@@ -69,7 +69,7 @@ tracing-subscriber = { version = "0.3.20", features = [
 ] }
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2.2"
-test-log = { version = "0.2.18", features = ["trace"] }
+test-log = { version = "0.2.19", features = ["trace"] }
 tempfile = "3.23.0"
 vergen = { version = "9.0.6", features = ["build", "cargo", "rustc", "si"] }
 
