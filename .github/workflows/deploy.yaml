@@ -3,6 +3,9 @@ name: Deploy
 on:
   # Enable manual running of action if necessary
   workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   deploy_linux_amd64:
