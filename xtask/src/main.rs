@@ -177,7 +177,7 @@ fn ci() -> Result<()> {
     deny()?;
     machete()?;
     build()?;
-    // test()?;
+    test()?;
     Ok(())
 }
 
@@ -315,7 +315,7 @@ fn test_docs() -> Result<()> {
 
 /// Run lib tests for the workspace's default packages
 fn test_libs() -> Result<()> {
-    run_cargo(vec!["test", "--all-targets", "--all-features"])
+    run_cargo(vec!["test", "--all-features"])
 }
 
 /// Run a cargo subcommand with the default toolchain
