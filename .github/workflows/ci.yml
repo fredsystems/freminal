@@ -1,14 +1,34 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 jobs:
+  success:
+    name: Rust Success
+    runs-on: ubuntu-latest
+    needs:
+      [
+        build-and-check,
+        lint-formatting,
+        lint-typos,
+        dependencies,
+        cargo-machete,
+        lint-markdown,
+        coverage,
+        check,
+        lint-docs,
+        test-docs,
+      ]
+    steps:
+      - name: Rust build and check succeeded
+        run: |
+          echo "Rust build and check succeeded"
+
   build-and-check:
     runs-on: ubuntu-latest
 
