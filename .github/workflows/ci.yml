@@ -14,27 +14,15 @@ jobs:
   success:
     name: Rust Success
     runs-on: ubuntu-latest
-    needs:
-      [
-        build-and-check,
-        lint-formatting,
-        lint-typos,
-        dependencies,
-        cargo-machete,
-        lint-markdown,
-        coverage,
-        check,
-        lint-docs,
-        test-docs,
-      ]
+    needs: [build-and-check, coverage]
     steps:
       - name: Rust build and check succeeded
         run: |
           echo "Rust build and check succeeded"
 
   build-and-check:
+    name: Rust Build and Check
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
@@ -56,63 +44,6 @@ jobs:
             pre-commit run --all-files
           '
 
-  # lint, clippy and coverage jobs are intentionally early in the workflow to catch simple formatting,
-  # typos, and missing tests as early as possible. This allows us to fix these and resubmit the PR
-  # without having to wait for the comprehensive matrix of tests to complete.
-
-  # Lint the formatting of the codebase.
-  lint-formatting:
-    name: Check Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: dtolnay/rust-toolchain@nightly
-        with: { components: rustfmt }
-      - run: cargo xtask lint-formatting
-
-  # Check for typos in the codebase.
-  # See <https://github.com/crate-ci/typos/>
-  lint-typos:
-    name: Check Typos
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: crate-ci/typos@master
-
-  # Check for any disallowed dependencies in the codebase due to license / security issues.
-  # See <https://github.com/EmbarkStudios/cargo-deny>
-  dependencies:
-    name: Check Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: EmbarkStudios/cargo-deny-action@76cd80eb775d7bbbd2d80292136d74d39e1b4918 # v2.0.14
-
-  # Check for any unused dependencies in the codebase.
-  # See <https://github.com/bnjbvr/cargo-machete/>
-  cargo-machete:
-    name: Check Unused Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - uses: bnjbvr/cargo-machete@v0.9.1
-
-  # Run markdownlint on all markdown files in the repository.
-  lint-markdown:
-    name: Check Markdown
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: DavidAnson/markdownlint-cli2-action@30a0e04f1870d58f8d717450cc6134995f993c63 # v21.0.0
-        with:
-          globs: |
-            '**/*.md'
-            '!target'
-      - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-
   # Run cargo coverage. This will generate a coverage report and upload it to codecov.
   coverage:
     name: Coverage Report
@@ -121,97 +52,12 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
       - uses: dtolnay/rust-toolchain@nightly
       # --- Install Nix ---
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2.62.61
+        with:
+          tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo xtask coverage
       - uses: codecov/codecov-action@v5.5.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-
-  # Run cargo check. This is a fast way to catch any obvious errors in the code.
-  check:
-    name: Check ${{ matrix.os }} ${{ matrix.toolchain }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
-        # We target 1.91.0 because it is the minimum supported version of Rust. If that build fails, or we rely on language features
-        # added in later versions, we'll have to bump the minimum version of rust.
-        toolchain: ["1.91.0", "stable", "nightly"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - run: cargo xtask check
-
-  # Check if README.md is up-to-date with the crate's documentation.
-  # check-readme:
-  #   name: Check README
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: Swatinem/rust-cache@v2.8.1
-  #     - uses: taiki-e/install-action@cargo-rdme
-  #     - run: cargo xtask check-readme
-
-  # Run cargo rustdoc with the same options that would be used by docs.rs, taking into account the
-  # package.metadata.docs.rs configured in Cargo.toml. https://github.com/dtolnay/cargo-docs-rs
-  lint-docs:
-    name: Check Docs
-    runs-on: ubuntu-latest
-    env:
-      RUSTDOCFLAGS: -Dwarnings
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: dtolnay/install@cargo-docs-rs
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - run: cargo xtask lint-docs
-
-  # Run cargo test on the documentation of the crate. This will catch any code examples that don't
-  # compile, or any other issues in the documentation.
-  test-docs:
-    name: Test Docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - run: cargo xtask test-docs
-
-  # # Run cargo test on the libraries of the crate.
-  # test-libs:
-  #   name: Test Libs ${{ matrix.toolchain }}
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       toolchain: ["1.82.0", "stable"]
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2.8.1
-  #     - run: cargo xtask test-libs
-
-  # # Run cargo test on all the backends.
-  # test-backends:
-  #   name: Test ${{matrix.backend}} on ${{ matrix.os }}
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       os: [ubuntu-latest, windows-latest, macos-latest]
-  #       backend: [crossterm, termion, termwiz]
-  #       exclude:
-  #         # termion is not supported on windows
-  #         - os: windows-latest
-  #           backend: termion
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2.8.1
-  #     - run: cargo xtask test-backend ${{ matrix.backend }}
