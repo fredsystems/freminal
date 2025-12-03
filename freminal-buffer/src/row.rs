@@ -175,20 +175,31 @@ impl Row {
         let mut col = start_col;
 
         // ---------------------------------------------------------------
-        // SAFETY CHECK: If start_col is out of bounds, nothing fits here.
-        // We just report all text as leftover.
+        // If we start at or beyond the logical width, this row is full.
+        // Caller must wrap the entire input to the next row.
         // ---------------------------------------------------------------
         if col >= self.width {
-            return InsertResponse::Consumed(col);
+            return InsertResponse::Leftover {
+                data: text.to_vec(),
+                final_col: col, // typically == self.width
+            };
         }
 
         // ---------------------------------------------------------------
         // Walk each character and try to insert it.
         // ---------------------------------------------------------------
         for (i, tchar) in text.iter().enumerate() {
-            let w = tchar.display_width();
+            let w = tchar.display_width().max(1);
 
-            // RULE 1: Glyph won't fit — overflow mid-insertion.
+            // If we've reached the row's width, nothing else fits here.
+            if col >= self.width {
+                return InsertResponse::Leftover {
+                    data: text[i..].to_vec(),
+                    final_col: col,
+                };
+            }
+
+            // If this glyph would overflow, stop here and wrap remaining text.
             if col + w > self.width {
                 return InsertResponse::Leftover {
                     data: text[i..].to_vec(),
@@ -197,7 +208,7 @@ impl Row {
             }
 
             // -----------------------------------------------------------
-            // Pad row up to current col if needed
+            // Pad up to current column with blanks if there's a gap.
             // -----------------------------------------------------------
             if col > self.cells.len() {
                 let pad = col - self.cells.len();
@@ -207,34 +218,48 @@ impl Row {
             }
 
             // -----------------------------------------------------------
-            // Overwriting a wide glyph head/continuation?
-            // Clean up any continuation cells.
+            // If we're overwriting, clean up any wide-glyph debris.
             // -----------------------------------------------------------
             if col < self.cells.len() {
                 self.cleanup_wide_overwrite(col);
             }
 
             // -----------------------------------------------------------
+            // Ensure we have enough storage for head + continuations,
+            // but never grow beyond self.width.
+            // -----------------------------------------------------------
+            let target_len = (col + w).min(self.width);
+            if self.cells.len() < target_len {
+                self.cells
+                    .resize(target_len, Cell::new(TChar::Space, tag.clone()));
+            }
+
+            // After resize, col must be within bounds; double-check defensively.
+            if col >= self.cells.len() {
+                return InsertResponse::Leftover {
+                    data: text[i..].to_vec(),
+                    final_col: col,
+                };
+            }
+
+            // -----------------------------------------------------------
             // Insert head cell
             // -----------------------------------------------------------
-            // Ensure vector is large enough
-            if self.cells.len() < col + w {
-                self.cells
-                    .resize(col + w, Cell::new(TChar::Space, tag.clone()));
-            }
-
-            // Insert head
             self.cells[col] = Cell::new(tchar.clone(), tag.clone());
 
-            // Insert continuation cells
+            // -----------------------------------------------------------
+            // Insert continuation cells within bounds
+            // -----------------------------------------------------------
             for offset in 1..w {
-                self.cells[col + offset] = Cell::wide_continuation();
+                let idx = col + offset;
+                if idx >= self.width || idx >= self.cells.len() {
+                    break;
+                }
+                self.cells[idx] = Cell::wide_continuation();
             }
 
-            // Move column forward
+            // Move column forward by glyph width, but never beyond width
             col += w;
-
-            // RULE 2: Clamp col to width
             if col > self.width {
                 col = self.width;
             }
