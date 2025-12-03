@@ -3,7 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::fmt;
 use std::str::FromStr;
 
 //use eframe::egui::Color32;
@@ -11,6 +10,7 @@ use std::str::FromStr;
 use crate::ansi::{ParserOutcome, TerminalOutput};
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use anyhow::{Error, Result};
+use freminal_common::buffer_states::url::Url;
 
 #[derive(Eq, PartialEq, Debug)]
 pub enum AnsiOscInternalType {
@@ -152,26 +152,6 @@ impl From<Vec<Option<AnsiOscToken>>> for UrlResponse {
             }
             _ => Self::End,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Url {
-    // Ostensibly, the ID is a key/value pair that is used to identify the URL
-    // However, the current spec (https://iterm2.com/documentation-escape-codes.html) only
-    // defines the ID as the only valid parameter
-    pub id: Option<String>,
-    pub url: String,
-}
-
-impl fmt::Display for Url {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Url {{ id: {}, url: {} }}",
-            self.id.as_deref().unwrap_or("None"),
-            self.url
-        )
     }
 }
 

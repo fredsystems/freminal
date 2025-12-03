@@ -5,11 +5,14 @@
 
 use core::fmt;
 
-use freminal_common::colors::TerminalColor;
-
-use crate::ansi_components::{modes::decawm::Decawm, osc::Url};
-
-use super::fonts::{FontDecorations, FontWeight};
+use crate::{
+    buffer_states::{
+        fonts::{FontDecorations, FontWeight},
+        line_wrap::LineWrap,
+        url::Url,
+    },
+    colors::TerminalColor,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub enum ReverseVideo {
@@ -131,7 +134,7 @@ pub struct CursorState {
     pub font_weight: FontWeight,
     pub font_decorations: Vec<FontDecorations>,
     pub colors: StateColors,
-    pub line_wrap_mode: Decawm,
+    pub line_wrap_mode: LineWrap,
     pub url: Option<Url>,
 }
 

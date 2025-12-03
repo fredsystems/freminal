@@ -4,8 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId};
-
-use freminal_terminal_emulator::state::fonts::{FontDecorations, FontWeight};
+use freminal_common::buffer_states::fonts::{FontDecorations, FontWeight};
 
 // -------------------------------------------------------------------------------------------------
 //  Freminal Terminal – Unified Font Loader

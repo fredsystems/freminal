@@ -8,6 +8,14 @@ use conv2::ConvUtil;
 use core::str;
 use eframe::egui::{self, Color32, Context};
 use freminal_common::{
+    buffer_states::{
+        buffer_type::BufferType,
+        cursor::{CursorPos, CursorState, ReverseVideo},
+        fonts::{FontDecorations, FontWeight},
+        format_tag::FormatTag,
+        line_wrap::LineWrap,
+        tchar::TChar,
+    },
     colors::TerminalColor,
     cursor::CursorVisualStyle,
     scroll::ScrollDirection,
@@ -33,7 +41,7 @@ use crate::{
         osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
         sgr::SelectGraphicRendition,
     },
-    format_tracker::{FormatTag, FormatTracker},
+    format_tracker::FormatTracker,
     interface::{
         collect_text, split_format_data_for_scrollback, TerminalInput, TerminalInputPayload,
     },
@@ -43,18 +51,8 @@ use crate::{
 
 use super::{
     buffer::{TerminalBufferHolder, TerminalBufferSetWinSizeResponse},
-    cursor::{CursorPos, CursorState, ReverseVideo},
     data::TerminalSections,
-    fonts::{FontDecorations, FontWeight},
-    term_char::TChar,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BufferType {
-    #[default]
-    Primary,
-    Alternate,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Buffer {
@@ -446,7 +444,7 @@ impl TerminalState {
         let response = match current_buffer.terminal_buffer.insert_data(
             &current_buffer.cursor_state.pos,
             &data,
-            &current_buffer.cursor_state.line_wrap_mode.clone(),
+            &Decawm::from(current_buffer.cursor_state.line_wrap_mode),
         ) {
             Ok(response) => response,
             Err(e) => {
@@ -883,16 +881,17 @@ impl TerminalState {
                 self.modes.cursor_key = decckm.clone();
             }
             Mode::Decawm(Decawm::Query) => {
-                let to_write = self
-                    .get_current_buffer()
-                    .cursor_state
-                    .line_wrap_mode
-                    .clone();
+                let to_write = Decawm::from(self.get_current_buffer().cursor_state.line_wrap_mode);
 
                 self.report_mode(&to_write.report(None));
             }
             Mode::Decawm(decawm) => {
-                self.get_current_buffer().cursor_state.line_wrap_mode = decawm.clone();
+                let assign = match decawm {
+                    Decawm::AutoWrap => LineWrap::Wrap,
+                    Decawm::NoAutoWrap => LineWrap::NoWrap,
+                    Decawm::Query => unreachable!(),
+                };
+                self.get_current_buffer().cursor_state.line_wrap_mode = assign;
             }
             Mode::Dectem(Dectcem::Query) => {
                 let to_write = self.get_current_buffer().show_cursor.report(None);

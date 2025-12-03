@@ -1,6 +1,17 @@
 [workspace]
-members = ["freminal", "freminal-common", "freminal-terminal-emulator", "xtask"]
-default-members = ["freminal", "freminal-common", "freminal-terminal-emulator"]
+members = [
+  "freminal",
+  "freminal-buffer",
+  "freminal-common",
+  "freminal-terminal-emulator",
+  "xtask",
+]
+default-members = [
+  "freminal",
+  "freminal-buffer",
+  "freminal-common",
+  "freminal-terminal-emulator",
+]
 resolver = "2"
 
 [workspace.package]
@@ -21,7 +32,7 @@ ignored = ["vergen"]
 [workspace.dependencies]
 anyhow = "1.0.100"
 cargo_metadata = "0.23.1"
-clap = { version = "4.5.52", features = ["derive"] }
+clap = { version = "4.5.53", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["cargo_metadata"] }
 clap-verbosity-flag = "3.0.4"
 color-eyre = "0.6.5"
@@ -57,6 +68,7 @@ tracing-subscriber = { version = "0.3.20", features = [
   "parking_lot",
 ] }
 unicode-segmentation = "1.12.0"
+unicode-width = "0.2.2"
 test-log = { version = "0.2.18", features = ["trace"] }
 tempfile = "3.23.0"
 vergen = { version = "9.0.6", features = ["build", "cargo", "rustc", "si"] }

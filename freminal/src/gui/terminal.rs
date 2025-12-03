@@ -12,13 +12,18 @@ use crate::gui::{
     TerminalEmulator,
 };
 
-use freminal_common::{config::Config, cursor::CursorVisualStyle};
+use freminal_common::{
+    buffer_states::{
+        cursor::CursorPos, fonts::FontDecorations, format_tag::FormatTag, tchar::TChar,
+    },
+    config::Config,
+    cursor::CursorVisualStyle,
+};
 use freminal_terminal_emulator::{
     ansi_components::modes::rl_bracket::RlBracket,
-    format_tracker::FormatTag,
     interface::{collect_text, TerminalInput},
     io::FreminalTermInputOutput,
-    state::{cursor::CursorPos, fonts::FontDecorations, internal::Theme, term_char::TChar},
+    state::internal::Theme,
 };
 
 use eframe::egui::{
