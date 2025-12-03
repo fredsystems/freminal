@@ -124,7 +124,7 @@ jobs:
       - uses: codecov/codecov-action@v5.5.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # Run cargo check. This is a fast way to catch any obvious errors in the code.
   check:
