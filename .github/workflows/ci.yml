@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -62,7 +62,7 @@ jobs:
     name: Check Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rustfmt }
       - run: cargo xtask lint-formatting
@@ -73,7 +73,7 @@ jobs:
     name: Check Typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: crate-ci/typos@master
 
   # Check for any disallowed dependencies in the codebase due to license / security issues.
@@ -82,7 +82,7 @@ jobs:
     name: Check Dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@76cd80eb775d7bbbd2d80292136d74d39e1b4918 # v2.0.14
 
   # Check for any unused dependencies in the codebase.
@@ -91,7 +91,7 @@ jobs:
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - uses: bnjbvr/cargo-machete@v0.9.1
@@ -101,21 +101,21 @@ jobs:
     name: Check Markdown
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: DavidAnson/markdownlint-cli2-action@30a0e04f1870d58f8d717450cc6134995f993c63 # v21.0.0
         with:
           globs: |
             '**/*.md'
             '!target'
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
   # Run cargo coverage. This will generate a coverage report and upload it to codecov.
   coverage:
     name: Coverage Report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       # --- Install Nix ---
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -138,7 +138,7 @@ jobs:
         toolchain: ["1.91.0", "stable", "nightly"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -150,7 +150,7 @@ jobs:
   #   name: Check README
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v5
+  #     - uses: actions/checkout@v6
   #     - uses: Swatinem/rust-cache@v2.8.1
   #     - uses: taiki-e/install-action@cargo-rdme
   #     - run: cargo xtask check-readme
@@ -163,7 +163,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/install@cargo-docs-rs
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
@@ -175,7 +175,7 @@ jobs:
     name: Test Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo xtask test-docs
@@ -189,7 +189,7 @@ jobs:
   #     matrix:
   #       toolchain: ["1.82.0", "stable"]
   #   steps:
-  #     - uses: actions/checkout@v5
+  #     - uses: actions/checkout@v6
   #     - uses: dtolnay/rust-toolchain@stable
   #     - uses: Swatinem/rust-cache@v2.8.1
   #     - run: cargo xtask test-libs
@@ -208,7 +208,7 @@ jobs:
   #         - os: windows-latest
   #           backend: termion
   #   steps:
-  #     - uses: actions/checkout@v5
+  #     - uses: actions/checkout@v6
   #     - uses: dtolnay/rust-toolchain@stable
   #     - uses: Swatinem/rust-cache@v2.8.1
   #     - run: cargo xtask test-backend ${{ matrix.backend }}
