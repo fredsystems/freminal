@@ -19,14 +19,14 @@ jobs:
           cargo bundle --release
 
       - name: Archive production artifacts debian
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: LinuxAMD64 Debian
           path: |
             target/release/bundle/deb/*.deb
 
       - name: Archive production artifacts executable only
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: LinuxAMD64 Executable
           path: |
@@ -46,14 +46,14 @@ jobs:
           cargo bundle --release
 
       - name: Archive production artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: LinuxARM64
           path: |
             target/release/bundle/deb/*.deb
 
       - name: Archive production artifacts executable only
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: LinuxARM64 Executable
           path: |
@@ -77,7 +77,7 @@ jobs:
       # we can't bundle windows yet
 
       - name: Archive production artifacts executable only
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: Windows Executable
           path: |
@@ -107,7 +107,7 @@ jobs:
   #         /usr/bin/codesign --force -s "Developer ID Application: Fred Clausen (8J9KGJ49RD)" target/release/bundle/osx/*.app -v
 
   #     - name: Archive production artifacts
-  #       uses: actions/upload-artifact@v5
+  #       uses: actions/upload-artifact@v6
   #       with:
   #         name: Mac
   #         path: |
