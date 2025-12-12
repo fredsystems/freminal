@@ -1,199 +1,105 @@
 {
-  description = "Freminal dev env — Nix-native pre-commit + xtask";
+  description = "Consumer repo using shared base + rust precommit system";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    git-hooks.url = "github:cachix/git-hooks.nix";
+    precommit.url = "github:FredSystems/pre-commit-checks";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   };
 
   outputs =
     {
       self,
+      precommit,
       nixpkgs,
-      flake-utils,
-      rust-overlay,
-      git-hooks,
+      ...
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
-        };
-
-        libPath = pkgs.lib.makeLibraryPath (
-          with pkgs;
-          [
-            libGL
-            libxkbcommon
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ wayland ]
-        );
-
-        myRustToolchain = pkgs.rust-bin.fromRustupToolchain {
-          channel = "stable";
-          components = [
-            "rustc"
-            "cargo"
-            "clippy"
-            "rustfmt"
-            "rust-analyzer"
-            "rust-src"
-            "llvm-tools-preview"
-          ]; # Add desired components
-        };
-      in
-      {
-        checks.pre-commit-check = git-hooks.lib.${system}.run {
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              path: type:
-              # keep all files, including dotfiles
-              true;
-          };
-
-          excludes = [
-            "^res/"
-            "^./res/"
-            "^typos\\.toml$"
-            "^speed_tests/.*\\.txt$"
-            "^Documents/.*"
-          ];
-
-          hooks = {
-            # Built-in git-hooks.nix hooks
-            check-yaml.enable = true;
-            end-of-file-fixer.enable = true;
-            trailing-whitespace = {
-              enable = true;
-              entry = "${pkgs.python3Packages.pre-commit-hooks}/bin/trailing-whitespace-fixer";
-            };
-
-            mixed-line-ending = {
-              enable = true;
-              entry = "${pkgs.python3Packages.pre-commit-hooks}/bin/mixed-line-ending";
-              args = [ "--fix=auto" ];
-            };
-
-            check-executables-have-shebangs.enable = true;
-            check-shebang-scripts-are-executable.enable = true;
-            black.enable = true;
-            flake8.enable = true;
-            nixfmt.enable = true;
-            hadolint.enable = true;
-            shellcheck.enable = true;
-            prettier.enable = true;
-
-            # Hooks that need system packages
-            codespell = {
-              enable = true;
-              entry = "${pkgs.codespell}/bin/codespell";
-              args = [ "--ignore-words=.dictionary.txt" ];
-              files = "\\.([ch]|cpp|rs|py|sh|txt|md|toml|yaml|yml)$";
-            };
-
-            check-github-actions = {
-              enable = true;
-              entry = "${pkgs.check-jsonschema}/bin/check-jsonschema";
-              args = [
-                "--builtin-schema"
-                "github-actions"
+    let
+      systems = precommit.lib.supportedSystems;
+    in
+    {
+      ##########################################################################
+      ## CHECKS — unified base+rust via mkCheck
+      ##########################################################################
+      checks = builtins.listToAttrs (
+        map (system: {
+          name = system;
+          value = {
+            pre-commit-check = precommit.lib.mkCheck {
+              inherit system;
+              check_rust = true;
+              enableXtask = true;
+              extraExcludes = [
+                "^speed_tests/"
+                "^Documents/"
+                "^res/"
+                "typos.toml"
               ];
-              files = "^\\.github/actions/.*\\.ya?ml$";
-              pass_filenames = true;
-            };
-
-            check-github-workflows = {
-              enable = true;
-              entry = "${pkgs.check-jsonschema}/bin/check-jsonschema";
-              args = [
-                "--builtin-schema"
-                "github-workflows"
-              ];
-              files = "^\\.github/workflows/.*\\.ya?ml$";
-              pass_filenames = true;
-            };
-
-            # Rust hooks
-            rustfmt = {
-              enable = true;
-              entry = "${pkgs.rust-bin.stable.latest.default}/bin/cargo";
-              args = [
-                "fmt"
-                "--all"
-              ];
-            };
-            clippy = {
-              enable = true;
-              entry = "${pkgs.rust-bin.stable.latest.default}/bin/cargo";
-              args = [
-                "clippy"
-                "--workspace"
-                "--all-targets"
-              ];
-            };
-
-            xtask-check = {
-              enable = true;
-              entry = "${pkgs.rust-bin.stable.latest.default}/bin/cargo";
-              args = [
-                "xtask"
-                "ci"
-              ];
-              pass_filenames = false;
             };
           };
-        };
+        }) systems
+      );
 
-        devShells.default =
-          let
-            inherit (self.checks.${system}.pre-commit-check) shellHook enabledPackages;
-          in
-          pkgs.mkShell {
-            # Put your Rust toolchain *after* enabledPackages so it wins in PATH
-            buildInputs =
-              enabledPackages
-              ++ [
-                myRustToolchain
+      ##########################################################################
+      ## DEV SHELLS — merged env + your extra Rust goodies
+      ##########################################################################
+      devShells = builtins.listToAttrs (
+        map (system: {
+          name = system;
+
+          value =
+            let
+              pkgs = import nixpkgs { inherit system; };
+
+              # Unified check result (base + rust)
+              chk = self.checks.${system}."pre-commit-check";
+
+              # Packages that git-hooks.nix / mkCheck say we need
+              corePkgs = chk.enabledPackages or [ ];
+
+              # Extra Rust / tooling packages (NO extra rustc here)
+              extraRustTools = [
+                chk.passthru.devPackages
+                pkgs.cargo-deny
+                pkgs.cargo-machete
+                pkgs.cargo-make
+                pkgs.cargo-profiler
+                pkgs.cargo-bundle
+                pkgs.typos
+                pkgs.vttest
               ]
-              ++ (
-                with pkgs;
-                [
-                  pre-commit
-                  check-jsonschema
-                  codespell
-                  cargo-deny
-                  cargo-machete
-                  cargo-make
-                  cargo-profiler
-                  cargo-bundle
-                  typos
-                  vttest
-                  nodePackages.markdownlint-cli2
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+                pkgs.cargo-llvm-cov
+                pkgs.cachix
+              ];
+
+              # Extra dev packages provided by mkCheck (includes rustToolchain)
+              extraDev = chk.passthru.devPackages or [ ];
+
+              # Library path packages: whatever mkCheck wants + your GL/Wayland bits
+              libPkgs =
+                (chk.passthru.libPath or [ ])
+                ++ [
+                  pkgs.libGL
+                  pkgs.libxkbcommon
                 ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-                  cargo-llvm-cov
-                  cachix
-                ]
-              );
+                  pkgs.wayland
+                ];
+            in
+            {
+              default = pkgs.mkShell {
+                buildInputs = extraRustTools ++ corePkgs ++ extraDev;
 
-            LD_LIBRARY_PATH = libPath;
+                LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
 
-            shellHook = ''
-              export PATH="${myRustToolchain}/bin:$PATH"
-                # Run git-hooks.nix setup (creates .pre-commit-config.yaml)
-                ${shellHook}
+                shellHook = ''
+                  ${chk.shellHook}
 
-                # Your own extras
-                alias pre-commit="pre-commit run --all-files"
-                alias xtask="cargo run -p xtask --"
-            '';
-          };
-
-      }
-    );
+                  alias pre-commit="pre-commit run --all-files"
+                '';
+              };
+            };
+        }) systems
+      );
+    };
 }
