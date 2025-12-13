@@ -1269,14 +1269,11 @@ impl TerminalBufferHolder {
             buf.insert(actual_end + i, TChar::Space);
         }
 
-        let start_buf_pos = padding_start_pos.map_or_else(
-            || {
-                // If we did not insert padding, we are at the end of a line
-                error!("Padding start position not set and it should have been. This is a bug");
-                actual_end
-            },
-            |p| p,
-        );
+        let start_buf_pos = padding_start_pos.unwrap_or_else(|| {
+            // If we did not insert padding, we are at the end of a line
+            error!("Padding start position not set and it should have been. This is a bug");
+            actual_end
+        });
 
         PadBufferForWriteResponse {
             write_idx: desired_start,
