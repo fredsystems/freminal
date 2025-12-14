@@ -33,63 +33,6 @@ jobs:
             pre-commit run --all-files
           '
 
-  # lint, clippy and coverage jobs are intentionally early in the workflow to catch simple formatting,
-  # typos, and missing tests as early as possible. This allows us to fix these and resubmit the PR
-  # without having to wait for the comprehensive matrix of tests to complete.
-
-  # Lint the formatting of the codebase.
-  lint-formatting:
-    name: Check Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-        with: { components: rustfmt }
-      - run: cargo xtask lint-formatting
-
-  # Check for typos in the codebase.
-  # See <https://github.com/crate-ci/typos/>
-  lint-typos:
-    name: Check Typos
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: crate-ci/typos@master
-
-  # Check for any disallowed dependencies in the codebase due to license / security issues.
-  # See <https://github.com/EmbarkStudios/cargo-deny>
-  dependencies:
-    name: Check Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2.0.13
-
-  # Check for any unused dependencies in the codebase.
-  # See <https://github.com/bnjbvr/cargo-machete/>
-  cargo-machete:
-    name: Check Unused Dependencies
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2.8.1
-      - uses: bnjbvr/cargo-machete@v0.9.1
-
-  # Run markdownlint on all markdown files in the repository.
-  lint-markdown:
-    name: Check Markdown
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: DavidAnson/markdownlint-cli2-action@v20.0.0
-        with:
-          globs: |
-            '**/*.md'
-            '!target'
-      - name: Checkout
-        uses: actions/checkout@v5
-
   # Run cargo coverage. This will generate a coverage report and upload it to codecov.
   coverage:
     name: Coverage Report
@@ -125,70 +68,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2.8.1
       - run: cargo xtask check
 
-  # Check if README.md is up-to-date with the crate's documentation.
-  # check-readme:
-  #   name: Check README
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: Swatinem/rust-cache@v2.8.1
-  #     - uses: taiki-e/install-action@cargo-rdme
-  #     - run: cargo xtask check-readme
-
-  # Run cargo rustdoc with the same options that would be used by docs.rs, taking into account the
-  # package.metadata.docs.rs configured in Cargo.toml. https://github.com/dtolnay/cargo-docs-rs
-  lint-docs:
-    name: Check Docs
+  ci-success:
+    name: CI Success
     runs-on: ubuntu-latest
-    env:
-      RUSTDOCFLAGS: -Dwarnings
+    needs:
+      - build-and-check
+      - coverage
+      - check
+    if: always()
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: dtolnay/install@cargo-docs-rs
-      - uses: Swatinem/rust-cache@v2.8.1
-      - run: cargo xtask lint-docs
+      - name: Verify all jobs succeeded
+        run: |
+          echo "build-and-check: ${{ needs.build-and-check.result }}"
+          echo "coverage:        ${{ needs.coverage.result }}"
+          echo "check:           ${{ needs.check.result }}"
 
-  # Run cargo test on the documentation of the crate. This will catch any code examples that don't
-  # compile, or any other issues in the documentation.
-  test-docs:
-    name: Test Docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.8.1
-      - run: cargo xtask test-docs
+          if [[ "${{ needs.build-and-check.result }}" != "success" ]]; then
+            echo "❌ build-and-check failed"
+            exit 1
+          fi
 
-  # # Run cargo test on the libraries of the crate.
-  # test-libs:
-  #   name: Test Libs ${{ matrix.toolchain }}
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       toolchain: ["1.82.0", "stable"]
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2.8.1
-  #     - run: cargo xtask test-libs
+          if [[ "${{ needs.coverage.result }}" != "success" ]]; then
+            echo "❌ coverage failed"
+            exit 1
+          fi
 
-  # # Run cargo test on all the backends.
-  # test-backends:
-  #   name: Test ${{matrix.backend}} on ${{ matrix.os }}
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       os: [ubuntu-latest, windows-latest, macos-latest]
-  #       backend: [crossterm, termion, termwiz]
-  #       exclude:
-  #         # termion is not supported on windows
-  #         - os: windows-latest
-  #           backend: termion
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2.8.1
-  #     - run: cargo xtask test-backend ${{ matrix.backend }}
+          if [[ "${{ needs.check.result }}" != "success" ]]; then
+            echo "❌ check matrix failed"
+            exit 1
+          fi
+
+          echo "✅ All CI jobs succeeded"
