@@ -26,6 +26,7 @@
           value = {
             pre-commit-check = precommit.lib.mkCheck {
               inherit system;
+              src = ./.;
               check_rust = true;
               enableXtask = true;
               extraExcludes = [
