@@ -26,7 +26,7 @@ clap-cargo = { version = "0.18.3", features = ["cargo_metadata"] }
 clap-verbosity-flag = "3.0.4"
 color-eyre = "0.6.5"
 conv2 = "0.4.2"
-criterion = "0.7.0"
+criterion = "0.8.0"
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
 duct = "1.1.1"
