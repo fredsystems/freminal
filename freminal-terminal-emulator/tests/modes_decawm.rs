@@ -17,12 +17,16 @@ fn decawm_enable_disable() {
     let enable = push_seq("\x1b[?7h");
     let disable = push_seq("\x1b[?7l");
     println!("enable -> {:?}\ndisable -> {:?}", enable, disable);
-    assert!(enable
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
-    assert!(disable
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
+    assert!(
+        enable
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
+    assert!(
+        disable
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
 }
 
 #[test]

@@ -632,9 +632,10 @@ mod tests {
         let mut data = vec![];
 
         // Escape → Err, sets inner
-        assert!(p
-            .ansi_parser_inner_empty(b'\x1b', &mut data, &mut out)
-            .is_err());
+        assert!(
+            p.ansi_parser_inner_empty(b'\x1b', &mut data, &mut out)
+                .is_err()
+        );
         assert_eq!(p.inner, ParserInner::Escape);
 
         // Reset to Empty

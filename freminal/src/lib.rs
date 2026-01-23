@@ -5,14 +5,20 @@
 
 #![deny(
     clippy::pedantic,
-    //clippy::cargo,
+    clippy::cargo,
     clippy::nursery,
     clippy::style,
     clippy::correctness,
     clippy::all,
+    clippy::suspicious,
+    clippy::complexity,
+    clippy::perf,
     clippy::unwrap_used,
     clippy::expect_used
 )]
+#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
+#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
+
 // #![warn(missing_docs)]
 
 #[macro_use]

@@ -36,11 +36,11 @@ impl TerminalHandler {
     }
 
     /// Get a mutable reference to the underlying buffer
-    pub fn buffer_mut(&mut self) -> &mut Buffer {
+    pub const fn buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffer
     }
 
-    /// Handle raw data bytes - convert to TChar and insert
+    /// Handle raw data bytes - convert to `TChar` and insert
     pub fn handle_data(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -59,7 +59,7 @@ impl TerminalHandler {
     }
 
     /// Handle carriage return (CR)
-    pub fn handle_carriage_return(&mut self) {
+    pub const fn handle_carriage_return(&mut self) {
         self.buffer.handle_cr();
     }
 
@@ -82,21 +82,25 @@ impl TerminalHandler {
     }
 
     /// Handle cursor up (CUU)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_up(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, -(n as i32));
     }
 
     /// Handle cursor down (CUD)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_down(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, n as i32);
     }
 
     /// Handle cursor forward (CUF)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_forward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(n as i32, 0);
     }
 
     /// Handle cursor backward (CUB)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_backward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(-(n as i32), 0);
     }
@@ -138,7 +142,7 @@ impl TerminalHandler {
     }
 
     /// Handle set top and bottom margins (DECSTBM)
-    pub fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
+    pub const fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
         // Parser typically sends 1-indexed values
         let top_zero = top.saturating_sub(1);
         let bottom_zero = bottom.saturating_sub(1);
@@ -162,8 +166,8 @@ impl TerminalHandler {
 
     /// Handle SGR (Set Graphics Rendition)
     /// This is a placeholder - actual SGR handling requires converting
-    /// SelectGraphicRendition to FormatTag
-    pub fn handle_sgr(&mut self, _sgr_data: &[u8]) {
+    /// `SelectGraphicRendition` to `FormatTag`
+    pub const fn handle_sgr(&mut self, _sgr_data: &[u8]) {
         // TODO: Convert SGR parameters to FormatTag and call buffer.set_format()
         // For now, this is a stub
     }
@@ -204,10 +208,10 @@ impl TerminalHandler {
         self.buffer.scroll_to_bottom();
     }
 
-    /// Process an array of TerminalOutput commands
+    /// Process an array of `TerminalOutput` commands
     ///
     /// This is the main entry point for integrating with the parser.
-    /// It dispatches each TerminalOutput variant to the appropriate handler method.
+    /// It dispatches each `TerminalOutput` variant to the appropriate handler method.
     pub fn process_outputs<SGR, MODE, OSC, DECSG>(
         &mut self,
         outputs: &[TerminalOutput<SGR, MODE, OSC, DECSG>],
@@ -222,7 +226,7 @@ impl TerminalHandler {
         }
     }
 
-    /// Process a single TerminalOutput command
+    /// Process a single `TerminalOutput` command
     #[allow(clippy::too_many_lines)]
     fn process_output<SGR, MODE, OSC, DECSG>(
         &mut self,
@@ -467,15 +471,9 @@ impl TerminalHandler {
             TerminalOutput::RequestXtVersion => {
                 todo!("Request Xt version not yet implemented");
             }
-            TerminalOutput::Invalid => {
-                // Silently ignore invalid sequences
-            }
-            TerminalOutput::Skipped => {
-                // Silently ignore skipped sequences
-            }
-            // Catch-all for any future variants added to the non-exhaustive enum
-            _ => {
-                // Silently ignore unhandled sequences for forward compatibility
+            // Silently ignore invalid, skipped, and any future variants
+            TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {
+                // Silently ignore for forward compatibility
             }
         }
     }

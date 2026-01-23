@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{
-    extract_param, split_params_into_semicolon_delimited_usize, ParserOutcome, TerminalOutput,
+    ParserOutcome, TerminalOutput, extract_param, split_params_into_semicolon_delimited_usize,
 };
 use crate::error::ParserFailures;
 

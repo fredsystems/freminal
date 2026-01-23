@@ -47,7 +47,7 @@ pub enum CharOperation {
 /// The set may grow; match exhaustively with a wildcard for forward-compat.
 ///
 /// Note: Some variants contain types from freminal-terminal-emulator crate
-/// (SelectGraphicRendition, Mode, etc.) which will be available when that
+/// (`SelectGraphicRendition`, Mode, etc.) which will be available when that
 /// crate is in scope.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]

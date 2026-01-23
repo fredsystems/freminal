@@ -179,19 +179,19 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
     let mut cfg = Config::default();
 
     // 1. System config (Linux only)
-    if let Some(system_path) = system_config_path() {
-        if system_path.is_file() {
-            let partial = load_partial(&system_path)?;
-            cfg.apply_partial(partial);
-        }
+    if let Some(system_path) = system_config_path()
+        && system_path.is_file()
+    {
+        let partial = load_partial(&system_path)?;
+        cfg.apply_partial(partial);
     }
 
     // 2. Platform-specific user config
-    if let Some(user_path) = user_config_path() {
-        if user_path.is_file() {
-            let partial = load_partial(&user_path)?;
-            cfg.apply_partial(partial);
-        }
+    if let Some(user_path) = user_config_path()
+        && user_path.is_file()
+    {
+        let partial = load_partial(&user_path)?;
+        cfg.apply_partial(partial);
     }
 
     // 3. FREMINAL_CONFIG= override
@@ -204,11 +204,11 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
     }
 
     // 4. Explicit CLI override
-    if let Some(path) = explicit_path {
-        if path.is_file() {
-            let partial = load_partial(path)?;
-            cfg.apply_partial(partial);
-        }
+    if let Some(path) = explicit_path
+        && path.is_file()
+    {
+        let partial = load_partial(path)?;
+        cfg.apply_partial(partial);
     }
 
     cfg.validate()?;

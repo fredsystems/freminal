@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::colors::{cube_component, lookup_256_color_by_index, TerminalColor};
+use freminal_common::colors::{TerminalColor, cube_component, lookup_256_color_by_index};
 use proptest::prelude::*;
 use std::fmt::Write;
 use std::str::FromStr;

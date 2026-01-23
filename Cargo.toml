@@ -12,10 +12,10 @@ default-members = [
   "freminal-common",
   "freminal-terminal-emulator",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 authors = ["Fred Clausen"]
 license = "MIT"
 description = "A terminal emulator written in Rust"
@@ -23,7 +23,9 @@ repository = "https://github.com/fredclausen/freminal"
 documentation = "https://github.com/fred/freminal/README.md"
 homepage = "https://github.com/fredclausen/freminal"
 readme = "README.md"
-rust-version = "1.91.0"
+rust-version = "1.92.0"
+keywords = ["terminal", "emulator", "vt100", "tty", "terminal-emulator"]
+categories = ["command-line-utilities", "development-tools"]
 version = "0.1.0"
 
 [workspace.metadata.cargo-machete]

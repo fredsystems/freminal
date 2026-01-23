@@ -38,6 +38,7 @@ Migrated the `TerminalOutput` enum from `freminal-terminal-emulator` to the comm
   - `#[derive(Debug, Clone, PartialEq, Eq)]` - Common traits
   - 96 variants covering all terminal operations
 - **Type Parameters:**
+
   ```rust
   pub enum TerminalOutput<SGR = (), MODE = (), OSC = (), DECSG = ()>
   ```
@@ -174,7 +175,7 @@ Changed buffer initialization to create `height` rows instead of 1:
 
 ### Data Flow
 
-```
+```text
 Parser (freminal-terminal-emulator)
     ↓
 TerminalOutput<SGR, Mode, OscType, DecSG> (freminal-common)

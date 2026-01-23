@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::{parse_param_as, ParserOutcome, TerminalOutput};
+use crate::ansi::{ParserOutcome, TerminalOutput, parse_param_as};
 use crate::error::ParserFailures;
 
 /// Erase Character(s)

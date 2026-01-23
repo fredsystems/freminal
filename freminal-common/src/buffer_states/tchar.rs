@@ -157,7 +157,7 @@ impl From<char> for TChar {
             // non-ASCII: encode as UTF-8 scalar
             let mut buf = [0u8; 4];
             let s = c.encode_utf8(&mut buf); // &str
-                                             // we know this is valid UTF-8 by construction, so we can skip Result
+            // we know this is valid UTF-8 by construction, so we can skip Result
             Self::Utf8(s.as_bytes().to_vec())
         }
     }

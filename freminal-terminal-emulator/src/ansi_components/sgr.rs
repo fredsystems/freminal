@@ -64,6 +64,7 @@ pub enum SelectGraphicRendition {
 }
 
 impl SelectGraphicRendition {
+    #[allow(clippy::too_many_lines)]
     pub fn from_usize(val: usize) -> Self {
         match val {
             0 => Self::Reset,
@@ -105,7 +106,9 @@ impl SelectGraphicRendition {
             36 => Self::Foreground(TerminalColor::Cyan),
             37 => Self::Foreground(TerminalColor::White),
             38 => {
-                error!("This is a custom foreground color. We shouldn't end up here! Setting custom foreground color to default");
+                error!(
+                    "This is a custom foreground color. We shouldn't end up here! Setting custom foreground color to default"
+                );
                 Self::Foreground(TerminalColor::Default)
             }
             39 => Self::Foreground(TerminalColor::Default),
@@ -118,7 +121,9 @@ impl SelectGraphicRendition {
             46 => Self::Background(TerminalColor::Cyan),
             47 => Self::Background(TerminalColor::White),
             48 => {
-                error!("This is a custom background color. We shouldn't end up here! Setting custom background color to default");
+                error!(
+                    "This is a custom background color. We shouldn't end up here! Setting custom background color to default"
+                );
                 Self::Background(TerminalColor::DefaultBackground)
             }
             49 => Self::Background(TerminalColor::DefaultBackground),
@@ -129,7 +134,9 @@ impl SelectGraphicRendition {
             54 => Self::NotFramedOrEncircled,
             55 => Self::NotOverlined,
             58 => {
-                error!("This is a custom underline color. We shouldn't end up here! Setting custom underline color to default");
+                error!(
+                    "This is a custom underline color. We shouldn't end up here! Setting custom underline color to default"
+                );
                 Self::UnderlineColor(TerminalColor::DefaultUnderlineColor)
             }
             59 => Self::UnderlineColor(TerminalColor::DefaultUnderlineColor),

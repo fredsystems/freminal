@@ -8,11 +8,11 @@ use std::fmt;
 use crate::ansi_components::modes::{grapheme::GraphemeClustering, theme::Theming};
 
 use super::modes::{
-    allow_column_mode_switch::AllowColumnModeSwitch, decarm::Decarm, decawm::Decawm,
+    ReportMode, allow_column_mode_switch::AllowColumnModeSwitch, decarm::Decarm, decawm::Decawm,
     decckm::Decckm, deccolm::Deccolm, decom::Decom, decsclm::Decsclm, decscnm::Decscnm,
     dectcem::Dectcem, lnm::Lnm, mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket, sync_updates::SynchronizedUpdates, unknown::UnknownMode,
-    xtcblink::XtCBlink, xtextscrn::XtExtscrn, xtmsewin::XtMseWin, ReportMode,
+    xtcblink::XtCBlink, xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
 };
 
 #[allow(clippy::module_name_repetitions)]

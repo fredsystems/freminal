@@ -11,7 +11,7 @@ use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
-use crossbeam_channel::{unbounded, Receiver};
+use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui;
 
 use freminal_common::buffer_states::cursor::CursorPos;

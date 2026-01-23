@@ -31,19 +31,19 @@ use crate::{
         line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode, TerminalModes},
         modes::{
-            allow_column_mode_switch::AllowColumnModeSwitch, decarm::Decarm, decawm::Decawm,
-            decckm::Decckm, deccolm::Deccolm, decom::Decom, decsclm::Decsclm, decscnm::Decscnm,
-            dectcem::Dectcem, grapheme::GraphemeClustering, lnm::Lnm, mouse::MouseTrack,
-            reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket,
-            sync_updates::SynchronizedUpdates, theme::Theming, xtcblink::XtCBlink,
-            xtextscrn::XtExtscrn, xtmsewin::XtMseWin, MouseModeNumber, ReportMode,
+            MouseModeNumber, ReportMode, allow_column_mode_switch::AllowColumnModeSwitch,
+            decarm::Decarm, decawm::Decawm, decckm::Decckm, deccolm::Deccolm, decom::Decom,
+            decsclm::Decsclm, decscnm::Decscnm, dectcem::Dectcem, grapheme::GraphemeClustering,
+            lnm::Lnm, mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround,
+            rl_bracket::RlBracket, sync_updates::SynchronizedUpdates, theme::Theming,
+            xtcblink::XtCBlink, xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
         },
         osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
         sgr::SelectGraphicRendition,
     },
     format_tracker::FormatTracker,
     interface::{
-        collect_text, split_format_data_for_scrollback, TerminalInput, TerminalInputPayload,
+        TerminalInput, TerminalInputPayload, collect_text, split_format_data_for_scrollback,
     },
     io::PtyWrite,
     //state::term_char::display_vec_tchar_as_string,
@@ -109,11 +109,7 @@ pub enum Theme {
 
 impl From<bool> for Theme {
     fn from(dark_mode: bool) -> Self {
-        if dark_mode {
-            Self::Dark
-        } else {
-            Self::Light
-        }
+        if dark_mode { Self::Dark } else { Self::Light }
     }
 }
 
@@ -283,10 +279,11 @@ impl TerminalState {
             }
 
             // check if the cursor pos is within the range of the tag
-            if tag.start <= buf_pos && buf_pos < tag.end {
-                if let Some(url) = &tag.url {
-                    return Some(url.url.clone());
-                }
+            if tag.start <= buf_pos
+                && buf_pos < tag.end
+                && let Some(url) = &tag.url
+            {
+                return Some(url.url.clone());
             }
         }
 

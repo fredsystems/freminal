@@ -586,8 +586,17 @@ impl TerminalBufferHolder {
         if self.buffer_line_ranges[start].start > self.buf.len()
             || self.buffer_line_ranges[end].end > self.buf.len()
         {
-            error!("Data for GUI: buffer line ranges are out of bounds. start: {}, buf start: {}, buf end: {}, end: {}, buf len: {}, height: {}, visible: {:?}, buffer ranges: {:?}",
-                    start, self.buffer_line_ranges[start].start, end, self.buffer_line_ranges[end].end, self.buf.len(), self.height, self.visible_line_ranges.len(), self.buffer_line_ranges.len());
+            error!(
+                "Data for GUI: buffer line ranges are out of bounds. start: {}, buf start: {}, buf end: {}, end: {}, buf len: {}, height: {}, visible: {:?}, buffer ranges: {:?}",
+                start,
+                self.buffer_line_ranges[start].start,
+                end,
+                self.buffer_line_ranges[end].end,
+                self.buf.len(),
+                self.height,
+                self.visible_line_ranges.len(),
+                self.buffer_line_ranges.len()
+            );
 
             return (
                 TerminalSections {
@@ -921,10 +930,10 @@ impl TerminalBufferHolder {
         self.calculate_line_ranges();
 
         // check and make sure the last buffer line range end is not greater than the buffer length
-        if let Some(last) = self.buffer_line_ranges.last() {
-            if last.end > self.buf.len() {
-                error!("Last buffer line range end is greater than buffer length");
-            }
+        if let Some(last) = self.buffer_line_ranges.last()
+            && last.end > self.buf.len()
+        {
+            error!("Last buffer line range end is greater than buffer length");
         }
     }
 

@@ -4,12 +4,12 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::gui::{
+    TerminalEmulator,
     fonts::FontConfig,
     mouse::{
-        handle_pointer_button, handle_pointer_moved, handle_pointer_scroll, FreminalMousePosition,
-        PreviousMouseState,
+        FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
+        handle_pointer_scroll,
     },
-    TerminalEmulator,
 };
 
 use freminal_common::{
@@ -21,20 +21,20 @@ use freminal_common::{
 };
 use freminal_terminal_emulator::{
     ansi_components::modes::rl_bracket::RlBracket,
-    interface::{collect_text, TerminalInput},
+    interface::{TerminalInput, collect_text},
     io::FreminalTermInputOutput,
     state::internal::Theme,
 };
 
 use eframe::egui::{
-    self, scroll_area::ScrollBarVisibility, text::LayoutJob, Color32, Context, CursorIcon,
-    DragValue, Event, InputState, Key, Modifiers, OpenUrl, OutputCommand, PointerButton, Pos2,
-    Rect, Stroke, TextFormat, TextStyle, Ui,
+    self, Color32, Context, CursorIcon, DragValue, Event, InputState, Key, Modifiers, OpenUrl,
+    OutputCommand, PointerButton, Pos2, Rect, Stroke, TextFormat, TextStyle, Ui,
+    scroll_area::ScrollBarVisibility, text::LayoutJob,
 };
 
 use super::{
     colors::internal_color_to_egui,
-    fonts::{get_char_size, setup_font_files, TerminalFont},
+    fonts::{TerminalFont, get_char_size, setup_font_files},
 };
 use anyhow::Result;
 use conv2::{ApproxFrom, ConvUtil, RoundToZero, ValueFrom};

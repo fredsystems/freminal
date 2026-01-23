@@ -28,7 +28,8 @@ fn mixed_enable_disable_modes() {
     let seq = "\x1b[?1h\x1b[?7l\x1b[20h";
     let outs = push_seq(seq);
     println!("mixed -> {:?}", outs);
-    assert!(outs
-        .iter()
-        .all(|o| matches!(o, TerminalOutput::Mode { .. })));
+    assert!(
+        outs.iter()
+            .all(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
 }

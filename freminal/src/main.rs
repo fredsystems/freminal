@@ -5,14 +5,20 @@
 
 #![deny(
     clippy::pedantic,
-    //clippy::cargo,
+    clippy::cargo,
     clippy::nursery,
     clippy::style,
     clippy::correctness,
     clippy::all,
+    clippy::suspicious,
+    clippy::complexity,
+    clippy::perf,
     clippy::unwrap_used,
     clippy::expect_used
 )]
+#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
+#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
+
 // #![warn(missing_docs)]
 
 #[macro_use]
@@ -24,11 +30,11 @@ use std::{process, sync::Arc};
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
+    EnvFilter,
     filter::Directive,
     fmt::{self, layer},
     layer::SubscriberExt,
     util::SubscriberInitExt,
-    EnvFilter,
 };
 
 pub mod gui;
@@ -143,12 +149,14 @@ fn main() {
             let terminal = Arc::new(FairMutex::new(terminal));
             let terminal_clone = Arc::clone(&terminal);
 
-            std::thread::spawn(move || loop {
-                if let Ok(read) = rx.recv() {
-                    terminal
-                        .lock()
-                        .internal
-                        .handle_incoming_data(&read.buf[0..read.read_amount]);
+            std::thread::spawn(move || {
+                loop {
+                    if let Ok(read) = rx.recv() {
+                        terminal
+                            .lock()
+                            .internal
+                            .handle_incoming_data(&read.buf[0..read.read_amount]);
+                    }
                 }
             });
 

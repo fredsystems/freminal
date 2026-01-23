@@ -5,13 +5,13 @@
 
 use std::vec::IntoIter;
 
-use crate::ansi::{split_params_into_colon_delimited_usize, ParserOutcome};
+use crate::ansi::{ParserOutcome, split_params_into_colon_delimited_usize};
 use crate::error::ParserFailures;
 use crate::{
-    ansi::{split_params_into_semicolon_delimited_usize, TerminalOutput},
+    ansi::{TerminalOutput, split_params_into_semicolon_delimited_usize},
     ansi_components::sgr::SelectGraphicRendition,
 };
-use freminal_common::colors::{lookup_256_color_by_index, TerminalColor};
+use freminal_common::colors::{TerminalColor, lookup_256_color_by_index};
 
 #[inline]
 fn opt(params: &[Option<usize>], idx: usize) -> Option<usize> {

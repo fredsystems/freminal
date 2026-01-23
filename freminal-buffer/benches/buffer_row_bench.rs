@@ -1,5 +1,5 @@
 // Copyright ...
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::tchar::TChar;

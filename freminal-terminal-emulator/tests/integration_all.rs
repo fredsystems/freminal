@@ -5,7 +5,7 @@ use freminal_terminal_emulator::ansi::{FreminalAnsiParser, TerminalOutput};
 use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 use freminal_terminal_emulator::ansi_components::{
     mode::SetMode,
-    modes::{decawm::Decawm, deccolm::Deccolm, dectcem::Dectcem, ReportMode},
+    modes::{ReportMode, decawm::Decawm, deccolm::Deccolm, dectcem::Dectcem},
 };
 
 /// End-to-end parser smoke: mixed Standard/CSI/OSC/SGR + a couple of DEC modes toggles.

@@ -9,7 +9,7 @@ use conv2::ConvUtil;
 use eframe::egui::{Modifiers, PointerButton, Vec2};
 use freminal_terminal_emulator::{
     ansi_components::modes::mouse::{MouseEncoding, MouseTrack},
-    interface::{collect_text, raw_ascii_bytes_to_terminal_input, TerminalInput},
+    interface::{TerminalInput, collect_text, raw_ascii_bytes_to_terminal_input},
 };
 
 #[derive(Debug, PartialEq, Clone)]

@@ -3,10 +3,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use criterion::criterion_group;
-use criterion::criterion_main;
 use criterion::BenchmarkId;
 use criterion::Criterion;
+use criterion::criterion_group;
+use criterion::criterion_main;
 
 use freminal_common::buffer_states::buffer_type::BufferType;
 use freminal_terminal_emulator::ansi_components::modes::decawm::Decawm;

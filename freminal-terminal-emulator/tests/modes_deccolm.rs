@@ -13,10 +13,14 @@ fn deccolm_enable_disable() {
     let enable = push_seq("\x1b[?3h");
     let disable = push_seq("\x1b[?3l");
     println!("DECCOLM enable {:?} disable {:?}", enable, disable);
-    assert!(enable
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
-    assert!(disable
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
+    assert!(
+        enable
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
+    assert!(
+        disable
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
 }

@@ -228,10 +228,10 @@ fn find_system_font_by_name(name: &str) -> Option<Vec<u8>> {
         }
 
         // Load from file
-        if let fontdb::Source::File(path) = &face.source {
-            if let Ok(bytes) = std::fs::read(path) {
-                return Some(bytes);
-            }
+        if let fontdb::Source::File(path) = &face.source
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            return Some(bytes);
         }
     }
 
@@ -270,10 +270,10 @@ fn add_fallback_to_terminal_families(defs: &mut FontDefinitions, name: &str) {
     ];
 
     for fam in families {
-        if let Some(list) = defs.families.get_mut(&fam) {
-            if !list.contains(&name.to_owned()) {
-                list.push(name.to_owned());
-            }
+        if let Some(list) = defs.families.get_mut(&fam)
+            && !list.contains(&name.to_owned())
+        {
+            list.push(name.to_owned());
         }
     }
 }
@@ -322,13 +322,12 @@ mod emoji_fonts {
                 continue;
             }
 
-            if let Source::File(path) = &face.source {
-                if path.exists() {
-                    if let Ok(bytes) = std::fs::read(path) {
-                        let key = format!("emoji-{}", target.replace(' ', "_"));
-                        return Some((key, bytes));
-                    }
-                }
+            if let Source::File(path) = &face.source
+                && path.exists()
+                && let Ok(bytes) = std::fs::read(path)
+            {
+                let key = format!("emoji-{}", target.replace(' ', "_"));
+                return Some((key, bytes));
             }
         }
 

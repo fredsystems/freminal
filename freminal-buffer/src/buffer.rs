@@ -1227,7 +1227,9 @@ impl Buffer {
     /// - Saves current rows, cursor, and `scroll_offset`.
     /// - Replaces contents with a fresh empty screen (height rows).
     /// - Disables scrollback semantics for the alternate screen.
+    ///
     /// Move cursor to absolute position (CUP, HVP)
+    ///
     /// x and y are 0-indexed screen coordinates
     pub fn set_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
         let new_x = x.unwrap_or(0).min(self.width.saturating_sub(1));
@@ -1247,6 +1249,11 @@ impl Buffer {
     }
 
     /// Move cursor relatively (CUU, CUD, CUF, CUB)
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
     pub fn move_cursor_relative(&mut self, dx: i32, dy: i32) {
         let new_x = (self.cursor.pos.x as i32 + dx)
             .max(0)
@@ -1819,7 +1826,10 @@ mod pty_behavior_tests {
             }
         }
 
-        assert!(found,"Soft-wrap should produce at least one SoftWrap/ContinueLogicalLine row after the first");
+        assert!(
+            found,
+            "Soft-wrap should produce at least one SoftWrap/ContinueLogicalLine row after the first"
+        );
     }
 
     // B6-ish — Wrap into an existing row: reused row must become SoftWrap continuation

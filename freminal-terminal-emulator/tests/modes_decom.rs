@@ -13,12 +13,16 @@ fn decom_enable_disable() {
     let enable = push_seq("\x1b[?6h");
     let disable = push_seq("\x1b[?6l");
     println!("enable {:?}\ndisable {:?}", enable, disable);
-    assert!(enable
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
-    assert!(disable
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
+    assert!(
+        enable
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
+    assert!(
+        disable
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
 }
 
 #[test]
@@ -26,7 +30,8 @@ fn decom_invalid_and_recovery() {
     let seq = "\x1b[?xh\x1b[?6h";
     let outs = push_seq(seq);
     println!("recovery -> {:?}", outs);
-    assert!(outs
-        .iter()
-        .any(|o| matches!(o, TerminalOutput::Mode { .. })));
+    assert!(
+        outs.iter()
+            .any(|o| matches!(o, TerminalOutput::Mode { .. }))
+    );
 }

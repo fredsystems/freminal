@@ -7,7 +7,7 @@
 //! 1. "logic_only" – tests terminal logic without running the egui pipeline.
 //! 2. "full_egui"  – runs the full FreminalTerminalWidget::show() under a headless egui::Context.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use egui::{Context, Ui};
 use freminal::gui::terminal::FreminalTerminalWidget;
 use freminal_terminal_emulator::{interface::TerminalEmulator, io::DummyIo};

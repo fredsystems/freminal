@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::{split_params_into_semicolon_delimited_usize, ParserOutcome, TerminalOutput};
+use crate::ansi::{ParserOutcome, TerminalOutput, split_params_into_semicolon_delimited_usize};
 use crate::error::ParserFailures;
 
 /// Set Top and Bottom Margins

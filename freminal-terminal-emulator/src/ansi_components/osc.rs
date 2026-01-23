@@ -138,18 +138,22 @@ impl From<Vec<Option<AnsiOscToken>>> for UrlResponse {
 
         // Otherwise, the first token is the ID, and the second token is the URL
         match value.as_slice() {
-            [Some(AnsiOscToken::OscValue(8)), Some(AnsiOscToken::String(id)), Some(AnsiOscToken::String(url))] => {
-                Self::Url(Url {
-                    id: Some(id.clone()),
-                    url: url.clone(),
-                })
-            }
-            [Some(AnsiOscToken::OscValue(8)), None, Some(AnsiOscToken::String(url))] => {
-                Self::Url(Url {
-                    id: None,
-                    url: url.clone(),
-                })
-            }
+            [
+                Some(AnsiOscToken::OscValue(8)),
+                Some(AnsiOscToken::String(id)),
+                Some(AnsiOscToken::String(url)),
+            ] => Self::Url(Url {
+                id: Some(id.clone()),
+                url: url.clone(),
+            }),
+            [
+                Some(AnsiOscToken::OscValue(8)),
+                None,
+                Some(AnsiOscToken::String(url)),
+            ] => Self::Url(Url {
+                id: None,
+                url: url.clone(),
+            }),
             _ => Self::End,
         }
     }
@@ -442,12 +446,10 @@ impl FromStr for AnsiOscToken {
 pub fn split_params_into_semicolon_delimited_usize(
     params: &[u8],
 ) -> Result<Vec<Option<AnsiOscToken>>> {
-    let params = params
+    params
         .split(|b| *b == b';')
         .map(parse_param_as::<AnsiOscToken>)
-        .collect::<Result<Vec<Option<AnsiOscToken>>>>();
-
-    params
+        .collect::<Result<Vec<Option<AnsiOscToken>>>>()
 }
 
 /// # Errors

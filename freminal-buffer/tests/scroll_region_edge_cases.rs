@@ -585,7 +585,7 @@ fn wide_character_at_scroll_boundary() {
 
     // Insert wide character
     let wide = TChar::Utf8("🙂".as_bytes().to_vec());
-    buf.insert_text(&[wide.clone()]);
+    buf.insert_text(std::slice::from_ref(&wide));
 
     // Should handle wide character correctly even with scroll region active
     assert_eq!(buf.get_cursor().pos.x, 2); // Wide char takes 2 columns
