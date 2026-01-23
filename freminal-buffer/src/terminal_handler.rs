@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -212,15 +212,7 @@ impl TerminalHandler {
     ///
     /// This is the main entry point for integrating with the parser.
     /// It dispatches each `TerminalOutput` variant to the appropriate handler method.
-    pub fn process_outputs<SGR, MODE, OSC, DECSG>(
-        &mut self,
-        outputs: &[TerminalOutput<SGR, MODE, OSC, DECSG>],
-    ) where
-        SGR: std::fmt::Debug,
-        MODE: std::fmt::Debug,
-        OSC: std::fmt::Debug,
-        DECSG: std::fmt::Debug,
-    {
+    pub fn process_outputs(&mut self, outputs: &[TerminalOutput]) {
         for output in outputs {
             self.process_output(output);
         }
@@ -228,15 +220,7 @@ impl TerminalHandler {
 
     /// Process a single `TerminalOutput` command
     #[allow(clippy::too_many_lines)]
-    fn process_output<SGR, MODE, OSC, DECSG>(
-        &mut self,
-        output: &TerminalOutput<SGR, MODE, OSC, DECSG>,
-    ) where
-        SGR: std::fmt::Debug,
-        MODE: std::fmt::Debug,
-        OSC: std::fmt::Debug,
-        DECSG: std::fmt::Debug,
-    {
+    fn process_output(&mut self, output: &TerminalOutput) {
         match output {
             // === Implemented Operations ===
             TerminalOutput::Data(bytes) => {
@@ -612,10 +596,10 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         let outputs = vec![
-            TerminalOutput::<(), (), (), ()>::Data(b"Hello".to_vec()),
-            TerminalOutput::<(), (), (), ()>::Newline,
-            TerminalOutput::<(), (), (), ()>::CarriageReturn,
-            TerminalOutput::<(), (), (), ()>::Data(b"World".to_vec()),
+            TerminalOutput::Data(b"Hello".to_vec()),
+            TerminalOutput::Newline,
+            TerminalOutput::CarriageReturn,
+            TerminalOutput::Data(b"World".to_vec()),
         ];
 
         handler.process_outputs(&outputs);
@@ -631,11 +615,11 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         let outputs = vec![
-            TerminalOutput::<(), (), (), ()>::SetCursorPos {
+            TerminalOutput::SetCursorPos {
                 x: Some(11),
                 y: Some(6),
             },
-            TerminalOutput::<(), (), (), ()>::Data(b"Test".to_vec()),
+            TerminalOutput::Data(b"Test".to_vec()),
         ];
 
         handler.process_outputs(&outputs);
@@ -651,11 +635,11 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         let outputs = vec![
-            TerminalOutput::<(), (), (), ()>::Data(b"Line 1".to_vec()),
-            TerminalOutput::<(), (), (), ()>::Newline,
-            TerminalOutput::<(), (), (), ()>::CarriageReturn,
-            TerminalOutput::<(), (), (), ()>::Data(b"Line 2".to_vec()),
-            TerminalOutput::<(), (), (), ()>::ClearDisplay,
+            TerminalOutput::Data(b"Line 1".to_vec()),
+            TerminalOutput::Newline,
+            TerminalOutput::CarriageReturn,
+            TerminalOutput::Data(b"Line 2".to_vec()),
+            TerminalOutput::ClearDisplay,
         ];
 
         handler.process_outputs(&outputs);

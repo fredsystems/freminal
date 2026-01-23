@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -13,22 +13,8 @@ use freminal_common::{
         cursor::{CursorPos, CursorState, ReverseVideo},
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
-        line_wrap::LineWrap,
-        tchar::TChar,
-    },
-    colors::TerminalColor,
-    cursor::CursorVisualStyle,
-    scroll::ScrollDirection,
-    terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
-    window_manipulation::WindowManipulation,
-};
-#[cfg(debug_assertions)]
-use std::time::Instant;
-
-use crate::{
-    ansi::{FreminalAnsiParser, TerminalOutput},
-    ansi_components::{
         line_draw::DecSpecialGraphics,
+        line_wrap::LineWrap,
         mode::{Mode, SetMode, TerminalModes},
         modes::{
             MouseModeNumber, ReportMode, allow_column_mode_switch::AllowColumnModeSwitch,
@@ -39,8 +25,21 @@ use crate::{
             xtcblink::XtCBlink, xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
         },
         osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
-        sgr::SelectGraphicRendition,
+        tchar::TChar,
+        terminal_output::TerminalOutput,
+        window_manipulation::WindowManipulation,
     },
+    colors::TerminalColor,
+    cursor::CursorVisualStyle,
+    scroll::ScrollDirection,
+    sgr::SelectGraphicRendition,
+    terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
+};
+#[cfg(debug_assertions)]
+use std::time::Instant;
+
+use crate::{
+    ansi::FreminalAnsiParser,
     format_tracker::FormatTracker,
     interface::{
         TerminalInput, TerminalInputPayload, collect_text, split_format_data_for_scrollback,

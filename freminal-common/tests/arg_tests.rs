@@ -1,11 +1,11 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use anyhow::Result;
 use freminal_common::args::Args;
-use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest};
 
 /// Helper: run the parser with a simple iterator of strings
 fn parse_from<I: IntoIterator<Item = S>, S: Into<String>>(args: I) -> Result<Args> {
@@ -102,7 +102,7 @@ proptest! {
     /// Any combination of valid boolean flag forms for `--write-logs-to-file`
     /// should parse consistently.
     #[test]
-    fn write_logs_to_file_accepts_boolean_values(val in prop::bool::ANY) {
+    fn write_logs_to_file_accepts_boolean_values(val in proptest::bool::ANY) {
         let arg = format!("--write-logs-to-file={}", val);
         let args = parse_from(["freminal", &arg]).unwrap();
         prop_assert_eq!(args.write_logs_to_file, val);
@@ -141,7 +141,7 @@ proptest! {
 
     /// The parser should never panic or crash for arbitrary ASCII input.
     #[test]
-    fn parser_never_panics_on_random_input(input in prop::collection::vec("[ -~]{0,20}", 0..10)) {
+    fn parser_never_panics_on_random_input(input in proptest::collection::vec("[ -~]{0,20}", 0..10)) {
         let args: Vec<String> = std::iter::once("freminal".to_string())
             .chain(input.into_iter())
             .collect();

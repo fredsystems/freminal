@@ -1,10 +1,10 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use freminal_common::colors::{TerminalColor, cube_component, lookup_256_color_by_index};
-use proptest::prelude::*;
+use proptest::{prop_assert, prop_assert_eq, proptest};
 use std::fmt::Write;
 use std::str::FromStr;
 
@@ -227,7 +227,7 @@ proptest! {
     }
 
     #[test]
-    fn cube_component_cycles(value in 16usize..=230usize, modifier in prop::sample::select(vec![36usize, 6usize, 1usize])) {
+    fn cube_component_cycles(value in 16usize..=230usize, modifier in proptest::sample::select(vec![36usize, 6usize, 1usize])) {
         let c = cube_component(value, modifier);
         prop_assert!(c <= 255);
 

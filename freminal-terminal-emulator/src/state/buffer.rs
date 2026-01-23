@@ -1,14 +1,14 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi_components::modes::decawm::Decawm;
-
 use super::data::TerminalSections;
 use anyhow::Result;
 use freminal_common::{
-    buffer_states::{buffer_type::BufferType, cursor::CursorPos, tchar::TChar},
+    buffer_states::{
+        buffer_type::BufferType, cursor::CursorPos, modes::decawm::Decawm, tchar::TChar,
+    },
     scroll::ScrollDirection,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };

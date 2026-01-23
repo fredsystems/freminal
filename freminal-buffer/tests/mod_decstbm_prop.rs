@@ -1,6 +1,11 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::tchar::TChar;
-use proptest::prelude::*;
+use proptest::proptest;
 
 fn c(ch: char) -> TChar {
     TChar::new_from_single_char(ch as u8)
@@ -11,7 +16,7 @@ proptest! {
     fn decstbm_random_ops_do_not_panic(
         width in 2usize..15,
         height in 2usize..15,
-        actions in prop::collection::vec(0u8..=255, 10..200),
+        actions in proptest::collection::vec(0u8..=255, 10..200),
     ) {
         let mut buf = Buffer::new(width, height);
 

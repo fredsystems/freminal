@@ -1,36 +1,32 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use super::{
-    csi_commands::{
-        cha::ansi_parser_inner_csi_finished_set_cursor_position_g,
-        cub::ansi_parser_inner_csi_finished_move_cursor_left,
-        cud::ansi_parser_inner_csi_finished_move_down,
-        cuf::ansi_parser_inner_csi_finished_move_right,
-        cup::ansi_parser_inner_csi_finished_set_position_h,
-        cuu::ansi_parser_inner_csi_finished_move_up,
-        dch::ansi_parser_inner_csi_finished_set_position_p,
-        decrqm::ansi_parser_inner_csi_finished_decrqm,
-        decscusr::ansi_parser_inner_csi_finished_set_position_q,
-        decslpp::ansi_parser_inner_csi_finished_set_position_t,
-        decstbm::ansi_parser_inner_csi_set_top_and_bottom_margins,
-        ech::ansi_parser_inner_csi_finished_set_position_x,
-        ed::ansi_parser_inner_csi_finished_set_position_j,
-        el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
-        il::ansi_parser_inner_csi_finished_set_position_l,
-        report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
-        send_device_attributes::ansi_parser_inner_csi_finished_send_da,
-        sgr::ansi_parser_inner_csi_finished_sgr_ansi,
-    },
-    mode::{Mode, SetMode},
+use freminal_common::buffer_states::mode::{Mode, SetMode};
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+use super::csi_commands::{
+    cha::ansi_parser_inner_csi_finished_set_cursor_position_g,
+    cub::ansi_parser_inner_csi_finished_move_cursor_left,
+    cud::ansi_parser_inner_csi_finished_move_down, cuf::ansi_parser_inner_csi_finished_move_right,
+    cup::ansi_parser_inner_csi_finished_set_position_h,
+    cuu::ansi_parser_inner_csi_finished_move_up,
+    dch::ansi_parser_inner_csi_finished_set_position_p,
+    decrqm::ansi_parser_inner_csi_finished_decrqm,
+    decscusr::ansi_parser_inner_csi_finished_set_position_q,
+    decslpp::ansi_parser_inner_csi_finished_set_position_t,
+    decstbm::ansi_parser_inner_csi_set_top_and_bottom_margins,
+    ech::ansi_parser_inner_csi_finished_set_position_x,
+    ed::ansi_parser_inner_csi_finished_set_position_j,
+    el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
+    il::ansi_parser_inner_csi_finished_set_position_l,
+    report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
+    send_device_attributes::ansi_parser_inner_csi_finished_send_da,
+    sgr::ansi_parser_inner_csi_finished_sgr_ansi,
 };
 use crate::ansi_components::tracer::SequenceTracer;
-use crate::{
-    ansi::{ParserOutcome, TerminalOutput},
-    ansi_components::tracer::SequenceTraceable,
-};
+use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
 
 #[derive(Eq, PartialEq, Debug, Default)]
 pub enum AnsiCsiParserState {

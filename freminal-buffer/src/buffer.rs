@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -423,6 +423,10 @@ impl Buffer {
 
         // Always clamp cursor after size change
         self.clamp_cursor_after_resize();
+
+        // Enforce scrollback limit after resize (reflow may have created extra rows)
+        self.enforce_scrollback_limit();
+
         self.debug_assert_invariants();
     }
 

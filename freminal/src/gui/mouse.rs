@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -7,9 +7,9 @@ use std::borrow::Cow;
 
 use conv2::ConvUtil;
 use eframe::egui::{Modifiers, PointerButton, Vec2};
-use freminal_terminal_emulator::{
-    ansi_components::modes::mouse::{MouseEncoding, MouseTrack},
-    interface::{TerminalInput, collect_text, raw_ascii_bytes_to_terminal_input},
+use freminal_common::buffer_states::modes::mouse::{MouseEncoding, MouseTrack};
+use freminal_terminal_emulator::interface::{
+    TerminalInput, collect_text, raw_ascii_bytes_to_terminal_input,
 };
 
 #[derive(Debug, PartialEq, Clone)]

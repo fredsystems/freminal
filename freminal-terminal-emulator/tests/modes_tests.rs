@@ -1,9 +1,10 @@
 // Copyright (C) 2024–2025 Fred Clausen
 // Licensed under the MIT license (https://opensource.org/licenses/MIT).
 
-use freminal_terminal_emulator::ansi_components::mode::SetMode;
-use freminal_terminal_emulator::ansi_components::modes::ReportMode;
-use freminal_terminal_emulator::ansi_components::modes::decawm::Decawm;
+use freminal_common::buffer_states::{
+    mode::SetMode,
+    modes::{ReportMode, decawm::Decawm},
+};
 
 #[test]
 fn default_is_autowrap_enabled() {

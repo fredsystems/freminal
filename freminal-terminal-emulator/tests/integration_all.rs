@@ -1,12 +1,14 @@
 // Copyright (C) 2024–2025 Fred Clausen
 // Licensed under the MIT license (https://opensource.org/licenses/MIT).
 
-use freminal_terminal_emulator::ansi::{FreminalAnsiParser, TerminalOutput};
+use freminal_common::buffer_states::mode::SetMode;
+use freminal_common::buffer_states::modes::ReportMode;
+use freminal_common::buffer_states::modes::decawm::Decawm;
+use freminal_common::buffer_states::modes::deccolm::Deccolm;
+use freminal_common::buffer_states::modes::dectcem::Dectcem;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
-use freminal_terminal_emulator::ansi_components::{
-    mode::SetMode,
-    modes::{ReportMode, decawm::Decawm, deccolm::Deccolm, dectcem::Dectcem},
-};
 
 /// End-to-end parser smoke: mixed Standard/CSI/OSC/SGR + a couple of DEC modes toggles.
 /// Goal: quick sanity over the whole pipeline without over-constraining output ordering.

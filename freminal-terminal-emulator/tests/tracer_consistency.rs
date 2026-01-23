@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -6,7 +6,7 @@
 use freminal_terminal_emulator::ansi_components::{
     csi::AnsiCsiParser, osc::AnsiOscParser, standard::StandardParser,
 };
-use proptest::prelude::*;
+use proptest::{prelude::any, prop_assert_eq, proptest};
 
 /// Ensure all parser variants record pushed bytes into their trace buffer.
 #[test]
@@ -40,7 +40,7 @@ fn seq_trace_updates_on_push() {
 // as pushing them in a single pass (streaming determinism).
 proptest! {
     #[test]
-    fn seq_trace_deterministic_across_chunking(input in prop::collection::vec(any::<u8>(), 1..128)) {
+    fn seq_trace_deterministic_across_chunking(input in proptest::collection::vec(any::<u8>(), 1..128)) {
         // OSC
         {
             let mut full = AnsiOscParser::new();

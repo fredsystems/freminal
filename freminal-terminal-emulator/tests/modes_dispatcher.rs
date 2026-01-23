@@ -1,10 +1,11 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // MIT license, see LICENSE file.
 
 //! Ensures the mode dispatcher in `ansi_components/mode.rs` correctly interprets
 //! multiple mode sequences in a single stream.
 
-use freminal_terminal_emulator::ansi::*;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 fn push_seq(seq: &str) -> Vec<TerminalOutput> {
     let mut parser = FreminalAnsiParser::default();

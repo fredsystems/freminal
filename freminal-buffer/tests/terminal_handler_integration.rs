@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -405,27 +405,27 @@ fn test_process_outputs_api() {
     // Simulate a realistic terminal session using process_outputs
     let outputs = vec![
         // Clear screen and go home
-        TerminalOutput::<(), (), (), ()>::ClearDisplay,
-        TerminalOutput::<(), (), (), ()>::SetCursorPos {
+        TerminalOutput::ClearDisplay,
+        TerminalOutput::SetCursorPos {
             x: Some(1),
             y: Some(1),
         },
         // Write prompt
-        TerminalOutput::<(), (), (), ()>::Data(b"$ ".to_vec()),
+        TerminalOutput::Data(b"$ ".to_vec()),
         // User types command
-        TerminalOutput::<(), (), (), ()>::Data(b"ls -la".to_vec()),
+        TerminalOutput::Data(b"ls -la".to_vec()),
         // Enter pressed
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
         // Output some file listings
-        TerminalOutput::<(), (), (), ()>::Data(b"total 48".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
-        TerminalOutput::<(), (), (), ()>::Data(b"-rw-r--r-- 1 user user 1234 file.txt".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
+        TerminalOutput::Data(b"total 48".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"-rw-r--r-- 1 user user 1234 file.txt".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
         // New prompt
-        TerminalOutput::<(), (), (), ()>::Data(b"$ ".to_vec()),
+        TerminalOutput::Data(b"$ ".to_vec()),
     ];
 
     handler.process_outputs(&outputs);
@@ -447,23 +447,23 @@ fn test_process_outputs_with_cursor_positioning() {
 
     let outputs = vec![
         // Write header at top
-        TerminalOutput::<(), (), (), ()>::SetCursorPos {
+        TerminalOutput::SetCursorPos {
             x: Some(1),
             y: Some(1),
         },
-        TerminalOutput::<(), (), (), ()>::Data(b"=== Terminal Test ===".to_vec()),
+        TerminalOutput::Data(b"=== Terminal Test ===".to_vec()),
         // Write content in middle
-        TerminalOutput::<(), (), (), ()>::SetCursorPos {
+        TerminalOutput::SetCursorPos {
             x: Some(1),
             y: Some(10),
         },
-        TerminalOutput::<(), (), (), ()>::Data(b"Middle content".to_vec()),
+        TerminalOutput::Data(b"Middle content".to_vec()),
         // Write footer at bottom
-        TerminalOutput::<(), (), (), ()>::SetCursorPos {
+        TerminalOutput::SetCursorPos {
             x: Some(1),
             y: Some(24),
         },
-        TerminalOutput::<(), (), (), ()>::Data(b"Footer".to_vec()),
+        TerminalOutput::Data(b"Footer".to_vec()),
     ];
 
     handler.process_outputs(&outputs);
@@ -480,15 +480,15 @@ fn test_process_outputs_with_scroll_region() {
 
     let outputs = vec![
         // Set up scroll region
-        TerminalOutput::<(), (), (), ()>::SetTopAndBottomMargins {
+        TerminalOutput::SetTopAndBottomMargins {
             top_margin: 5,
             bottom_margin: 20,
         },
         // Write some lines
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 1".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 2".to_vec()),
+        TerminalOutput::Data(b"Line 1".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"Line 2".to_vec()),
     ];
 
     handler.process_outputs(&outputs);
@@ -504,22 +504,22 @@ fn test_process_outputs_mixed_erase_operations() {
 
     let outputs = vec![
         // Fill screen with data
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 1".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 2".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 3".to_vec()),
+        TerminalOutput::Data(b"Line 1".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"Line 2".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"Line 3".to_vec()),
         // Move to middle of screen
-        TerminalOutput::<(), (), (), ()>::SetCursorPos {
+        TerminalOutput::SetCursorPos {
             x: Some(1),
             y: Some(2),
         },
         // Erase from cursor to end of display
-        TerminalOutput::<(), (), (), ()>::ClearDisplayfromCursortoEndofDisplay,
+        TerminalOutput::ClearDisplayfromCursortoEndofDisplay,
         // Write new content
-        TerminalOutput::<(), (), (), ()>::Data(b"New Line 2".to_vec()),
+        TerminalOutput::Data(b"New Line 2".to_vec()),
     ];
 
     handler.process_outputs(&outputs);
@@ -534,22 +534,22 @@ fn test_process_outputs_insert_delete_operations() {
     let mut handler = TerminalHandler::new(80, 24);
 
     let outputs = vec![
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 1".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 2".to_vec()),
-        TerminalOutput::<(), (), (), ()>::Newline,
-        TerminalOutput::<(), (), (), ()>::CarriageReturn,
-        TerminalOutput::<(), (), (), ()>::Data(b"Line 3".to_vec()),
+        TerminalOutput::Data(b"Line 1".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"Line 2".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"Line 3".to_vec()),
         // Go back to line 2
-        TerminalOutput::<(), (), (), ()>::SetCursorPos {
+        TerminalOutput::SetCursorPos {
             x: Some(1),
             y: Some(2),
         },
         // Insert a blank line
-        TerminalOutput::<(), (), (), ()>::InsertLines(1),
+        TerminalOutput::InsertLines(1),
         // Write on the new line
-        TerminalOutput::<(), (), (), ()>::Data(b"Inserted".to_vec()),
+        TerminalOutput::Data(b"Inserted".to_vec()),
     ];
 
     handler.process_outputs(&outputs);

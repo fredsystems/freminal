@@ -1,11 +1,10 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use std::borrow::Cow;
 
-use crate::ansi_components::modes::dectcem::Dectcem;
 use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
@@ -16,6 +15,7 @@ use eframe::egui;
 
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::buffer_states::modes::dectcem::Dectcem;
 use freminal_common::{
     args::Args, buffer_states::tchar::TChar, cursor::CursorVisualStyle,
     terminal_size::DEFAULT_HEIGHT, terminal_size::DEFAULT_WIDTH,

@@ -1,18 +1,17 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use std::fmt;
 
-use crate::ansi_components::modes::{grapheme::GraphemeClustering, theme::Theming};
-
-use super::modes::{
+use crate::buffer_states::modes::{
     ReportMode, allow_column_mode_switch::AllowColumnModeSwitch, decarm::Decarm, decawm::Decawm,
     decckm::Decckm, deccolm::Deccolm, decom::Decom, decsclm::Decsclm, decscnm::Decscnm,
-    dectcem::Dectcem, lnm::Lnm, mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround,
-    rl_bracket::RlBracket, sync_updates::SynchronizedUpdates, unknown::UnknownMode,
-    xtcblink::XtCBlink, xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
+    dectcem::Dectcem, grapheme::GraphemeClustering, lnm::Lnm, mouse::MouseTrack,
+    reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket,
+    sync_updates::SynchronizedUpdates, theme::Theming, unknown::UnknownMode, xtcblink::XtCBlink,
+    xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
 };
 
 #[allow(clippy::module_name_repetitions)]
@@ -48,7 +47,7 @@ pub struct TerminalModes {
     pub line_feed_mode: Lnm,
 }
 
-#[derive(Eq, PartialEq, Debug, Default)]
+#[derive(Eq, PartialEq, Debug, Default, Clone)]
 pub enum Mode {
     #[default]
     NoOp,

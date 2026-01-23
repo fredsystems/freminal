@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! Internal, lightweight ring buffer for capturing the most recent input bytes.
 //! Kept fully internal (pub(crate)) and allocation-free on the hot path.
 

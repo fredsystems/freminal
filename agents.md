@@ -107,6 +107,7 @@ This is enforced via:
 - Document public types and functions
 - Prefer explicit types for clarity
 - Follow standard Rust naming conventions
+- If you are working on a function
 
 ### Dead Code Policy
 

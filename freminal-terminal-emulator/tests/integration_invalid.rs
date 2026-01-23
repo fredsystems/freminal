@@ -1,11 +1,11 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 //! Integration tests for invalid and truncated sequence recovery
 
-use freminal_terminal_emulator::ansi::*;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 #[test]
 fn truncated_sequence_resets_cleanly() {

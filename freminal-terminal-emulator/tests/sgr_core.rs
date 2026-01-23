@@ -1,7 +1,8 @@
 // Copyright (C) 2024–2025 Fred Clausen
 // Licensed under the MIT license (https://opensource.org/licenses/MIT).
 
-use freminal_terminal_emulator::ansi::{FreminalAnsiParser, TerminalOutput};
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 /// Helper to push a single sequence and collect all outputs.
 fn parse_seq(seq: &[u8]) -> Vec<TerminalOutput> {

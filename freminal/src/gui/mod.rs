@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -13,8 +13,8 @@ use anyhow::Result;
 use conv2::ConvUtil;
 use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
 use fonts::get_char_size;
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
-use freminal_common::window_manipulation::WindowManipulation;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::FreminalPtyInputOutput;
 use parking_lot::FairMutex;

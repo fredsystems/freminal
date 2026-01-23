@@ -1,7 +1,7 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // This test guards the Display string mapping for clear-display variants.
 
-use freminal_terminal_emulator::ansi::TerminalOutput;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 #[test]
 fn display_clear_display_backwards_maps_stably() {

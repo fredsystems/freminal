@@ -1,16 +1,14 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use core::fmt;
 
-use crate::ansi_components::mode::SetMode;
-
-use super::ReportMode;
+use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
 /// Alternate Screen (`XT_EXTSCRN`) ?1049
-#[derive(Debug, Eq, PartialEq, Default)]
+#[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum XtExtscrn {
     /// Primary screen
     /// Clear screen, switch to normal screen buffer, and restore cursor position.

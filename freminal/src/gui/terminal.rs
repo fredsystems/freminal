@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -14,13 +14,13 @@ use crate::gui::{
 
 use freminal_common::{
     buffer_states::{
-        cursor::CursorPos, fonts::FontDecorations, format_tag::FormatTag, tchar::TChar,
+        cursor::CursorPos, fonts::FontDecorations, format_tag::FormatTag,
+        modes::rl_bracket::RlBracket, tchar::TChar,
     },
     config::Config,
     cursor::CursorVisualStyle,
 };
 use freminal_terminal_emulator::{
-    ansi_components::modes::rl_bracket::RlBracket,
     interface::{TerminalInput, collect_text},
     io::FreminalTermInputOutput,
     state::internal::Theme,

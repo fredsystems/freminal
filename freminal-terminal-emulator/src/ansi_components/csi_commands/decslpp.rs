@@ -1,11 +1,12 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::{ParserOutcome, TerminalOutput, split_params_into_semicolon_delimited_usize};
+use crate::ansi::{ParserOutcome, split_params_into_semicolon_delimited_usize};
 use crate::error::ParserFailures;
-use freminal_common::window_manipulation::WindowManipulation;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 
 /// DECSLLP - Window Manipulation
 ///

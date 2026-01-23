@@ -1,13 +1,14 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use std::fmt;
 
-use crate::ansi_components::mode::SetMode;
-
-use super::{MouseModeNumber, ReportMode};
+use crate::buffer_states::{
+    mode::SetMode,
+    modes::{MouseModeNumber, ReportMode},
+};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MouseEncoding {

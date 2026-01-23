@@ -1,13 +1,11 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use core::fmt;
 
-use freminal_common::buffer_states::line_wrap::LineWrap;
-
-use crate::ansi_components::mode::SetMode;
+use crate::buffer_states::{line_wrap::LineWrap, mode::SetMode};
 
 use super::ReportMode;
 

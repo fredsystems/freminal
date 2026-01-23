@@ -1,20 +1,25 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_terminal_emulator::ansi::*;
-use proptest::prelude::*;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
+use proptest::{
+    prelude::any,
+    prop_assert, prop_assert_eq, prop_assume, prop_oneof, proptest,
+    strategy::{Just, Strategy},
+};
 
 /// Generates arbitrary byte sequences that may contain printable data,
 /// control bytes, and escape sequences.
 fn arb_ansi_bytes() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(
+    proptest::collection::vec(
         prop_oneof![
             // Normal printable ASCII
             (0x20u8..=0x7Eu8),
             // Common control characters
-            prop::sample::select(vec![0x07u8, 0x08u8, b'\r', b'\n']),
+            proptest::sample::select(vec![0x07u8, 0x08u8, b'\r', b'\n']),
             // Escape initiator
             Just(0x1Bu8),
             // Some extended random bytes (0–255)
@@ -101,7 +106,7 @@ proptest! {
 
     /// Property: Each control character should map to a distinct TerminalOutput variant.
     #[test]
-    fn known_control_chars_emit_expected_output(b in prop::sample::select(vec![b'\r', b'\n', 0x07u8, 0x08u8])) {
+    fn known_control_chars_emit_expected_output(b in proptest::sample::select(vec![b'\r', b'\n', 0x07u8, 0x08u8])) {
         let mut parser = FreminalAnsiParser::new();
         let out = parser.push(&[b]);
         prop_assert!(matches!(

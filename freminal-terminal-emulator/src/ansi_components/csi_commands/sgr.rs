@@ -1,17 +1,16 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use std::vec::IntoIter;
 
+use crate::ansi::split_params_into_semicolon_delimited_usize;
 use crate::ansi::{ParserOutcome, split_params_into_colon_delimited_usize};
 use crate::error::ParserFailures;
-use crate::{
-    ansi::{TerminalOutput, split_params_into_semicolon_delimited_usize},
-    ansi_components::sgr::SelectGraphicRendition,
-};
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::colors::{TerminalColor, lookup_256_color_by_index};
+use freminal_common::sgr::SelectGraphicRendition;
 
 #[inline]
 fn opt(params: &[Option<usize>], idx: usize) -> Option<usize> {

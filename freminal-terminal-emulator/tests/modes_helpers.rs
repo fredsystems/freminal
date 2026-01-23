@@ -1,9 +1,9 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // MIT license.
 
-use freminal_terminal_emulator::ansi_components::mode::SetMode;
-use freminal_terminal_emulator::ansi_components::modes::{
-    decawm::Decawm, deccolm::Deccolm, decom::Decom, dectcem::Dectcem, lnm::Lnm,
+use freminal_common::buffer_states::{
+    mode::SetMode,
+    modes::{decawm::Decawm, deccolm::Deccolm, decom::Decom, dectcem::Dectcem, lnm::Lnm},
 };
 
 #[test]

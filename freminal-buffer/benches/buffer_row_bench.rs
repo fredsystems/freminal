@@ -1,4 +1,8 @@
-// Copyright ...
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use freminal_buffer::buffer::Buffer;
