@@ -5,6 +5,8 @@
 
 use core::fmt;
 
+use freminal_common::buffer_states::line_wrap::LineWrap;
+
 use crate::ansi_components::mode::SetMode;
 
 use super::ReportMode;
@@ -29,6 +31,15 @@ impl Decawm {
             SetMode::DecSet => Self::AutoWrap,
             SetMode::DecRst => Self::NoAutoWrap,
             SetMode::DecQuery => Self::Query,
+        }
+    }
+}
+
+impl From<LineWrap> for Decawm {
+    fn from(value: LineWrap) -> Self {
+        match value {
+            LineWrap::Wrap => Self::AutoWrap,
+            LineWrap::NoWrap => Self::NoAutoWrap,
         }
     }
 }

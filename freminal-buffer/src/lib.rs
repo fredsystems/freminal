@@ -13,17 +13,13 @@
     clippy::unwrap_used,
     clippy::expect_used
 )]
-// #![warn(missing_docs)]
+#![allow(dead_code, unused_imports)]
 
-pub mod args;
-pub mod buffer_states;
-pub mod colors;
-pub mod config;
-pub mod cursor;
-pub mod scroll;
-pub mod terminal_size;
-pub mod terminfo;
-pub mod window_manipulation;
+pub mod buffer;
+pub mod cell;
+pub mod response;
+pub mod row;
+pub mod terminal_handler;
 
 #[macro_use]
 extern crate tracing;

@@ -6,21 +6,20 @@
 use std::borrow::Cow;
 
 use crate::ansi_components::modes::dectcem::Dectcem;
-use crate::format_tracker::FormatTag;
 use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
-use crate::state::{
-    cursor::CursorPos, data::TerminalSections, internal::TerminalState, term_char::TChar,
-};
+use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver};
 use eframe::egui;
 
-use freminal_common::args::Args;
-use freminal_common::cursor::CursorVisualStyle;
-use freminal_common::terminal_size::DEFAULT_HEIGHT;
-use freminal_common::terminal_size::DEFAULT_WIDTH;
+use freminal_common::buffer_states::cursor::CursorPos;
+use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::{
+    args::Args, buffer_states::tchar::TChar, cursor::CursorVisualStyle,
+    terminal_size::DEFAULT_HEIGHT, terminal_size::DEFAULT_WIDTH,
+};
 
 const fn char_to_ctrl_code(c: u8) -> u8 {
     // https://catern.com/posts/terminal_quirks.html

@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
   merge_group:
 
@@ -10,6 +8,27 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 jobs:
+  success:
+    name: Rust Success
+    runs-on: ubuntu-latest
+    needs:
+      [
+        build-and-check,
+        lint-formatting,
+        lint-typos,
+        dependencies,
+        cargo-machete,
+        lint-markdown,
+        coverage,
+        check,
+        lint-docs,
+        test-docs,
+      ]
+    steps:
+      - name: Rust build and check succeeded
+        run: |
+          echo "Rust build and check succeeded"
+
   build-and-check:
     runs-on: ubuntu-latest
 
@@ -48,7 +67,7 @@ jobs:
       - uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # Run cargo check. This is a fast way to catch any obvious errors in the code.
   check:

@@ -8,9 +8,9 @@ use criterion::criterion_main;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 
+use freminal_common::buffer_states::buffer_type::BufferType;
 use freminal_terminal_emulator::ansi_components::modes::decawm::Decawm;
 use freminal_terminal_emulator::state::internal::Buffer;
-use freminal_terminal_emulator::state::internal::BufferType;
 use std::io::Read;
 
 fn load_random_file() -> Vec<u8> {

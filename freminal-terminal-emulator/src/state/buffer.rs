@@ -5,9 +5,10 @@
 
 use crate::ansi_components::modes::decawm::Decawm;
 
-use super::{cursor::CursorPos, data::TerminalSections, internal::BufferType, term_char::TChar};
+use super::data::TerminalSections;
 use anyhow::Result;
 use freminal_common::{
+    buffer_states::{buffer_type::BufferType, cursor::CursorPos, tchar::TChar},
     scroll::ScrollDirection,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };

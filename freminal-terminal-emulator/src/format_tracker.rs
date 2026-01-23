@@ -3,13 +3,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::{ansi_components::osc::Url, state::cursor::StateColors};
-
-use super::state::{
-    cursor::CursorState,
-    fonts::{FontDecorations, FontWeight},
-};
 use anyhow::Result;
+use freminal_common::buffer_states::{
+    cursor::{CursorState, StateColors},
+    fonts::FontWeight,
+    format_tag::FormatTag,
+};
 use std::ops::Range;
 
 #[must_use]
@@ -121,29 +120,6 @@ struct ColorRangeAdjustment {
     should_delete: bool,
     // If a range was split we need to insert a new one
     to_insert: Option<FormatTag>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FormatTag {
-    pub start: usize,
-    pub end: usize,
-    pub colors: StateColors,
-    pub font_weight: FontWeight,
-    pub font_decorations: Vec<FontDecorations>,
-    pub url: Option<Url>,
-}
-
-impl Default for FormatTag {
-    fn default() -> Self {
-        Self {
-            start: 0,
-            end: usize::MAX,
-            colors: StateColors::default(),
-            font_weight: FontWeight::Normal,
-            font_decorations: Vec::new(),
-            url: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

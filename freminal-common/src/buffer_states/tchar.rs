@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use crate::error::ParserFailures;
+use crate::buffer_states::error::TCharError;
 use anyhow::Result;
 use std::fmt::Write;
 use unicode_segmentation::UnicodeSegmentation;
@@ -28,6 +28,23 @@ impl TChar {
         }
     }
 
+    #[must_use]
+    pub fn display_width(&self) -> usize {
+        match self {
+            Self::Ascii(_) | Self::Space => 1,
+
+            // newline is not a cell; it causes a line break handled by Buffer
+            Self::NewLine => 0,
+
+            Self::Utf8(v) => {
+                // Try to interpret as UTF-8; fallback to width 1 for invalid sequences
+                std::str::from_utf8(v)
+                    .map(unicode_width::UnicodeWidthStr::width)
+                    .unwrap_or(1)
+            }
+        }
+    }
+
     /// Create a new `TChar` from a vector of u8
     ///
     /// There is no UTF8 validation. That is assumed to have happened before this function is called.
@@ -41,7 +58,7 @@ impl TChar {
             return Ok(Self::Utf8(v));
         }
 
-        Err(ParserFailures::InvalidTChar(v).into())
+        Err(TCharError::InvalidTChar(v).into())
     }
 
     #[must_use]
@@ -128,6 +145,21 @@ pub fn display_vec_tchar_as_string(v: &[TChar]) -> String {
 impl From<u8> for TChar {
     fn from(c: u8) -> Self {
         Self::new_from_single_char(c)
+    }
+}
+
+impl From<char> for TChar {
+    fn from(c: char) -> Self {
+        if c.is_ascii() {
+            // single-byte fast path
+            Self::new_from_single_char(c as u8)
+        } else {
+            // non-ASCII: encode as UTF-8 scalar
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf); // &str
+                                             // we know this is valid UTF-8 by construction, so we can skip Result
+            Self::Utf8(s.as_bytes().to_vec())
+        }
     }
 }
 

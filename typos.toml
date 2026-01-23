@@ -38,4 +38,5 @@ extend-ignore-identifiers-re = [ # NDK - Native  Development Kit
     "Sceptre",
     "DECID",
     "iterm",
+    "Hel",
 ]
