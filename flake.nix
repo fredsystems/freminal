@@ -14,9 +14,25 @@
       ...
     }:
     let
+      inherit (nixpkgs) lib;
       systems = precommit.lib.supportedSystems;
     in
     {
+      packages = lib.genAttrs systems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          freminal = pkgs.stdenv.mkDerivation {
+            pname = "freminal";
+            version = "0.1.0";
+
+            src = ./.;
+          };
+        }
+      );
+
       ##########################################################################
       ## CHECKS — unified base+rust via mkCheck
       ##########################################################################

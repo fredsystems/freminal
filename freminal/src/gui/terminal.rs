@@ -837,8 +837,6 @@ pub fn render_terminal_text(
                 if c == '\n' {
                     continue;
                 }
-
-                info!("soft wrap");
             }
 
             // 1) Draw background cell
