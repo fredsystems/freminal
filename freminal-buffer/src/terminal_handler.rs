@@ -136,6 +136,11 @@ impl TerminalHandler {
         self.buffer.delete_lines(n);
     }
 
+    /// Handle erase characters (ECH)
+    pub fn handle_erase_chars(&mut self, n: usize) {
+        self.buffer.erase_chars(n);
+    }
+
     /// Handle delete characters (DCH)
     pub fn handle_delete_chars(&mut self, n: usize) {
         self.buffer.delete_chars(n);
@@ -296,7 +301,7 @@ impl TerminalHandler {
                 todo!("NormalKeypadMode not yet implemented");
             }
             TerminalOutput::Erase(n) => {
-                todo!("Erase({}) not yet implemented", n);
+                self.handle_erase_chars(*n);
             }
             TerminalOutput::Sgr(_sgr) => {
                 todo!("SGR not yet implemented - need to convert to FormatTag");

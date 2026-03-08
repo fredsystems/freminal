@@ -1045,6 +1045,28 @@ impl Buffer {
         self.debug_assert_invariants();
     }
 
+    /// Implements ECH – Erase Characters.
+    ///
+    /// Replaces `n` cells starting at the cursor column with blanks using the current
+    /// format tag.  Cells to the right of the erased range are **not** shifted.
+    /// The cursor does not move.
+    ///
+    /// Wide-glyph cleanup is delegated to [`Row::erase_cells_at`].
+    pub fn erase_chars(&mut self, n: usize) {
+        let row = self.cursor.pos.y;
+        let col = self.cursor.pos.x;
+
+        if row >= self.rows.len() {
+            // Row doesn't exist yet — nothing to erase.
+            return;
+        }
+
+        let tag = self.current_tag.clone();
+        self.rows[row].erase_cells_at(col, n, &tag);
+
+        self.debug_assert_invariants();
+    }
+
     const fn reset_scroll_region_to_full(&mut self) {
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
@@ -2438,6 +2460,116 @@ mod dch_tests {
             "wide head+continuation removed, BC shifts left"
         );
         assert_eq!(buf.cursor.pos.x, 0, "cursor must not move");
+    }
+}
+
+#[cfg(test)]
+mod ech_tests {
+    use super::*;
+
+    /// Construct a `TChar::Ascii` from a char for brevity.
+    fn a(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Render row `row` of `buf` as a `String` using the full logical width.
+    fn cell_str(buf: &Buffer, row: usize) -> String {
+        (0..buf.width)
+            .map(|col| {
+                let cell = buf.rows[row].resolve_cell(col);
+                match cell.tchar() {
+                    TChar::Ascii(b) => *b as char,
+                    TChar::Space => ' ',
+                    TChar::NewLine => '\n',
+                    TChar::Utf8(v) => String::from_utf8_lossy(v).chars().next().unwrap_or('?'),
+                }
+            })
+            .collect()
+    }
+
+    /// ECH replaces cells in-place with blanks; chars to the right stay put.
+    #[test]
+    fn ech_simple() {
+        // width 10: insert "ABCDE", cursor at col 1, erase_chars(2) → "A  DE     "
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B'), a('C'), a('D'), a('E')]);
+        buf.cursor.pos.x = 1;
+        buf.erase_chars(2);
+
+        let row = cell_str(&buf, 0);
+        assert_eq!(
+            &row[..5],
+            "A  DE",
+            "B and C replaced by blanks, D/E stay in place"
+        );
+        assert_eq!(buf.cursor.pos.x, 1, "cursor must not move after ECH");
+    }
+
+    /// When the erase range extends past the row width, only up to `width` cells
+    /// are erased — no panic, no out-of-bounds access.
+    #[test]
+    fn ech_clamps_at_width() {
+        // width 10: insert "ABCDEFGHIJ", cursor at col 8, erase_chars(10) → only 2 erased
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[
+            a('A'),
+            a('B'),
+            a('C'),
+            a('D'),
+            a('E'),
+            a('F'),
+            a('G'),
+            a('H'),
+            a('I'),
+            a('J'),
+        ]);
+        buf.cursor.pos.x = 8;
+        buf.erase_chars(10); // only cols 8 and 9 can be erased
+
+        let row = cell_str(&buf, 0);
+        assert_eq!(&row[..8], "ABCDEFGH", "first 8 chars untouched");
+        assert_eq!(&row[8..10], "  ", "last 2 chars erased");
+        assert_eq!(buf.cursor.pos.x, 8, "cursor must not move");
+    }
+
+    /// ECH at column 0 replaces the first n cells with blanks.
+    #[test]
+    fn ech_at_col_zero() {
+        // width 10: insert "ABCDE", cursor at col 0, erase_chars(3) → "   DE     "
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B'), a('C'), a('D'), a('E')]);
+        buf.cursor.pos.x = 0;
+        buf.erase_chars(3);
+
+        let row = cell_str(&buf, 0);
+        assert_eq!(&row[..5], "   DE", "first 3 cells blanked, D and E stay");
+        assert_eq!(buf.cursor.pos.x, 0, "cursor must not move");
+    }
+
+    /// ECH differs from DCH: after erasing, the character to the right of the
+    /// erased region is still at its original column position (not shifted left).
+    #[test]
+    fn ech_vs_dch_differ() {
+        // width 10: insert "ABCDE", cursor at col 1, erase 2.
+        // After ECH: col 3 still holds 'D' (not shifted to col 1 as DCH would do).
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B'), a('C'), a('D'), a('E')]);
+        buf.cursor.pos.x = 1;
+        buf.erase_chars(2);
+
+        // 'D' must still be at column 3, not column 1.
+        let cell_at_3 = buf.rows[0].resolve_cell(3);
+        assert_eq!(
+            cell_at_3.tchar(),
+            &TChar::Ascii(b'D'),
+            "D must remain at col 3 (ECH does not shift)"
+        );
+
+        // Erased columns 1 and 2 should be blank.
+        let cell_at_1 = buf.rows[0].resolve_cell(1);
+        let cell_at_2 = buf.rows[0].resolve_cell(2);
+        assert_eq!(cell_at_1.tchar(), &TChar::Space, "col 1 should be blank");
+        assert_eq!(cell_at_2.tchar(), &TChar::Space, "col 2 should be blank");
     }
 }
 

@@ -159,7 +159,7 @@ not change length beyond its logical width). The dispatcher currently calls
 
 ### Step 1.2 — Add `Erase(n)` / ECH (Erase Character) implementation
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 1.2 Why this step exists
 

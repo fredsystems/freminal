@@ -367,6 +367,61 @@ impl Row {
         self.cells.clear();
     }
 
+    /// Replace `n` cells starting at `col` with blanks, using `tag` for each blank.
+    /// Implements VT ECH (Erase Character).
+    ///
+    /// - The cursor does not move (caller's responsibility).
+    /// - Remaining characters to the right of the erased region are **not** shifted.
+    /// - If the range `[col .. col + n]` extends beyond the stored cells, blanks are
+    ///   written only up to `min(col + n, self.width)`.
+    /// - Wide-glyph cleanup is applied across the entire erased range: any head or
+    ///   continuation cell that falls within the range is replaced, and any wide glyph
+    ///   that straddles the boundary is fully blanked so no dangling continuations remain.
+    pub fn erase_cells_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
+        if n == 0 || col >= self.width {
+            return;
+        }
+
+        let end = (col + n).min(self.width);
+
+        // Extend the backing storage up to `end` if needed, filling with default blanks.
+        if self.cells.len() < end {
+            self.cells
+                .resize(end, Cell::blank_with_tag(FormatTag::default()));
+        }
+
+        // If `end` cuts through a wide glyph (continuation at `end` whose head is
+        // before `end`), extend `end` to cover the whole glyph so no dangling
+        // continuation is left.
+        let erase_end = if end < self.cells.len() && self.cells[end].is_continuation() {
+            let mut head = end;
+            while head > 0 && self.cells[head].is_continuation() {
+                head -= 1;
+            }
+            if self.cells[head].is_head() {
+                (head + self.cells[head].display_width()).min(self.cells.len())
+            } else {
+                end
+            }
+        } else {
+            end
+        };
+
+        // Replace every cell in [col .. erase_end] with a blank using `tag`.
+        for i in col..erase_end.min(self.cells.len()) {
+            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        }
+
+        // Trim trailing default blanks to maintain the sparse-row invariant.
+        while let Some(last) = self.cells.last() {
+            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
+                self.cells.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Delete `n` cells starting at `col`, shifting cells to the right of the deleted
     /// range left to fill the gap. Implements VT DCH (Delete Character).
     ///
