@@ -373,7 +373,7 @@ dispatcher. Many terminal applications (tmux, screen, various prompts) use these
 
 ### Step 2.1 — Implement `SelectGraphicRendition` to `FormatTag` accumulation
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 2.1 Why this step exists
 

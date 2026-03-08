@@ -3,9 +3,17 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::buffer_states::{
-    format_tag::FormatTag, mode::Mode, modes::xtextscrn::XtExtscrn, tchar::TChar,
-    terminal_output::TerminalOutput,
+use freminal_common::{
+    buffer_states::{
+        cursor::{ReverseVideo, StateColors},
+        fonts::{FontDecorations, FontWeight},
+        format_tag::FormatTag,
+        mode::Mode,
+        modes::xtextscrn::XtExtscrn,
+        tchar::TChar,
+        terminal_output::TerminalOutput,
+    },
+    sgr::SelectGraphicRendition,
 };
 
 use crate::buffer::Buffer;
@@ -185,12 +193,10 @@ impl TerminalHandler {
         self.buffer.handle_nel();
     }
 
-    /// Handle SGR (Set Graphics Rendition)
-    /// This is a placeholder - actual SGR handling requires converting
-    /// `SelectGraphicRendition` to `FormatTag`
-    pub const fn handle_sgr(&mut self, _sgr_data: &[u8]) {
-        // TODO: Convert SGR parameters to FormatTag and call buffer.set_format()
-        // For now, this is a stub
+    /// Handle SGR (Select Graphic Rendition) — update `current_format` and propagate to buffer.
+    pub fn handle_sgr(&mut self, sgr: &SelectGraphicRendition) {
+        apply_sgr(&mut self.current_format, sgr);
+        self.buffer.set_format(self.current_format.clone());
     }
 
     /// Update format tag directly
@@ -323,8 +329,8 @@ impl TerminalHandler {
             TerminalOutput::Erase(n) => {
                 self.handle_erase_chars(*n);
             }
-            TerminalOutput::Sgr(_sgr) => {
-                todo!("SGR not yet implemented - need to convert to FormatTag");
+            TerminalOutput::Sgr(sgr) => {
+                self.handle_sgr(sgr);
             }
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate) => self.handle_enter_alternate(),
@@ -501,9 +507,352 @@ impl TerminalHandler {
     }
 }
 
+/// Apply a single `SelectGraphicRendition` value to a `FormatTag`, mutating it in-place.
+///
+/// This is the central mapping between the parser's SGR enum and the buffer's format
+/// representation.  It is a pure function — it has no side effects beyond mutating `tag`.
+#[allow(clippy::too_many_lines)]
+fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
+    match sgr {
+        // Reset: restore every field to its default value
+        SelectGraphicRendition::Reset => {
+            *tag = FormatTag::default();
+        }
+
+        // Font weight
+        SelectGraphicRendition::Bold => {
+            tag.font_weight = FontWeight::Bold;
+        }
+        SelectGraphicRendition::ResetBold => {
+            tag.font_weight = FontWeight::Normal;
+        }
+        // NormalIntensity resets both bold AND faint
+        SelectGraphicRendition::NormalIntensity => {
+            tag.font_weight = FontWeight::Normal;
+            tag.font_decorations
+                .retain(|d| *d != FontDecorations::Faint);
+        }
+
+        // Italic
+        SelectGraphicRendition::Italic => {
+            if !tag.font_decorations.contains(&FontDecorations::Italic) {
+                tag.font_decorations.push(FontDecorations::Italic);
+            }
+        }
+        SelectGraphicRendition::NotItalic => {
+            tag.font_decorations
+                .retain(|d| *d != FontDecorations::Italic);
+        }
+
+        // Faint
+        SelectGraphicRendition::Faint => {
+            if !tag.font_decorations.contains(&FontDecorations::Faint) {
+                tag.font_decorations.push(FontDecorations::Faint);
+            }
+        }
+
+        // Underline
+        SelectGraphicRendition::Underline => {
+            if !tag.font_decorations.contains(&FontDecorations::Underline) {
+                tag.font_decorations.push(FontDecorations::Underline);
+            }
+        }
+        SelectGraphicRendition::NotUnderlined => {
+            tag.font_decorations
+                .retain(|d| *d != FontDecorations::Underline);
+        }
+
+        // Strikethrough
+        SelectGraphicRendition::Strikethrough => {
+            if !tag
+                .font_decorations
+                .contains(&FontDecorations::Strikethrough)
+            {
+                tag.font_decorations.push(FontDecorations::Strikethrough);
+            }
+        }
+        SelectGraphicRendition::NotStrikethrough => {
+            tag.font_decorations
+                .retain(|d| *d != FontDecorations::Strikethrough);
+        }
+
+        // Reverse video
+        SelectGraphicRendition::ReverseVideo => {
+            tag.colors.set_reverse_video(ReverseVideo::On);
+        }
+        SelectGraphicRendition::ResetReverseVideo => {
+            tag.colors.set_reverse_video(ReverseVideo::Off);
+        }
+
+        // Colors
+        SelectGraphicRendition::Foreground(color) => {
+            tag.colors.set_color(*color);
+        }
+        SelectGraphicRendition::Background(color) => {
+            tag.colors.set_background_color(*color);
+        }
+        SelectGraphicRendition::UnderlineColor(color) => {
+            tag.colors.set_underline_color(*color);
+        }
+
+        // Intentionally ignored attributes and unknown codes — these have no FormatTag
+        // equivalent.  Silently ignore for forward compatibility.
+        SelectGraphicRendition::NoOp
+        | SelectGraphicRendition::FastBlink
+        | SelectGraphicRendition::SlowBlink
+        | SelectGraphicRendition::NotBlinking
+        | SelectGraphicRendition::Conceal
+        | SelectGraphicRendition::Revealed
+        | SelectGraphicRendition::PrimaryFont
+        | SelectGraphicRendition::AlternativeFont1
+        | SelectGraphicRendition::AlternativeFont2
+        | SelectGraphicRendition::AlternativeFont3
+        | SelectGraphicRendition::AlternativeFont4
+        | SelectGraphicRendition::AlternativeFont5
+        | SelectGraphicRendition::AlternativeFont6
+        | SelectGraphicRendition::AlternativeFont7
+        | SelectGraphicRendition::AlternativeFont8
+        | SelectGraphicRendition::AlternativeFont9
+        | SelectGraphicRendition::FontFranktur
+        | SelectGraphicRendition::ProportionalSpacing
+        | SelectGraphicRendition::DisableProportionalSpacing
+        | SelectGraphicRendition::Framed
+        | SelectGraphicRendition::Encircled
+        | SelectGraphicRendition::Overlined
+        | SelectGraphicRendition::NotOverlined
+        | SelectGraphicRendition::NotFramedOrEncircled
+        | SelectGraphicRendition::IdeogramUnderline
+        | SelectGraphicRendition::IdeogramDoubleUnderline
+        | SelectGraphicRendition::IdeogramOverline
+        | SelectGraphicRendition::IdeogramDoubleOverline
+        | SelectGraphicRendition::IdeogramStress
+        | SelectGraphicRendition::IdeogramAttributes
+        | SelectGraphicRendition::Superscript
+        | SelectGraphicRendition::Subscript
+        | SelectGraphicRendition::NeitherSuperscriptNorSubscript
+        | SelectGraphicRendition::Unknown(_) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use freminal_common::{
+        buffer_states::{
+            cursor::ReverseVideo,
+            fonts::{FontDecorations, FontWeight},
+            terminal_output::TerminalOutput,
+        },
+        colors::TerminalColor,
+        sgr::SelectGraphicRendition,
+    };
+
     use super::*;
+
+    // ------------------------------------------------------------------
+    // apply_sgr unit tests (pure function, no buffer involved)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sgr_bold_sets_font_weight() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
+        assert_eq!(tag.font_weight, FontWeight::Bold);
+    }
+
+    #[test]
+    fn sgr_reset_bold_clears_font_weight() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
+        apply_sgr(&mut tag, &SelectGraphicRendition::ResetBold);
+        assert_eq!(tag.font_weight, FontWeight::Normal);
+    }
+
+    #[test]
+    fn sgr_normal_intensity_clears_bold_and_faint() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
+        apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
+        apply_sgr(&mut tag, &SelectGraphicRendition::NormalIntensity);
+        assert_eq!(tag.font_weight, FontWeight::Normal);
+        assert!(!tag.font_decorations.contains(&FontDecorations::Faint));
+    }
+
+    #[test]
+    fn sgr_italic_toggle() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Italic);
+        assert!(tag.font_decorations.contains(&FontDecorations::Italic));
+        apply_sgr(&mut tag, &SelectGraphicRendition::NotItalic);
+        assert!(!tag.font_decorations.contains(&FontDecorations::Italic));
+    }
+
+    #[test]
+    fn sgr_italic_not_duplicated() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Italic);
+        apply_sgr(&mut tag, &SelectGraphicRendition::Italic);
+        assert_eq!(
+            tag.font_decorations
+                .iter()
+                .filter(|d| **d == FontDecorations::Italic)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn sgr_underline_toggle() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Underline);
+        assert!(tag.font_decorations.contains(&FontDecorations::Underline));
+        apply_sgr(&mut tag, &SelectGraphicRendition::NotUnderlined);
+        assert!(!tag.font_decorations.contains(&FontDecorations::Underline));
+    }
+
+    #[test]
+    fn sgr_strikethrough_toggle() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Strikethrough);
+        assert!(
+            tag.font_decorations
+                .contains(&FontDecorations::Strikethrough)
+        );
+        apply_sgr(&mut tag, &SelectGraphicRendition::NotStrikethrough);
+        assert!(
+            !tag.font_decorations
+                .contains(&FontDecorations::Strikethrough)
+        );
+    }
+
+    #[test]
+    fn sgr_faint_adds_decoration() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
+        assert!(tag.font_decorations.contains(&FontDecorations::Faint));
+    }
+
+    #[test]
+    fn sgr_fg_color() {
+        let mut tag = FormatTag::default();
+        apply_sgr(
+            &mut tag,
+            &SelectGraphicRendition::Foreground(TerminalColor::Red),
+        );
+        assert_eq!(tag.colors.color, TerminalColor::Red);
+    }
+
+    #[test]
+    fn sgr_bg_color() {
+        let mut tag = FormatTag::default();
+        apply_sgr(
+            &mut tag,
+            &SelectGraphicRendition::Background(TerminalColor::Blue),
+        );
+        assert_eq!(tag.colors.background_color, TerminalColor::Blue);
+    }
+
+    #[test]
+    fn sgr_custom_rgb_fg() {
+        let mut tag = FormatTag::default();
+        apply_sgr(
+            &mut tag,
+            &SelectGraphicRendition::Foreground(TerminalColor::Custom(255, 128, 0)),
+        );
+        assert_eq!(tag.colors.color, TerminalColor::Custom(255, 128, 0));
+    }
+
+    #[test]
+    fn sgr_underline_color() {
+        let mut tag = FormatTag::default();
+        apply_sgr(
+            &mut tag,
+            &SelectGraphicRendition::UnderlineColor(TerminalColor::Green),
+        );
+        assert_eq!(tag.colors.underline_color, TerminalColor::Green);
+    }
+
+    #[test]
+    fn sgr_reverse_video_on_off() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::ReverseVideo);
+        assert_eq!(tag.colors.reverse_video, ReverseVideo::On);
+        apply_sgr(&mut tag, &SelectGraphicRendition::ResetReverseVideo);
+        assert_eq!(tag.colors.reverse_video, ReverseVideo::Off);
+    }
+
+    #[test]
+    fn sgr_reset_clears_all() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
+        apply_sgr(
+            &mut tag,
+            &SelectGraphicRendition::Foreground(TerminalColor::Red),
+        );
+        apply_sgr(&mut tag, &SelectGraphicRendition::Italic);
+        apply_sgr(&mut tag, &SelectGraphicRendition::Reset);
+        assert_eq!(tag, FormatTag::default());
+    }
+
+    #[test]
+    fn sgr_multiple_accumulate() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
+        apply_sgr(&mut tag, &SelectGraphicRendition::Underline);
+        apply_sgr(
+            &mut tag,
+            &SelectGraphicRendition::Foreground(TerminalColor::Red),
+        );
+        assert_eq!(tag.font_weight, FontWeight::Bold);
+        assert!(tag.font_decorations.contains(&FontDecorations::Underline));
+        assert_eq!(tag.colors.color, TerminalColor::Red);
+    }
+
+    #[test]
+    fn sgr_noop_does_nothing() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::NoOp);
+        assert_eq!(tag, FormatTag::default());
+    }
+
+    // ------------------------------------------------------------------
+    // handle_sgr integration tests (via TerminalHandler)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handle_sgr_bold_propagates_to_buffer_format() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::Bold);
+        assert_eq!(handler.current_format.font_weight, FontWeight::Bold);
+    }
+
+    #[test]
+    fn handle_sgr_reset_propagates_to_buffer_format() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::Bold);
+        handler.handle_sgr(&SelectGraphicRendition::Reset);
+        assert_eq!(handler.current_format, FormatTag::default());
+    }
+
+    #[test]
+    fn process_output_sgr_bold_then_data() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[
+            TerminalOutput::Sgr(SelectGraphicRendition::Bold),
+            TerminalOutput::Data(b"A".to_vec()),
+        ]);
+        // After writing, current format should still be bold
+        assert_eq!(handler.current_format.font_weight, FontWeight::Bold);
+    }
+
+    #[test]
+    fn process_output_sgr_fg_color_then_reset() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[
+            TerminalOutput::Sgr(SelectGraphicRendition::Foreground(TerminalColor::Green)),
+            TerminalOutput::Sgr(SelectGraphicRendition::Reset),
+        ]);
+        assert_eq!(handler.current_format, FormatTag::default());
+    }
 
     #[test]
     fn test_handler_creation() {
