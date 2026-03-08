@@ -1005,6 +1005,136 @@ fn wrap_re_enable() {
 }
 
 #[test]
+fn show_cursor_default_true() {
+    // A freshly created handler must report show_cursor() == true (DECTCEM Show is default).
+    let handler = TerminalHandler::new(80, 24);
+    assert!(handler.show_cursor(), "show_cursor must be true by default");
+}
+
+#[test]
+fn hide_cursor_mode() {
+    // Sending Mode(Dectem(Hide)) must make show_cursor() return false.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::dectcem::Dectcem,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::new(
+        &SetMode::DecRst,
+    )))]);
+
+    assert!(
+        !handler.show_cursor(),
+        "show_cursor must be false after Hide mode"
+    );
+}
+
+#[test]
+fn show_cursor_mode() {
+    // Hide then Show must leave show_cursor() == true.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::dectcem::Dectcem,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::new(
+        &SetMode::DecRst,
+    )))]);
+    assert!(!handler.show_cursor(), "must be hidden after DecRst");
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        handler.show_cursor(),
+        "show_cursor must be true after Show mode"
+    );
+}
+
+#[test]
+fn cursor_visual_style_set() {
+    // CursorVisualStyle output must update cursor_visual_style().
+    use freminal_common::{
+        buffer_states::terminal_output::TerminalOutput, cursor::CursorVisualStyle,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+        CursorVisualStyle::VerticalLineCursorSteady,
+    )]);
+
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::VerticalLineCursorSteady,
+        "cursor_visual_style must reflect the last CursorVisualStyle output"
+    );
+}
+
+#[test]
+fn xtcblink_toggles_blink() {
+    // XtCBlink::Blinking flips the current steady style to blinking;
+    // XtCBlink::Steady flips it back.
+    use freminal_common::{
+        buffer_states::{
+            mode::{Mode, SetMode},
+            modes::xtcblink::XtCBlink,
+            terminal_output::TerminalOutput,
+        },
+        cursor::CursorVisualStyle,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default style is BlockCursorSteady; enabling blink must give BlockCursorBlink.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::BlockCursorBlink,
+        "XtCBlink Blinking must flip BlockCursorSteady to BlockCursorBlink"
+    );
+
+    // Disabling blink must restore the steady variant.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::new(
+        &SetMode::DecRst,
+    )))]);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::BlockCursorSteady,
+        "XtCBlink Steady must flip BlockCursorBlink back to BlockCursorSteady"
+    );
+
+    // Switch to a different shape, then verify blink still works on the new shape.
+    handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+        CursorVisualStyle::UnderlineCursorSteady,
+    )]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::UnderlineCursorBlink,
+        "XtCBlink Blinking must flip UnderlineCursorSteady to UnderlineCursorBlink"
+    );
+
+    // Query variant must not panic and must leave state unchanged.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Query))]);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::UnderlineCursorBlink,
+        "XtCBlink Query must not change cursor_visual_style"
+    );
+}
+
+#[test]
 fn lnm_off_lf_does_not_reset_x() {
     // LNM disabled (default): LF advances Y but leaves X unchanged.
     use freminal_common::buffer_states::terminal_output::TerminalOutput;

@@ -10,11 +10,14 @@ use freminal_common::{
         format_tag::FormatTag,
         mode::Mode,
         modes::decawm::Decawm,
+        modes::dectcem::Dectcem,
         modes::lnm::Lnm,
+        modes::xtcblink::XtCBlink,
         modes::xtextscrn::XtExtscrn,
         tchar::TChar,
         terminal_output::TerminalOutput,
     },
+    cursor::CursorVisualStyle,
     sgr::SelectGraphicRendition,
 };
 
@@ -28,6 +31,10 @@ use crate::buffer::Buffer;
 pub struct TerminalHandler {
     buffer: Buffer,
     current_format: FormatTag,
+    /// Whether the cursor should be rendered (`Dectcem::Show`) or hidden.
+    show_cursor: Dectcem,
+    /// The current cursor shape and blink state.
+    cursor_visual_style: CursorVisualStyle,
 }
 
 impl TerminalHandler {
@@ -37,6 +44,8 @@ impl TerminalHandler {
         Self {
             buffer: Buffer::new(width, height),
             current_format: FormatTag::default(),
+            show_cursor: Dectcem::default(),
+            cursor_visual_style: CursorVisualStyle::default(),
         }
     }
 
@@ -222,6 +231,55 @@ impl TerminalHandler {
         self.buffer.set_wrap(enabled);
     }
 
+    /// Return `true` when the cursor should be painted.
+    #[must_use]
+    pub const fn show_cursor(&self) -> bool {
+        matches!(self.show_cursor, Dectcem::Show)
+    }
+
+    /// Return the current cursor shape / blink style.
+    #[must_use]
+    pub fn cursor_visual_style(&self) -> CursorVisualStyle {
+        self.cursor_visual_style.clone()
+    }
+
+    /// Apply an `XtCBlink` blink-mode change to the current `cursor_visual_style`.
+    ///
+    /// Flips between the blinking and steady variants of whichever shape is active,
+    /// matching the behaviour of the old buffer's `set_mode` handler.
+    fn apply_xtcblink(&mut self, blink: &XtCBlink) {
+        match blink {
+            XtCBlink::Blinking => {
+                self.cursor_visual_style = match self.cursor_visual_style {
+                    CursorVisualStyle::BlockCursorSteady => CursorVisualStyle::BlockCursorBlink,
+                    CursorVisualStyle::UnderlineCursorSteady => {
+                        CursorVisualStyle::UnderlineCursorBlink
+                    }
+                    CursorVisualStyle::VerticalLineCursorSteady => {
+                        CursorVisualStyle::VerticalLineCursorBlink
+                    }
+                    // Already blinking — leave unchanged.
+                    ref other => other.clone(),
+                };
+            }
+            XtCBlink::Steady => {
+                self.cursor_visual_style = match self.cursor_visual_style {
+                    CursorVisualStyle::BlockCursorBlink => CursorVisualStyle::BlockCursorSteady,
+                    CursorVisualStyle::UnderlineCursorBlink => {
+                        CursorVisualStyle::UnderlineCursorSteady
+                    }
+                    CursorVisualStyle::VerticalLineCursorBlink => {
+                        CursorVisualStyle::VerticalLineCursorSteady
+                    }
+                    // Already steady — leave unchanged.
+                    ref other => other.clone(),
+                };
+            }
+            // Query: deferred to Step 3.5
+            XtCBlink::Query => {}
+        }
+    }
+
     /// Handle LNM — enable or disable Line Feed Mode.
     pub const fn handle_set_lnm(&mut self, enabled: bool) {
         self.buffer.set_lnm(enabled);
@@ -350,13 +408,17 @@ impl TerminalHandler {
                 // Query variants: report mode — deferred to Step 3.5
                 Mode::XtExtscrn(XtExtscrn::Query)
                 | Mode::Decawm(Decawm::Query)
-                | Mode::LineFeedMode(Lnm::Query) => {
+                | Mode::LineFeedMode(Lnm::Query)
+                | Mode::Dectem(Dectcem::Query) => {
                     // TODO: Step 3.5 — report mode via outbound write channel
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
                 Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(false),
                 Mode::LineFeedMode(Lnm::NewLine) => self.handle_set_lnm(true),
                 Mode::LineFeedMode(Lnm::LineFeed) => self.handle_set_lnm(false),
+                Mode::Dectem(Dectcem::Show) => self.show_cursor = Dectcem::Show,
+                Mode::Dectem(Dectcem::Hide) => self.show_cursor = Dectcem::Hide,
+                Mode::XtCBlink(blink) => self.apply_xtcblink(blink),
                 _other => {
                     // All other modes: silently ignore.
                     // Do NOT use todo!() — unknown modes must never panic.
@@ -371,8 +433,8 @@ impl TerminalHandler {
             TerminalOutput::DecSpecialGraphics(_decsg) => {
                 todo!("DEC special graphics not yet implemented");
             }
-            TerminalOutput::CursorVisualStyle(_style) => {
-                todo!("Cursor visual style not yet implemented");
+            TerminalOutput::CursorVisualStyle(style) => {
+                self.cursor_visual_style = style.clone();
             }
             TerminalOutput::WindowManipulation(_wm) => {
                 todo!("Window manipulation not yet implemented");

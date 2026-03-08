@@ -575,7 +575,7 @@ does not set it. The `LineFeedMode(Lnm::NewLine)` mode makes LF behave like CRLF
 
 ### Step 3.3 — Expose show-cursor and cursor-visual-style from TerminalHandler
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 3.3 Why this step exists
 
