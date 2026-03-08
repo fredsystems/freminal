@@ -846,7 +846,7 @@ TerminalOutput::OscResponse(osc) => self.handle_osc(osc),
 
 ### Step 4.1 — Implement `visible_as_tchars_and_tags` on Buffer
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 4.1 Why this step exists
 

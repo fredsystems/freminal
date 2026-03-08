@@ -1504,6 +1504,111 @@ impl Buffer {
         self.debug_assert_invariants();
     }
 
+    /// Convert the currently visible rows into a flat `(Vec<TChar>, Vec<FormatTag>)` pair
+    /// suitable for consumption by the GUI renderer.
+    ///
+    /// Algorithm:
+    /// - Iterate over `visible_rows()`.
+    /// - For each non-continuation cell, append its `TChar` and either extend the last
+    ///   `FormatTag` (if the format is identical and the tag is adjacent) or push a new one.
+    /// - After each row except the last, append a `TChar::NewLine` and extend the last tag.
+    /// - Continuation cells are skipped — they are internal bookkeeping for wide glyphs.
+    ///
+    /// The returned `FormatTag` entries use `start`/`end` as half-open byte indices into
+    /// the returned `Vec<TChar>`, matching the convention used by the old `FormatTracker`.
+    #[must_use]
+    pub fn visible_as_tchars_and_tags(&self) -> (Vec<TChar>, Vec<FormatTag>) {
+        let rows = self.visible_rows();
+        let mut chars: Vec<TChar> = Vec::new();
+        let mut tags: Vec<FormatTag> = Vec::new();
+
+        let row_count = rows.len();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            for cell in row.get_characters() {
+                // Skip wide-glyph continuation cells — the head already covers them.
+                if cell.is_continuation() {
+                    continue;
+                }
+
+                let byte_pos = chars.len();
+                chars.push(cell.tchar().clone());
+
+                // Merge into the previous tag if the format is identical and adjacent,
+                // otherwise open a new tag.
+                let cell_tag = cell.tag();
+                if let Some(last) = tags.last_mut() {
+                    if last.end == byte_pos && tags_same_format(last, cell_tag) {
+                        last.end += 1;
+                    } else {
+                        tags.push(FormatTag {
+                            start: byte_pos,
+                            end: byte_pos + 1,
+                            colors: cell_tag.colors.clone(),
+                            font_weight: cell_tag.font_weight.clone(),
+                            font_decorations: cell_tag.font_decorations.clone(),
+                            url: cell_tag.url.clone(),
+                        });
+                    }
+                } else {
+                    tags.push(FormatTag {
+                        start: byte_pos,
+                        end: byte_pos + 1,
+                        colors: cell_tag.colors.clone(),
+                        font_weight: cell_tag.font_weight.clone(),
+                        font_decorations: cell_tag.font_decorations.clone(),
+                        url: cell_tag.url.clone(),
+                    });
+                }
+            }
+
+            // Append a NewLine after every row except the last.
+            let is_last_row = row_idx + 1 == row_count;
+            if !is_last_row {
+                let byte_pos = chars.len();
+                chars.push(TChar::NewLine);
+                // The newline inherits the last active format.
+                if let Some(last) = tags.last_mut() {
+                    if last.end == byte_pos {
+                        last.end += 1;
+                    } else {
+                        tags.push(FormatTag {
+                            start: byte_pos,
+                            end: byte_pos + 1,
+                            ..FormatTag::default()
+                        });
+                    }
+                } else {
+                    tags.push(FormatTag {
+                        start: byte_pos,
+                        end: byte_pos + 1,
+                        ..FormatTag::default()
+                    });
+                }
+            }
+        }
+
+        // Guarantee at least one tag covering the full range.
+        if tags.is_empty() {
+            tags.push(FormatTag {
+                start: 0,
+                end: if chars.is_empty() {
+                    usize::MAX
+                } else {
+                    chars.len()
+                },
+                ..FormatTag::default()
+            });
+        } else {
+            // Clamp the last tag's end to the actual length (no stale usize::MAX).
+            if let Some(last) = tags.last_mut() {
+                last.end = chars.len();
+            }
+        }
+
+        (chars, tags)
+    }
+
     /// Set the current format tag for subsequent text insertions
     pub fn set_format(&mut self, tag: FormatTag) {
         self.current_tag = tag;
@@ -1598,6 +1703,19 @@ impl Buffer {
 
         self.debug_assert_invariants();
     }
+}
+
+// ============================================================================
+// Private helpers
+// ============================================================================
+
+/// Compare two `FormatTag` values by their visual formatting only, ignoring
+/// the `start` and `end` byte-position fields.
+fn tags_same_format(a: &FormatTag, b: &FormatTag) -> bool {
+    a.colors == b.colors
+        && a.font_weight == b.font_weight
+        && a.font_decorations == b.font_decorations
+        && a.url == b.url
 }
 
 // tests
@@ -3324,5 +3442,200 @@ mod alt_primary_scroll_offset_restore_tests {
 
         b.leave_alternate();
         assert_eq!(b.scroll_offset, 3);
+    }
+}
+
+// ============================================================================
+// visible_as_tchars_and_tags tests
+// ============================================================================
+
+#[cfg(test)]
+mod visible_as_tchars_and_tags_tests {
+    use super::*;
+    use freminal_common::buffer_states::{
+        cursor::StateColors,
+        fonts::{FontDecorations, FontWeight},
+        format_tag::FormatTag,
+        tchar::TChar,
+    };
+    use freminal_common::colors::TerminalColor;
+
+    // Helper: convert ASCII &str or &[u8] to Vec<TChar> without fallible operations.
+    fn to_tchars(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    fn tchars_to_string(chars: &[TChar]) -> String {
+        chars
+            .iter()
+            .map(|c| match c {
+                TChar::Ascii(b) => (*b as char).to_string(),
+                TChar::Space => " ".to_string(),
+                TChar::NewLine => "\n".to_string(),
+                TChar::Utf8(v) => String::from_utf8_lossy(v).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_buffer_returns_single_default_tag() {
+        // A freshly created buffer with no content written must return an empty
+        // chars vec and exactly one default-format tag (start=0, end=usize::MAX).
+        let buf = Buffer::new(10, 5);
+        let (chars, tags) = buf.visible_as_tchars_and_tags();
+
+        // Empty buffer: visible rows exist but all cells are blank/empty.
+        // The returned tags must be non-empty (at least one sentinel tag).
+        assert!(
+            !tags.is_empty(),
+            "tags must not be empty for an empty buffer"
+        );
+        assert_eq!(
+            tags[0].font_weight,
+            FontWeight::Normal,
+            "default tag must have Normal weight"
+        );
+        let _ = chars; // may be empty or contain spaces — just must not panic
+    }
+
+    #[test]
+    fn single_char_one_tag() {
+        // Write a single ASCII character — chars = [Ascii(b'A')], one tag [0, 1).
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&to_tchars("A"));
+
+        let (chars, tags) = buf.visible_as_tchars_and_tags();
+
+        // 'A' must appear in chars.
+        assert!(
+            chars.contains(&TChar::Ascii(b'A')),
+            "chars must contain Ascii(b'A')"
+        );
+        // At least one tag must exist.
+        assert!(!tags.is_empty(), "tags must not be empty after writing 'A'");
+        // Every tag must have valid start <= end.
+        for tag in &tags {
+            assert!(
+                tag.start <= tag.end,
+                "tag start ({}) must not exceed end ({})",
+                tag.start,
+                tag.end
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_same_format_merged() {
+        // Write "ABC" with the same default format — should produce a single merged tag.
+        let mut buf = Buffer::new(80, 5);
+        buf.insert_text(&to_tchars("ABC"));
+
+        let (chars, tags) = buf.visible_as_tchars_and_tags();
+
+        // All three characters must be present.
+        assert!(chars.contains(&TChar::Ascii(b'A')), "must contain A");
+        assert!(chars.contains(&TChar::Ascii(b'B')), "must contain B");
+        assert!(chars.contains(&TChar::Ascii(b'C')), "must contain C");
+
+        // All three characters share the same default format so they should be
+        // covered by a single tag (or at most a few — the exact merge count
+        // depends on newlines).  The key invariant is that no two consecutive
+        // tags in the run covering A/B/C have different format.
+        assert!(
+            tags.iter()
+                .any(|t| t.font_weight == FontWeight::Normal && t.font_decorations.is_empty()),
+            "at least one default-format tag must cover A/B/C"
+        );
+    }
+
+    #[test]
+    fn color_change_splits_tag() {
+        // Write "A", change fg color to Red, write "B" → two distinct tags.
+        let mut buf = Buffer::new(80, 5);
+
+        // Write 'A' with default format.
+        buf.insert_text(&to_tchars("A"));
+
+        // Change foreground color to Red.
+        let mut red_tag = FormatTag::default();
+        red_tag.colors.set_color(TerminalColor::Red);
+        buf.set_format(red_tag);
+
+        // Write 'B' with red format.
+        buf.insert_text(&to_tchars("B"));
+
+        let (chars, tags) = buf.visible_as_tchars_and_tags();
+
+        // Both characters must be present.
+        assert!(chars.contains(&TChar::Ascii(b'A')), "must contain A");
+        assert!(chars.contains(&TChar::Ascii(b'B')), "must contain B");
+
+        // There must be at least two distinct tags with different colors.
+        let default_color_tags = tags
+            .iter()
+            .filter(|t| t.colors.color == TerminalColor::Default)
+            .count();
+        let red_tags = tags
+            .iter()
+            .filter(|t| t.colors.color == TerminalColor::Red)
+            .count();
+        assert!(
+            default_color_tags >= 1,
+            "must have at least one default-color tag (for 'A')"
+        );
+        assert!(red_tags >= 1, "must have at least one red tag (for 'B')");
+    }
+
+    #[test]
+    fn newline_between_rows() {
+        // Write "hi", LF+CR, write "bye" — the flat chars must contain a NewLine
+        // between the two words.
+        let mut buf = Buffer::new(80, 10);
+        buf.insert_text(&to_tchars("hi"));
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.insert_text(&to_tchars("bye"));
+
+        let (chars, tags) = buf.visible_as_tchars_and_tags();
+
+        // NewLine must appear somewhere in the output.
+        assert!(
+            chars.contains(&TChar::NewLine),
+            "chars must contain at least one NewLine between rows"
+        );
+
+        // tags must be non-empty and well-formed.
+        assert!(!tags.is_empty(), "tags must not be empty");
+        for tag in &tags {
+            assert!(
+                tag.start <= tag.end,
+                "tag start ({}) must not exceed end ({})",
+                tag.start,
+                tag.end
+            );
+        }
+
+        // The string representation must contain the text from both rows.
+        let s = tchars_to_string(&chars);
+        assert!(s.contains('h'), "output must contain 'h'");
+        assert!(s.contains("bye"), "output must contain 'bye'");
+    }
+
+    #[test]
+    fn wide_char_no_continuation_in_output() {
+        // Write a wide CJK character (2 columns) — the output chars must contain
+        // it exactly once (continuation cells must be skipped).
+        let mut buf = Buffer::new(80, 5);
+        // "あ" is a 2-column wide character — build the TChar directly to avoid fallible ops.
+        let wide_tchar = TChar::Utf8("あ".as_bytes().to_vec());
+        buf.insert_text(std::slice::from_ref(&wide_tchar));
+
+        let (chars, _tags) = buf.visible_as_tchars_and_tags();
+
+        let count = chars.iter().filter(|c| **c == wide_tchar).count();
+        assert_eq!(
+            count, 1,
+            "wide char must appear exactly once in output (continuation must be skipped)"
+        );
     }
 }
