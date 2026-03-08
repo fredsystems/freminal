@@ -313,7 +313,7 @@ Subsequent steps will fill in individual mode arms one at a time.
 
 ### Step 1.5 — Implement Save/Restore Cursor (DECSC / DECRC)
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 1.5 Why this step exists
 

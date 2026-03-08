@@ -147,6 +147,16 @@ impl TerminalHandler {
         self.buffer.delete_chars(n);
     }
 
+    /// Handle save cursor (DECSC)
+    pub fn handle_save_cursor(&mut self) {
+        self.buffer.save_cursor();
+    }
+
+    /// Handle restore cursor (DECRC)
+    pub fn handle_restore_cursor(&mut self) {
+        self.buffer.restore_cursor();
+    }
+
     /// Handle insert spaces (ICH)
     pub fn handle_insert_spaces(&mut self, n: usize) {
         self.buffer.insert_spaces(n);
@@ -451,10 +461,10 @@ impl TerminalHandler {
                 todo!("Charset Swiss not yet implemented");
             }
             TerminalOutput::SaveCursor => {
-                todo!("Save cursor not yet implemented");
+                self.handle_save_cursor();
             }
             TerminalOutput::RestoreCursor => {
-                todo!("Restore cursor not yet implemented");
+                self.handle_restore_cursor();
             }
             TerminalOutput::CursorToLowerLeftCorner => {
                 todo!("Cursor to lower left corner not yet implemented");

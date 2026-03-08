@@ -773,3 +773,122 @@ fn unknown_mode_does_not_panic() {
     // If we reach here, no panic occurred.
     assert_eq!(handler.buffer().get_cursor().pos.x, 0);
 }
+
+#[test]
+fn save_restore_position() {
+    // Move cursor to (5, 3), save, move to (0, 0), restore → cursor is back at (5, 3).
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(20, 10);
+
+    // Position cursor at column 5, row 3.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(6), // 1-indexed → col 5
+        y: Some(4), // 1-indexed → row 3
+    }]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 3);
+
+    // Save cursor.
+    handler.process_outputs(&[TerminalOutput::SaveCursor]);
+
+    // Move cursor somewhere else.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(1),
+        y: Some(1),
+    }]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+
+    // Restore cursor.
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        5,
+        "cursor x must be restored to saved value"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        3,
+        "cursor y must be restored to saved value"
+    );
+}
+
+#[test]
+fn restore_without_save_is_noop() {
+    // RestoreCursor without a prior SaveCursor must not panic and must leave
+    // the cursor at its current position.
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(20, 10);
+
+    // Position cursor at (3, 2).
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(4),
+        y: Some(3),
+    }]);
+    let x_before = handler.buffer().get_cursor().pos.x;
+    let y_before = handler.buffer().get_cursor().pos.y;
+
+    // Restore without a prior save — must be a no-op.
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        x_before,
+        "x must not change on restore without save"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        y_before,
+        "y must not change on restore without save"
+    );
+}
+
+#[test]
+fn save_survives_alternate_roundtrip() {
+    // Save cursor in primary, enter alternate, leave alternate, restore →
+    // cursor position must be what was saved in the primary buffer.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(20, 10);
+
+    // Move to (7, 4) and save.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(8),
+        y: Some(5),
+    }]);
+    handler.process_outputs(&[TerminalOutput::SaveCursor]);
+
+    // Enter alternate screen.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Do some work in alternate buffer.
+    handler.process_outputs(&[TerminalOutput::Data(b"alternate content".to_vec())]);
+
+    // Leave alternate screen.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecRst,
+    )))]);
+
+    // Restore cursor — must retrieve the primary-buffer saved position.
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        7,
+        "cursor x must be restored to primary-saved value after alt roundtrip"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        4,
+        "cursor y must be restored to primary-saved value after alt roundtrip"
+    );
+}

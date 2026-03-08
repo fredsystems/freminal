@@ -58,6 +58,10 @@ pub struct Buffer {
     /// used when switching to and from alternate buffer.
     saved_primary: Option<SavedPrimaryState>,
 
+    /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
+    /// Independent of the alternate-screen save (`saved_primary`).
+    saved_cursor: Option<CursorState>,
+
     /// Current format tag to apply to inserted text.
     current_tag: FormatTag,
 
@@ -81,6 +85,8 @@ pub struct SavedPrimaryState {
     pub scroll_offset: usize,
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
+    /// Saved DECSC cursor carried across alternate-screen round-trips.
+    pub saved_cursor: Option<CursorState>,
 }
 
 impl Buffer {
@@ -103,6 +109,7 @@ impl Buffer {
             scrollback_limit: 4000,
             kind: BufferType::Primary,
             saved_primary: None,
+            saved_cursor: None,
             lnm_enabled: false,
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
@@ -1009,6 +1016,33 @@ impl Buffer {
         }
     }
 
+    /// Implements DECSC – Save Cursor.
+    ///
+    /// Saves the current cursor position (and associated `CursorState`).
+    pub fn save_cursor(&mut self) {
+        self.saved_cursor = Some(self.cursor.clone());
+    }
+
+    /// Implements DECRC – Restore Cursor.
+    ///
+    /// Restores the previously saved cursor position.  If no cursor has been
+    /// saved, this is a no-op.  The restored position is clamped to the
+    /// current buffer dimensions so a resize between save and restore never
+    /// produces an out-of-bounds cursor.
+    pub fn restore_cursor(&mut self) {
+        if let Some(saved) = self.saved_cursor.clone() {
+            self.cursor = saved;
+            // Clamp to current dimensions after restore.
+            if self.width > 0 {
+                self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
+            }
+            let max_row = self.rows.len().saturating_sub(1);
+            self.cursor.pos.y = self.cursor.pos.y.min(max_row);
+            self.debug_assert_invariants();
+        }
+        // No saved cursor → silent no-op.
+    }
+
     /// Implements ICH – Insert Characters (spaces).
     pub fn insert_spaces(&mut self, n: usize) {
         let row = self.cursor.pos.y;
@@ -1471,6 +1505,7 @@ impl Buffer {
             scroll_offset: self.scroll_offset,
             scroll_region_top: self.scroll_region_top,
             scroll_region_bottom: self.scroll_region_bottom,
+            saved_cursor: self.saved_cursor.clone(),
         };
         self.saved_primary = Some(saved);
 
@@ -1504,6 +1539,7 @@ impl Buffer {
             self.scroll_offset = saved.scroll_offset;
             self.scroll_region_top = saved.scroll_region_top;
             self.scroll_region_bottom = saved.scroll_region_bottom;
+            self.saved_cursor = saved.saved_cursor;
         }
 
         self.kind = BufferType::Primary;
