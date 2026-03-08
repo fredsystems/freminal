@@ -796,7 +796,7 @@ response. Device Attributes (DA1) is similarly important for capability detectio
 
 ### Step 3.6 — Implement OSC response handling
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 3.6 Why this step exists
 

@@ -1005,6 +1005,111 @@ fn wrap_re_enable() {
 }
 
 #[test]
+fn osc_title_queued() {
+    // OscResponse(SetTitleBar) must queue a SetTitleBarText window command.
+    use freminal_common::buffer_states::{
+        osc::AnsiOscType, terminal_output::TerminalOutput, window_manipulation::WindowManipulation,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(
+        String::from("vim"),
+    ))]);
+
+    let commands = handler.take_window_commands();
+    assert_eq!(commands.len(), 1, "one window command must be queued");
+    match &commands[0] {
+        WindowManipulation::SetTitleBarText(title) => {
+            assert_eq!(title, "vim", "title bar text must be preserved");
+        }
+        other => panic!("expected SetTitleBarText, got {other:?}"),
+    }
+}
+
+#[test]
+fn osc_url_sets_format() {
+    // OSC 8 URL start sets current_format.url; OSC 8 URL end clears it.
+    // Cells written between start and end must carry the URL tag;
+    // cells written after end must have url == None.
+    use freminal_common::buffer_states::{
+        osc::{AnsiOscType, UrlResponse},
+        terminal_output::TerminalOutput,
+        url::Url,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Start URL
+    handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Url(
+        UrlResponse::Url(Url {
+            id: None,
+            url: String::from("https://example.com"),
+        }),
+    ))]);
+
+    // Write text inside the URL
+    handler.handle_data(b"click");
+
+    // End URL
+    handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Url(
+        UrlResponse::End,
+    ))]);
+
+    // Write text after the URL
+    handler.handle_data(b"plain");
+
+    let rows = handler.buffer().visible_rows();
+    let row = &rows[0];
+
+    // Cells 0-4 ("click") must have a URL tag.
+    for col in 0..5 {
+        let cell = row
+            .get_char_at(col)
+            .unwrap_or_else(|| panic!("cell {col} must exist"));
+        assert!(
+            cell.tag().url.is_some(),
+            "cell {col} inside URL must have url tag set"
+        );
+        assert_eq!(
+            cell.tag().url.as_ref().unwrap().url,
+            "https://example.com",
+            "cell {col} must carry the correct URL"
+        );
+    }
+
+    // Cells 5-9 ("plain") must have no URL tag.
+    for col in 5..10 {
+        let cell = row
+            .get_char_at(col)
+            .unwrap_or_else(|| panic!("cell {col} must exist"));
+        assert!(
+            cell.tag().url.is_none(),
+            "cell {col} after URL end must have no url tag"
+        );
+    }
+}
+
+#[test]
+fn osc_noop_does_not_panic() {
+    // OscResponse(NoOp) must not panic and must produce no side effects.
+    use freminal_common::buffer_states::{osc::AnsiOscType, terminal_output::TerminalOutput};
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::NoOp)]);
+
+    // No window commands queued.
+    assert!(
+        handler.take_window_commands().is_empty(),
+        "NoOp must not queue any window commands"
+    );
+    // Cursor unmoved.
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+}
+
+#[test]
 fn cursor_report_sends_correct_position() {
     // Move cursor to (4, 2) (0-indexed), send CursorReport → channel receives "\x1b[3;5R".
     use freminal_buffer::terminal_handler::PtyWrite;

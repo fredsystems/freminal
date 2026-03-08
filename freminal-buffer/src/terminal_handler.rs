@@ -16,8 +16,10 @@ use freminal_common::{
         modes::lnm::Lnm,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::XtExtscrn,
+        osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
         tchar::TChar,
         terminal_output::TerminalOutput,
+        url::Url,
         window_manipulation::WindowManipulation,
     },
     cursor::CursorVisualStyle,
@@ -349,6 +351,59 @@ impl TerminalHandler {
         self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
     }
 
+    /// Handle an OSC (Operating System Command) sequence.
+    ///
+    /// Ports the logic from `TerminalState::osc_response` in the old buffer.
+    pub fn handle_osc(&mut self, osc: &AnsiOscType) {
+        match osc {
+            // Hyperlink: OSC 8 ; params ; url ST  (start) / OSC 8 ; ; ST  (end)
+            AnsiOscType::Url(UrlResponse::Url(url)) => {
+                self.current_format.url = Some(Url {
+                    id: url.id.clone(),
+                    url: url.url.clone(),
+                });
+                self.buffer.set_format(self.current_format.clone());
+            }
+            AnsiOscType::Url(UrlResponse::End) => {
+                self.current_format.url = None;
+                self.buffer.set_format(self.current_format.clone());
+            }
+
+            // Window title
+            AnsiOscType::SetTitleBar(title) => {
+                self.window_commands
+                    .push(WindowManipulation::SetTitleBarText(title.clone()));
+            }
+
+            // Color queries — respond with hardcoded defaults matching the old buffer.
+            // TODO: make these configurable once a theme/color API exists.
+            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
+                // Hardcoded Catppuccin Mocha base: #45475a
+                self.write_to_pty("\x1b]11;rgb:45/47/5a\x1b\\");
+            }
+            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
+                // Hardcoded white foreground: #ffffff
+                self.write_to_pty("\x1b]10;rgb:ff/ff/ff\x1b\\");
+            }
+            // Remote host / FTCS / iTerm2 — informational only, no action needed.
+            AnsiOscType::RemoteHost(value) => {
+                tracing::debug!("OSC RemoteHost (ignored): {value}");
+            }
+            AnsiOscType::Ftcs(value) => {
+                tracing::debug!("OSC FTCS (ignored): {value}");
+            }
+            AnsiOscType::ITerm2 => {
+                tracing::debug!("OSC iTerm2 (ignored)");
+            }
+
+            // NoOp, non-Query color variants, cursor-color reset — nothing to do.
+            AnsiOscType::NoOp
+            | AnsiOscType::ResetCursorColor
+            | AnsiOscType::RequestColorQueryBackground(_)
+            | AnsiOscType::RequestColorQueryForeground(_) => {}
+        }
+    }
+
     /// Handle resize
     pub fn handle_resize(&mut self, width: usize, height: usize) {
         self.buffer.set_size(width, height);
@@ -488,8 +543,8 @@ impl TerminalHandler {
                     // Do NOT use todo!() — unknown modes must never panic.
                 }
             },
-            TerminalOutput::OscResponse(_osc) => {
-                todo!("OSC response not yet implemented");
+            TerminalOutput::OscResponse(osc) => {
+                self.handle_osc(osc);
             }
             TerminalOutput::CursorReport => {
                 self.handle_cursor_report();
