@@ -366,4 +366,78 @@ impl Row {
     pub fn clear_with_tag(&mut self, _tag: &FormatTag) {
         self.cells.clear();
     }
+
+    /// Delete `n` cells starting at `col`, shifting cells to the right of the deleted
+    /// range left to fill the gap. Implements VT DCH (Delete Character).
+    ///
+    /// - Cursor does not move (caller's responsibility).
+    /// - If `col` is beyond the stored cells, this is a no-op.
+    /// - If `n` exceeds the cells to the right of `col`, everything from `col` onward
+    ///   is removed.
+    /// - Wide-glyph cleanup: if `col` lands on a continuation cell, back up to its
+    ///   head and extend the deletion to cover the whole glyph. If `col` lands on a
+    ///   head, extend the deletion to include all its trailing continuation cells.
+    pub fn delete_cells_at(&mut self, col: usize, n: usize) {
+        if n == 0 || col >= self.cells.len() {
+            return;
+        }
+
+        // --- Wide-glyph cleanup: find the real start of deletion --------
+        let mut start = col;
+
+        // If we land on a continuation, walk back to the head and include it.
+        if start < self.cells.len() && self.cells[start].is_continuation() {
+            let mut head = start;
+            while head > 0 && self.cells[head].is_continuation() {
+                head -= 1;
+            }
+            // head is now either the wide head or position 0.
+            if self.cells[head].is_head() {
+                start = head;
+            }
+        }
+
+        // Extend deletion to cover any trailing continuations of a head at `start`.
+        let mut end = (start + n).min(self.cells.len());
+
+        // If the cell at `start` is a wide head, make sure we include all of its
+        // continuation cells (they may already be covered, but let's be safe).
+        if start < self.cells.len() && self.cells[start].is_head() {
+            let head_width = self.cells[start].display_width();
+            end = end.max((start + head_width).min(self.cells.len()));
+        }
+
+        // Also extend `end` if it cuts through a wide glyph (continuation at `end`
+        // whose head is before `end`): we blank the whole glyph.
+        if end < self.cells.len() && self.cells[end].is_continuation() {
+            // Walk back to find head
+            let mut head = end;
+            while head > 0 && self.cells[head].is_continuation() {
+                head -= 1;
+            }
+            if self.cells[head].is_head() {
+                // Replace the head+continuations with blanks rather than splitting.
+                let head_width = self.cells[head].display_width();
+                let replace_end = (head + head_width).min(self.cells.len());
+                for i in head..replace_end {
+                    self.cells[i] = Cell::blank_with_tag(FormatTag::default());
+                }
+            }
+        }
+
+        // Clamp end to actual length
+        let end = end.min(self.cells.len());
+
+        // --- Remove the range [start..end] by draining it ---------------
+        self.cells.drain(start..end);
+
+        // Trim trailing default blanks to maintain the sparse-row invariant.
+        while let Some(last) = self.cells.last() {
+            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
+                self.cells.pop();
+            } else {
+                break;
+            }
+        }
+    }
 }

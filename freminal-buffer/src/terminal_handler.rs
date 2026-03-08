@@ -136,6 +136,11 @@ impl TerminalHandler {
         self.buffer.delete_lines(n);
     }
 
+    /// Handle delete characters (DCH)
+    pub fn handle_delete_chars(&mut self, n: usize) {
+        self.buffer.delete_chars(n);
+    }
+
     /// Handle insert spaces (ICH)
     pub fn handle_insert_spaces(&mut self, n: usize) {
         self.buffer.insert_spaces(n);
@@ -268,7 +273,7 @@ impl TerminalHandler {
                 self.handle_insert_lines(*n);
             }
             TerminalOutput::Delete(n) => {
-                self.handle_delete_lines(*n);
+                self.handle_delete_chars(*n);
             }
             TerminalOutput::InsertSpaces(n) => {
                 self.handle_insert_spaces(*n);

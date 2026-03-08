@@ -107,7 +107,7 @@ are not yet reachable through the dispatcher. No GUI changes. No emulator integr
 
 ### Step 1.1 — Fix the `Delete(n)` DCH vs. DL semantic mismatch
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 1.1 Why this step exists
 

@@ -1024,6 +1024,27 @@ impl Buffer {
         // Cursor does NOT move for ICH
     }
 
+    /// Implements DCH – Delete Characters.
+    ///
+    /// Removes `n` cells starting at the cursor column on the cursor row, shifting
+    /// the cells to the right of the deleted range left to fill the gap. Cells
+    /// shifted off the right edge are discarded.  The cursor does not move.
+    ///
+    /// Wide-glyph cleanup is delegated to [`Row::delete_cells_at`].
+    pub fn delete_chars(&mut self, n: usize) {
+        let row = self.cursor.pos.y;
+        let col = self.cursor.pos.x;
+
+        if row >= self.rows.len() {
+            // Row doesn't even exist — nothing to delete.
+            return;
+        }
+
+        self.rows[row].delete_cells_at(col, n);
+
+        self.debug_assert_invariants();
+    }
+
     const fn reset_scroll_region_to_full(&mut self) {
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
@@ -2308,6 +2329,115 @@ mod insert_space_tests {
         // D, E use new_tag
         assert_eq!(tags_check[5], new_tag);
         assert_eq!(tags_check[6], new_tag);
+    }
+}
+
+#[cfg(test)]
+mod dch_tests {
+    use super::*;
+
+    /// Construct a `TChar::Ascii` from a char for brevity.
+    fn a(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Render row `row` of `buf` as a `String` using the full logical width.
+    fn cell_str(buf: &Buffer, row: usize) -> String {
+        (0..buf.width)
+            .map(|col| {
+                let cell = buf.rows[row].resolve_cell(col);
+                match cell.tchar() {
+                    TChar::Ascii(b) => *b as char,
+                    TChar::Space => ' ',
+                    TChar::NewLine => '\n',
+                    TChar::Utf8(v) => String::from_utf8_lossy(v).chars().next().unwrap_or('?'),
+                }
+            })
+            .collect()
+    }
+
+    /// `delete_chars` removes cells at the cursor column, shifting the rest left.
+    #[test]
+    fn dch_simple() {
+        // width 10: insert "ABCDE", cursor at col 1, delete 2 → "ADE       "
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B'), a('C'), a('D'), a('E')]);
+        buf.cursor.pos.x = 1;
+        buf.delete_chars(2);
+
+        let row = cell_str(&buf, 0);
+        assert_eq!(
+            &row[..3],
+            "ADE",
+            "B and C should be removed, rest shifts left"
+        );
+        assert_eq!(buf.cursor.pos.x, 1, "cursor must not move after DCH");
+    }
+
+    /// When `n` exceeds the cells to the right of the cursor, everything from
+    /// the cursor onward is erased — no panic, no out-of-bounds access.
+    #[test]
+    fn dch_clamps() {
+        // width 10: insert "ABC", cursor at col 1, delete 100 → "A         "
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B'), a('C')]);
+        buf.cursor.pos.x = 1;
+        buf.delete_chars(100);
+
+        let row = cell_str(&buf, 0);
+        // Only 'A' remains; the rest is blank.
+        assert_eq!(row.trim_end(), "A", "only A should remain");
+        assert_eq!(buf.cursor.pos.x, 1, "cursor must not move");
+    }
+
+    /// DCH at column 0 removes the very first character and shifts everything left.
+    #[test]
+    fn dch_at_col_zero() {
+        // width 10: insert "ABCDE", cursor at col 0, delete 1 → "BCDE      "
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B'), a('C'), a('D'), a('E')]);
+        buf.cursor.pos.x = 0;
+        buf.delete_chars(1);
+
+        let row = cell_str(&buf, 0);
+        assert_eq!(&row[..4], "BCDE", "first char removed, rest shifts left");
+        assert_eq!(buf.cursor.pos.x, 0, "cursor must not move");
+    }
+
+    /// When the cursor is at or beyond the stored cells, DCH is a no-op
+    /// and must not panic.
+    #[test]
+    fn dch_noop_past_end() {
+        // width 10: insert "AB", cursor way beyond stored cells
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[a('A'), a('B')]);
+        buf.cursor.pos.x = 8; // past stored cells
+        buf.delete_chars(2); // should be a silent no-op
+
+        let row = cell_str(&buf, 0);
+        assert_eq!(&row[..2], "AB", "stored cells must be unchanged");
+    }
+
+    /// DCH on a wide (2-column) character at the cursor removes both the head
+    /// and its continuation cell.
+    #[test]
+    fn dch_wide_head() {
+        // Width 10; insert the wide char "あ" (display width 2) followed by "BC".
+        // Cursor at col 0, delete 1 → head + continuation gone, "BC" shifts left.
+        let wide = TChar::Utf8("あ".as_bytes().to_vec());
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[wide, a('B'), a('C')]);
+        buf.cursor.pos.x = 0;
+        buf.delete_chars(1);
+
+        // After deletion the wide glyph (2 cols) is removed; "BC" starts at col 0.
+        let row = cell_str(&buf, 0);
+        assert_eq!(
+            &row[..2],
+            "BC",
+            "wide head+continuation removed, BC shifts left"
+        );
+        assert_eq!(buf.cursor.pos.x, 0, "cursor must not move");
     }
 }
 
