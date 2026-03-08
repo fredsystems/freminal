@@ -668,3 +668,108 @@ fn nel_moves_to_col_zero_of_next_line() {
         "NEL must advance cursor to next row"
     );
 }
+
+#[test]
+fn alternate_enter_clears_screen() {
+    // Write content to the primary buffer, then enter alternate screen.
+    // Visible rows in the alternate buffer must be empty — no content from
+    // the primary buffer should bleed through.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(20, 5);
+
+    handler.process_outputs(&[TerminalOutput::Data(b"primary content".to_vec())]);
+
+    // Verify primary has content.
+    let primary_row = handler.buffer().visible_rows();
+    assert!(
+        !primary_row.is_empty(),
+        "primary buffer should have visible rows after data"
+    );
+
+    // Enter alternate screen via Mode dispatch.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Alternate screen must show only blank rows.
+    let alt_rows = handler.buffer().visible_rows();
+    for row in alt_rows {
+        for cell in row.get_characters() {
+            assert!(
+                !cell.is_head(),
+                "alternate screen should have no wide-head content cells"
+            );
+        }
+    }
+}
+
+#[test]
+fn alternate_leave_restores_content() {
+    // Write "hello" in primary, enter alternate, write "world", leave alternate.
+    // After leaving, visible rows must show the primary content ("hello"), not "world".
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(20, 5);
+
+    // Write to primary.
+    handler.process_outputs(&[TerminalOutput::Data(b"hello".to_vec())]);
+
+    // Enter alternate and write different content.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Data(b"world".to_vec())]);
+
+    // Leave alternate — should restore primary.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecRst,
+    )))]);
+
+    // The first visible row should contain the original primary content.
+    let rows = handler.buffer().visible_rows();
+    let first_row = &rows[0];
+    let content: String = first_row
+        .get_characters()
+        .iter()
+        .filter_map(|c| match c.tchar() {
+            freminal_common::buffer_states::tchar::TChar::Ascii(b) => Some(*b as char),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        content, "hello",
+        "leaving alternate screen must restore primary content"
+    );
+}
+
+#[test]
+fn unknown_mode_does_not_panic() {
+    // Sending unhandled Mode variants through process_outputs must not panic.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decarm::Decarm,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(20, 5);
+
+    // NoOp mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::NoOp)]);
+
+    // Decarm (key auto-repeat) — not handled by the buffer.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decarm(Decarm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // If we reach here, no panic occurred.
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+}

@@ -4,7 +4,8 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_common::buffer_states::{
-    format_tag::FormatTag, tchar::TChar, terminal_output::TerminalOutput,
+    format_tag::FormatTag, mode::Mode, modes::xtextscrn::XtExtscrn, tchar::TChar,
+    terminal_output::TerminalOutput,
 };
 
 use crate::buffer::Buffer;
@@ -315,9 +316,17 @@ impl TerminalHandler {
             TerminalOutput::Sgr(_sgr) => {
                 todo!("SGR not yet implemented - need to convert to FormatTag");
             }
-            TerminalOutput::Mode(_mode) => {
-                todo!("Mode switching not yet implemented");
-            }
+            TerminalOutput::Mode(mode) => match mode {
+                Mode::XtExtscrn(XtExtscrn::Alternate) => self.handle_enter_alternate(),
+                Mode::XtExtscrn(XtExtscrn::Primary) => self.handle_leave_alternate(),
+                Mode::XtExtscrn(XtExtscrn::Query) => {
+                    // TODO: Step 3.5 — report mode via outbound write channel
+                }
+                _other => {
+                    // All other modes: silently ignore.
+                    // Do NOT use todo!() — unknown modes must never panic.
+                }
+            },
             TerminalOutput::OscResponse(_osc) => {
                 todo!("OSC response not yet implemented");
             }

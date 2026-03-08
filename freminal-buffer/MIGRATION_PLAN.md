@@ -261,7 +261,7 @@ wrapping them. But `process_output` has no arms for these because `TerminalOutpu
 
 ### Step 1.4 — Wire alternate-buffer enter/leave through the Mode dispatcher
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 1.4 Why this step exists
 
