@@ -647,7 +647,7 @@ expose them.
 
 ### Step 3.4 — Add DecSpecialGraphics character remapping
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 3.4 Why this step exists
 

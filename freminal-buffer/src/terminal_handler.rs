@@ -8,6 +8,7 @@ use freminal_common::{
         cursor::{ReverseVideo, StateColors},
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
+        line_draw::DecSpecialGraphics,
         mode::Mode,
         modes::decawm::Decawm,
         modes::dectcem::Dectcem,
@@ -35,6 +36,8 @@ pub struct TerminalHandler {
     show_cursor: Dectcem,
     /// The current cursor shape and blink state.
     cursor_visual_style: CursorVisualStyle,
+    /// Whether DEC Special Graphics character remapping is active.
+    character_replace: DecSpecialGraphics,
 }
 
 impl TerminalHandler {
@@ -46,6 +49,7 @@ impl TerminalHandler {
             current_format: FormatTag::default(),
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
+            character_replace: DecSpecialGraphics::default(),
         }
     }
 
@@ -60,15 +64,16 @@ impl TerminalHandler {
         &mut self.buffer
     }
 
-    /// Handle raw data bytes - convert to `TChar` and insert
+    /// Handle raw data bytes - convert to `TChar` and insert.
+    /// When DEC Special Graphics mode is active, bytes 0x5F–0x7E are remapped
+    /// to their Unicode box-drawing equivalents before conversion.
     pub fn handle_data(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
         }
 
-        // Convert bytes to TChar
-        // This is a simplified version - in production, proper UTF-8 handling is needed
-        if let Ok(text) = TChar::from_vec(data) {
+        let remapped: Vec<u8> = apply_dec_special(data, &self.character_replace);
+        if let Ok(text) = TChar::from_vec(&remapped) {
             self.buffer.insert_text(&text);
         }
     }
@@ -430,8 +435,8 @@ impl TerminalHandler {
             TerminalOutput::CursorReport => {
                 todo!("Cursor report not yet implemented");
             }
-            TerminalOutput::DecSpecialGraphics(_decsg) => {
-                todo!("DEC special graphics not yet implemented");
+            TerminalOutput::DecSpecialGraphics(dsg) => {
+                self.character_replace = dsg.clone();
             }
             TerminalOutput::CursorVisualStyle(style) => {
                 self.cursor_visual_style = style.clone();
@@ -584,6 +589,61 @@ impl TerminalHandler {
             TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {
                 // Silently ignore for forward compatibility
             }
+        }
+    }
+}
+
+/// Remap bytes in `data` according to the DEC Special Graphics character set.
+///
+/// When `mode` is `DecSpecialGraphics::Replace`, bytes in the range `0x5F–0x7E`
+/// are expanded to their Unicode UTF-8 equivalents (box-drawing, Greek, etc.).
+/// All other bytes are passed through unchanged. When `mode` is `DontReplace`
+/// the slice is copied verbatim.
+///
+/// Reference: <https://en.wikipedia.org/wiki/DEC_Special_Graphics>
+fn apply_dec_special(data: &[u8], mode: &DecSpecialGraphics) -> Vec<u8> {
+    match mode {
+        DecSpecialGraphics::DontReplace => data.to_vec(),
+        DecSpecialGraphics::Replace => {
+            let mut out = Vec::with_capacity(data.len() * 3);
+            for &b in data {
+                match b {
+                    0x5f => out.extend_from_slice("\u{00A0}".as_bytes()), // NO-BREAK SPACE
+                    0x60 => out.extend_from_slice("\u{25C6}".as_bytes()), // BLACK DIAMOND
+                    0x61 => out.extend_from_slice("\u{2592}".as_bytes()), // MEDIUM SHADE
+                    0x62 => out.extend_from_slice("\u{2409}".as_bytes()), // SYMBOL FOR HT
+                    0x63 => out.extend_from_slice("\u{240C}".as_bytes()), // SYMBOL FOR FF
+                    0x64 => out.extend_from_slice("\u{240D}".as_bytes()), // SYMBOL FOR CR
+                    0x65 => out.extend_from_slice("\u{240A}".as_bytes()), // SYMBOL FOR LF
+                    0x66 => out.extend_from_slice("\u{00B0}".as_bytes()), // DEGREE SIGN
+                    0x67 => out.extend_from_slice("\u{00B1}".as_bytes()), // PLUS-MINUS SIGN
+                    0x68 => out.extend_from_slice("\u{2424}".as_bytes()), // SYMBOL FOR NEWLINE
+                    0x69 => out.extend_from_slice("\u{240B}".as_bytes()), // SYMBOL FOR VT
+                    0x6a => out.extend_from_slice("\u{2518}".as_bytes()), // BOX LIGHT UP AND LEFT
+                    0x6b => out.extend_from_slice("\u{2510}".as_bytes()), // BOX LIGHT DOWN AND LEFT
+                    0x6c => out.extend_from_slice("\u{250C}".as_bytes()), // BOX LIGHT DOWN AND RIGHT
+                    0x6d => out.extend_from_slice("\u{2514}".as_bytes()), // BOX LIGHT UP AND RIGHT
+                    0x6e => out.extend_from_slice("\u{253C}".as_bytes()), // BOX LIGHT VERTICAL AND HORIZONTAL
+                    0x6f => out.extend_from_slice("\u{23BA}".as_bytes()), // HORIZONTAL SCAN LINE-1
+                    0x70 => out.extend_from_slice("\u{23BB}".as_bytes()), // HORIZONTAL SCAN LINE-3
+                    0x71 => out.extend_from_slice("\u{2500}".as_bytes()), // BOX LIGHT HORIZONTAL
+                    0x72 => out.extend_from_slice("\u{23BC}".as_bytes()), // HORIZONTAL SCAN LINE-7
+                    0x73 => out.extend_from_slice("\u{23BD}".as_bytes()), // HORIZONTAL SCAN LINE-9
+                    0x74 => out.extend_from_slice("\u{251C}".as_bytes()), // BOX LIGHT VERTICAL AND RIGHT
+                    0x75 => out.extend_from_slice("\u{2524}".as_bytes()), // BOX LIGHT VERTICAL AND LEFT
+                    0x76 => out.extend_from_slice("\u{2534}".as_bytes()), // BOX LIGHT UP AND HORIZONTAL
+                    0x77 => out.extend_from_slice("\u{252C}".as_bytes()), // BOX LIGHT DOWN AND HORIZONTAL
+                    0x78 => out.extend_from_slice("\u{2502}".as_bytes()), // BOX LIGHT VERTICAL
+                    0x79 => out.extend_from_slice("\u{2264}".as_bytes()), // LESS-THAN OR EQUAL TO
+                    0x7a => out.extend_from_slice("\u{2265}".as_bytes()), // GREATER-THAN OR EQUAL TO
+                    0x7b => out.extend_from_slice("\u{03C0}".as_bytes()), // GREEK SMALL LETTER PI
+                    0x7c => out.extend_from_slice("\u{2260}".as_bytes()), // NOT EQUAL TO
+                    0x7d => out.extend_from_slice("\u{00A3}".as_bytes()), // POUND SIGN
+                    0x7e => out.extend_from_slice("\u{00B7}".as_bytes()), // MIDDLE DOT
+                    _ => out.push(b),
+                }
+            }
+            out
         }
     }
 }

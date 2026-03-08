@@ -1005,6 +1005,113 @@ fn wrap_re_enable() {
 }
 
 #[test]
+fn dec_special_replace_lower_right_corner() {
+    // Enable Replace mode, send byte 0x6a → cell must contain TChar::Utf8 for ┘ (U+2518).
+    use freminal_common::buffer_states::{
+        line_draw::DecSpecialGraphics, terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+        DecSpecialGraphics::Replace,
+    )]);
+    handler.handle_data(&[0x6a]);
+
+    let rows = handler.buffer().visible_rows();
+    let cell = rows[0]
+        .get_char_at(0)
+        .expect("cell 0 must exist after writing");
+    assert_eq!(
+        cell.tchar(),
+        &freminal_common::buffer_states::tchar::TChar::Utf8("\u{2518}".as_bytes().to_vec()),
+        "0x6a in Replace mode must produce ┘ (U+2518)"
+    );
+}
+
+#[test]
+fn dec_special_dont_replace_passthrough() {
+    // In DontReplace mode (default), byte 0x6a is stored as TChar::Ascii(0x6a).
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_data(&[0x6a]);
+
+    let rows = handler.buffer().visible_rows();
+    let cell = rows[0]
+        .get_char_at(0)
+        .expect("cell 0 must exist after writing");
+    assert_eq!(
+        cell.tchar(),
+        &freminal_common::buffer_states::tchar::TChar::Ascii(0x6a),
+        "0x6a in DontReplace mode must be stored as Ascii(0x6a)"
+    );
+}
+
+#[test]
+fn dec_special_toggle() {
+    // Enable Replace → write 0x6a (gets remapped to ┘).
+    // Disable Replace → write 0x6a again (stored as ASCII).
+    // Verify both cells independently.
+    use freminal_common::buffer_states::{
+        line_draw::DecSpecialGraphics, terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // First character: Replace mode → ┘
+    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+        DecSpecialGraphics::Replace,
+    )]);
+    handler.handle_data(&[0x6a]);
+
+    // Second character: DontReplace mode → ASCII 'j'
+    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+        DecSpecialGraphics::DontReplace,
+    )]);
+    handler.handle_data(&[0x6a]);
+
+    let rows = handler.buffer().visible_rows();
+    let cell0 = rows[0].get_char_at(0).expect("cell 0 must exist");
+    let cell1 = rows[0].get_char_at(1).expect("cell 1 must exist");
+
+    assert_eq!(
+        cell0.tchar(),
+        &freminal_common::buffer_states::tchar::TChar::Utf8("\u{2518}".as_bytes().to_vec()),
+        "cell 0 must be ┘ (Replace mode)"
+    );
+    assert_eq!(
+        cell1.tchar(),
+        &freminal_common::buffer_states::tchar::TChar::Ascii(0x6a),
+        "cell 1 must be Ascii(0x6a) (DontReplace mode)"
+    );
+}
+
+#[test]
+fn dec_special_all_passthrough_above_7e() {
+    // Bytes above 0x7E are never remapped even in Replace mode.
+    use freminal_common::buffer_states::{
+        line_draw::DecSpecialGraphics, terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+        DecSpecialGraphics::Replace,
+    )]);
+
+    // 0x41 = 'A' (below 0x5F — also not remapped)
+    handler.handle_data(&[0x41]);
+
+    let rows = handler.buffer().visible_rows();
+    let cell = rows[0].get_char_at(0).expect("cell 0 must exist");
+    assert_eq!(
+        cell.tchar(),
+        &freminal_common::buffer_states::tchar::TChar::Ascii(0x41),
+        "bytes outside 0x5F–0x7E must pass through unchanged in Replace mode"
+    );
+}
+
+#[test]
 fn show_cursor_default_true() {
     // A freshly created handler must report show_cursor() == true (DECTCEM Show is default).
     let handler = TerminalHandler::new(80, 24);
