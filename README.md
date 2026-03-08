@@ -76,14 +76,6 @@ cargo bench
 
 ## 🧱 Architecture Overview
 
-Freminal is composed of three primary layers:
-
-| Layer                | Crate                        | Role                                                              |
-| -------------------- | ---------------------------- | ----------------------------------------------------------------- |
-| **Parser / Core**    | `freminal-terminal-emulator` | Handles ANSI/DEC/OSC parsing, cursor state, and buffer logic.     |
-| **Common Utilities** | `freminal-common`            | Shared color, geometry, and data types.                           |
-| **GUI / Frontend**   | `freminal`                   | Renders terminal grid using `egui`; manages PTY ↔ renderer loop. |
-
 ### Data Flow
 
 ```text
