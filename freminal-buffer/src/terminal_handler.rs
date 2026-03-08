@@ -283,6 +283,15 @@ impl TerminalHandler {
             TerminalOutput::InsertSpaces(n) => {
                 self.handle_insert_spaces(*n);
             }
+            TerminalOutput::Index => {
+                self.handle_index();
+            }
+            TerminalOutput::ReverseIndex => {
+                self.handle_reverse_index();
+            }
+            TerminalOutput::NextLine => {
+                self.handle_next_line();
+            }
             TerminalOutput::SetTopAndBottomMargins {
                 top_margin,
                 bottom_margin,

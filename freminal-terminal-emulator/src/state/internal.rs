@@ -1519,6 +1519,11 @@ impl TerminalState {
                 TerminalOutput::RequestDeviceNameAndVersion => {
                     self.report_device_name_and_version();
                 }
+                TerminalOutput::Index => self.set_cursor_pos_rel(None, Some(1)),
+                TerminalOutput::ReverseIndex => self.set_cursor_pos_rel(None, Some(-1)),
+                TerminalOutput::NextLine => {
+                    self.set_cursor_pos_rel(Some(1), Some(1));
+                }
                 TerminalOutput::Skipped | TerminalOutput::Bell | _ => (),
             }
         }

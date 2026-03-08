@@ -205,7 +205,7 @@ semantically different from `delete_chars` (Step 1.1) which does shift them.
 
 ### Step 1.3 — Wire IND, RI, NEL into the dispatcher
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 1.3 Why this step exists
 

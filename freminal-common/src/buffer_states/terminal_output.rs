@@ -150,6 +150,12 @@ pub enum TerminalOutput {
         param: usize,
     }, // for ESC[>Ps c
     RequestXtVersion, // for ESC[>c
+    /// ESC D — IND (Index): move cursor down, scroll if at bottom margin
+    Index,
+    /// ESC M — RI (Reverse Index): move cursor up, scroll if at top margin
+    ReverseIndex,
+    /// ESC E — NEL (Next Line): move cursor to col 0 of next line, scroll if at bottom
+    NextLine,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -260,6 +266,9 @@ impl std::fmt::Display for TerminalOutput {
                 write!(f, "RequestSecondaryDeviceAttributes({param})")
             }
             Self::RequestXtVersion => write!(f, "RequestXtVersion"),
+            Self::Index => write!(f, "Index"),
+            Self::ReverseIndex => write!(f, "ReverseIndex"),
+            Self::NextLine => write!(f, "NextLine"),
         }
     }
 }

@@ -377,24 +377,9 @@ impl StandardParser {
                         '|' => output.push(TerminalOutput::CharsetG3AsGR),
                         '}' => output.push(TerminalOutput::CharsetG2AsGR),
                         '~' => output.push(TerminalOutput::CharsetG1AsGR),
-                        'M' => {
-                            output.push(TerminalOutput::SetCursorPosRel {
-                                x: None,
-                                y: Some(-1),
-                            });
-                        }
-                        'D' => {
-                            output.push(TerminalOutput::SetCursorPosRel {
-                                x: None,
-                                y: Some(1),
-                            });
-                        }
-                        'E' => {
-                            output.push(TerminalOutput::SetCursorPosRel {
-                                x: Some(1),
-                                y: Some(1),
-                            });
-                        }
+                        'M' => output.push(TerminalOutput::ReverseIndex),
+                        'D' => output.push(TerminalOutput::Index),
+                        'E' => output.push(TerminalOutput::NextLine),
                         _ => {
                             output.push(TerminalOutput::Invalid);
                             return ParserOutcome::Invalid(

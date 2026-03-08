@@ -556,3 +556,115 @@ fn test_process_outputs_insert_delete_operations() {
 
     assert_eq!(handler.buffer().get_cursor().pos.x, 8);
 }
+
+#[test]
+fn ind_scrolls_at_bottom_margin() {
+    // Use the alternate buffer (no scrollback) so IND at the bottom margin
+    // scrolls the screen in-place and the cursor stays at the bottom row.
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(10, 5);
+
+    // Enter alternate screen so IND scrolls rather than growing scrollback.
+    handler.handle_enter_alternate();
+
+    // Fill all 5 rows with content.
+    for _ in 0..5 {
+        handler.process_outputs(&[
+            TerminalOutput::Data(b"XXXXX".to_vec()),
+            TerminalOutput::Newline,
+            TerminalOutput::CarriageReturn,
+        ]);
+    }
+
+    // Place cursor at the bottom margin row (row 4, 0-indexed).
+    let bottom_row = 4usize;
+    handler
+        .buffer_mut()
+        .set_cursor_pos(Some(0), Some(bottom_row));
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        bottom_row,
+        "cursor should be at bottom margin before IND"
+    );
+
+    // IND at bottom margin in alternate buffer — scrolls up, cursor stays at row 4.
+    handler.process_outputs(&[TerminalOutput::Index]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        bottom_row,
+        "IND at bottom margin must keep cursor at bottom margin row"
+    );
+
+    // Leave alternate buffer to restore state.
+    handler.handle_leave_alternate();
+}
+
+#[test]
+fn ri_scrolls_at_top_margin() {
+    // 5-row buffer. Set scroll region rows 1–4 (1-indexed). Place cursor at the
+    // top of the region (row 0 in 0-indexed). Send ReverseIndex → region scrolls
+    // down, blank line inserted at top, cursor stays at the top margin row.
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(10, 5);
+
+    handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+        top_margin: 1,
+        bottom_margin: 5,
+    }]);
+
+    // Write a few lines.
+    for _ in 0..3 {
+        handler.process_outputs(&[
+            TerminalOutput::Data(b"HELLO".to_vec()),
+            TerminalOutput::Newline,
+            TerminalOutput::CarriageReturn,
+        ]);
+    }
+
+    // Move cursor to row 0 (top of scroll region).
+    handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+    let cursor_row_before = handler.buffer().get_cursor().pos.y;
+
+    handler.process_outputs(&[TerminalOutput::ReverseIndex]);
+
+    // Cursor must remain at the top margin row (or scroll inserted a blank above,
+    // keeping cursor at the same screen row).
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        cursor_row_before,
+        "RI at top margin must keep cursor at top margin row"
+    );
+}
+
+#[test]
+fn nel_moves_to_col_zero_of_next_line() {
+    // NEL is like CR+LF: cursor goes to column 0 of the next row.
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(20, 10);
+
+    // Write some text so cursor is mid-row.
+    handler.process_outputs(&[TerminalOutput::Data(b"Hello".to_vec())]);
+    let row_before = handler.buffer().get_cursor().pos.y;
+    assert!(
+        handler.buffer().get_cursor().pos.x > 0,
+        "cursor should be past col 0 after inserting text"
+    );
+
+    handler.process_outputs(&[TerminalOutput::NextLine]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        0,
+        "NEL must reset cursor to column 0"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        row_before + 1,
+        "NEL must advance cursor to next row"
+    );
+}
