@@ -1005,6 +1005,103 @@ fn wrap_re_enable() {
 }
 
 #[test]
+fn cursor_report_sends_correct_position() {
+    // Move cursor to (4, 2) (0-indexed), send CursorReport → channel receives "\x1b[3;5R".
+    use freminal_buffer::terminal_handler::PtyWrite;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Move cursor to col 4, row 2 (0-indexed) via 1-indexed SetCursorPos.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(5), // 1-indexed → col 4
+        y: Some(3), // 1-indexed → row 2
+    }]);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    let msg = rx
+        .try_recv()
+        .expect("CursorReport must send a message to the channel");
+    let response = String::from_utf8(msg.data).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[3;5R",
+        "CPR must be ESC[row;colR (1-indexed)"
+    );
+}
+
+#[test]
+fn da1_sends_response() {
+    // RequestDeviceAttributes must send the DA1 capability string.
+    use freminal_buffer::terminal_handler::PtyWrite;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
+
+    let msg = rx
+        .try_recv()
+        .expect("RequestDeviceAttributes must send a message to the channel");
+    let response = String::from_utf8(msg.data).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[?65;1;2;4;6;17;18;22c",
+        "DA1 response must match the expected capability string"
+    );
+}
+
+#[test]
+fn window_manipulation_queued() {
+    // WindowManipulation commands must be stored and returned by take_window_commands().
+    use freminal_common::buffer_states::{
+        terminal_output::TerminalOutput, window_manipulation::WindowManipulation,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::WindowManipulation(
+        WindowManipulation::SetTitleBarText(String::from("test title")),
+    )]);
+
+    let commands = handler.take_window_commands();
+    assert_eq!(commands.len(), 1, "one window command must be queued");
+    match &commands[0] {
+        WindowManipulation::SetTitleBarText(title) => {
+            assert_eq!(title, "test title", "title bar text must be preserved");
+        }
+        other => panic!("expected SetTitleBarText, got {other:?}"),
+    }
+
+    // After draining, the queue must be empty.
+    let commands2 = handler.take_window_commands();
+    assert!(
+        commands2.is_empty(),
+        "take_window_commands must drain the queue"
+    );
+}
+
+#[test]
+fn no_write_tx_does_not_panic() {
+    // CursorReport and RequestDeviceAttributes with no write_tx set must not panic.
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // No set_write_tx call — both of these must silently no-op.
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+    handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
+
+    // If we reach here, no panic occurred.
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+}
+
+#[test]
 fn dec_special_replace_lower_right_corner() {
     // Enable Replace mode, send byte 0x6a → cell must contain TChar::Utf8 for ┘ (U+2518).
     use freminal_common::buffer_states::{

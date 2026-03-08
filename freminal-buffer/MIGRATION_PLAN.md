@@ -709,7 +709,7 @@ that draw borders (htop, dialog, etc.) depend on this.
 
 ### Step 3.5 — Add outbound write channel and implement cursor-position report
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 3.5 Why this step exists
 

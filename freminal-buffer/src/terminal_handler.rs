@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
         cursor::{ReverseVideo, StateColors},
@@ -17,6 +18,7 @@ use freminal_common::{
         modes::xtextscrn::XtExtscrn,
         tchar::TChar,
         terminal_output::TerminalOutput,
+        window_manipulation::WindowManipulation,
     },
     cursor::CursorVisualStyle,
     sgr::SelectGraphicRendition,
@@ -29,6 +31,21 @@ use crate::buffer::Buffer;
 /// This is the main entry point for integrating the buffer with a terminal emulator.
 /// It receives parsed terminal sequences (via a TerminalOutput-like enum) and updates
 /// the buffer state accordingly.
+/// Bytes sent to the PTY in response to terminal queries (CPR, DA1, mode reports).
+#[derive(Debug, Clone)]
+pub struct PtyWrite {
+    /// Raw bytes to write back to the running process.
+    pub data: Vec<u8>,
+}
+
+impl PtyWrite {
+    fn new(s: &str) -> Self {
+        Self {
+            data: s.as_bytes().to_vec(),
+        }
+    }
+}
+
 pub struct TerminalHandler {
     buffer: Buffer,
     current_format: FormatTag,
@@ -38,6 +55,10 @@ pub struct TerminalHandler {
     cursor_visual_style: CursorVisualStyle,
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
+    /// Optional channel for writing responses back to the PTY.
+    write_tx: Option<Sender<PtyWrite>>,
+    /// Queued window-manipulation commands waiting to be consumed by the GUI.
+    window_commands: Vec<WindowManipulation>,
 }
 
 impl TerminalHandler {
@@ -50,6 +71,8 @@ impl TerminalHandler {
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
             character_replace: DecSpecialGraphics::default(),
+            write_tx: None,
+            window_commands: Vec::new(),
         }
     }
 
@@ -290,6 +313,42 @@ impl TerminalHandler {
         self.buffer.set_lnm(enabled);
     }
 
+    /// Set the PTY write channel.  Once set, responses such as CPR and DA1
+    /// will be sent through this channel rather than silently discarded.
+    pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
+        self.write_tx = Some(tx);
+    }
+
+    /// Drain and return all queued `WindowManipulation` commands.
+    pub fn take_window_commands(&mut self) -> Vec<WindowManipulation> {
+        std::mem::take(&mut self.window_commands)
+    }
+
+    /// Send a raw string response to the PTY.  Silently drops if no channel is set.
+    fn write_to_pty(&self, text: &str) {
+        if let Some(tx) = &self.write_tx {
+            let msg = PtyWrite::new(text);
+            if let Err(e) = tx.send(msg) {
+                tracing::error!("Failed to write to PTY: {e}");
+            }
+        }
+    }
+
+    /// Handle CPR — Cursor Position Report.
+    /// Responds with `ESC [ <row> ; <col> R` (1-indexed).
+    pub fn handle_cursor_report(&mut self) {
+        let pos = self.buffer.get_cursor().pos;
+        let x = pos.x + 1;
+        let y = pos.y + 1;
+        self.write_to_pty(&format!("\x1b[{y};{x}R"));
+    }
+
+    /// Handle DA1 — Primary Device Attributes.
+    /// Responds with the capability string used by the old buffer (iTerm2 DA set).
+    pub fn handle_request_device_attributes(&mut self) {
+        self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
+    }
+
     /// Handle resize
     pub fn handle_resize(&mut self, width: usize, height: usize) {
         self.buffer.set_size(width, height);
@@ -433,7 +492,7 @@ impl TerminalHandler {
                 todo!("OSC response not yet implemented");
             }
             TerminalOutput::CursorReport => {
-                todo!("Cursor report not yet implemented");
+                self.handle_cursor_report();
             }
             TerminalOutput::DecSpecialGraphics(dsg) => {
                 self.character_replace = dsg.clone();
@@ -441,11 +500,11 @@ impl TerminalHandler {
             TerminalOutput::CursorVisualStyle(style) => {
                 self.cursor_visual_style = style.clone();
             }
-            TerminalOutput::WindowManipulation(_wm) => {
-                todo!("Window manipulation not yet implemented");
+            TerminalOutput::WindowManipulation(wm) => {
+                self.window_commands.push(wm.clone());
             }
             TerminalOutput::RequestDeviceAttributes => {
-                todo!("Request device attributes not yet implemented");
+                self.handle_request_device_attributes();
             }
             TerminalOutput::EightBitControl => {
                 todo!("Eight bit control not yet implemented");
