@@ -1515,6 +1515,20 @@ impl Buffer {
         &self.current_tag
     }
 
+    /// Set whether Line Feed Mode (LNM) is enabled.
+    ///
+    /// `true`: LF behaves like CRLF (cursor moves to column 0 on line feed).
+    /// `false` (default): LF only advances the row; column is unchanged.
+    pub const fn set_lnm(&mut self, enabled: bool) {
+        self.lnm_enabled = enabled;
+    }
+
+    /// Return whether Line Feed Mode is currently enabled.
+    #[must_use]
+    pub const fn is_lnm_enabled(&self) -> bool {
+        self.lnm_enabled
+    }
+
     /// Set whether soft-wrapping is enabled (DECAWM).
     ///
     /// `true` (default): text wraps at the terminal width onto the next row.

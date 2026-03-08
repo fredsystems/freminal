@@ -525,7 +525,7 @@ Without this, text in `NoAutoWrap` mode gets mangled.
 
 ### Step 3.2 — Implement LNM (Line Feed Mode) setter
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 3.2 Why this step exists
 

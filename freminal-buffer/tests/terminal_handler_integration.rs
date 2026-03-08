@@ -1005,6 +1005,136 @@ fn wrap_re_enable() {
 }
 
 #[test]
+fn lnm_off_lf_does_not_reset_x() {
+    // LNM disabled (default): LF advances Y but leaves X unchanged.
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_data(&text_to_bytes("hello"));
+    let x_before = handler.buffer().get_cursor().pos.x;
+    let y_before = handler.buffer().get_cursor().pos.y;
+    assert!(x_before > 0, "cursor x must be past 0 after writing text");
+
+    handler.process_outputs(&[TerminalOutput::Newline]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        x_before,
+        "LNM off: LF must not reset cursor X"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        y_before + 1,
+        "LNM off: LF must advance cursor Y by 1"
+    );
+}
+
+#[test]
+fn lnm_on_lf_resets_x() {
+    // LNM enabled: LF behaves like CRLF — X resets to 0, Y advances.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::lnm::Lnm,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    handler.handle_data(&text_to_bytes("hello"));
+    let y_before = handler.buffer().get_cursor().pos.y;
+    assert!(
+        handler.buffer().get_cursor().pos.x > 0,
+        "cursor x must be past 0 after writing text"
+    );
+
+    handler.process_outputs(&[TerminalOutput::Newline]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        0,
+        "LNM on: LF must reset cursor X to 0"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        y_before + 1,
+        "LNM on: LF must still advance cursor Y by 1"
+    );
+}
+
+#[test]
+fn lnm_toggle() {
+    // Enable LNM → LF resets X; disable LNM → LF leaves X alone.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::lnm::Lnm,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default: LNM off.
+    assert!(
+        !handler.buffer().is_lnm_enabled(),
+        "LNM must be disabled by default"
+    );
+
+    // Enable LNM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        handler.buffer().is_lnm_enabled(),
+        "LNM must be enabled after NewLine mode"
+    );
+
+    // Verify LF resets X while LNM is on.
+    handler.handle_data(&text_to_bytes("hello"));
+    handler.process_outputs(&[TerminalOutput::Newline]);
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        0,
+        "LNM on: LF must reset X to 0"
+    );
+
+    // Disable LNM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(
+        &SetMode::DecRst,
+    )))]);
+    assert!(
+        !handler.buffer().is_lnm_enabled(),
+        "LNM must be disabled after LineFeed mode"
+    );
+
+    // Verify LF no longer resets X.
+    handler.handle_data(&text_to_bytes("world"));
+    let x_after_write = handler.buffer().get_cursor().pos.x;
+    let y_after_write = handler.buffer().get_cursor().pos.y;
+    handler.process_outputs(&[TerminalOutput::Newline]);
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        x_after_write,
+        "LNM off: LF must not reset X"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        y_after_write + 1,
+        "LNM off: LF must still advance Y"
+    );
+
+    // Query variant must not panic and must leave state unchanged.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::Query))]);
+    assert!(
+        !handler.buffer().is_lnm_enabled(),
+        "LNM state must not change after a Query mode"
+    );
+}
+
+#[test]
 fn decawm_mode_dispatch() {
     // Verify that Mode::Decawm variants are correctly dispatched through
     // process_outputs (AutoWrap enables, NoAutoWrap disables).

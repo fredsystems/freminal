@@ -10,6 +10,7 @@ use freminal_common::{
         format_tag::FormatTag,
         mode::Mode,
         modes::decawm::Decawm,
+        modes::lnm::Lnm,
         modes::xtextscrn::XtExtscrn,
         tchar::TChar,
         terminal_output::TerminalOutput,
@@ -221,6 +222,11 @@ impl TerminalHandler {
         self.buffer.set_wrap(enabled);
     }
 
+    /// Handle LNM — enable or disable Line Feed Mode.
+    pub const fn handle_set_lnm(&mut self, enabled: bool) {
+        self.buffer.set_lnm(enabled);
+    }
+
     /// Handle resize
     pub fn handle_resize(&mut self, width: usize, height: usize) {
         self.buffer.set_size(width, height);
@@ -342,11 +348,15 @@ impl TerminalHandler {
                 Mode::XtExtscrn(XtExtscrn::Alternate) => self.handle_enter_alternate(),
                 Mode::XtExtscrn(XtExtscrn::Primary) => self.handle_leave_alternate(),
                 // Query variants: report mode — deferred to Step 3.5
-                Mode::XtExtscrn(XtExtscrn::Query) | Mode::Decawm(Decawm::Query) => {
+                Mode::XtExtscrn(XtExtscrn::Query)
+                | Mode::Decawm(Decawm::Query)
+                | Mode::LineFeedMode(Lnm::Query) => {
                     // TODO: Step 3.5 — report mode via outbound write channel
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
                 Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(false),
+                Mode::LineFeedMode(Lnm::NewLine) => self.handle_set_lnm(true),
+                Mode::LineFeedMode(Lnm::LineFeed) => self.handle_set_lnm(false),
                 _other => {
                     // All other modes: silently ignore.
                     // Do NOT use todo!() — unknown modes must never panic.
