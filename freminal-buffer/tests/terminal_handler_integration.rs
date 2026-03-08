@@ -892,3 +892,158 @@ fn save_survives_alternate_roundtrip() {
         "cursor y must be restored to primary-saved value after alt roundtrip"
     );
 }
+
+#[test]
+fn wrap_enabled_default() {
+    // By default DECAWM is on: writing 85 chars to an 80-col buffer must
+    // produce content on row 1 (the soft-wrap continuation row).
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // 85 ASCII characters — 5 should overflow onto row 1.
+    let text: Vec<u8> = b"A".repeat(85);
+    handler.handle_data(&text);
+
+    // Cursor must have wrapped to row 1.
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        1,
+        "cursor must be on row 1 after wrapping 85 chars into 80-col buffer"
+    );
+    // Cursor column should be 5 (the 5 overflow chars).
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        5,
+        "cursor x must be 5 after the 5-char overflow"
+    );
+
+    let visible = handler.buffer().visible_rows();
+    // Row 1 should have cells (at least the 5 overflow chars).
+    assert!(
+        visible.len() > 1,
+        "visible rows must include at least two rows after wrap"
+    );
+}
+
+#[test]
+fn wrap_disabled_clamps() {
+    // With DECAWM disabled writing 85 chars to an 80-col buffer must:
+    // - keep the cursor on row 0
+    // - clamp cursor x to column 79 (last valid column)
+    // - not create a row 1
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decawm::Decawm,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Disable autowrap via the Mode dispatcher.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
+        &SetMode::DecRst,
+    )))]);
+
+    let text: Vec<u8> = b"A".repeat(85);
+    handler.handle_data(&text);
+
+    // Must still be on row 0.
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        0,
+        "cursor must remain on row 0 when wrap is disabled"
+    );
+    // Cursor must be clamped to the last column.
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        79,
+        "cursor x must be clamped to 79 (last column) when wrap is disabled"
+    );
+}
+
+#[test]
+fn wrap_re_enable() {
+    // Disable wrap → write overflow (stays on row 0) → re-enable wrap →
+    // write more text → overflow must now wrap to row 1.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decawm::Decawm,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Disable wrap and write 85 chars — all stay on row 0.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
+        &SetMode::DecRst,
+    )))]);
+    handler.handle_data(&b"A".repeat(85));
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        0,
+        "cursor should stay on row 0 while wrap is disabled"
+    );
+
+    // Re-enable wrap.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Move cursor to col 75 so the next 10 chars will overflow.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(76), // 1-indexed → col 75
+        y: Some(1),  // 1-indexed → row 0
+    }]);
+
+    // Write 10 chars — 5 fit, 5 overflow onto row 1.
+    handler.handle_data(&b"B".repeat(10));
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        1,
+        "cursor must be on row 1 after re-enabling wrap and writing overflow"
+    );
+}
+
+#[test]
+fn decawm_mode_dispatch() {
+    // Verify that Mode::Decawm variants are correctly dispatched through
+    // process_outputs (AutoWrap enables, NoAutoWrap disables).
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decawm::Decawm,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default is wrap-enabled.
+    assert!(
+        handler.buffer().is_wrap_enabled(),
+        "wrap must be enabled by default"
+    );
+
+    // Disable via mode dispatch.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
+        &SetMode::DecRst,
+    )))]);
+    assert!(
+        !handler.buffer().is_wrap_enabled(),
+        "wrap must be disabled after NoAutoWrap mode"
+    );
+
+    // Re-enable via mode dispatch.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        handler.buffer().is_wrap_enabled(),
+        "wrap must be re-enabled after AutoWrap mode"
+    );
+
+    // Query variant must not panic and must leave the state unchanged.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::Query))]);
+    assert!(
+        handler.buffer().is_wrap_enabled(),
+        "wrap state must not change after a Query mode"
+    );
+}

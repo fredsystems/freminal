@@ -65,8 +65,13 @@ pub struct Buffer {
     /// Current format tag to apply to inserted text.
     current_tag: FormatTag,
 
-    /// LMN mode
+    /// LNM mode
     lnm_enabled: bool,
+
+    /// DECAWM — whether soft-wrapping is enabled.
+    /// `true` (default): text wraps at the terminal width.
+    /// `false`: text is clamped to the last column; overflow is discarded.
+    wrap_enabled: bool,
 
     /// Preserve the scrollback anchor when resizing
     preserve_scrollback_anchor: bool,
@@ -111,6 +116,7 @@ impl Buffer {
             saved_primary: None,
             saved_cursor: None,
             lnm_enabled: false,
+            wrap_enabled: true,
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
             scroll_region_bottom: height.saturating_sub(1),
@@ -293,6 +299,15 @@ impl Buffer {
             // │ move to the next row as a soft-wrap row.    │
             // └─────────────────────────────────────────────┘
             if col >= self.width {
+                if !self.wrap_enabled {
+                    // DECAWM NoAutoWrap: clamp cursor to last column and discard
+                    // all remaining text.
+                    self.cursor.pos.x = self.width.saturating_sub(1);
+                    self.cursor.pos.y = row_idx;
+                    self.enforce_scrollback_limit();
+                    return;
+                }
+
                 row_idx += 1;
                 col = 0;
 
@@ -355,6 +370,14 @@ impl Buffer {
                     // This row filled; some data remains.
                     self.cursor.pos.x = final_col;
                     self.cursor.pos.y = row_idx;
+
+                    if !self.wrap_enabled {
+                        // DECAWM NoAutoWrap: clamp cursor to last column and discard
+                        // the overflow — do not continue onto the next row.
+                        self.cursor.pos.x = self.width.saturating_sub(1);
+                        self.enforce_scrollback_limit();
+                        return;
+                    }
 
                     remaining = data;
 
@@ -1490,6 +1513,21 @@ impl Buffer {
     #[must_use]
     pub const fn get_format(&self) -> &FormatTag {
         &self.current_tag
+    }
+
+    /// Set whether soft-wrapping is enabled (DECAWM).
+    ///
+    /// `true` (default): text wraps at the terminal width onto the next row.
+    /// `false`: text is clamped to the last column; any characters that would
+    /// overflow the current row are discarded.
+    pub const fn set_wrap(&mut self, enabled: bool) {
+        self.wrap_enabled = enabled;
+    }
+
+    /// Return whether soft-wrapping is currently enabled.
+    #[must_use]
+    pub const fn is_wrap_enabled(&self) -> bool {
+        self.wrap_enabled
     }
 
     pub fn enter_alternate(&mut self) {

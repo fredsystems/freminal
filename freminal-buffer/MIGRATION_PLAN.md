@@ -460,7 +460,7 @@ after the mutation.
 
 ### Step 3.1 — Add DECAWM (auto-wrap) to the buffer
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 3.1 Why this step exists
 

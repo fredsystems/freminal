@@ -9,6 +9,7 @@ use freminal_common::{
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
         mode::Mode,
+        modes::decawm::Decawm,
         modes::xtextscrn::XtExtscrn,
         tchar::TChar,
         terminal_output::TerminalOutput,
@@ -215,6 +216,11 @@ impl TerminalHandler {
         self.buffer.leave_alternate();
     }
 
+    /// Handle DECAWM — enable or disable soft-wrapping.
+    pub const fn handle_set_wrap(&mut self, enabled: bool) {
+        self.buffer.set_wrap(enabled);
+    }
+
     /// Handle resize
     pub fn handle_resize(&mut self, width: usize, height: usize) {
         self.buffer.set_size(width, height);
@@ -335,9 +341,12 @@ impl TerminalHandler {
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate) => self.handle_enter_alternate(),
                 Mode::XtExtscrn(XtExtscrn::Primary) => self.handle_leave_alternate(),
-                Mode::XtExtscrn(XtExtscrn::Query) => {
+                // Query variants: report mode — deferred to Step 3.5
+                Mode::XtExtscrn(XtExtscrn::Query) | Mode::Decawm(Decawm::Query) => {
                     // TODO: Step 3.5 — report mode via outbound write channel
                 }
+                Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
+                Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(false),
                 _other => {
                     // All other modes: silently ignore.
                     // Do NOT use todo!() — unknown modes must never panic.
