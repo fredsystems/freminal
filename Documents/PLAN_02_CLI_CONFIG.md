@@ -16,11 +16,12 @@ relevant options, and add a `--config` flag for specifying an override config pa
 
 ### CLI Args
 
-The current CLI argument parser in `freminal-common/src/args.rs` is hand-rolled. It handles 4
-flags with manual string matching and custom error handling. This is fragile, doesn't generate
-help text, and requires manual maintenance for each new flag.
+The CLI argument parser in `freminal-common/src/args.rs` was originally hand-rolled, handling 4
+flags with manual string matching and custom error handling. This was fragile, didn't generate
+help text, and required manual maintenance for each new flag.
 
-`clap` is already in the workspace dependencies (used by `xtask`) but not used by the main binary.
+The parser has been migrated to `clap` (derive) as part of this task. `clap` was already in the
+workspace dependencies (used by `xtask`) and is now also used by the main binary.
 
 ### Config System
 
@@ -217,16 +218,18 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.7 — Cleanup and documentation
 
-- **Status:** Not Started
+- **Status:** COMPLETE ✓
 - **Scope:** All modified files
 - **Details:**
-  - Remove old hand-rolled arg parsing code
-  - Ensure no dead code warnings
-  - Update any documentation referencing CLI flags
-  - Run full verification suite
+  - Old hand-rolled arg parsing code was fully removed in subtask 2.1
+  - Verified no dead code warnings (clippy clean, no warnings in test output)
+  - No unused dependencies (cargo machete clean)
+  - Updated README.md with CLI usage table documenting all flags
+  - Updated PLAN_02 problem statement to reflect completed migration (past tense)
+  - Updated `config_example.toml` (already current from earlier subtasks)
 - **Acceptance criteria:**
-  - No dead code from old arg parser
-  - All tests pass, clippy clean, no unused deps
+  - No dead code from old arg parser ✓
+  - All tests pass, clippy clean, no unused deps ✓
 
 ---
 

@@ -72,6 +72,26 @@ cargo test
 cargo bench
 ```
 
+### 3. **CLI Options**
+
+```text
+freminal [OPTIONS]
+```
+
+| Flag                          | Description                                                    |
+| ----------------------------- | -------------------------------------------------------------- |
+| `--shell <PATH>`              | Shell to run (overrides config file and default shell)         |
+| `--config <PATH>`             | Path to a TOML config file (overrides default config search)   |
+| `--recording-path <PATH>`     | Path to write session recordings to                            |
+| `--write-logs-to-file[=BOOL]` | Write logs to a file in the current directory (default: false) |
+| `--show-all-debug`            | Show all debug output (disables default log filtering)         |
+| `--help`                      | Print help                                                     |
+| `--version`                   | Print version                                                  |
+
+Configuration is loaded from a layered set of TOML files (system, user, env var), then
+overridden by `--config` if specified, and finally by individual CLI flags. See
+[`config_example.toml`](./config_example.toml) for all available settings.
+
 ---
 
 ## 🧱 Architecture Overview
@@ -158,4 +178,4 @@ Escape Sequence Coverage: SGR ✅ CSI ✅ OSC 🚧 DEC ✅ FTCS ⬜
 
 ---
 
-© 2024–2025 Fred Clausen — MIT License.
+© 2024–2026 Fred Clausen — MIT License.
