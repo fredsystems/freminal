@@ -24,7 +24,9 @@
 #[macro_use]
 extern crate tracing;
 
+use crossbeam_channel::unbounded;
 use freminal_terminal_emulator::interface::TerminalEmulator;
+use freminal_terminal_emulator::io::InputEvent;
 use parking_lot::FairMutex;
 use std::{process, sync::Arc};
 use tracing::Level;
@@ -149,8 +151,27 @@ fn main() {
             let terminal = Arc::new(FairMutex::new(terminal));
             let terminal_clone = Arc::clone(&terminal);
 
+            // Channel for GUI → PTY-consumer thread events (resize, key, focus).
+            // The GUI holds the Sender; the consumer thread holds the Receiver.
+            let (input_tx, input_rx) = unbounded::<InputEvent>();
+
             std::thread::spawn(move || {
                 loop {
+                    // Drain any pending InputEvents first (non-blocking), then
+                    // block on the next PTY read.  This keeps resize handling
+                    // off the GUI lock while still being processed promptly.
+                    while let Ok(event) = input_rx.try_recv() {
+                        match event {
+                            InputEvent::Resize(w, h, pw, ph) => {
+                                terminal.lock().handle_resize_event(w, h, pw, ph);
+                            }
+                            InputEvent::Key(_) | InputEvent::FocusChange(_) => {
+                                // Key and FocusChange are handled elsewhere for now;
+                                // reserved for Task 8.
+                            }
+                        }
+                    }
+
                     if let Ok(read) = rx.recv() {
                         terminal
                             .lock()
@@ -159,7 +180,7 @@ fn main() {
                 }
             });
 
-            gui::run(terminal_clone, cfg)
+            gui::run(terminal_clone, cfg, input_tx)
         }
         Err(e) => {
             error!("Failed to create terminal emulator: {}", e);

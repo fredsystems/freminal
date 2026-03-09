@@ -11,12 +11,13 @@ use std::sync::Arc;
 use crate::gui::colors::internal_color_to_egui;
 use anyhow::Result;
 use conv2::ConvUtil;
+use crossbeam_channel::Sender;
 use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
 use fonts::get_char_size;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
 use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::FreminalPtyInputOutput;
+use freminal_terminal_emulator::io::{FreminalPtyInputOutput, InputEvent};
 use parking_lot::FairMutex;
 use terminal::FreminalTerminalWidget;
 use view_state::ViewState;
@@ -49,6 +50,10 @@ struct FreminalGui {
     view_state: ViewState,
     window_title_stack: Vec<String>,
     _config: Config,
+    /// Channel sender used to deliver resize events to the PTY consumer thread
+    /// without holding the emulator lock.  Created once in `main.rs` and
+    /// passed through `run()` → `FreminalGui::new()`.
+    input_tx: Sender<InputEvent>,
 }
 
 impl FreminalGui {
@@ -56,6 +61,7 @@ impl FreminalGui {
         cc: &eframe::CreationContext<'_>,
         terminal_emulator: Arc<FairMutex<TerminalEmulator<FreminalPtyInputOutput>>>,
         config: Config,
+        input_tx: Sender<InputEvent>,
     ) -> Self {
         set_egui_options(&cc.egui_ctx);
 
@@ -65,6 +71,7 @@ impl FreminalGui {
             view_state: ViewState::new(),
             window_title_stack: Vec::new(),
             _config: config,
+            input_tx,
         }
     }
 }
@@ -373,13 +380,26 @@ impl eframe::App for FreminalGui {
                 })
                 .max(1);
 
+            // Debounced resize: only send an InputEvent::Resize when the
+            // character-cell dimensions actually change.  This keeps the PTY
+            // consumer thread off the hot render path for the common case.
+            let new_size = (width_chars, height_chars);
+            if new_size != self.view_state.last_sent_size {
+                if let Err(e) = self.input_tx.send(InputEvent::Resize(
+                    width_chars,
+                    height_chars,
+                    font_width,
+                    font_height,
+                )) {
+                    error!("Failed to send resize event: {e}");
+                } else {
+                    self.view_state.last_sent_size = new_size;
+                }
+            }
+
             let t_wait = std::time::Instant::now();
             let mut lock = self.terminal_emulator.lock();
             waited = t_wait.elapsed();
-
-            if let Err(e) = lock.set_win_size(width_chars, height_chars, font_width, font_height) {
-                error!("failed to set window size {e}");
-            }
 
             let window_width = ctx.input(|i: &egui::InputState| i.content_rect());
 
@@ -452,13 +472,21 @@ impl eframe::App for FreminalGui {
 pub fn run(
     terminal_emulator: Arc<FairMutex<TerminalEmulator<FreminalPtyInputOutput>>>,
     config: Config,
+    input_tx: Sender<InputEvent>,
 ) -> Result<()> {
     let native_options = eframe::NativeOptions::default();
 
     match eframe::run_native(
         "Freminal",
         native_options,
-        Box::new(move |cc| Ok(Box::new(FreminalGui::new(cc, terminal_emulator, config)))),
+        Box::new(move |cc| {
+            Ok(Box::new(FreminalGui::new(
+                cc,
+                terminal_emulator,
+                config,
+                input_tx,
+            )))
+        }),
     ) {
         Ok(()) => Ok(()),
         Err(e) => Err(anyhow::anyhow!(e.to_string())),

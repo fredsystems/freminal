@@ -33,8 +33,12 @@ pub trait FreminalTermInputOutput {
 pub enum InputEvent {
     /// Raw bytes to write to the PTY (keyboard input).
     Key(Vec<u8>),
-    /// New terminal dimensions in character cells `(width, height)`.
-    Resize(usize, usize),
+    /// New terminal dimensions in character cells and font pixel size.
+    ///
+    /// Fields: `(width_chars, height_chars, font_pixel_width, font_pixel_height)`.
+    /// The pixel dimensions are needed by the PTY consumer thread to build the
+    /// correct `PtyWrite::Resize(FreminalTerminalSize { … })` payload.
+    Resize(usize, usize, usize, usize),
     /// Window focus gained (`true`) or lost (`false`).
     FocusChange(bool),
 }

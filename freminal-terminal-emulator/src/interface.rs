@@ -396,6 +396,39 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         Ok(())
     }
 
+    /// Handle a resize event delivered via the `InputEvent` channel.
+    ///
+    /// This is called by the PTY consumer thread (or, currently, the inline
+    /// `input_rx` receiver in `main.rs`) when the GUI detects a change in
+    /// terminal dimensions.  It updates the emulator's internal size and
+    /// forwards a `PtyWrite::Resize` to the PTY writer so the kernel's tty
+    /// layer sees the new window size.
+    ///
+    /// Unlike `set_win_size`, this method does not need to return `Result`
+    /// because send failures are logged rather than propagated — the caller
+    /// is on the consumer thread which has no caller to propagate to.
+    pub fn handle_resize_event(
+        &mut self,
+        width_chars: usize,
+        height_chars: usize,
+        font_pixel_width: usize,
+        font_pixel_height: usize,
+    ) {
+        self.internal.set_win_size(width_chars, height_chars);
+
+        if let Err(e) = self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
+            width: width_chars,
+            height: height_chars,
+            pixel_width: font_pixel_width,
+            pixel_height: font_pixel_height,
+        })) {
+            error!("Failed to send resize to PTY: {e}");
+        }
+
+        self.previous_pass_valid = false;
+        self.request_repaint();
+    }
+
     /// Write to the terminal
     ///
     /// # Errors

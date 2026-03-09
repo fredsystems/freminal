@@ -1364,6 +1364,7 @@ dependencies = [
  "anyhow",
  "conv2",
  "criterion",
+ "crossbeam-channel",
  "eframe",
  "egui",
  "fontdb",
