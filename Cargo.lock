@@ -1403,6 +1403,7 @@ dependencies = [
  "predicates",
  "proptest",
  "serde",
+ "tempfile",
  "test-log",
  "thiserror 2.0.18",
  "toml",

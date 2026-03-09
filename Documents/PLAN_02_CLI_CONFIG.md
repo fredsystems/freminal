@@ -83,7 +83,7 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.1 — Migrate CLI parsing to clap
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `freminal-common/src/args.rs`, `freminal-common/Cargo.toml`
 - **Details:**
   - Add `clap` with `derive` feature to `freminal-common` dependencies
@@ -107,7 +107,7 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.2 — Extend TOML config schema
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `freminal-common/src/config.rs`, `config_example.toml`
 - **Details:**
   - Add `ShellConfig { path: Option<String> }` section

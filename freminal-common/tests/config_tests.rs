@@ -1,0 +1,401 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
+use freminal_common::config::{Config, LoggingConfig, ScrollbackConfig, ShellConfig, load_config};
+use std::io::Write;
+use tempfile::NamedTempFile;
+
+/// Helper: write TOML content to a temp file and load it via `load_config`.
+fn load_from_toml(toml: &str) -> Result<Config, freminal_common::config::ConfigError> {
+    let mut file = NamedTempFile::new().expect("failed to create temp file");
+    file.write_all(toml.as_bytes())
+        .expect("failed to write temp file");
+    load_config(Some(file.path()))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Defaults
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn default_config_has_expected_values() {
+    let cfg = Config::default();
+    assert_eq!(cfg.version, 1);
+    assert!((cfg.font.size - 12.0).abs() < f32::EPSILON);
+    assert!(cfg.font.family.is_none());
+    assert!(cfg.cursor.blink);
+    assert_eq!(cfg.theme.name, "catppuccin-mocha");
+    assert!(cfg.shell.path.is_none());
+    assert!(!cfg.logging.write_to_file);
+    assert_eq!(cfg.scrollback.limit, 4000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Backward compatibility — old configs without new sections
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn v1_config_without_new_sections_loads_with_defaults() {
+    let toml = r#"
+        version = 1
+
+        [font]
+        family = "Fira Code"
+        size = 14.0
+
+        [cursor]
+        shape = "bar"
+        blink = false
+
+        [theme]
+        name = "gruvbox"
+    "#;
+
+    let cfg = load_from_toml(toml).expect("should parse v1 config");
+    assert_eq!(cfg.version, 1);
+    assert_eq!(cfg.font.family.as_deref(), Some("Fira Code"));
+    assert!((cfg.font.size - 14.0).abs() < f32::EPSILON);
+    assert!(!cfg.cursor.blink);
+    assert_eq!(cfg.theme.name, "gruvbox");
+
+    // New sections should fall back to defaults
+    assert!(cfg.shell.path.is_none());
+    assert!(!cfg.logging.write_to_file);
+    assert_eq!(cfg.scrollback.limit, 4000);
+}
+
+#[test]
+fn empty_config_file_loads_all_defaults() {
+    // An empty file should parse successfully and use all defaults.
+    let cfg = load_from_toml("").expect("empty config should parse");
+    // version defaults to 1 (valid)
+    assert_eq!(cfg.version, 1);
+    assert_eq!(cfg.scrollback.limit, 4000);
+    assert!(!cfg.logging.write_to_file);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Full config with all sections
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn full_config_with_all_sections_parses() {
+    let toml = r#"
+        version = 1
+
+        [font]
+        family = "JetBrains Mono"
+        size = 16.0
+
+        [cursor]
+        shape = "underline"
+        blink = true
+
+        [theme]
+        name = "dracula"
+
+        [shell]
+        path = "/bin/zsh"
+
+        [logging]
+        write_to_file = true
+
+        [scrollback]
+        limit = 10000
+    "#;
+
+    let cfg = load_from_toml(toml).expect("should parse full config");
+    assert_eq!(cfg.font.family.as_deref(), Some("JetBrains Mono"));
+    assert!((cfg.font.size - 16.0).abs() < f32::EPSILON);
+    assert!(cfg.cursor.blink);
+    assert_eq!(cfg.theme.name, "dracula");
+    assert_eq!(cfg.shell.path.as_deref(), Some("/bin/zsh"));
+    assert!(cfg.logging.write_to_file);
+    assert_eq!(cfg.scrollback.limit, 10000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Individual new sections
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn shell_section_parses_with_path() {
+    let toml = r#"
+        version = 1
+        [shell]
+        path = "/usr/local/bin/fish"
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse shell section");
+    assert_eq!(cfg.shell.path.as_deref(), Some("/usr/local/bin/fish"));
+}
+
+#[test]
+fn shell_section_without_path_defaults_to_none() {
+    let toml = r#"
+        version = 1
+        [shell]
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse empty shell section");
+    assert!(cfg.shell.path.is_none());
+}
+
+#[test]
+fn logging_section_write_to_file_true() {
+    let toml = r#"
+        version = 1
+        [logging]
+        write_to_file = true
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse logging section");
+    assert!(cfg.logging.write_to_file);
+}
+
+#[test]
+fn logging_section_write_to_file_false() {
+    let toml = r#"
+        version = 1
+        [logging]
+        write_to_file = false
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse logging section");
+    assert!(!cfg.logging.write_to_file);
+}
+
+#[test]
+fn scrollback_section_custom_limit() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 50000
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse scrollback section");
+    assert_eq!(cfg.scrollback.limit, 50000);
+}
+
+#[test]
+fn scrollback_section_minimum_valid_limit() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 1
+    "#;
+    let cfg = load_from_toml(toml).expect("should accept scrollback.limit=1");
+    assert_eq!(cfg.scrollback.limit, 1);
+}
+
+#[test]
+fn scrollback_section_maximum_valid_limit() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 100000
+    "#;
+    let cfg = load_from_toml(toml).expect("should accept scrollback.limit=100000");
+    assert_eq!(cfg.scrollback.limit, 100_000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Validation — scrollback
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn scrollback_limit_zero_is_rejected() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 0
+    "#;
+    let err = load_from_toml(toml).expect_err("limit=0 should fail validation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("scrollback.limit=0"),
+        "error should mention the bad value: {msg}"
+    );
+}
+
+#[test]
+fn scrollback_limit_too_large_is_rejected() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 100001
+    "#;
+    let err = load_from_toml(toml).expect_err("limit=100001 should fail validation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("scrollback.limit=100001"),
+        "error should mention the bad value: {msg}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Validation — existing checks still work
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn font_size_too_small_is_rejected() {
+    let toml = r#"
+        version = 1
+        [font]
+        size = 2.0
+    "#;
+    let err = load_from_toml(toml).expect_err("font.size=2.0 should fail validation");
+    let msg = err.to_string();
+    assert!(msg.contains("font.size=2"), "error: {msg}");
+}
+
+#[test]
+fn font_size_too_large_is_rejected() {
+    let toml = r#"
+        version = 1
+        [font]
+        size = 100.0
+    "#;
+    let err = load_from_toml(toml).expect_err("font.size=100.0 should fail validation");
+    let msg = err.to_string();
+    assert!(msg.contains("font.size=100"), "error: {msg}");
+}
+
+#[test]
+fn version_zero_is_rejected() {
+    let toml = r#"
+        version = 0
+    "#;
+    let err = load_from_toml(toml).expect_err("version=0 should fail validation");
+    let msg = err.to_string();
+    assert!(msg.contains("version must be >= 1"), "error: {msg}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Serialization round-trip (for future save_config support)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn config_serializes_to_valid_toml() {
+    let cfg = Config::default();
+    let toml_str = toml::to_string_pretty(&cfg).expect("should serialize to TOML");
+
+    // Deserialize it back
+    let deserialized: Config = toml::from_str(&toml_str).expect("serialized TOML should parse");
+    assert_eq!(deserialized.version, cfg.version);
+    assert!((deserialized.font.size - cfg.font.size).abs() < f32::EPSILON);
+    assert_eq!(deserialized.theme.name, cfg.theme.name);
+    assert_eq!(deserialized.scrollback.limit, cfg.scrollback.limit);
+    assert_eq!(
+        deserialized.logging.write_to_file,
+        cfg.logging.write_to_file
+    );
+    assert_eq!(deserialized.shell.path, cfg.shell.path);
+}
+
+#[test]
+fn config_with_custom_values_round_trips() {
+    let mut cfg = Config::default();
+    cfg.shell.path = Some("/bin/fish".to_string());
+    cfg.logging.write_to_file = true;
+    cfg.scrollback.limit = 8000;
+    cfg.font.family = Some("Hack".to_string());
+
+    let toml_str = toml::to_string_pretty(&cfg).expect("should serialize");
+    let deserialized: Config = toml::from_str(&toml_str).expect("should deserialize");
+
+    assert_eq!(deserialized.shell.path.as_deref(), Some("/bin/fish"));
+    assert!(deserialized.logging.write_to_file);
+    assert_eq!(deserialized.scrollback.limit, 8000);
+    assert_eq!(deserialized.font.family.as_deref(), Some("Hack"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Default impls for section structs
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn shell_config_default() {
+    let s = ShellConfig::default();
+    assert!(s.path.is_none());
+}
+
+#[test]
+fn logging_config_default() {
+    let l = LoggingConfig::default();
+    assert!(!l.write_to_file);
+}
+
+#[test]
+fn scrollback_config_default() {
+    let s = ScrollbackConfig::default();
+    assert_eq!(s.limit, 4000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Partial configs — only some new sections present
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn config_with_only_shell_section_uses_defaults_for_rest() {
+    let toml = r#"
+        version = 1
+        [shell]
+        path = "/bin/bash"
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse");
+    assert_eq!(cfg.shell.path.as_deref(), Some("/bin/bash"));
+    assert!(!cfg.logging.write_to_file);
+    assert_eq!(cfg.scrollback.limit, 4000);
+}
+
+#[test]
+fn config_with_only_logging_section_uses_defaults_for_rest() {
+    let toml = r#"
+        version = 1
+        [logging]
+        write_to_file = true
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse");
+    assert!(cfg.logging.write_to_file);
+    assert!(cfg.shell.path.is_none());
+    assert_eq!(cfg.scrollback.limit, 4000);
+}
+
+#[test]
+fn config_with_only_scrollback_section_uses_defaults_for_rest() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 500
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse");
+    assert_eq!(cfg.scrollback.limit, 500);
+    assert!(cfg.shell.path.is_none());
+    assert!(!cfg.logging.write_to_file);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TOML parse errors for invalid types in new sections
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn scrollback_limit_string_is_parse_error() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = "lots"
+    "#;
+    let err = load_from_toml(toml).expect_err("string limit should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("TOML parse error"), "error: {msg}");
+}
+
+#[test]
+fn logging_write_to_file_string_is_parse_error() {
+    let toml = r#"
+        version = 1
+        [logging]
+        write_to_file = "yes"
+    "#;
+    let err = load_from_toml(toml).expect_err("string bool should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("TOML parse error"), "error: {msg}");
+}

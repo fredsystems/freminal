@@ -21,6 +21,9 @@ pub struct Config {
     pub font: FontConfig,
     pub cursor: CursorConfig,
     pub theme: ThemeConfig,
+    pub shell: ShellConfig,
+    pub logging: LoggingConfig,
+    pub scrollback: ScrollbackConfig,
 }
 
 impl Default for Config {
@@ -30,6 +33,9 @@ impl Default for Config {
             font: FontConfig::default(),
             cursor: CursorConfig::default(),
             theme: ThemeConfig::default(),
+            shell: ShellConfig::default(),
+            logging: LoggingConfig::default(),
+            scrollback: ScrollbackConfig::default(),
         }
     }
 }
@@ -100,6 +106,43 @@ impl Default for ThemeConfig {
 }
 
 /// ---------------------------------------------------------------------------------------------
+///  Shell
+/// ---------------------------------------------------------------------------------------------
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellConfig {
+    /// Default shell path. When `None`, the system default shell is used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// ---------------------------------------------------------------------------------------------
+///  Logging
+/// ---------------------------------------------------------------------------------------------
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    /// Whether to write logs to a file. Equivalent to `--write-logs-to-file`.
+    pub write_to_file: bool,
+}
+
+/// ---------------------------------------------------------------------------------------------
+///  Scrollback
+/// ---------------------------------------------------------------------------------------------
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScrollbackConfig {
+    /// Maximum number of scrollback lines. Must be in the range `1..=100_000`.
+    pub limit: usize,
+}
+
+impl Default for ScrollbackConfig {
+    fn default() -> Self {
+        Self { limit: 4000 }
+    }
+}
+
+/// ---------------------------------------------------------------------------------------------
 ///  Partial config (for layered merging)
 /// ---------------------------------------------------------------------------------------------
 #[derive(Debug, Default, Deserialize)]
@@ -109,6 +152,9 @@ struct ConfigPartial {
     pub font: Option<FontConfig>,
     pub cursor: Option<CursorConfig>,
     pub theme: Option<ThemeConfig>,
+    pub shell: Option<ShellConfig>,
+    pub logging: Option<LoggingConfig>,
+    pub scrollback: Option<ScrollbackConfig>,
 }
 
 impl Config {
@@ -125,6 +171,15 @@ impl Config {
         if let Some(theme) = partial.theme {
             self.theme = theme;
         }
+        if let Some(shell) = partial.shell {
+            self.shell = shell;
+        }
+        if let Some(logging) = partial.logging {
+            self.logging = logging;
+        }
+        if let Some(scrollback) = partial.scrollback {
+            self.scrollback = scrollback;
+        }
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -137,6 +192,13 @@ impl Config {
 
         if self.version == 0 {
             return Err(ConfigError::Validation("version must be >= 1".to_string()));
+        }
+
+        if self.scrollback.limit == 0 || self.scrollback.limit > 100_000 {
+            return Err(ConfigError::Validation(format!(
+                "scrollback.limit={} out of allowed range (1–100000)",
+                self.scrollback.limit
+            )));
         }
 
         Ok(())
