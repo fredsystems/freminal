@@ -564,7 +564,7 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
 
 ---
 
-- [ ] **Task 7 — Move resize out of the render loop**
+- [x] **Task 7 — Move resize out of the render loop**
   - In `FreminalGui::update()` in `freminal/src/gui/mod.rs`, replace the
     `lock.set_win_size(width_chars, height_chars, …)` call with a comparison against
     `ViewState::last_sent_size`.
@@ -577,6 +577,25 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
   - Remove `set_win_size` from the render-loop lock-held path entirely.
   - **Verify:** `cargo test --all` passes. Resizing the terminal window causes the PTY to receive
     the correct new dimensions.
+  - ✅ **Completed 2026-03-09.** `InputEvent::Resize` extended to carry four fields
+    `(width_chars, height_chars, font_pixel_width, font_pixel_height)` so the consumer
+    thread has everything it needs to build a correct `PtyWrite::Resize` payload without
+    touching the GUI. Added `TerminalEmulator::handle_resize_event(w, h, pw, ph)` which
+    calls `internal.set_win_size`, sends `PtyWrite::Resize`, clears `previous_pass_valid`,
+    and requests a repaint — all the work that was previously done inside the GUI lock by
+    `set_win_size`. Added `crossbeam-channel` workspace dep to `freminal/Cargo.toml`.
+    In `main.rs`: created an `unbounded::<InputEvent>()` channel pair; passed `input_tx`
+    to `gui::run()`; in the consumer thread loop, drained pending `InputEvent`s with
+    `try_recv()` before each blocking `rx.recv()` — `Resize` events are dispatched to
+    `handle_resize_event()` under the lock; `Key`/`FocusChange` are reserved stubs for
+    Task 8. In `gui/mod.rs`: added `input_tx: Sender<InputEvent>` field to `FreminalGui`,
+    threaded through `new()` and `run()`; in `update()` computed the new size, compared
+    to `view_state.last_sent_size`, sent `InputEvent::Resize` only on change and updated
+    `last_sent_size`; removed `lock.set_win_size()` from the lock-held path entirely.
+    Committed as e366739.
+    `cargo test --all`: 498 passed, 0 failed.
+    `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+    `cargo-machete`: no unused dependencies.
 
 ---
 
@@ -922,7 +941,7 @@ refactor is stable.
 - [x] Task 4 complete
 - [x] Task 5 complete
 - [x] Task 6 complete
-- [ ] Task 7 complete
+- [x] Task 7 complete
 - [ ] Task 8 complete (`FairMutex` eliminated)
 - [ ] Task 9 complete
 - [ ] Task 10 complete
