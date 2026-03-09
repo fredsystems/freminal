@@ -599,7 +599,7 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
 
 ---
 
-- [ ] **Task 8 — Move the PTY consumer thread off the `FairMutex` (central step)**
+- [x] **Task 8 — Move the PTY consumer thread off the `FairMutex` (central step)**
 
   This is the step where the `FairMutex` is eliminated. All prior tasks have been removing
   mutations from the GUI side to make this step safe.
@@ -629,6 +629,51 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
     `self.arc_swap.load()`.
   - **Verify:** `cargo test --all` passes. The application runs. PTY output appears. Keyboard
     input works. Window resize works.
+  - ✅ **Completed 2026-03-09.** `Arc<FairMutex<TerminalEmulator>>` fully eliminated.
+    `TerminalEmulator` is now owned exclusively by the PTY consumer thread; no lock is
+    taken on the GUI render path.
+
+    Key changes:
+    - `main.rs`: created `Arc<ArcSwap<TerminalSnapshot>>` (shared via `arc_swap_gui`);
+      cloned `pty_write_tx` from emulator via `clone_write_tx()` before moving emulator
+      into the thread; created `(window_cmd_tx, window_cmd_rx)` pair; replaced the
+      previous `try_recv` + blocking `recv` loop with `crossbeam::select!` over
+      `pty_read_rx` and `input_rx`; after each event drains `emulator.internal.window_commands`,
+      classifies each as `WindowCommand::Viewport` or `WindowCommand::Report`, sends via
+      `window_cmd_tx`; then calls `emulator.build_snapshot()` and stores via `arc_swap.store()`.
+    - `interface.rs`: added `TerminalEmulator::clone_write_tx()` to expose the write
+      channel before the emulator is moved; added `write_raw_bytes(&[u8])` to forward
+      `InputEvent::Key` bytes as `PtyWrite::Write` without re-encoding through
+      `TerminalInput`; updated `build_snapshot()` to include `bracketed_paste`,
+      `mouse_tracking`, `repeat_keys`, `cursor_key_app_mode`, and `skip_draw` fields
+      so the GUI can handle input and rendering entirely from the snapshot.
+    - `snapshot.rs`: added `bracketed_paste: RlBracket`, `mouse_tracking: MouseTrack`,
+      `repeat_keys: bool`, `cursor_key_app_mode: bool`, `skip_draw: bool` to
+      `TerminalSnapshot`; added `TerminalSnapshot::empty()` as the initial value for
+      the `ArcSwap` before the PTY thread has produced real data.
+    - `gui/mod.rs`: `FreminalGui` now holds `Arc<ArcSwap<TerminalSnapshot>>`,
+      `Sender<InputEvent>`, `Sender<PtyWrite>`, and `Receiver<WindowCommand>` — no
+      `FairMutex` anywhere; `update()` loads snapshot with `arc_swap.load()` (single
+      atomic pointer load, no blocking); `handle_window_manipulation` rewritten to drain
+      from `window_cmd_rx` via non-blocking `try_recv()`; `Report*` variants now build
+      escape strings inline and send via `pty_write_tx` rather than calling
+      `terminal_emulator.internal.report_*()`.
+    - `gui/terminal.rs`: `show()` signature changed to accept `&TerminalSnapshot`,
+      `&Sender<InputEvent>`, and `&Sender<PtyWrite>` — generic `Io` type parameter
+      removed; `write_input_to_terminal` uses snapshot fields for modes
+      (`bracketed_paste`, `mouse_tracking`, `repeat_keys`); keyboard input converted
+      via `to_payload(cursor_key_app_mode, cursor_key_app_mode)` and sent as
+      `InputEvent::Key(bytes)`; focus events sent as `InputEvent::FocusChange`;
+      `render_terminal_output` takes `&TerminalSnapshot` and reads `visible_chars` /
+      `visible_tags` directly.
+    - `freminal/Cargo.toml`: added `arc-swap.workspace = true`; removed `parking_lot`
+      (no longer needed now that `FairMutex` is gone).
+
+    Committed as 6e89e1a.
+    `cargo test --all`: 498 passed, 0 failed.
+    `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+    `cargo-machete`: no unused dependencies.
+    Pre-commit hooks (clippy, rustfmt, xtask-check, codespell, etc.): all passed.
 
 ---
 
@@ -942,7 +987,7 @@ refactor is stable.
 - [x] Task 5 complete
 - [x] Task 6 complete
 - [x] Task 7 complete
-- [ ] Task 8 complete (`FairMutex` eliminated)
+- [x] Task 8 complete (`FairMutex` eliminated)
 - [ ] Task 9 complete
 - [ ] Task 10 complete
 - [ ] Task 11 complete (dead code deleted, clippy clean)
