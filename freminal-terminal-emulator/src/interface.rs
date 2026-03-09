@@ -4,10 +4,12 @@
 // https://opensource.org/licenses/MIT.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
+use crate::snapshot::TerminalSnapshot;
 use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, unbounded};
@@ -438,5 +440,45 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
 
     pub const fn show_cursor(&mut self) -> bool {
         self.internal.show_cursor()
+    }
+
+    /// Build a point-in-time snapshot of the terminal state.
+    ///
+    /// This is cheap to call: the visible content is flattened here on the
+    /// PTY thread so the GUI render path never has to do it.  The raw rows are
+    /// wrapped in an `Arc` so the GUI can inspect scrollback without a copy.
+    ///
+    /// `content_changed` is hardcoded `true` for now; a future task will wire
+    /// up proper dirty tracking.
+    #[must_use]
+    pub fn build_snapshot(&mut self) -> TerminalSnapshot {
+        // Extract handler-derived fields first (immutable borrow of handler).
+        let (term_width, term_height) = self.internal.handler.get_win_size();
+        let total_rows = self.internal.handler.buffer().get_rows().len();
+        let rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
+        let is_alternate_screen = self.internal.handler.is_alternate_screen();
+
+        // Now call the &mut self methods on internal.
+        let (chars, tags) = self.internal.data_and_format_data_for_gui();
+        let cursor_pos = self.internal.cursor_pos();
+        let show_cursor = self.internal.show_cursor();
+        let cursor_visual_style = self.internal.get_cursor_visual_style();
+        let is_normal_display = self.internal.is_normal_display();
+
+        TerminalSnapshot {
+            visible_chars: chars.visible,
+            visible_tags: tags.visible,
+            rows,
+            total_rows,
+            height: term_height,
+            cursor_pos,
+            show_cursor,
+            cursor_visual_style,
+            is_alternate_screen,
+            is_normal_display,
+            term_width,
+            term_height,
+            content_changed: true,
+        }
     }
 }

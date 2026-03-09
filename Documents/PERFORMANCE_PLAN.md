@@ -395,7 +395,7 @@ No step should leave the tree in a state where `cargo test --all` fails.
 
 ---
 
-- [ ] **Task 1 — Add `arc-swap` dependency and define `TerminalSnapshot`**
+- [x] **Task 1 — Add `arc-swap` dependency and define `TerminalSnapshot`**
   - Add `arc-swap` to the workspace `Cargo.toml` and to `freminal-terminal-emulator/Cargo.toml`.
   - Create `freminal-terminal-emulator/src/snapshot.rs` and define the `TerminalSnapshot` struct
     exactly as specified in Section 4.1.
@@ -405,6 +405,15 @@ No step should leave the tree in a state where `cargo test --all` fails.
     fields. `content_changed` can be hardcoded `true` for now.
   - No existing behaviour changes. No call sites updated yet.
   - **Verify:** `cargo test --all` passes. `cargo build --all` passes.
+  - ✅ **Completed 2026-03-09.** Added `arc-swap = "1.7.1"` to workspace deps and
+    `arc-swap.workspace = true` to `freminal-terminal-emulator/Cargo.toml`. Created
+    `freminal-terminal-emulator/src/snapshot.rs` with `TerminalSnapshot` matching the Section 4.1
+    spec exactly (plus `#[allow(clippy::struct_excessive_bools)]` for the four semantic flags).
+    Added `pub mod snapshot;` to `lib.rs`. Added `build_snapshot(&mut self) -> TerminalSnapshot`
+    to `TerminalEmulator` in `interface.rs`; it extracts handler-derived fields first (immutable
+    borrow), then calls the `&mut self` methods on `internal`, and assembles the snapshot with
+    `content_changed: true` hardcoded. `cargo test --all` — 237 tests passed, 0 failed.
+    `cargo build --all` — clean. No clippy warnings.
 
 ---
 
@@ -808,7 +817,7 @@ refactor is stable.
 ## 11. Overall Progress
 
 - [ ] Document reviewed and agreed by user
-- [ ] Task 1 complete
+- [x] Task 1 complete
 - [ ] Task 2 complete
 - [ ] Task 3 complete (benchmarks written and baselined)
 - [ ] Task 4 complete

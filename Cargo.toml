@@ -32,6 +32,7 @@ ignored = ["vergen"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+arc-swap = "1.7.1"
 cargo_metadata = "0.23.1"
 clap = { version = "4.5.60", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["cargo_metadata"] }
