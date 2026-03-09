@@ -29,7 +29,7 @@ use crossbeam_channel::unbounded;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
-use std::{process, sync::Arc};
+use std::sync::Arc;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -44,15 +44,15 @@ pub mod gui;
 
 use freminal_common::{args::Args, config::load_config};
 
+use clap::Parser;
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     // use env for filtering
     // example
     // RUST_LOG=none,freminal=debug cargo run
 
-    let args = Args::parse(std::env::args()).unwrap_or_else(|_| {
-        process::exit(1);
-    });
+    let args = Args::parse();
 
     let env_filter = if args.show_all_debug {
         EnvFilter::builder()
@@ -136,7 +136,7 @@ fn main() {
 
     info!("Starting freminal");
 
-    let cfg = match load_config(None) {
+    let cfg = match load_config(args.config.as_deref()) {
         Ok(cfg) => cfg,
         Err(err) => {
             error!("Failed to load config: {:#}", err);

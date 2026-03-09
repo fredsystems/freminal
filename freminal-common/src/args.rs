@@ -3,114 +3,41 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use anyhow::Result;
+use std::path::PathBuf;
 
+use clap::Parser;
+
+/// Freminal — a modern terminal emulator written in Rust
+#[derive(Parser, Debug)]
+#[command(name = "freminal", version, about)]
 pub struct Args {
+    /// Path to write session recordings to
+    #[arg(long = "recording-path")]
     pub recording: Option<String>,
+
+    /// Shell to run (overrides config file and default shell)
+    #[arg(long)]
     pub shell: Option<String>,
+
+    /// Show all debug output (disables default log filtering)
+    #[arg(long = "show-all-debug")]
     pub show_all_debug: bool,
-    pub write_logs_to_file: bool,
-}
 
-impl Args {
-    /// Parse the arguments
+    /// Write logs to a file in the current directory.
     ///
-    /// # Errors
-    /// Will return an error if the arguments are invalid
-    pub fn parse<It: Iterator<Item = String>>(mut it: It) -> Result<Self> {
-        trace!("Parsing args");
+    /// Accepts `--write-logs-to-file=true` or `--write-logs-to-file=false`.
+    /// Defaults to true in debug builds and false in release builds.
+    #[arg(
+        long = "write-logs-to-file",
+        value_name = "BOOL",
+        default_value_t = cfg!(debug_assertions),
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+    )]
+    pub write_logs_to_file: bool,
 
-        let program_name = it.next();
-        let mut recording_path = None;
-        let mut shell = None;
-        let mut error = false;
-        let mut show_all_debug = false;
-        #[cfg(debug_assertions)]
-        let mut write_logs_to_file = true;
-        #[cfg(not(debug_assertions))]
-        let mut write_logs_to_file = false;
-
-        while let Some(arg) = it.next() {
-            match arg {
-                arg if arg.as_str() == "--recording-path" => {
-                    recording_path = it.next().map_or_else(
-                        || {
-                            println!("Missing argument for --recording-path");
-                            Self::help(program_name.as_deref());
-                            error = true;
-                            None
-                        },
-                        Some,
-                    );
-                }
-                arg if arg.as_str() == "--shell" => {
-                    shell = it.next().map_or_else(
-                        || {
-                            println!("Missing argument for --shell");
-                            Self::help(program_name.as_deref());
-                            error = true;
-                            None
-                        },
-                        Some,
-                    );
-                }
-                arg if arg.as_str() == "--help" => Self::help(program_name.as_deref()),
-                arg if arg.as_str() == "--show-all-debug" => show_all_debug = true,
-                arg if arg.as_str().contains("--write-logs-to-file") => {
-                    let mut internal_error = false;
-                    write_logs_to_file = arg.split('=').nth(1).map_or_else(
-                        || {
-                            println!("Missing argument for --write-logs-to-file");
-                            Self::help(program_name.as_deref());
-                            internal_error = true;
-                            false
-                        },
-                        |val| {
-                            val.parse().unwrap_or_else(|_| {
-                                println!("Invalid argument for --write-logs-to-file");
-                                Self::help(program_name.as_deref());
-                                error = true;
-                                false
-                            })
-                        },
-                    );
-
-                    if internal_error {
-                        error = true;
-                    }
-                }
-                _ => {
-                    println!("Invalid argument {arg}");
-                    Self::help(program_name.as_deref());
-                    error = true;
-                }
-            }
-        }
-
-        if error {
-            return Err(anyhow::anyhow!("Invalid arguments"));
-        }
-
-        Ok(Self {
-            recording: recording_path,
-            shell,
-            show_all_debug,
-            write_logs_to_file,
-        })
-    }
-
-    fn help(program_name: Option<&str>) {
-        trace!("Showing help");
-
-        let program_name = program_name.unwrap_or("freminal");
-        println!(
-            "\
-                 Usage:\n\
-                 {program_name} [ARGS]\n\
-                 \n\
-                 Args:\n\
-                    --recording-path: Optional, where to output recordings to\n--shell: Optional, shell to run\n--help: Show this help message\n--write-logs-to-file=[true/false]\
-                 "
-        );
-    }
+    /// Path to a TOML configuration file (overrides default config locations)
+    #[arg(long = "config")]
+    pub config: Option<PathBuf>,
 }

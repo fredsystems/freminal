@@ -17,6 +17,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 tracing.workspace = true
 conv2.workspace = true
 portable-pty.workspace = true
