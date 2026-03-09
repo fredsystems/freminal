@@ -23,7 +23,7 @@ use super::csi_commands::{
     il::ansi_parser_inner_csi_finished_set_position_l,
     report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
     send_device_attributes::ansi_parser_inner_csi_finished_send_da,
-    sgr::ansi_parser_inner_csi_finished_sgr_ansi,
+    sgr::ansi_parser_inner_csi_finished_sgr_ansi, vpa::ansi_parser_inner_csi_finished_vpa,
 };
 use crate::ansi_components::tracer::SequenceTracer;
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
@@ -222,6 +222,9 @@ impl AnsiCsiParser {
                     return ansi_parser_inner_csi_finished_set_position_q(&self.params, output);
                 }
                 ansi_parser_inner_csi_finished_report_version_q(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'd') => {
+                ansi_parser_inner_csi_finished_vpa(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'r') => {
                 ansi_parser_inner_csi_set_top_and_bottom_margins(&self.params, output)

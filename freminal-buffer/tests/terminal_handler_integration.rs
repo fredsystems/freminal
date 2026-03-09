@@ -1618,3 +1618,125 @@ fn decawm_mode_dispatch() {
         "wrap state must not change after a Query mode"
     );
 }
+
+// ── VPA (ESC [ n d) – Vertical Position Absolute ──────────────────────────────
+
+#[test]
+fn vpa_moves_cursor_to_correct_row() {
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    // ESC[42d should place cursor on row 41 (0-based) without touching x.
+    let mut handler = TerminalHandler::new(147, 43);
+
+    // Position cursor at column 10 (1-based → col 9 zero-based)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(10),
+        y: None,
+    }]);
+
+    // VPA to row 42 (1-based → screen row 41 zero-based)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: None,
+        y: Some(42),
+    }]);
+
+    let screen_pos = handler.cursor_pos();
+    assert_eq!(
+        screen_pos.y, 41,
+        "cursor should be on screen row 41 (0-based)"
+    );
+    assert_eq!(screen_pos.x, 9, "VPA must not change the column");
+}
+
+#[test]
+fn vpa_row_1_places_cursor_at_top() {
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move cursor somewhere first (1-based → col 4 / row 9 zero-based)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(5),
+        y: Some(10),
+    }]);
+
+    // VPA to row 1 (top of screen)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: None,
+        y: Some(1),
+    }]);
+
+    let screen_pos = handler.cursor_pos();
+    assert_eq!(screen_pos.y, 0, "VPA 1 should place cursor at top row");
+    assert_eq!(screen_pos.x, 4, "VPA must not change the column");
+}
+
+#[test]
+fn vpa_nano_bottom_bar_sequence() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+        terminal_output::TerminalOutput,
+    };
+
+    // Simulate nano's approach: switch to alt screen, set scroll region,
+    // clear, then use VPA to position the bottom status bar rows.
+    let mut handler = TerminalHandler::new(147, 43);
+
+    // Enter alternate screen
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Set scroll region rows 1..43 (DECSTBM ESC[1;43r → 0-based: top=0, bottom=42)
+    handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+        top_margin: 1,
+        bottom_margin: 43,
+    }]);
+
+    // Home + clear (ESC[H + ESC[2J)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(1),
+        y: Some(1),
+    }]);
+    handler.process_outputs(&[TerminalOutput::ClearDisplay]);
+
+    // Write title bar content at row 1 (CUP ESC[1;1H already done above)
+    handler.handle_data(b"  GNU nano 8.7.1  ");
+
+    // VPA to row 42 — nano's shortcut bar (1-based → screen row 41)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: None,
+        y: Some(42),
+    }]);
+
+    assert_eq!(
+        handler.cursor_pos().y,
+        41,
+        "nano's ESC[42d should land on screen row 41 (0-based)"
+    );
+
+    // VPA to row 43 — second shortcut bar row
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: None,
+        y: Some(43),
+    }]);
+
+    assert_eq!(
+        handler.cursor_pos().y,
+        42,
+        "nano's ESC[43d should land on screen row 42 (0-based)"
+    );
+
+    // VPA to row 2 — cursor should return near the top (content area)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: None,
+        y: Some(2),
+    }]);
+
+    assert_eq!(
+        handler.cursor_pos().y,
+        1,
+        "nano's ESC[2d should land on screen row 1 (0-based)"
+    );
+}

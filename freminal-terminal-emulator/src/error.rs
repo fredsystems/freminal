@@ -50,4 +50,6 @@ pub enum ParserFailures {
     UnhandledDACommand(String),
     #[error("Invalid request device name and version (XTVERSION) set position sequence: {0}")]
     UnhandledXTVERSIONCommand(String),
+    #[error("Invalid cursor (VPA) vertical position absolute sequence: {0}")]
+    UnhandledVPACommand(String),
 }
