@@ -29,6 +29,8 @@
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use freminal_terminal_emulator::interface::TerminalEmulator;
+use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+use std::sync::Arc;
 use std::time::Duration;
 
 // ---------------------------------------------------------------
@@ -234,6 +236,42 @@ fn bench_build_snapshot_after_feed(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_arcswap_roundtrip
+// ---------------------------------------------------------------
+fn bench_arcswap_roundtrip(c: &mut Criterion) {
+    use arc_swap::ArcSwap;
+
+    // Build a realistic snapshot to store/load.
+    let mut terminal = make_terminal();
+    let payload = ansi_heavy_payload(24, 80);
+    terminal.internal.handle_incoming_data(&payload);
+    let snap = terminal.build_snapshot();
+    let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
+        Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
+
+    let mut group = c.benchmark_group("render_terminal_text_arcswap");
+
+    // Measure store + load (the hot path that runs every PTY batch).
+    group.bench_function("store_and_load", |b| {
+        let snap_arc = Arc::new(snap.clone());
+        b.iter(|| {
+            arc_swap.store(Arc::clone(&snap_arc));
+            std::hint::black_box(arc_swap.load());
+        });
+    });
+
+    // Measure load-only (the GUI poll path).
+    group.bench_function("load_only", |b| {
+        arc_swap.store(Arc::new(snap.clone()));
+        b.iter(|| {
+            std::hint::black_box(arc_swap.load());
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -244,6 +282,7 @@ criterion_group!(
         bench_feed_data_ansi_heavy,
         bench_feed_data_bursty,
         bench_build_snapshot_after_feed,
+        bench_arcswap_roundtrip,
 );
 
 criterion_main!(benches);
