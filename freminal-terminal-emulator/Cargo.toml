@@ -17,6 +17,7 @@ categories.workspace = true
 anyhow.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
+freminal-buffer = { path = "../freminal-buffer" }
 freminal-common = { path = "../freminal-common" }
 thiserror.workspace = true
 tracing.workspace = true

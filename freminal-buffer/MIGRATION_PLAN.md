@@ -976,7 +976,7 @@ to `TerminalHandler`.
 
 ### Step 5.1 — Add `freminal-buffer` as a dependency; create parallel-run infrastructure
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 5.1 Why this step exists
 

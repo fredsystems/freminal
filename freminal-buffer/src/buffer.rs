@@ -16,6 +16,7 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
+#[derive(Debug)]
 pub struct Buffer {
     /// All rows in this buffer: scrollback + visible region.
     /// In the primary buffer, this grows until `scrollback_limit` is hit.

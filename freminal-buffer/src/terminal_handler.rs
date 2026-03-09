@@ -49,6 +49,7 @@ impl PtyWrite {
     }
 }
 
+#[derive(Debug)]
 pub struct TerminalHandler {
     buffer: Buffer,
     current_format: FormatTag,

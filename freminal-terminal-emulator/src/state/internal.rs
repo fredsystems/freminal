@@ -48,6 +48,9 @@ use crate::{
     //state::term_char::display_vec_tchar_as_string,
 };
 
+#[cfg(debug_assertions)]
+use freminal_buffer::terminal_handler::TerminalHandler as ShadowHandler;
+
 use super::{
     buffer::{TerminalBufferHolder, TerminalBufferSetWinSizeResponse},
     data::TerminalSections,
@@ -131,6 +134,12 @@ pub struct TerminalState {
     pub saved_cursor: Option<CursorState>,
     pub theme: Theme,
     pub cursor_visual_style: CursorVisualStyle,
+    /// Shadow handler running the new `freminal-buffer` implementation in
+    /// parallel with the old buffer. Present only in debug builds; used to
+    /// verify that the new buffer produces identical output before the old
+    /// buffer is removed.
+    #[cfg(debug_assertions)]
+    pub shadow_handler: ShadowHandler,
 }
 
 impl Default for TerminalState {
@@ -182,6 +191,8 @@ impl TerminalState {
             saved_cursor: None,
             theme: Theme::default(),
             cursor_visual_style: CursorVisualStyle::default(),
+            #[cfg(debug_assertions)]
+            shadow_handler: ShadowHandler::new(DEFAULT_WIDTH as usize, DEFAULT_HEIGHT as usize),
         }
     }
 
@@ -324,6 +335,9 @@ impl TerminalState {
             &current_buffer.cursor_state.pos,
         );
         self.get_current_buffer().cursor_state.pos = response.new_cursor_pos;
+
+        #[cfg(debug_assertions)]
+        self.shadow_handler.handle_resize(width, height);
 
         response
     }
@@ -1453,6 +1467,9 @@ impl TerminalState {
 
         // verify that the incoming data is utf-8
         let parsed = self.parser.push(&incoming);
+
+        #[cfg(debug_assertions)]
+        self.shadow_handler.process_outputs(&parsed);
 
         for segment in parsed {
             // if segment is not data, we want to print out the segment

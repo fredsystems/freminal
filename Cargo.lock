@@ -1407,6 +1407,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "eframe",
+ "freminal-buffer",
  "freminal-common",
  "portable-pty",
  "proptest",
