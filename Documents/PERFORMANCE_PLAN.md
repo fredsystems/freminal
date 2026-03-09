@@ -424,8 +424,8 @@ No step should leave the tree in a state where `cargo test --all` fails.
   - No call sites wired up yet — these are type definitions only.
   - **Verify:** `cargo test --all` passes. `cargo build --all` passes.
   - ✅ **Completed 2026-03-09.** Added `InputEvent { Key(Vec<u8>), Resize(usize, usize),
-    FocusChange(bool) }` and `WindowCommand { Viewport(WindowManipulation),
-    Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
+FocusChange(bool) }` and `WindowCommand { Viewport(WindowManipulation),
+Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
     `WindowManipulation` is referenced via its full path from `freminal-common`.
     No call sites wired up. `cargo build --all` clean, `cargo test --all` passed,
     no diagnostics.
@@ -487,7 +487,7 @@ No step should leave the tree in a state where `cargo test --all` fails.
     `handle_lf`; `scroll_offset > 0` guards removed from `insert_lines` and
     `delete_lines` (PTY always operates at live bottom). `max_scroll_offset()` made
     `pub`. All internal PTY-side callers pass `0`. `TerminalHandler::handle_scroll_back
-    / forward` now take and return offset; `handle_scroll_to_bottom` is a const fn.
+/ forward` now take and return offset; `handle_scroll_to_bottom` is a const fn.
     `TerminalState::scroll()` discards returned offsets temporarily (wired in Task 7/8).
     Created `freminal/src/gui/view_state.rs` with `ViewState` matching Section 4.5 spec.
     Added `pub mod view_state` to `gui/mod.rs`. Updated all tests (buffer unit tests,
@@ -496,7 +496,7 @@ No step should leave the tree in a state where `cargo test --all` fails.
 
 ---
 
-- [ ] **Task 5 — Move GUI-local fields off `TerminalState`**
+- [x] **Task 5 — Move GUI-local fields off `TerminalState`**
   - Remove the following fields from `TerminalState` in
     `freminal-terminal-emulator/src/state/internal.rs`:
     `mouse_position`, `window_focused`, `ctx`, `changed`.
@@ -510,6 +510,29 @@ No step should leave the tree in a state where `cargo test --all` fails.
     `ViewState` fields directly instead of going through the emulator. The emulator is still
     locked at this stage — the plumbing changes but the lock is not removed yet.
   - **Verify:** `cargo test --all` passes. The application compiles and runs.
+  - ✅ **Completed 2026-03-09.** Removed `mouse_position`, `window_focused`, `ctx`, `changed`
+    from `TerminalState` and their associated methods (`is_changed`, `set_state_changed`,
+    `clear_changed`, `set_ctx`, private `request_redraw`). Renamed `set_window_focused` →
+    `send_focus_event` to retain the focus-report escape-sequence logic without owning
+    `window_focused` state. Removed the `set_state_changed()` + `request_redraw()` tail
+    from `handle_incoming_data()` — signalling is now the `TerminalEmulator` wrapper's
+    responsibility. Added `changed: bool` field to `TerminalEmulator`; added
+    `handle_incoming_data()` wrapper that calls `internal.handle_incoming_data`, sets
+    `self.changed = true`, and calls `request_repaint()`. `needs_redraw()` reads
+    `self.changed` instead of `self.internal.is_changed()`. Removed `set_mouse_position*`,
+    `get_mouse_position`, `set_window_focused` from `TerminalEmulator`; `set_egui_ctx_if_missing`
+    no longer forwards ctx to `internal.set_ctx`. Added `view_state: ViewState` field to
+    `FreminalGui`; threaded `&mut self.view_state` into `terminal_widget.show()`. Added
+    `view_state: &mut ViewState` parameter to `show()` and `write_input_to_terminal()`;
+    `PointerGone`, `WindowFocused`, `PointerMoved` events now write directly to `ViewState`
+    fields; URL hover check reads `view_state.mouse_position`. Updated `main.rs` to call
+    `terminal.lock().handle_incoming_data(...)` through the wrapper. Also added
+    `#[allow(dead_code)]` to `gen_line_tchars` in `buffer_row_bench.rs` (unused under
+    `--all-features`) and added `arc-swap` to the `cargo-machete` ignore list in
+    `freminal-terminal-emulator/Cargo.toml` (wired in Task 8). Committed as 3ee252d.
+    `cargo test --all`: 498 tests passed, 0 failed.
+    `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+    `cargo-machete`: clean.
 
 ---
 
@@ -689,42 +712,42 @@ The goal is a suite that:
 
 **`freminal-buffer` (`buffer_row_bench.rs`) — inline 500 000-elem dataset:**
 
-| Benchmark                                                    | Time      | Throughput      |
-| ------------------------------------------------------------ | --------- | --------------- |
-| `buffer_insert_large_line/insert_full/500000`                | ~1.32 s   | ~378 Kelem/s    |
-| `buffer_insert_chunks/insert_chunks_1000/500`                | ~35.1 ms  | ~14.2 Melem/s   |
-| `buffer_resize/reflow_width/40`                              | ~1.35 s   | —               |
-| `buffer_resize/shrink_height/20`                             | ~1.33 s   | —               |
-| `softwrap_heavy/wrap_long_line_to_width_10`                  | ~361 µs   | —               |
-| `bench_visible_flatten/visible_200x50`                       | ~30.5 µs  | ~327 Melem/s    |
-| `bench_scrollback_flatten/scrollback_1024_rows`              | ~289 µs   | ~283 Melem/s    |
-| `bench_insert_with_color_changes/color_change_every_8_chars` | ~141 µs   | ~28.4 Melem/s   |
-| `bench_cursor_ops/cup_then_data_24x80`                       | ~61.0 µs  | ~31.5 Melem/s   |
-| `bench_lf_heavy/lf_4100_times`                               | ~3.89 ms  | ~1.05 Melem/s   |
-| `bench_erase_display/erase_to_end_of_display_80x24`          | ~22.8 µs  | —               |
+| Benchmark                                                    | Time     | Throughput    |
+| ------------------------------------------------------------ | -------- | ------------- |
+| `buffer_insert_large_line/insert_full/500000`                | ~1.32 s  | ~378 Kelem/s  |
+| `buffer_insert_chunks/insert_chunks_1000/500`                | ~35.1 ms | ~14.2 Melem/s |
+| `buffer_resize/reflow_width/40`                              | ~1.35 s  | —             |
+| `buffer_resize/shrink_height/20`                             | ~1.33 s  | —             |
+| `softwrap_heavy/wrap_long_line_to_width_10`                  | ~361 µs  | —             |
+| `bench_visible_flatten/visible_200x50`                       | ~30.5 µs | ~327 Melem/s  |
+| `bench_scrollback_flatten/scrollback_1024_rows`              | ~289 µs  | ~283 Melem/s  |
+| `bench_insert_with_color_changes/color_change_every_8_chars` | ~141 µs  | ~28.4 Melem/s |
+| `bench_cursor_ops/cup_then_data_24x80`                       | ~61.0 µs | ~31.5 Melem/s |
+| `bench_lf_heavy/lf_4100_times`                               | ~3.89 ms | ~1.05 Melem/s |
+| `bench_erase_display/erase_to_end_of_display_80x24`          | ~22.8 µs | —             |
 
 **`freminal-terminal-emulator` (`buffer_benches.rs`):**
 
-| Benchmark                                            | Time      | Throughput      |
-| ---------------------------------------------------- | --------- | --------------- |
-| `bench_parse_plain_text/parser_push/4096`            | ~9.74 µs  | ~401 MiB/s      |
-| `bench_parse_sgr_heavy/parser_push_sgr/4097`         | ~98.7 µs  | ~39.6 MiB/s     |
-| `bench_parse_cup_writes/parse_and_handle_80x24`      | ~118 µs   | ~16.8 MiB/s     |
-| `bench_parse_bursty/bursty_10_small_plus_1_large`    | ~278 µs   | ~14.2 MiB/s     |
-| `bench_handle_incoming_data/handle_incoming_data_4096` | ~276 µs | ~14.2 MiB/s     |
-| `bench_data_and_format_for_gui/flatten_80x24`        | ~5.81 µs  | ~330 Melem/s    |
-| `bench_build_snapshot/build_snapshot_80x24`          | ~16.1 µs  | ~119 Melem/s    |
+| Benchmark                                              | Time     | Throughput   |
+| ------------------------------------------------------ | -------- | ------------ |
+| `bench_parse_plain_text/parser_push/4096`              | ~9.74 µs | ~401 MiB/s   |
+| `bench_parse_sgr_heavy/parser_push_sgr/4097`           | ~98.7 µs | ~39.6 MiB/s  |
+| `bench_parse_cup_writes/parse_and_handle_80x24`        | ~118 µs  | ~16.8 MiB/s  |
+| `bench_parse_bursty/bursty_10_small_plus_1_large`      | ~278 µs  | ~14.2 MiB/s  |
+| `bench_handle_incoming_data/handle_incoming_data_4096` | ~276 µs  | ~14.2 MiB/s  |
+| `bench_data_and_format_for_gui/flatten_80x24`          | ~5.81 µs | ~330 Melem/s |
+| `bench_build_snapshot/build_snapshot_80x24`            | ~16.1 µs | ~119 Melem/s |
 
 **`freminal` (`render_loop_bench.rs`):**
 
-| Benchmark                                                          | Time      | Throughput    |
-| ------------------------------------------------------------------ | --------- | ------------- |
-| `render_terminal_text/feed_data_incremental/100_lines`             | ~383 µs   | ~12.9 MiB/s   |
-| `render_terminal_text/feed_data_incremental/1000_lines`            | ~5.94 ms  | ~8.35 MiB/s   |
-| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/24_lines`    | ~281 µs   | ~20.2 MiB/s   |
-| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/240_lines`   | ~2.43 ms  | ~23.5 MiB/s   |
-| `render_terminal_text_bursty/feed_data_bursty_5_rounds`            | ~1.46 ms  | ~13.9 MiB/s   |
-| `render_terminal_text_snapshot/build_snapshot_after_ansi_feed`     | ~47.3 µs  | ~40.6 Melem/s |
+| Benchmark                                                        | Time     | Throughput    |
+| ---------------------------------------------------------------- | -------- | ------------- |
+| `render_terminal_text/feed_data_incremental/100_lines`           | ~383 µs  | ~12.9 MiB/s   |
+| `render_terminal_text/feed_data_incremental/1000_lines`          | ~5.94 ms | ~8.35 MiB/s   |
+| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/24_lines`  | ~281 µs  | ~20.2 MiB/s   |
+| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/240_lines` | ~2.43 ms | ~23.5 MiB/s   |
+| `render_terminal_text_bursty/feed_data_bursty_5_rounds`          | ~1.46 ms | ~13.9 MiB/s   |
+| `render_terminal_text_snapshot/build_snapshot_after_ansi_feed`   | ~47.3 µs | ~40.6 Melem/s |
 
 **Post-refactor results (to be filled in after Task 12):**
 
@@ -881,8 +904,8 @@ refactor is stable.
 - [x] Task 1 complete
 - [x] Task 2 complete
 - [x] Task 3 complete (benchmarks written and baselined)
-- [ ] Task 4 complete
-- [ ] Task 5 complete
+- [x] Task 4 complete
+- [x] Task 5 complete
 - [ ] Task 6 complete
 - [ ] Task 7 complete
 - [ ] Task 8 complete (`FairMutex` eliminated)
