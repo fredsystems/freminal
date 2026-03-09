@@ -473,7 +473,7 @@ impl TerminalHandler {
     /// needed to render the terminal.
     #[must_use]
     pub fn data_and_format_data_for_gui(
-        &self,
+        &mut self,
     ) -> (
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,

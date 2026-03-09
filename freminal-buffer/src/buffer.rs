@@ -23,6 +23,11 @@ pub struct Buffer {
     /// In the alternate buffer, this always has exactly `height` rows.
     rows: Vec<Row>,
 
+    /// Per-row flat-representation cache.  Index matches `self.rows`.
+    /// `None` = dirty (must be re-flattened on next snapshot).
+    /// `Some((chars, tags))` = clean cached flat representation for that row.
+    row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+
     /// Width and height of the terminal grid.
     width: usize,
     height: usize,
@@ -82,6 +87,8 @@ pub struct Buffer {
 #[derive(Debug, Clone)]
 pub struct SavedPrimaryState {
     pub rows: Vec<Row>,
+    /// Per-row flat-representation cache saved alongside `rows`.
+    pub row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
     pub cursor: CursorState,
     pub scroll_offset: usize,
     pub scroll_region_top: usize,
@@ -100,9 +107,11 @@ impl Buffer {
         // blank — the GUI's stick_to_bottom would then display those trailing
         // blank rows instead of the actual content at the top.
         let rows = vec![Row::new(width)];
+        let row_cache = vec![None];
 
         Self {
             rows,
+            row_cache,
             width,
             height,
             cursor: CursorState::default(),
@@ -196,6 +205,15 @@ impl Buffer {
                 self.height
             );
         }
+
+        // Cache length must always match rows length.
+        debug_assert_eq!(
+            self.row_cache.len(),
+            self.rows.len(),
+            "row_cache length {} != rows length {}",
+            self.row_cache.len(),
+            self.rows.len()
+        );
     }
 
     // In release builds this is a no-op, so we can call it freely.
@@ -206,6 +224,7 @@ impl Buffer {
     fn push_row(&mut self, origin: RowOrigin, join: RowJoin) {
         let row = Row::new_with_origin(self.width, origin, join);
         self.rows.push(row);
+        self.row_cache.push(None);
     }
 
     #[must_use]
@@ -310,6 +329,7 @@ impl Buffer {
                     row.origin = RowOrigin::SoftWrap;
                     row.join = RowJoin::ContinueLogicalLine;
                     row.clear();
+                    self.row_cache[row_idx] = None;
                 }
 
                 self.cursor.pos.y = row_idx;
@@ -338,6 +358,7 @@ impl Buffer {
 
                 self.rows
                     .push(Row::new_with_origin(self.width, origin, join));
+                self.row_cache.push(None);
             }
 
             // clone tag here to avoid long-lived borrows of &self
@@ -392,6 +413,7 @@ impl Buffer {
                         row.origin = RowOrigin::SoftWrap;
                         row.join = RowJoin::ContinueLogicalLine;
                         row.clear();
+                        self.row_cache[row_idx] = None;
                     }
 
                     self.cursor.pos.y = row_idx;
@@ -612,6 +634,9 @@ impl Buffer {
 
         // 3) Install the new rows and update width
         self.rows = new_rows;
+        // All rows are freshly constructed (dirty=true by construction), so
+        // the entire cache is invalid.  Reset it to match the new row count.
+        self.row_cache = vec![None; self.rows.len()];
         self.width = new_width;
 
         // 4) Ensure cursor is in bounds (scroll_offset is always reset to 0 by the
@@ -640,6 +665,7 @@ impl Buffer {
             let grow = new_height - old_height;
             for _ in 0..grow {
                 self.rows.push(Row::new(self.width));
+                self.row_cache.push(None);
             }
         } else if new_height < old_height {
             // If cursor is above the bottom of the new visible window, clamp it.
@@ -707,8 +733,9 @@ impl Buffer {
         // out all their scrollback, snap them to live view.
         let adjusted_offset = scroll_offset.saturating_sub(overflow);
 
-        // --- Drop the oldest rows ---
+        // --- Drop the oldest rows (and their cache entries) ---
         self.rows.drain(0..overflow);
+        self.row_cache.drain(0..overflow);
 
         // --- Adjust cursor row index ---
         //
@@ -807,6 +834,7 @@ impl Buffer {
                             RowOrigin::HardBreak,
                             RowJoin::NewLogicalLine,
                         ));
+                        self.row_cache.push(None);
                     } else {
                         let row = &mut self.rows[self.cursor.pos.y];
                         if row.origin == RowOrigin::ScrollFill {
@@ -858,6 +886,7 @@ impl Buffer {
                             RowOrigin::HardBreak,
                             RowJoin::NewLogicalLine,
                         ));
+                        self.row_cache.push(None);
                         self.cursor.pos.y = self.rows.len() - 1;
                     }
                 }
@@ -1249,9 +1278,14 @@ impl Buffer {
         for row_idx in first..last {
             let next = self.rows[row_idx + 1].clone();
             self.rows[row_idx] = next;
+            // Rotate the cache entry in lockstep: a moved row keeps its cached
+            // flat representation (it hasn't changed content, only position).
+            self.row_cache[row_idx] = self.row_cache[row_idx + 1].take();
         }
 
         self.rows[last] = Row::new(self.width);
+        // New blank row at `last` — no cached representation yet.
+        self.row_cache[last] = None;
     }
 
     /// Scroll a contiguous vertical slice [first, last] DOWN by one line.
@@ -1267,9 +1301,13 @@ impl Buffer {
         for row_idx in (first + 1..=last).rev() {
             let prev = self.rows[row_idx - 1].clone();
             self.rows[row_idx] = prev;
+            // Rotate the cache entry in lockstep.
+            self.row_cache[row_idx] = self.row_cache[row_idx - 1].take();
         }
 
         self.rows[first] = Row::new(self.width);
+        // New blank row at `first` — no cached representation yet.
+        self.row_cache[first] = None;
     }
 
     // ----------------------------------------------------------
@@ -1325,11 +1363,13 @@ impl Buffer {
     }
 
     pub fn scroll_up(&mut self) {
-        // remove topmost row
+        // remove topmost row (and its cache entry)
         self.rows.remove(0);
+        self.row_cache.remove(0);
 
         // add a new empty row at the bottom
         self.rows.push(Row::new(self.width));
+        self.row_cache.push(None);
 
         // DO NOT move the cursor in alternate buffer
         if self.kind == BufferType::Primary {
@@ -1480,6 +1520,7 @@ impl Buffer {
         // Remove all scrollback rows (everything before visible window)
         if visible_start > 0 {
             self.rows.drain(0..visible_start);
+            self.row_cache.drain(0..visible_start);
 
             // Adjust cursor
             if self.cursor.pos.y >= visible_start {
@@ -1546,14 +1587,25 @@ impl Buffer {
     ///
     /// The returned `FormatTag` entries use `start`/`end` as half-open byte indices into
     /// the returned `Vec<TChar>`, matching the convention used by the old `FormatTracker`.
-    #[must_use]
     /// Convert visible rows (with the given `scroll_offset`) into flat
     /// `(Vec<TChar>, Vec<FormatTag>)` suitable for the GUI renderer.
     ///
     /// Pass `scroll_offset = 0` when calling from the PTY thread (which always
     /// operates at the live bottom).
-    pub fn visible_as_tchars_and_tags(&self, scroll_offset: usize) -> (Vec<TChar>, Vec<FormatTag>) {
-        Self::rows_as_tchars_and_tags(self.visible_rows(scroll_offset))
+    ///
+    /// Takes `&mut self` because it updates the per-row cache and clears dirty
+    /// flags on rows that are freshly flattened.
+    #[must_use]
+    pub fn visible_as_tchars_and_tags(
+        &mut self,
+        scroll_offset: usize,
+    ) -> (Vec<TChar>, Vec<FormatTag>) {
+        let visible_start = self.visible_window_start(scroll_offset);
+        let visible_end = (visible_start + self.height).min(self.rows.len());
+        Self::rows_as_tchars_and_tags_cached(
+            &mut self.rows[visible_start..visible_end],
+            &mut self.row_cache[visible_start..visible_end],
+        )
     }
 
     /// Flatten all scrollback rows (everything before the visible window) into
@@ -1562,13 +1614,13 @@ impl Buffer {
     ///
     /// Returns `(vec![], vec![])` for the alternate screen buffer, which never
     /// accumulates scrollback.
-    #[must_use]
+    ///
     /// Flatten all scrollback rows (everything before the visible window) into
     /// a linear `(Vec<TChar>, Vec<FormatTag>)` pair.
     ///
     /// Pass `scroll_offset = 0` when calling from the PTY thread.
     pub fn scrollback_as_tchars_and_tags(
-        &self,
+        &mut self,
         scroll_offset: usize,
     ) -> (Vec<TChar>, Vec<FormatTag>) {
         // Alternate buffer has no scrollback.
@@ -1583,56 +1635,78 @@ impl Buffer {
             return (vec![], vec![]);
         }
 
-        let scrollback_rows = &self.rows[..visible_start];
-        Self::rows_as_tchars_and_tags(scrollback_rows)
+        Self::rows_as_tchars_and_tags_cached(
+            &mut self.rows[..visible_start],
+            &mut self.row_cache[..visible_start],
+        )
     }
 
     /// Shared helper: flatten a slice of [`Row`]s into `(Vec<TChar>,
-    /// Vec<FormatTag>)`.  Used by both `visible_as_tchars_and_tags` and
-    /// `scrollback_as_tchars_and_tags` so the merge logic is never duplicated.
-    fn rows_as_tchars_and_tags(rows: &[Row]) -> (Vec<TChar>, Vec<FormatTag>) {
+    /// Vec<FormatTag>)`, using a per-row cache to skip rows that have not
+    /// changed since the last snapshot.
+    ///
+    /// For each row:
+    /// - If `row.dirty` or the cache entry is `None`, flatten the row, populate
+    ///   the cache entry, and call `row.mark_clean()`.
+    /// - Otherwise reuse the cached per-row `(chars, tags)` directly.
+    ///
+    /// Per-row tag offsets are stored relative to each row's own character
+    /// slice (starting at 0).  The merge step below re-computes global offsets
+    /// each time, so the cache never stores stale absolute positions.
+    fn rows_as_tchars_and_tags_cached(
+        rows: &mut [Row],
+        cache: &mut [Option<(Vec<TChar>, Vec<FormatTag>)>],
+    ) -> (Vec<TChar>, Vec<FormatTag>) {
+        // ── Step 1: ensure every row has an up-to-date cache entry ──────────
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
+            if row.dirty || entry.is_none() {
+                *entry = Some(Self::flatten_row(row));
+                row.mark_clean();
+            }
+        }
+
+        // ── Step 2: merge per-row results into the global flat vectors ───────
+        // Per-row tags have offsets relative to the start of that row's chars.
+        // We accumulate a running `global_offset` and re-base each tag.
+        let row_count = rows.len();
         let mut chars: Vec<TChar> = Vec::new();
         let mut tags: Vec<FormatTag> = Vec::new();
 
-        let row_count = rows.len();
+        for (row_idx, entry) in cache.iter().enumerate() {
+            // Step 1 populated every entry unconditionally, so `None` cannot
+            // occur here.  We use `if let` to satisfy the no-unwrap/expect rule;
+            // the `else` branch is unreachable in practice.
+            if let Some((row_chars, row_tags)) = entry.as_ref() {
+                let global_offset = chars.len();
 
-        for (row_idx, row) in rows.iter().enumerate() {
-            for cell in row.get_characters() {
-                // Skip wide-glyph continuation cells.
-                if cell.is_continuation() {
-                    continue;
-                }
+                // Append this row's characters, adjusting tag offsets.
+                for row_tag in row_tags {
+                    let rebased = FormatTag {
+                        start: global_offset + row_tag.start,
+                        end: global_offset + row_tag.end,
+                        colors: row_tag.colors.clone(),
+                        font_weight: row_tag.font_weight.clone(),
+                        font_decorations: row_tag.font_decorations.clone(),
+                        url: row_tag.url.clone(),
+                    };
 
-                let byte_pos = chars.len();
-                chars.push(cell.tchar().clone());
-
-                let cell_tag = cell.tag();
-                if let Some(last) = tags.last_mut() {
-                    if last.end == byte_pos && tags_same_format(last, cell_tag) {
-                        last.end += 1;
+                    // Merge with the previous tag when format is identical and
+                    // the ranges are contiguous (same logic as the original helper).
+                    if let Some(last) = tags.last_mut() {
+                        if last.end == rebased.start && tags_same_format(last, &rebased) {
+                            last.end = rebased.end;
+                        } else {
+                            tags.push(rebased);
+                        }
                     } else {
-                        tags.push(FormatTag {
-                            start: byte_pos,
-                            end: byte_pos + 1,
-                            colors: cell_tag.colors.clone(),
-                            font_weight: cell_tag.font_weight.clone(),
-                            font_decorations: cell_tag.font_decorations.clone(),
-                            url: cell_tag.url.clone(),
-                        });
+                        tags.push(rebased);
                     }
-                } else {
-                    tags.push(FormatTag {
-                        start: byte_pos,
-                        end: byte_pos + 1,
-                        colors: cell_tag.colors.clone(),
-                        font_weight: cell_tag.font_weight.clone(),
-                        font_decorations: cell_tag.font_decorations.clone(),
-                        url: cell_tag.url.clone(),
-                    });
                 }
+
+                chars.extend_from_slice(row_chars);
             }
 
-            // Append a NewLine after every row except the last.
+            // Append a NewLine separator after every row except the last.
             let is_last_row = row_idx + 1 == row_count;
             if !is_last_row {
                 let byte_pos = chars.len();
@@ -1670,6 +1744,62 @@ impl Buffer {
             });
         } else if let Some(last) = tags.last_mut() {
             last.end = chars.len();
+        }
+
+        (chars, tags)
+    }
+
+    /// Flatten a single [`Row`] into a `(Vec<TChar>, Vec<FormatTag>)` pair.
+    ///
+    /// Tag offsets are **row-relative** (start at 0 for the first character in
+    /// this row).  The caller is responsible for re-basing them into global
+    /// offsets when merging multiple rows.
+    fn flatten_row(row: &Row) -> (Vec<TChar>, Vec<FormatTag>) {
+        let mut chars: Vec<TChar> = Vec::new();
+        let mut tags: Vec<FormatTag> = Vec::new();
+
+        for cell in row.get_characters() {
+            // Skip wide-glyph continuation cells.
+            if cell.is_continuation() {
+                continue;
+            }
+
+            let byte_pos = chars.len();
+            chars.push(cell.tchar().clone());
+
+            let cell_tag = cell.tag();
+            if let Some(last) = tags.last_mut() {
+                if last.end == byte_pos && tags_same_format(last, cell_tag) {
+                    last.end += 1;
+                } else {
+                    tags.push(FormatTag {
+                        start: byte_pos,
+                        end: byte_pos + 1,
+                        colors: cell_tag.colors.clone(),
+                        font_weight: cell_tag.font_weight.clone(),
+                        font_decorations: cell_tag.font_decorations.clone(),
+                        url: cell_tag.url.clone(),
+                    });
+                }
+            } else {
+                tags.push(FormatTag {
+                    start: byte_pos,
+                    end: byte_pos + 1,
+                    colors: cell_tag.colors.clone(),
+                    font_weight: cell_tag.font_weight.clone(),
+                    font_decorations: cell_tag.font_decorations.clone(),
+                    url: cell_tag.url.clone(),
+                });
+            }
+        }
+
+        // Guarantee at least one tag even for an empty row.
+        if tags.is_empty() {
+            tags.push(FormatTag {
+                start: 0,
+                end: 0,
+                ..FormatTag::default()
+            });
         }
 
         (chars, tags)
@@ -1744,9 +1874,10 @@ impl Buffer {
             return;
         }
 
-        // Save primary state (rows + cursor + scroll_offset).
+        // Save primary state (rows + cursor + scroll_offset + cache).
         let saved = SavedPrimaryState {
             rows: self.rows.clone(),
+            row_cache: self.row_cache.clone(),
             cursor: self.cursor.clone(),
             scroll_offset,
             scroll_region_top: self.scroll_region_top,
@@ -1758,8 +1889,9 @@ impl Buffer {
         // Switch to alternate buffer.
         self.kind = BufferType::Alternate;
 
-        // Fresh screen: exactly `height` empty rows.
+        // Fresh screen: exactly `height` empty rows, all dirty (None cache entries).
         self.rows = vec![Row::new(self.width); self.height];
+        self.row_cache = vec![None; self.height];
 
         // Reset cursor for the alternate screen.
         self.cursor = CursorState::default();
@@ -1788,6 +1920,7 @@ impl Buffer {
             // Restore saved primary state.
             let restored_offset = saved.scroll_offset;
             self.rows = saved.rows;
+            self.row_cache = saved.row_cache;
             self.cursor = saved.cursor;
             self.scroll_region_top = saved.scroll_region_top;
             self.scroll_region_bottom = saved.scroll_region_bottom;
@@ -3121,6 +3254,7 @@ mod tests_gui_scroll {
         let mut b = Buffer::new(width, height);
         b.scrollback_limit = scrollback;
         b.rows = (0..n).map(|_| make_row(width)).collect();
+        b.row_cache = vec![None; b.rows.len()];
 
         // Put cursor at last row to begin
         b.cursor.pos.y = b.rows.len().saturating_sub(1);
@@ -3268,6 +3402,7 @@ mod tests_gui_resize {
         b.rows = (0..n)
             .map(|_| Row::new_with_origin(width, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
             .collect();
+        b.row_cache = vec![None; b.rows.len()];
 
         b.cursor.pos.y = b.rows.len().saturating_sub(1);
         b.cursor.pos.x = 0;
@@ -3801,7 +3936,7 @@ mod visible_as_tchars_and_tags_tests {
     fn empty_buffer_returns_single_default_tag() {
         // A freshly created buffer with no content written must return an empty
         // chars vec and exactly one default-format tag (start=0, end=usize::MAX).
-        let buf = Buffer::new(10, 5);
+        let mut buf = Buffer::new(10, 5);
         let (chars, tags) = buf.visible_as_tchars_and_tags(0);
 
         // Empty buffer: visible rows exist but all cells are blank/empty.
