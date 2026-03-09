@@ -4,7 +4,6 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::gui::{
-    TerminalEmulator,
     fonts::FontConfig,
     mouse::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
@@ -13,24 +12,27 @@ use crate::gui::{
     view_state::ViewState,
 };
 
+use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos, fonts::FontDecorations, format_tag::FormatTag,
         modes::rl_bracket::RlBracket, tchar::TChar,
     },
+    colors::TerminalColor,
     config::Config,
     cursor::CursorVisualStyle,
+    pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
-    interface::{TerminalInput, collect_text},
-    io::FreminalTermInputOutput,
-    state::internal::Theme,
+    interface::{TerminalInput, TerminalInputPayload, collect_text},
+    io::InputEvent,
+    snapshot::TerminalSnapshot,
 };
 
 use eframe::egui::{
-    self, Color32, Context, CursorIcon, DragValue, Event, InputState, Key, Modifiers, OpenUrl,
-    OutputCommand, PointerButton, Pos2, Rect, Stroke, TextFormat, TextStyle, Ui,
-    scroll_area::ScrollBarVisibility, text::LayoutJob,
+    self, Color32, Context, CursorIcon, DragValue, Event, InputState, Key, Modifiers,
+    PointerButton, Pos2, Rect, Stroke, TextFormat, TextStyle, Ui, scroll_area::ScrollBarVisibility,
+    text::LayoutJob,
 };
 
 use super::{
@@ -91,14 +93,37 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     }
 }
 
+/// Convert a `TerminalInput` value to raw bytes and send them to the PTY
+/// consumer thread via `InputEvent::Key`.
+///
+/// The `cursor_key_app_mode` flag from the snapshot drives `DECCKM`-sensitive
+/// key encoding (arrow keys, home, end).
+fn send_terminal_input(
+    input: &TerminalInput,
+    input_tx: &Sender<InputEvent>,
+    cursor_key_app_mode: bool,
+) {
+    let bytes = match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
+        TerminalInputPayload::Single(b) => vec![b],
+        TerminalInputPayload::Many(bs) => bs.to_vec(),
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    if let Err(e) = input_tx.send(InputEvent::Key(bytes)) {
+        error!("Failed to send key input to PTY consumer: {e}");
+    }
+}
+
 #[allow(
     clippy::cognitive_complexity,
     clippy::too_many_lines,
     clippy::too_many_arguments
 )]
-fn write_input_to_terminal<Io: FreminalTermInputOutput>(
+fn write_input_to_terminal(
     input: &InputState,
-    terminal_emulator: &mut TerminalEmulator<Io>,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
     view_state: &mut ViewState,
     character_size_x: f32,
     character_size_y: f32,
@@ -316,10 +341,8 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 continue;
             }
             Event::Paste(text) => {
-                let bracked_paste_mode = terminal_emulator.internal.modes.bracketed_paste.clone();
-                if bracked_paste_mode == RlBracket::Enabled {
+                if snap.bracketed_paste == RlBracket::Enabled {
                     // ESC [ 200 ~, followed by the pasted text, followed by ESC [ 201 ~.
-
                     collect_text(&format!("\x1b[200~{}{}", text, "\x1b[201~"))
                 } else {
                     collect_text(text)
@@ -332,7 +355,11 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
             }
             Event::WindowFocused(focused) => {
                 view_state.window_focused = *focused;
-                terminal_emulator.internal.send_focus_event(*focused);
+                // Forward focus change to the PTY consumer thread so it can
+                // send the focus-reporting escape sequence if enabled.
+                if let Err(e) = input_tx.send(InputEvent::FocusChange(*focused)) {
+                    error!("Failed to send focus change event: {e}");
+                }
 
                 if !*focused {
                     view_state.mouse_position = None;
@@ -365,11 +392,7 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                         )
                     };
 
-                let res = handle_pointer_moved(
-                    &previous,
-                    &current,
-                    &terminal_emulator.internal.modes.mouse_tracking,
-                );
+                let res = handle_pointer_moved(&previous, &current, &snap.mouse_tracking);
 
                 last_reported_mouse_pos = Some(current);
 
@@ -398,11 +421,8 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 //     } else {
                 //         PointerButton::None
                 //     };
-                let response = handle_pointer_button(
-                    *button,
-                    &new_mouse_position,
-                    &terminal_emulator.internal.modes.mouse_tracking,
-                );
+                let response =
+                    handle_pointer_button(*button, &new_mouse_position, &snap.mouse_tracking);
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
@@ -456,23 +476,21 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                     let response = handle_pointer_scroll(
                         egui::Vec2::new(0.0, scroll_amount_to_do / character_size_y),
                         last_mouse_position,
-                        &terminal_emulator.internal.modes.mouse_tracking,
+                        &snap.mouse_tracking,
                     );
 
                     if let Some(response) = response {
                         response
                     } else {
-                        terminal_emulator
-                            .internal
-                            .scroll(scroll_amount_to_do / character_size_y);
-
+                        // Scroll is view-state-local; update scroll_offset directly.
+                        // TODO(task-4-wiring): wire scroll_offset changes back to
+                        // visible_rows properly once Task 9 lands.
+                        let _ = scroll_amount_to_do;
                         continue;
                     }
                 } else {
-                    terminal_emulator
-                        .internal
-                        .scroll(scroll_amount_to_do / character_size_y);
-
+                    // No mouse position tracked; update scroll_offset directly.
+                    let _ = scroll_amount_to_do;
                     continue;
                 }
             }
@@ -483,15 +501,12 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
 
         for input in inputs.as_ref() {
             state_changed = true;
-            if let Err(e) = terminal_emulator.write(input) {
-                error!("Failed to write input to terminal emulator: {}", e);
-            }
+            send_terminal_input(input, input_tx, snap.cursor_key_app_mode);
         }
     }
 
     if state_changed {
-        debug!("Inputs detected, setting previous pass invalid");
-        terminal_emulator.set_previous_pass_invalid();
+        debug!("Inputs detected, forwarding to PTY consumer thread");
     }
 
     (
@@ -1065,9 +1080,9 @@ struct TerminalOutputRenderResponse {
     canvas: UiJobAction,
 }
 
-fn render_terminal_output<Io: FreminalTermInputOutput>(
+fn render_terminal_output(
     ui: &mut egui::Ui,
-    terminal_emulator: &mut TerminalEmulator<Io>,
+    snap: &TerminalSnapshot,
     previous_pass: Option<&TerminalOutputRenderResponse>,
     max_line_width: f32,
     terminal_fonts: &TerminalFont,
@@ -1104,15 +1119,7 @@ fn render_terminal_output<Io: FreminalTermInputOutput>(
 
                 (*previous_pass).clone()
             } else {
-                let (terminal_data, format_data) = terminal_emulator.data_and_format_data_for_gui();
-                // if !terminal_data.scrollback.is_empty() {
-                //     error!(
-                //         "Scrollback is not empty: {}",
-                //         terminal_data.scrollback.len()
-                //     );
-                // }
-
-                let mut canvas_data = terminal_data.visible;
+                let mut canvas_data = snap.visible_chars.clone();
 
                 if canvas_data.ends_with(&[TChar::NewLine]) {
                     canvas_data = canvas_data[0..canvas_data.len() - 1].to_vec();
@@ -1121,7 +1128,7 @@ fn render_terminal_output<Io: FreminalTermInputOutput>(
                     ui,
                     &UiData::NewPass(&NewJobAction {
                         text: &canvas_data,
-                        format_data: format_data.visible,
+                        format_data: snap.visible_tags.clone(),
                     }),
                     max_line_width,
                     terminal_fonts,
@@ -1177,6 +1184,7 @@ pub struct FreminalTerminalWidget {
     previous_mouse_state: Option<PreviousMouseState>,
     previous_key: Option<Key>,
     previous_scroll_amount: f32,
+    #[allow(dead_code)]
     ctx: Context,
 }
 
@@ -1220,19 +1228,16 @@ impl FreminalTerminalWidget {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn show<Io: FreminalTermInputOutput>(
+    pub fn show(
         &mut self,
         ui: &mut Ui,
-        terminal_emulator: &mut TerminalEmulator<Io>,
+        snap: &TerminalSnapshot,
         view_state: &mut ViewState,
+        input_tx: &Sender<InputEvent>,
+        _pty_write_tx: &Sender<PtyWrite>,
     ) {
         let frame_response = egui::Frame::new().show(ui, |ui| {
             self.character_size = get_char_size(ui.ctx(), &self.terminal_fonts);
-            terminal_emulator.set_egui_ctx_if_missing(self.ctx.clone());
-
-            let theme = Theme::from(ui.style().visuals.clone().dark_mode);
-
-            terminal_emulator.internal.set_theme(theme);
 
             // Claim the full available space directly — no round-trip through PTY row count.
             let available = ui.available_size();
@@ -1242,14 +1247,14 @@ impl FreminalTerminalWidget {
             let max_line_width = (available.x / self.character_size.0).floor();
             self.previous_font_size = Some(self.font_defs.size);
             self.max_line_width = max_line_width;
-            terminal_emulator.set_previous_pass_invalid();
 
-            let repeat_characters = terminal_emulator.internal.should_repeat_keys();
-            let (left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) =
-                ui.input(|input_state| {
+            let repeat_characters = snap.repeat_keys;
+            let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
+                .input(|input_state| {
                     write_input_to_terminal(
                         input_state,
-                        terminal_emulator,
+                        snap,
+                        input_tx,
                         view_state,
                         self.character_size.0,
                         self.character_size.1,
@@ -1263,20 +1268,24 @@ impl FreminalTerminalWidget {
             self.previous_key = previous_key;
             self.previous_scroll_amount = scroll_amount;
 
-            if terminal_emulator.needs_redraw() && !terminal_emulator.skip_draw_always() {
-                self.previous_pass = render_terminal_output(
+            // Always render a fresh pass from the snapshot.  The PTY thread
+            // publishes a new snapshot only when data has changed, so
+            // `snap.content_changed` is effectively always true here.
+            // Task 12 will add generation-counter-based skip-draw optimisation.
+            if snap.skip_draw {
+                let _response = render_terminal_output(
                     ui,
-                    terminal_emulator,
-                    None,
+                    snap,
+                    Some(&self.previous_pass),
                     self.max_line_width,
                     &self.get_terminal_fonts(),
                     &self.font_defs.clone(),
                 );
             } else {
-                let _response = render_terminal_output(
+                self.previous_pass = render_terminal_output(
                     ui,
-                    terminal_emulator,
-                    Some(&self.previous_pass),
+                    snap,
+                    None,
                     self.max_line_width,
                     &self.get_terminal_fonts(),
                     &self.font_defs.clone(),
@@ -1287,63 +1296,36 @@ impl FreminalTerminalWidget {
             self.debug_renderer
                 .render(ui, self.previous_pass.canvas_area, Color32::BLUE);
 
-            if terminal_emulator.show_cursor() {
-                let color =
-                    internal_color_to_egui(terminal_emulator.internal.cursor_color(), false);
-
-                let cursor_style = terminal_emulator.get_cursor_visual_style();
+            if snap.show_cursor {
+                // cursor_color is not yet tracked in the snapshot; use the default.
+                let color = internal_color_to_egui(TerminalColor::DefaultCursorColor, false);
+                let cursor_style = snap.cursor_visual_style.clone();
 
                 paint_cursor(
                     self.previous_pass.canvas_area,
                     self.character_size,
-                    &terminal_emulator.cursor_pos(),
+                    &snap.cursor_pos,
                     ui,
                     color,
                     &cursor_style,
                 );
             }
 
-            // lets see if we're hovering over a URL
+            // URL hover detection is not yet ported to snapshots.
+            // TODO(task-9): implement URL hover via snapshot data.
             if let Some(mouse_position) = view_state.mouse_position {
-                // convert the mouse position x and y to character positions
-                let mut x = ((mouse_position.x / self.character_size.0).floor())
-                    .approx_as::<usize>()
-                    .unwrap_or_default();
-                let mut y = ((mouse_position.y / self.character_size.1).floor())
-                    .approx_as::<usize>()
-                    .unwrap_or_default();
-
-                x = x.saturating_sub(1);
-                y = y.saturating_sub(1);
-
-                let cursor_pos = CursorPos { x, y };
-
-                if let Some(url) = terminal_emulator.is_mouse_hovered_on_url(&cursor_pos) {
-                    debug!("Mouse is hovering over a URL");
-                    if left_mouse_button_pressed {
-                        ui.ctx().output_mut(|output| {
-                            output.cursor_icon = CursorIcon::Wait;
-                            output.commands.push(OutputCommand::OpenUrl(OpenUrl {
-                                url: url.clone(),
-                                new_tab: true,
-                            }));
-                        });
-                    } else {
-                        ui.ctx().output_mut(|output| {
-                            output.cursor_icon = CursorIcon::PointingHand;
-                        });
-                    }
-                }
+                let _ = mouse_position; // suppress unused-variable lint
+                debug!("No URL hover detection in snapshot mode yet");
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = CursorIcon::Default;
+                });
             } else {
                 debug!("No mouse position");
-
                 ui.ctx().output_mut(|output| {
                     output.cursor_icon = CursorIcon::Default;
                 });
             }
         });
-
-        terminal_emulator.set_previous_pass_valid();
 
         self.debug_renderer
             .render(ui, frame_response.response.rect, Color32::RED);

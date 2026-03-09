@@ -15,7 +15,12 @@ use std::sync::Arc;
 
 use freminal_buffer::row::Row;
 use freminal_common::{
-    buffer_states::{cursor::CursorPos, format_tag::FormatTag, tchar::TChar},
+    buffer_states::{
+        cursor::CursorPos,
+        format_tag::FormatTag,
+        modes::{mouse::MouseTrack, rl_bracket::RlBracket},
+        tchar::TChar,
+    },
     cursor::CursorVisualStyle,
 };
 
@@ -79,4 +84,60 @@ pub struct TerminalSnapshot {
     /// The GUI uses this flag to reset `ViewState::scroll_offset` to 0 when
     /// the user is scrolled back and new output arrives.
     pub content_changed: bool,
+
+    /// Current bracketed-paste mode setting.
+    ///
+    /// Carried in the snapshot so the GUI can wrap pasted text in the correct
+    /// escape sequences without holding the emulator lock.
+    pub bracketed_paste: RlBracket,
+
+    /// Current mouse-tracking mode setting.
+    ///
+    /// Carried in the snapshot so the GUI can decide which mouse events to
+    /// encode and send to the PTY without holding the emulator lock.
+    pub mouse_tracking: MouseTrack,
+
+    /// Whether the terminal should repeat key-press events while a key is held.
+    pub repeat_keys: bool,
+
+    /// Whether the cursor key is in application mode (`DECCKM`).
+    ///
+    /// Needed by the GUI to encode arrow / home / end keys correctly without
+    /// consulting the emulator.
+    pub cursor_key_app_mode: bool,
+
+    /// Whether the terminal has requested that rendering be suppressed
+    /// (Synchronized Output / `DEC 2026`).
+    ///
+    /// When `true` the GUI skips the render pass entirely for this frame.
+    pub skip_draw: bool,
+}
+
+impl TerminalSnapshot {
+    /// Construct a blank snapshot suitable as the initial value for an
+    /// `ArcSwap<TerminalSnapshot>` before the PTY thread has produced any
+    /// real data.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            visible_chars: Vec::new(),
+            visible_tags: Vec::new(),
+            rows: Arc::new(Vec::new()),
+            total_rows: 0,
+            height: 0,
+            cursor_pos: CursorPos { x: 0, y: 0 },
+            show_cursor: false,
+            cursor_visual_style: CursorVisualStyle::default(),
+            is_alternate_screen: false,
+            is_normal_display: true,
+            term_width: 0,
+            term_height: 0,
+            content_changed: false,
+            bracketed_paste: RlBracket::default(),
+            mouse_tracking: MouseTrack::default(),
+            repeat_keys: true,
+            cursor_key_app_mode: false,
+            skip_draw: false,
+        }
+    }
 }

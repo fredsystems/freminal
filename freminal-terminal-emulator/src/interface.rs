@@ -307,6 +307,17 @@ impl TerminalEmulator<FreminalPtyInputOutput> {
 }
 
 impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
+    /// Return a clone of the PTY write sender.
+    ///
+    /// Used by `main.rs` to pass the real write channel to the GUI before the
+    /// emulator is moved into the PTY consumer thread.  The GUI uses it to
+    /// send `PtyWrite::Write` responses for Report* window manipulation
+    /// commands without going through the emulator lock.
+    #[must_use]
+    pub fn clone_write_tx(&self) -> crossbeam_channel::Sender<PtyWrite> {
+        self.write_tx.clone()
+    }
+
     pub fn get_cursor_visual_style(&self) -> CursorVisualStyle {
         self.internal.get_cursor_visual_style()
     }
@@ -437,6 +448,20 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.write(to_write)
     }
 
+    /// Write raw bytes directly to the PTY write channel.
+    ///
+    /// Used by the PTY consumer thread to forward keyboard input bytes that
+    /// arrived via `InputEvent::Key(bytes)` without re-encoding them through
+    /// `TerminalInput`.
+    ///
+    /// # Errors
+    /// Returns an error if the send to the PTY write channel fails.
+    pub fn write_raw_bytes(&self, bytes: &[u8]) -> Result<()> {
+        self.write_tx
+            .send(PtyWrite::Write(bytes.to_vec()))
+            .map_err(|e| anyhow::anyhow!("Failed to send raw bytes to PTY: {e}"))
+    }
+
     pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
         let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui();
         if include_scrollback {
@@ -489,6 +514,15 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         let cursor_visual_style = self.internal.get_cursor_visual_style();
         let is_normal_display = self.internal.is_normal_display();
 
+        let bracketed_paste = self.internal.modes.bracketed_paste.clone();
+        let mouse_tracking = self.internal.modes.mouse_tracking.clone();
+        let repeat_keys = self.internal.should_repeat_keys();
+        let cursor_key_app_mode = {
+            use freminal_common::buffer_states::modes::decckm::Decckm;
+            self.internal.get_cursor_key_mode() == Decckm::Application
+        };
+        let skip_draw = self.internal.skip_draw_always();
+
         TerminalSnapshot {
             visible_chars: chars.visible,
             visible_tags: tags.visible,
@@ -503,6 +537,11 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
             term_width,
             term_height,
             content_changed: true,
+            bracketed_paste,
+            mouse_tracking,
+            repeat_keys,
+            cursor_key_app_mode,
+            skip_draw,
         }
     }
 }

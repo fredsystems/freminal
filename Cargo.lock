@@ -1362,6 +1362,7 @@ name = "freminal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "conv2",
  "criterion",
  "crossbeam-channel",
@@ -1370,7 +1371,6 @@ dependencies = [
  "fontdb",
  "freminal-common",
  "freminal-terminal-emulator",
- "parking_lot",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

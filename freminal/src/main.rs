@@ -24,10 +24,11 @@
 #[macro_use]
 extern crate tracing;
 
+use arc_swap::ArcSwap;
 use crossbeam_channel::unbounded;
 use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::InputEvent;
-use parking_lot::FairMutex;
+use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::{process, sync::Arc};
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -107,20 +108,19 @@ fn main() {
             .with_span_events(fmt::format::FmtSpan::ACTIVE)
             .compact();
 
-        //let file_appender = tracing_appender::rolling::daily("./", "freminal.log");
         let file_appender = match RollingFileAppender::builder()
-            .rotation(Rotation::HOURLY) // rotate log files once every hour
+            .rotation(Rotation::HOURLY)
             .max_log_files(2)
-            .filename_prefix("freminal") // log file names will be prefixed with `myapp.`
-            .filename_suffix("log") // log file names will be suffixed with `.log`
-            .build("./") // try to build an appender that stores log files in `/var/log`
-             {
+            .filename_prefix("freminal")
+            .filename_suffix("log")
+            .build("./")
+        {
             Ok(appender) => appender,
             Err(e) => {
                 error!("Failed to create file appender: {}", e);
                 return;
-             }
-            };
+            }
+        };
         subscriber
             .with(layer().with_ansi(false).with_writer(file_appender))
             .with(std_out_layer)
@@ -147,40 +147,96 @@ fn main() {
     debug!("Loaded config: {:#?}", cfg);
 
     let res = match TerminalEmulator::new(&args) {
-        Ok((terminal, rx)) => {
-            let terminal = Arc::new(FairMutex::new(terminal));
-            let terminal_clone = Arc::clone(&terminal);
+        Ok((terminal, pty_read_rx)) => {
+            // Shared snapshot published by the PTY thread, consumed lock-free by the GUI.
+            let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
+                Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
+            let arc_swap_gui = Arc::clone(&arc_swap);
+
+            // Clone the PTY write sender before the emulator is moved into the
+            // consumer thread.  The GUI uses it to send Report* responses back
+            // to the PTY without going through the emulator.
+            let pty_write_tx = terminal.clone_write_tx();
 
             // Channel for GUI → PTY-consumer thread events (resize, key, focus).
-            // The GUI holds the Sender; the consumer thread holds the Receiver.
             let (input_tx, input_rx) = unbounded::<InputEvent>();
 
+            // Channel for PTY-consumer thread → GUI (window manipulation commands).
+            let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+
+            // The TerminalEmulator is fully owned by the PTY consumer thread.
+            // No FairMutex. No shared lock.
             std::thread::spawn(move || {
+                let mut emulator = terminal;
+
                 loop {
-                    // Drain any pending InputEvents first (non-blocking), then
-                    // block on the next PTY read.  This keeps resize handling
-                    // off the GUI lock while still being processed promptly.
-                    while let Ok(event) = input_rx.try_recv() {
-                        match event {
-                            InputEvent::Resize(w, h, pw, ph) => {
-                                terminal.lock().handle_resize_event(w, h, pw, ph);
+                    // Use crossbeam select! to wait on either a PTY read or an
+                    // InputEvent from the GUI without spinning.
+                    crossbeam_channel::select! {
+                        recv(pty_read_rx) -> msg => {
+                            if let Ok(read) = msg {
+                                emulator.handle_incoming_data(
+                                    &read.buf[0..read.read_amount],
+                                );
+                            } else {
+                                // PTY read channel closed — shell exited.
+                                info!("PTY read channel closed; consumer thread exiting");
+                                break;
                             }
-                            InputEvent::Key(_) | InputEvent::FocusChange(_) => {
-                                // Key and FocusChange are handled elsewhere for now;
-                                // reserved for Task 8.
+                        }
+                        recv(input_rx) -> msg => {
+                            match msg {
+                                Ok(InputEvent::Resize(w, h, pw, ph)) => {
+                                    emulator.handle_resize_event(w, h, pw, ph);
+                                }
+                                Ok(InputEvent::Key(bytes)) => {
+                                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
+                                        error!("Failed to forward key bytes to PTY: {e}");
+                                    }
+                                }
+                                Ok(InputEvent::FocusChange(focused)) => {
+                                    emulator.internal.send_focus_event(focused);
+                                }
+                                Err(_) => {
+                                    // GUI closed the sender — time to stop.
+                                    info!("Input channel closed; consumer thread exiting");
+                                    break;
+                                }
                             }
                         }
                     }
 
-                    if let Ok(read) = rx.recv() {
-                        terminal
-                            .lock()
-                            .handle_incoming_data(&read.buf[0..read.read_amount]);
+                    // After processing each event, drain any window manipulation
+                    // commands the emulator accumulated and forward them to the GUI.
+                    let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
+                    for cmd in cmds {
+                        use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+                        let wc = match &cmd {
+                            WindowManipulation::ReportWindowState
+                            | WindowManipulation::ReportWindowPositionWholeWindow
+                            | WindowManipulation::ReportWindowPositionTextArea
+                            | WindowManipulation::ReportWindowSizeInPixels
+                            | WindowManipulation::ReportWindowTextAreaSizeInPixels
+                            | WindowManipulation::ReportRootWindowSizeInPixels
+                            | WindowManipulation::ReportCharacterSizeInPixels
+                            | WindowManipulation::ReportTerminalSizeInCharacters
+                            | WindowManipulation::ReportRootWindowSizeInCharacters
+                            | WindowManipulation::ReportIconLabel
+                            | WindowManipulation::ReportTitle => WindowCommand::Report(cmd),
+                            _ => WindowCommand::Viewport(cmd),
+                        };
+                        if let Err(e) = window_cmd_tx.send(wc) {
+                            error!("Failed to send window command to GUI: {e}");
+                        }
                     }
+
+                    // Publish a fresh snapshot for the GUI to load lock-free.
+                    let snap = emulator.build_snapshot();
+                    arc_swap.store(Arc::new(snap));
                 }
             });
 
-            gui::run(terminal_clone, cfg, input_tx)
+            gui::run(arc_swap_gui, cfg, input_tx, pty_write_tx, window_cmd_rx)
         }
         Err(e) => {
             error!("Failed to create terminal emulator: {}", e);
