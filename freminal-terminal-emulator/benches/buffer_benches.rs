@@ -242,23 +242,63 @@ fn bench_data_and_format_for_gui(c: &mut Criterion) {
 
 // ---------------------------------------------------------------
 // bench_build_snapshot — snapshot production cost on pre-populated emulator
+//
+// Two sub-benchmarks:
+//
+//   build_snapshot_80x24_dirty
+//     Measures the *dirty path*: every iteration re-marks all visible rows
+//     as dirty (by re-processing the fill payload) before calling
+//     `build_snapshot`.  This reflects the worst-case cost — a full screen
+//     repaint after every PTY data batch.
+//
+//   build_snapshot_80x24_clean
+//     Measures the *clean path*: `build_snapshot` is called on an emulator
+//     whose rows are all clean (no mutation since the last snapshot).  This
+//     reflects the typical cost when the PTY is idle and the GUI polls for
+//     a fresh snapshot — the cached vectors are simply cloned.
 // ---------------------------------------------------------------
 fn bench_build_snapshot(c: &mut Criterion) {
-    // Build a dummy emulator and fill it with a full 80×24 screen.
-    let mut emulator = TerminalEmulator::dummy_for_bench();
-    emulator.internal.set_win_size(80, 24);
-    let payload = cup_writes_payload(80, 24);
-    let parsed = emulator.internal.parser.push(&payload);
-    emulator.internal.handler.process_outputs(&parsed);
-
     let mut group = c.benchmark_group("bench_build_snapshot");
     group.throughput(Throughput::Elements((80 * 24) as u64));
 
-    group.bench_function("build_snapshot_80x24", |b| {
-        b.iter(|| {
-            std::hint::black_box(emulator.build_snapshot());
-        });
+    // ── Dirty path ──────────────────────────────────────────────────────────
+    // Re-feed the fill payload before every snapshot call so every visible
+    // row is dirty.  Uses iter_batched to set up state per-sample.
+    group.bench_function("build_snapshot_80x24_dirty", |b| {
+        b.iter_batched(
+            || {
+                let mut emulator = TerminalEmulator::dummy_for_bench();
+                emulator.internal.set_win_size(80, 24);
+                let payload = cup_writes_payload(80, 24);
+                let parsed = emulator.internal.parser.push(&payload);
+                emulator.internal.handler.process_outputs(&parsed);
+                emulator
+            },
+            |mut emulator| {
+                std::hint::black_box(emulator.build_snapshot());
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
+
+    // ── Clean path ──────────────────────────────────────────────────────────
+    // Build one snapshot to warm the cache (marking all rows clean), then
+    // measure repeated calls where nothing has changed.
+    {
+        let mut emulator = TerminalEmulator::dummy_for_bench();
+        emulator.internal.set_win_size(80, 24);
+        let payload = cup_writes_payload(80, 24);
+        let parsed = emulator.internal.parser.push(&payload);
+        emulator.internal.handler.process_outputs(&parsed);
+        // Warm the cache: first build_snapshot marks all rows clean.
+        let _ = emulator.build_snapshot();
+
+        group.bench_function("build_snapshot_80x24_clean", |b| {
+            b.iter(|| {
+                std::hint::black_box(emulator.build_snapshot());
+            });
+        });
+    }
 
     group.finish();
 }

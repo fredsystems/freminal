@@ -515,6 +515,17 @@ impl TerminalHandler {
         self.buffer.is_alternate_screen()
     }
 
+    /// Return `true` if any row in the visible window (at the given scroll
+    /// offset) has been mutated since it was last flattened into the cache.
+    ///
+    /// The PTY thread always passes `scroll_offset = 0`.  When this returns
+    /// `false`, `build_snapshot` can skip flattening and reuse the previous
+    /// `visible_chars` / `visible_tags` vectors.
+    #[must_use]
+    pub fn any_visible_dirty(&self, scroll_offset: usize) -> bool {
+        self.buffer.any_visible_dirty(scroll_offset)
+    }
+
     /// Process an array of `TerminalOutput` commands
     ///
     /// This is the main entry point for integrating with the parser.

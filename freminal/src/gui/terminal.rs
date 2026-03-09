@@ -42,6 +42,7 @@ use super::{
 use anyhow::Result;
 use conv2::{ApproxFrom, ConvUtil, RoundToZero, ValueFrom};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
@@ -792,7 +793,7 @@ pub struct UiJobAction {
 #[derive(Debug)]
 pub struct NewJobAction<'a> {
     text: &'a [TChar],
-    format_data: Vec<FormatTag>,
+    format_data: Arc<Vec<FormatTag>>,
 }
 
 #[derive(Debug)]
@@ -1044,7 +1045,7 @@ fn add_terminal_data_to_ui(
     match data {
         UiData::NewPass(data) => {
             let (data_utf8_new, adjusted_format_data_new) =
-                create_terminal_output_layout_job(data.text, &data.format_data)?;
+                create_terminal_output_layout_job(data.text, data.format_data.as_ref())?;
             data_len = data_utf8_new.len();
             data_utf8 = data_utf8_new;
             adjusted_format_data = adjusted_format_data_new;
@@ -1131,16 +1132,17 @@ fn render_terminal_output(
 
                 (*previous_pass).clone()
             } else {
-                let mut canvas_data = snap.visible_chars.clone();
-
-                if canvas_data.ends_with(&[TChar::NewLine]) {
-                    canvas_data = canvas_data[0..canvas_data.len() - 1].to_vec();
-                }
+                let chars = snap.visible_chars.as_ref();
+                let trim_len = if chars.ends_with(&[TChar::NewLine]) {
+                    chars.len() - 1
+                } else {
+                    chars.len()
+                };
                 canvas_response = error_logged_rect(add_terminal_data_to_ui(
                     ui,
                     &UiData::NewPass(&NewJobAction {
-                        text: &canvas_data,
-                        format_data: snap.visible_tags.clone(),
+                        text: &chars[..trim_len],
+                        format_data: Arc::clone(&snap.visible_tags),
                     }),
                     max_line_width,
                     terminal_fonts,

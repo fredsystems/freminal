@@ -31,16 +31,25 @@ use freminal_common::{
 ///
 /// The snapshot is always immutable once constructed.  The GUI must never
 /// mutate any field.
+///
+/// `visible_chars` and `visible_tags` are wrapped in `Arc` so that cloning a
+/// snapshot (or handing the same content to a second snapshot on the clean
+/// path) is a cheap atomic refcount increment rather than a full `Vec` copy.
 #[allow(clippy::struct_excessive_bools)] // Four independent semantic flags; enums would add noise
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {
     /// Flattened visible character content, already converted from `Row`/`Cell`.
     ///
     /// Produced once on the PTY side; the GUI reads it directly.
-    pub visible_chars: Vec<TChar>,
+    ///
+    /// Wrapped in `Arc` so passing the same content to a new snapshot (clean
+    /// path — no visible rows changed) is a refcount bump, not a Vec copy.
+    pub visible_chars: Arc<Vec<TChar>>,
 
     /// Format tags corresponding to `visible_chars`.
-    pub visible_tags: Vec<FormatTag>,
+    ///
+    /// Wrapped in `Arc` for the same reason as `visible_chars`.
+    pub visible_tags: Arc<Vec<FormatTag>>,
 
     /// Raw rows wrapped in an `Arc` so the GUI can perform its own
     /// `scroll_offset`-based slicing without copying all row data.
@@ -120,8 +129,8 @@ impl TerminalSnapshot {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            visible_chars: Vec::new(),
-            visible_tags: Vec::new(),
+            visible_chars: Arc::new(Vec::new()),
+            visible_tags: Arc::new(Vec::new()),
             rows: Arc::new(Vec::new()),
             total_rows: 0,
             height: 0,

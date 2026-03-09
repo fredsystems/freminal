@@ -6,6 +6,21 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+/// Cached flat representation of the visible window stored between snapshots.
+///
+/// Two separate `Arc<Vec<T>>` fields match the types in `TerminalSnapshot`
+/// directly, so the clean path (no dirty rows) is a pair of refcount bumps
+/// with no `Vec` allocation.
+type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>)>;
+
+/// Cached `Arc<Vec<Row>>` stored between snapshots.
+///
+/// `TerminalSnapshot.rows` is included for future scrollback rendering but is
+/// not read by the GUI today.  Re-cloning the entire rows `Vec` on every call
+/// to `build_snapshot` dominates the clean-path cost.  We cache it here and
+/// only rebuild it when the dirty check says at least one visible row changed.
+type CachedRows = Option<Arc<Vec<freminal_buffer::row::Row>>>;
+
 use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
@@ -245,6 +260,22 @@ pub struct TerminalEmulator<Io: FreminalTermInputOutput> {
     ctx: Option<egui::Context>,
     previous_pass_valid: bool,
     changed: bool,
+    /// Cached flat representation of the visible window from the last
+    /// `build_snapshot` call.  `None` until the first snapshot is built.
+    ///
+    /// Stored as two separate `Arc<Vec<T>>` matching the types in
+    /// `TerminalSnapshot`, so the clean path (no dirty rows) hands them
+    /// directly into the snapshot with a refcount bump — no Vec allocation.
+    previous_visible_snap: VisibleSnap,
+    /// Cached `Arc<Vec<Row>>` from the last snapshot.  Reused on the clean
+    /// path so we avoid cloning the whole rows `Vec` when no row changed.
+    /// Invalidated alongside `previous_visible_snap` on buffer-type switches.
+    cached_rows: CachedRows,
+    /// Whether the previous snapshot was taken while in the alternate screen
+    /// buffer.  Used to detect primary↔alternate transitions and invalidate
+    /// `previous_visible_snap` so stale content is never reused across a
+    /// buffer switch.
+    previous_was_alternate: bool,
 }
 
 impl TerminalEmulator<DummyIo> {
@@ -265,6 +296,9 @@ impl TerminalEmulator<DummyIo> {
             ctx: None,
             previous_pass_valid: false,
             changed: false,
+            previous_visible_snap: None,
+            cached_rows: None,
+            previous_was_alternate: false,
         }
     }
 }
@@ -301,6 +335,9 @@ impl TerminalEmulator<FreminalPtyInputOutput> {
             ctx: None,
             previous_pass_valid: false,
             changed: false,
+            previous_visible_snap: None,
+            cached_rows: None,
+            previous_was_alternate: false,
         };
         Ok((ret, pty_rx))
     }
@@ -497,18 +534,75 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     /// PTY thread so the GUI render path never has to do it.  The raw rows are
     /// wrapped in an `Arc` so the GUI can inspect scrollback without a copy.
     ///
-    /// `content_changed` is hardcoded `true` for now; a future task will wire
-    /// up proper dirty tracking.
+    /// `content_changed` is `true` only when the visible flat content differs
+    /// from the previous snapshot.  Cursor-only moves do not set it because
+    /// cursor position is carried separately in the snapshot struct.
     #[must_use]
     pub fn build_snapshot(&mut self) -> TerminalSnapshot {
-        // Extract handler-derived fields first (immutable borrow of handler).
+        // ── Cheap immutable reads (no &mut borrow of handler needed) ────────
         let (term_width, term_height) = self.internal.handler.get_win_size();
         let total_rows = self.internal.handler.buffer().get_rows().len();
-        let rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
         let is_alternate_screen = self.internal.handler.is_alternate_screen();
 
-        // Now call the &mut self methods on internal.
-        let (chars, tags) = self.internal.data_and_format_data_for_gui();
+        // ── Invalidate the snap cache on primary ↔ alternate screen switch ───
+        //
+        // When the buffer type changes, the previous visible_snap belongs to
+        // the other buffer and must never be reused for the new one.
+        if is_alternate_screen != self.previous_was_alternate {
+            self.previous_visible_snap = None;
+            self.cached_rows = None;
+            self.previous_was_alternate = is_alternate_screen;
+        }
+
+        // ── Determine whether any visible row changed since last snapshot ────
+        //
+        // The PTY thread always operates at scroll_offset = 0.
+        let any_dirty = self.internal.handler.any_visible_dirty(0);
+
+        // ── Produce (visible_chars, visible_tags, content_changed, rows) ───────
+        let (visible_chars, visible_tags, content_changed, snap_rows) = if any_dirty {
+            // At least one visible row is dirty — re-flatten via the cache.
+            // `data_and_format_data_for_gui` calls `visible_as_tchars_and_tags`
+            // which updates the per-row cache and clears dirty flags in one pass.
+            let (chars, tags) = self.internal.data_and_format_data_for_gui();
+            let vc = Arc::new(chars.visible);
+            let vt = Arc::new(tags.visible);
+
+            // `content_changed` is true when the flat content actually differs
+            // from the previous snapshot (guards against spurious redraws from
+            // dirty flags set on rows that were ultimately written with the same
+            // bytes, e.g. cursor-blink redraws).
+            let changed = self
+                .previous_visible_snap
+                .as_ref()
+                .is_none_or(|(prev_chars, _)| prev_chars.as_ref() != vc.as_ref());
+
+            // Rebuild the rows Arc — rows changed so we need a fresh clone.
+            let new_rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
+            self.cached_rows = Some(Arc::clone(&new_rows));
+            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
+            (vc, vt, changed, new_rows)
+        } else if let Some((prev_chars, prev_tags)) = &self.previous_visible_snap {
+            // No visible row is dirty — reuse cached Arcs.
+            // This is a refcount bump only: no Vec allocation, no memcpy.
+            let rows = self.cached_rows.as_ref().map_or_else(
+                || Arc::new(self.internal.handler.buffer().get_rows().clone()),
+                Arc::clone,
+            );
+            (Arc::clone(prev_chars), Arc::clone(prev_tags), false, rows)
+        } else {
+            // First-ever snapshot and nothing is marked dirty yet (e.g. the
+            // buffer was just created).  Flatten once to populate the cache.
+            let (chars, tags) = self.internal.data_and_format_data_for_gui();
+            let vc = Arc::new(chars.visible);
+            let vt = Arc::new(tags.visible);
+            let new_rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
+            self.cached_rows = Some(Arc::clone(&new_rows));
+            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
+            (vc, vt, true, new_rows)
+        };
+
+        // ── Remaining cheap reads ────────────────────────────────────────────
         let cursor_pos = self.internal.cursor_pos();
         let show_cursor = self.internal.show_cursor();
         let cursor_visual_style = self.internal.get_cursor_visual_style();
@@ -524,9 +618,9 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         let skip_draw = self.internal.skip_draw_always();
 
         TerminalSnapshot {
-            visible_chars: chars.visible,
-            visible_tags: tags.visible,
-            rows,
+            visible_chars,
+            visible_tags,
+            rows: snap_rows,
             total_rows,
             height: term_height,
             cursor_pos,
@@ -536,7 +630,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
             is_normal_display,
             term_width,
             term_height,
-            content_changed: true,
+            content_changed,
             bracketed_paste,
             mouse_tracking,
             repeat_keys,

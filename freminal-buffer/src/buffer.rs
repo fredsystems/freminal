@@ -1227,6 +1227,22 @@ impl Buffer {
         total.saturating_sub(h + offset)
     }
 
+    /// Return `true` if any row in the visible window is dirty (needs re-flattening).
+    ///
+    /// The PTY thread calls this with `scroll_offset = 0`.  A `false` result means
+    /// the cached flat representation for every visible row is still valid, so
+    /// `build_snapshot` can skip the flatten step entirely and reuse the previous
+    /// `visible_chars` / `visible_tags` vectors.
+    #[must_use]
+    pub fn any_visible_dirty(&self, scroll_offset: usize) -> bool {
+        if self.rows.is_empty() || self.height == 0 {
+            return false;
+        }
+        let vis_start = self.visible_window_start(scroll_offset);
+        let vis_end = (vis_start + self.height).min(self.rows.len());
+        self.rows[vis_start..vis_end].iter().any(|r| r.dirty)
+    }
+
     /// Cursor Y expressed in "screen coordinates" (0..height-1).
     /// If the buffer is shorter than the height, we just return the raw Y.
     /// Always computed relative to the live bottom (`scroll_offset` = 0), because the

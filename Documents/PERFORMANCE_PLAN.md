@@ -817,6 +817,16 @@ The goal is a suite that:
 | `bench_data_and_format_for_gui/flatten_80x24`          | ~5.81 µs | ~330 Melem/s |
 | `bench_build_snapshot/build_snapshot_80x24`            | ~16.1 µs | ~119 Melem/s |
 
+**Post-9.5 results (after dirty-row tracking + Arc-wrapped snapshot fields):**
+
+| Benchmark                                                          | Time       | Throughput      | Notes                                        |
+| ------------------------------------------------------------------ | ---------- | --------------- | -------------------------------------------- |
+| `bench_build_snapshot/build_snapshot_80x24_dirty` (all rows dirty) | ~49 µs     | ~39 Melem/s     | Full re-flatten path (worst case)            |
+| `bench_build_snapshot/build_snapshot_80x24_clean` (no rows dirty)  | ~**30 ns** | ~**65 Gelem/s** | Clean path: 3x Arc refcount bumps, no memcpy |
+
+The clean-path result (~30 ns) is a **540x improvement** over the pre-9.5 baseline (~16.1 µs).
+A static screen (PTY idle, cursor only) now costs essentially nothing to snapshot.
+
 **`freminal` (`render_loop_bench.rs`):**
 
 | Benchmark                                                        | Time     | Throughput    |
@@ -1149,7 +1159,7 @@ every row is clean).
 
 ---
 
-#### 9.5-C — Wire `build_snapshot` to honour the cache; fix `content_changed`
+#### 9.5-C — Wire `build_snapshot` to honour the cache; fix `content_changed` ✅
 
 **Files touched:** `freminal-terminal-emulator/src/interface.rs`,
 `freminal-terminal-emulator/src/snapshot.rs`
@@ -1303,6 +1313,6 @@ with the new numbers.
 - [ ] Task 10 complete
 - [ ] Task 11 complete (dead code deleted, clippy clean)
 - [ ] Task 12 complete (benchmarks re-baselined, results recorded)
-- [ ] Phase 3 — 9.5-A complete (dirty flag on Row, all mutation sites instrumented)
-- [ ] Phase 3 — 9.5-B complete (per-row cache in Buffer, cache coherence maintained)
-- [ ] Phase 3 — 9.5-C complete (build_snapshot uses cache, content_changed correct)
+- [x] Phase 3 — 9.5-A complete (dirty flag on Row, all mutation sites instrumented)
+- [x] Phase 3 — 9.5-B complete (per-row cache in Buffer, cache coherence maintained)
+- [x] Phase 3 — 9.5-C complete (build_snapshot uses cache, content_changed correct)
