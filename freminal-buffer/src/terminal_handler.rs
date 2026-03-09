@@ -235,12 +235,15 @@ impl TerminalHandler {
 
     /// Handle entering alternate screen
     pub fn handle_enter_alternate(&mut self) {
-        self.buffer.enter_alternate();
+        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
+        // correct wiring happens in Task 7/8.
+        self.buffer.enter_alternate(0);
     }
 
     /// Handle leaving alternate screen
     pub fn handle_leave_alternate(&mut self) {
-        self.buffer.leave_alternate();
+        // Returns the saved scroll_offset; discarded here until ViewState is wired (Task 7/8).
+        let _restored_offset = self.buffer.leave_alternate();
     }
 
     /// Handle DECAWM — enable or disable soft-wrapping.
@@ -430,22 +433,35 @@ impl TerminalHandler {
 
     /// Handle resize
     pub fn handle_resize(&mut self, width: usize, height: usize) {
-        self.buffer.set_size(width, height);
+        // scroll_offset lives in `ViewState` (Task 4). Pass 0 temporarily;
+        // correct wiring happens in Task 7/8.
+        let _new_offset = self.buffer.set_size(width, height, 0);
     }
 
-    /// Handle scroll back (user scrolling)
-    pub fn handle_scroll_back(&mut self, lines: usize) {
-        self.buffer.scroll_back(lines);
+    /// Compute new `scroll_offset` after scrolling back by `lines`.
+    ///
+    /// The caller must pass the current offset and store the returned value
+    /// into `ViewState::scroll_offset`.
+    #[must_use]
+    pub fn handle_scroll_back(&self, scroll_offset: usize, lines: usize) -> usize {
+        self.buffer.scroll_back(scroll_offset, lines)
     }
 
-    /// Handle scroll forward (user scrolling)
-    pub fn handle_scroll_forward(&mut self, lines: usize) {
-        self.buffer.scroll_forward(lines);
+    /// Compute new `scroll_offset` after scrolling forward by `lines`.
+    ///
+    /// The caller must pass the current offset and store the returned value
+    /// into `ViewState::scroll_offset`.
+    #[must_use]
+    pub fn handle_scroll_forward(&self, scroll_offset: usize, lines: usize) -> usize {
+        self.buffer.scroll_forward(scroll_offset, lines)
     }
 
-    /// Handle scroll to bottom
-    pub fn handle_scroll_to_bottom(&mut self) {
-        self.buffer.scroll_to_bottom();
+    /// Returns 0 — the scroll offset for the live bottom view.
+    ///
+    /// The caller should store this into `ViewState::scroll_offset`.
+    #[must_use]
+    pub const fn handle_scroll_to_bottom() -> usize {
+        Buffer::scroll_to_bottom()
     }
 
     /// Return the complete GUI data set: visible and scrollback content as
@@ -460,8 +476,10 @@ impl TerminalHandler {
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags();
-        let (scrollback_chars, scrollback_tags) = self.buffer.scrollback_as_tchars_and_tags();
+        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
+        // correct wiring happens in Task 7/8.
+        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags(0);
+        let (scrollback_chars, scrollback_tags) = self.buffer.scrollback_as_tchars_and_tags(0);
         (
             TerminalSections {
                 scrollback: scrollback_chars,
@@ -1195,7 +1213,7 @@ mod tests {
         handler.handle_erase_in_line(0);
 
         // The line should be partially cleared
-        let rows = handler.buffer().visible_rows();
+        let rows = handler.buffer().visible_rows(0);
         assert!(rows.len() >= 2);
     }
 
@@ -1213,7 +1231,7 @@ mod tests {
         // Insert a line
         handler.handle_insert_lines(1);
 
-        let rows = handler.buffer().visible_rows();
+        let rows = handler.buffer().visible_rows(0);
         // Should have inserted a blank line, pushing content down
         assert!(rows.len() >= 2);
     }
@@ -1313,7 +1331,7 @@ mod tests {
 
         // Screen should be cleared — buffer only grew to 2 rows (one per Data+Newline),
         // so visible_rows() returns those 2 rows (both now empty after ClearDisplay).
-        let visible = handler.buffer().visible_rows();
+        let visible = handler.buffer().visible_rows(0);
         assert_eq!(visible.len(), 2);
         // Both rows must be empty after the clear.
         for row in visible {

@@ -333,10 +333,13 @@ impl TerminalState {
         if scroll < 0.0 {
             scroll *= -1.0;
             let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
-            self.handler.handle_scroll_back(n);
+            // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
+            // The returned new offset is discarded until ViewState is wired (Task 7/8).
+            let _new_offset = self.handler.handle_scroll_back(0, n);
         } else {
             let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
-            self.handler.handle_scroll_forward(n);
+            // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
+            let _new_offset = self.handler.handle_scroll_forward(0, n);
         }
     }
 

@@ -122,7 +122,7 @@ fn bench_resize(c: &mut Criterion) {
         b.iter(|| {
             let mut buf = Buffer::new(100, 80);
             buf.insert_text(data);
-            buf.set_size(40, 80);
+            buf.set_size(40, 80, 0);
         });
     });
 
@@ -130,7 +130,7 @@ fn bench_resize(c: &mut Criterion) {
         b.iter(|| {
             let mut buf = Buffer::new(100, 200);
             buf.insert_text(data);
-            buf.set_size(100, 20);
+            buf.set_size(100, 20, 0);
         });
     });
 
@@ -150,7 +150,7 @@ fn bench_softwrap_heavy(c: &mut Criterion) {
         b.iter(|| {
             let mut buf = Buffer::new(100, 80);
             buf.insert_text(&data);
-            buf.set_size(10, 80);
+            buf.set_size(10, 80, 0);
         });
     });
 
@@ -171,7 +171,7 @@ fn bench_visible_flatten(c: &mut Criterion) {
 
     group.bench_function("visible_200x50", |b| {
         b.iter(|| {
-            std::hint::black_box(buf.visible_as_tchars_and_tags());
+            std::hint::black_box(buf.visible_as_tchars_and_tags(0));
         });
     });
 
@@ -201,7 +201,7 @@ fn bench_scrollback_flatten(c: &mut Criterion) {
 
     group.bench_function("scrollback_1024_rows", |b| {
         b.iter(|| {
-            std::hint::black_box(buf.scrollback_as_tchars_and_tags());
+            std::hint::black_box(buf.scrollback_as_tchars_and_tags(0));
         });
     });
 

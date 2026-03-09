@@ -30,7 +30,7 @@ fn build_tagged_screen(buf: &mut Buffer, width: usize, height: usize) {
 
 /// Helper: Get visible rows' "length signatures".
 fn visible_lengths(buf: &Buffer) -> Vec<usize> {
-    buf.visible_rows()
+    buf.visible_rows(0)
         .iter()
         .map(|row| row.get_characters().len())
         .collect()

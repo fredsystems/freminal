@@ -23,6 +23,7 @@ pub mod colors;
 pub mod fonts;
 pub mod mouse;
 pub mod terminal;
+pub mod view_state;
 
 fn set_egui_options(ctx: &egui::Context) {
     ctx.style_mut(|style| {

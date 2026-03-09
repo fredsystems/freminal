@@ -55,6 +55,6 @@ proptest! {
         }
 
         // Sanity: visible rows never exceed height.
-        assert!(buf.visible_rows().len() <= height);
+        assert!(buf.visible_rows(0).len() <= height);
     }
 }

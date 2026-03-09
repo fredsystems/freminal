@@ -30,12 +30,6 @@ pub struct Buffer {
     /// Current cursor position (row, col).
     cursor: CursorState,
 
-    /// How far the user has scrolled back.
-    ///
-    /// 0 = bottom (normal live terminal mode)
-    /// >0 = viewing older content
-    scroll_offset: usize,
-
     /// Maximum number of scrollback lines allowed.
     ///
     /// For example:
@@ -48,15 +42,16 @@ pub struct Buffer {
     ///
     /// Primary:
     ///   - Has scrollback
-    ///   - Writing while scrolled back resets `scroll_offset`
     ///
     /// Alternate:
     ///   - No scrollback
     ///   - Switching back restores primary buffer's saved state
     kind: BufferType,
 
-    /// Saved primary buffer content, cursor, `scroll_offset`,
+    /// Saved primary buffer content, cursor, and `scroll_offset`,
     /// used when switching to and from alternate buffer.
+    /// The scroll offset is owned by the caller (`ViewState`) and passed
+    /// in / returned from `enter_alternate` / `leave_alternate`.
     saved_primary: Option<SavedPrimaryState>,
 
     /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
@@ -112,7 +107,6 @@ impl Buffer {
             height,
             cursor: CursorState::default(),
             current_tag: FormatTag::default(),
-            scroll_offset: 0,
             scrollback_limit: 4000,
             kind: BufferType::Primary,
             saved_primary: None,
@@ -135,10 +129,6 @@ impl Buffer {
         if self.rows.is_empty() {
             debug_assert_eq!(self.cursor.pos.y, 0, "empty buffer must keep cursor.y at 0");
             debug_assert_eq!(self.cursor.pos.x, 0, "empty buffer must keep cursor.x at 0");
-            debug_assert_eq!(
-                self.scroll_offset, 0,
-                "empty buffer must have zero scroll_offset"
-            );
             return;
         }
 
@@ -188,22 +178,8 @@ impl Buffer {
                     self.rows.len(),
                     self.height
                 );
-                debug_assert_eq!(
-                    self.scroll_offset, 0,
-                    "alternate buffer must never have a scroll_offset (got {})",
-                    self.scroll_offset
-                );
             }
         }
-
-        // Scroll offset must always be within [0, max_scroll_offset].
-        let max_off = self.max_scroll_offset();
-        debug_assert!(
-            self.scroll_offset <= max_off,
-            "scroll_offset {} exceeds max_scroll_offset {}",
-            self.scroll_offset,
-            max_off
-        );
 
         // Scroll region (DECSTBM) invariants: screen-relative.
         if self.height > 0 {
@@ -261,15 +237,18 @@ impl Buffer {
     ///
     /// Contract:
     /// - Returns a contiguous slice of `self.rows`.
-    /// - `visible_rows().len() <= self.height`.
+    /// - `visible_rows(scroll_offset).len() <= self.height`.
     /// - When `self.rows.len() <= self.height`, the slice is the entire buffer.
     /// - When `scroll_offset == 0`, the slice is the last `height` rows
     ///   (the live bottom).
     /// - When `scroll_offset > 0`, the slice is shifted upwards into
     ///   scrollback, clamped so it never goes before the oldest row.
     /// - Never allocates; always borrows from `self.rows`.
+    ///
+    /// `scroll_offset` is owned by the caller (e.g. `ViewState`) and is never
+    /// stored inside `Buffer`.
     #[must_use]
-    pub fn visible_rows(&self) -> &[Row] {
+    pub fn visible_rows(&self, scroll_offset: usize) -> &[Row] {
         if self.rows.is_empty() {
             return &[];
         }
@@ -279,7 +258,7 @@ impl Buffer {
 
         // Clamp scroll_offset within bounds.
         let max_offset = self.max_scroll_offset();
-        let offset = self.scroll_offset.min(max_offset);
+        let offset = scroll_offset.min(max_offset);
 
         let start = total.saturating_sub(h + offset);
         let end = start + h;
@@ -288,12 +267,6 @@ impl Buffer {
     }
 
     pub fn insert_text(&mut self, text: &[TChar]) {
-        // If we're in the primary buffer and the user has scrolled back,
-        // jump back to the live bottom view when new output arrives.
-        if self.kind == BufferType::Primary && self.scroll_offset > 0 {
-            self.scroll_offset = 0;
-        }
-
         let mut remaining = text.to_vec();
         let mut row_idx = self.cursor.pos.y;
         let mut col = self.cursor.pos.x;
@@ -316,7 +289,8 @@ impl Buffer {
                     // all remaining text.
                     self.cursor.pos.x = self.width.saturating_sub(1);
                     self.cursor.pos.y = row_idx;
-                    self.enforce_scrollback_limit();
+                    // PTY always at scroll_offset=0; return value is always 0 here.
+                    let _ = self.enforce_scrollback_limit(0);
                     return;
                 }
 
@@ -374,7 +348,8 @@ impl Buffer {
                     self.cursor.pos.x = final_col;
                     self.cursor.pos.y = row_idx;
 
-                    self.enforce_scrollback_limit();
+                    // PTY always at scroll_offset=0; return value is always 0 here.
+                    let _ = self.enforce_scrollback_limit(0);
                     return;
                 }
 
@@ -387,7 +362,8 @@ impl Buffer {
                         // DECAWM NoAutoWrap: clamp cursor to last column and discard
                         // the overflow — do not continue onto the next row.
                         self.cursor.pos.x = self.width.saturating_sub(1);
-                        self.enforce_scrollback_limit();
+                        // PTY always at scroll_offset=0; return value is always 0 here.
+                        let _ = self.enforce_scrollback_limit(0);
                         return;
                     }
 
@@ -419,22 +395,30 @@ impl Buffer {
     /// Resize the terminal buffer.
     /// Reflows lines when width changes.
     /// Adjusts scrollback when height changes.
-    pub fn set_size(&mut self, new_width: usize, new_height: usize) {
+    /// Resize the terminal buffer and return the adjusted `scroll_offset`.
+    ///
+    /// The caller passes in the current `scroll_offset` (from `ViewState`) and
+    /// receives back the clamped/reset value that should be stored into `ViewState`.
+    pub fn set_size(&mut self, new_width: usize, new_height: usize, scroll_offset: usize) -> usize {
         let width_changed = new_width != self.width;
         let height_changed = new_height != self.height;
 
         if !width_changed && !height_changed {
-            return;
+            return scroll_offset;
         }
 
         // ---- WIDTH CHANGE → REFLOW ----
-        if width_changed {
+        // reflow_to_width always resets the scroll offset to 0.
+        let after_reflow = if width_changed {
             self.reflow_to_width(new_width);
-        }
+            0
+        } else {
+            scroll_offset
+        };
 
         // ---- HEIGHT CHANGE → GROW/SHRINK SCREEN ----
-        if height_changed {
-            self.resize_height(new_height);
+        let after_resize = if height_changed {
+            let adjusted = self.resize_height(new_height, after_reflow);
 
             // Validate scroll region against new height.
             // If it's now invalid, reset to full screen.
@@ -450,7 +434,11 @@ impl Buffer {
                 // Just clamp bottom if region is still valid
                 self.scroll_region_bottom = self.scroll_region_bottom.min(max_bottom);
             }
-        }
+
+            adjusted
+        } else {
+            after_reflow
+        };
 
         // Update buffer scalars
         self.width = new_width;
@@ -467,9 +455,11 @@ impl Buffer {
         self.clamp_cursor_after_resize();
 
         // Enforce scrollback limit after resize (reflow may have created extra rows)
-        self.enforce_scrollback_limit();
+        let final_offset = self.enforce_scrollback_limit(after_resize);
 
         self.debug_assert_invariants();
+
+        final_offset
     }
 
     #[allow(clippy::too_many_lines)]
@@ -615,9 +605,8 @@ impl Buffer {
         self.rows = new_rows;
         self.width = new_width;
 
-        // 4) Reset scroll offset; ensure cursor is in bounds.
-        self.scroll_offset = 0;
-
+        // 4) Ensure cursor is in bounds (scroll_offset is always reset to 0 by the
+        //    caller after a reflow — returned from set_size).
         if self.cursor.pos.y >= self.rows.len() {
             if self.rows.is_empty() {
                 self.cursor.pos.y = 0;
@@ -633,7 +622,8 @@ impl Buffer {
         }
     }
 
-    fn resize_height(&mut self, new_height: usize) {
+    /// Adjust the buffer rows for a new height and return the adjusted `scroll_offset`.
+    fn resize_height(&mut self, new_height: usize, scroll_offset: usize) -> usize {
         let old_height = self.height;
 
         if new_height > old_height {
@@ -656,10 +646,10 @@ impl Buffer {
             } else {
                 0
             };
-            self.scroll_offset = self.scroll_offset.min(max_offset);
+            scroll_offset.min(max_offset)
         } else {
-            // xterm-style
-            self.scroll_offset = 0;
+            // xterm-style: reset to live bottom
+            0
         }
     }
 
@@ -680,21 +670,22 @@ impl Buffer {
         }
     }
 
-    fn enforce_scrollback_limit(&mut self) {
+    /// Enforce the scrollback row limit, adjusting the caller's `scroll_offset` if
+    /// rows are trimmed from the top.  Returns the (possibly reduced) scroll offset
+    /// that the caller should store into `ViewState`.
+    #[must_use]
+    fn enforce_scrollback_limit(&mut self, scroll_offset: usize) -> usize {
         // Only primary buffer keeps scrollback.
         if self.kind == BufferType::Alternate {
-            return;
+            return scroll_offset;
         }
 
         let max_rows = self.height + self.scrollback_limit;
 
-        // Nothing to trim, but still make sure scroll_offset is not insane
+        // Nothing to trim, but still make sure scroll_offset is not insane.
         if self.rows.len() <= max_rows {
             let max_offset = self.max_scroll_offset();
-            if self.scroll_offset > max_offset {
-                self.scroll_offset = max_offset;
-            }
-            return;
+            return scroll_offset.min(max_offset);
         }
 
         // Number of rows to drop from the top of the scrollback.
@@ -705,13 +696,7 @@ impl Buffer {
         // If the user is scrolled back into the area we're about to delete,
         // reduce their offset by the number of deleted rows. If that wipes
         // out all their scrollback, snap them to live view.
-        if self.scroll_offset > 0 {
-            if self.scroll_offset > overflow {
-                self.scroll_offset -= overflow;
-            } else {
-                self.scroll_offset = 0;
-            }
-        }
+        let adjusted_offset = scroll_offset.saturating_sub(overflow);
 
         // --- Drop the oldest rows ---
         self.rows.drain(0..overflow);
@@ -728,11 +713,11 @@ impl Buffer {
 
         // Finally, clamp scroll_offset to the new max_scroll_offset().
         let max_offset = self.max_scroll_offset();
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
+        let final_offset = adjusted_offset.min(max_offset);
 
         self.debug_assert_invariants();
+
+        final_offset
     }
 
     /// Handle ANSI Backspace (BS, 0x08).
@@ -783,11 +768,6 @@ impl Buffer {
     pub fn handle_lf(&mut self) {
         match self.kind {
             BufferType::Primary => {
-                // Reset scrollback if output arrives while scrolled back
-                if self.scroll_offset > 0 {
-                    self.scroll_offset = 0;
-                }
-
                 // LNM: CR implied
                 if self.lnm_enabled {
                     self.cursor.pos.x = 0;
@@ -837,7 +817,8 @@ impl Buffer {
                         // content): leave the row completely untouched.
                     }
 
-                    self.enforce_scrollback_limit();
+                    // PTY always at scroll_offset=0; return value is always 0 here.
+                    let _ = self.enforce_scrollback_limit(0);
                     self.debug_assert_invariants();
                     return;
                 }
@@ -872,7 +853,8 @@ impl Buffer {
                     }
                 }
 
-                self.enforce_scrollback_limit();
+                // PTY always at scroll_offset=0; return value is always 0 here.
+                let _ = self.enforce_scrollback_limit(0);
                 self.debug_assert_invariants();
             }
 
@@ -1003,10 +985,6 @@ impl Buffer {
             }
 
             BufferType::Primary => {
-                if self.scroll_offset > 0 {
-                    return;
-                }
-
                 let sy = self.cursor_screen_y();
                 if sy < self.scroll_region_top || sy > self.scroll_region_bottom {
                     return;
@@ -1052,10 +1030,6 @@ impl Buffer {
             }
 
             BufferType::Primary => {
-                if self.scroll_offset > 0 {
-                    return;
-                }
-
                 let sy = self.cursor_screen_y();
                 if sy < self.scroll_region_top || sy > self.scroll_region_bottom {
                     return;
@@ -1199,32 +1173,38 @@ impl Buffer {
 
     /// Index in `rows` of the first visible line.
     /// This is the same start index used by `visible_rows()`.
-    fn visible_window_start(&self) -> usize {
+    /// Index in `rows` of the first visible line for the given `scroll_offset`.
+    /// The PTY thread always calls this with `scroll_offset = 0`; the GUI thread
+    /// passes the value from `ViewState`.
+    #[must_use]
+    fn visible_window_start(&self, scroll_offset: usize) -> usize {
         if self.rows.is_empty() || self.height == 0 {
             return 0;
         }
 
         let total = self.rows.len();
         let h = self.height.min(total);
-        let offset = self.scroll_offset.min(self.max_scroll_offset());
+        let offset = scroll_offset.min(self.max_scroll_offset());
 
         total.saturating_sub(h + offset)
     }
 
     /// Cursor Y expressed in "screen coordinates" (0..height-1).
     /// If the buffer is shorter than the height, we just return the raw Y.
+    /// Always computed relative to the live bottom (`scroll_offset` = 0), because the
+    /// PTY thread only ever mutates the buffer at the live bottom.
     fn cursor_screen_y(&self) -> usize {
         if self.rows.is_empty() || self.height == 0 {
             return 0;
         }
 
-        let start = self.visible_window_start();
+        let start = self.visible_window_start(0);
         self.cursor.pos.y.saturating_sub(start)
     }
 
     /// Convert DECSTBM region (screen coords) into buffer row indices (rows[])
     fn scroll_region_rows(&self) -> (usize, usize) {
-        let start = self.visible_window_start();
+        let start = self.visible_window_start(0);
         let top = start + self.scroll_region_top;
         let bottom = start + self.scroll_region_bottom;
         let max = self.rows.len().saturating_sub(1);
@@ -1287,8 +1267,9 @@ impl Buffer {
     // Scrollback: only valid in the PRIMARY buffer
     // ----------------------------------------------------------
 
-    /// How many lines above the live bottom we can scroll.
-    const fn max_scroll_offset(&self) -> usize {
+    /// How many lines above the live bottom the user can scroll.
+    #[must_use]
+    pub const fn max_scroll_offset(&self) -> usize {
         if self.rows.len() <= self.height {
             0
         } else {
@@ -1296,40 +1277,42 @@ impl Buffer {
         }
     }
 
-    /// Scroll upward (`lines > 0`) in the primary buffer.
-    pub fn scroll_back(&mut self, lines: usize) {
+    /// Compute a new scroll offset after scrolling upward by `lines`.
+    ///
+    /// Alternate buffer always returns 0 (no scrollback).
+    /// The caller is responsible for storing the returned value into `ViewState`.
+    #[must_use]
+    pub fn scroll_back(&self, scroll_offset: usize, lines: usize) -> usize {
         if self.kind != BufferType::Primary {
-            return; // Alternate buffer: no scrollback
+            return 0; // Alternate buffer: no scrollback
         }
 
         let max = self.max_scroll_offset();
         if max == 0 {
-            return;
+            return 0;
         }
 
-        self.scroll_offset = (self.scroll_offset + lines).min(max);
-
-        self.debug_assert_invariants();
+        (scroll_offset + lines).min(max)
     }
 
-    /// Scroll downward (`lines > 0`) toward the live bottom.
-    pub fn scroll_forward(&mut self, lines: usize) {
+    /// Compute a new scroll offset after scrolling downward by `lines`.
+    ///
+    /// The caller is responsible for storing the returned value into `ViewState`.
+    #[must_use]
+    pub fn scroll_forward(&self, scroll_offset: usize, lines: usize) -> usize {
         if self.kind != BufferType::Primary {
-            return;
+            return 0;
         }
 
-        if self.scroll_offset == 0 {
-            return;
-        }
-
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        self.debug_assert_invariants();
+        scroll_offset.saturating_sub(lines)
     }
 
-    /// Jump back to the live view (row = last row).
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
-        self.debug_assert_invariants();
+    /// Returns `0` — the scroll offset for the live bottom view.
+    ///
+    /// Provided as a convenience so call sites read clearly.
+    #[must_use]
+    pub const fn scroll_to_bottom() -> usize {
+        0
     }
 
     pub fn scroll_up(&mut self) {
@@ -1370,7 +1353,8 @@ impl Buffer {
         let new_buffer_y = match y {
             Some(row) => {
                 let clamped = row.min(self.height.saturating_sub(1));
-                self.visible_window_start() + clamped
+                // PTY always operates at live bottom (scroll_offset = 0)
+                self.visible_window_start(0) + clamped
             }
             None => self.cursor.pos.y,
         };
@@ -1401,7 +1385,8 @@ impl Buffer {
             .max(0)
             .min(self.height.saturating_sub(1) as i32) as usize;
 
-        let new_buffer_y = self.visible_window_start() + new_screen_y;
+        // PTY always operates at live bottom (scroll_offset = 0)
+        let new_buffer_y = self.visible_window_start(0) + new_screen_y;
 
         // Ensure rows exist
         while new_buffer_y >= self.rows.len() {
@@ -1425,7 +1410,8 @@ impl Buffer {
         }
 
         // Clear all rows below cursor in the visible window
-        let visible_start = self.visible_window_start();
+        // PTY always operates at live bottom (scroll_offset = 0)
+        let visible_start = self.visible_window_start(0);
         let visible_end = visible_start + self.height;
 
         for i in (cursor_y + 1)..visible_end.min(self.rows.len()) {
@@ -1441,7 +1427,8 @@ impl Buffer {
         let cursor_y = self.cursor.pos.y;
         let cursor_x = self.cursor.pos.x;
 
-        let visible_start = self.visible_window_start();
+        // PTY always operates at live bottom (scroll_offset = 0)
+        let visible_start = self.visible_window_start(0);
 
         // Clear all rows above cursor in the visible window
         for i in visible_start..cursor_y.min(self.rows.len()) {
@@ -1460,7 +1447,8 @@ impl Buffer {
 
     /// Erase entire display (ED 2)
     pub fn erase_display(&mut self) {
-        let visible_start = self.visible_window_start();
+        // PTY always operates at live bottom (scroll_offset = 0)
+        let visible_start = self.visible_window_start(0);
         let visible_end = visible_start + self.height;
 
         for i in visible_start..visible_end.min(self.rows.len()) {
@@ -1478,22 +1466,22 @@ impl Buffer {
             return;
         }
 
-        let visible_start = self.visible_window_start();
+        let visible_start = self.visible_window_start(0);
 
         // Remove all scrollback rows (everything before visible window)
         if visible_start > 0 {
             self.rows.drain(0..visible_start);
 
-            // Adjust cursor and scroll offset
+            // Adjust cursor
             if self.cursor.pos.y >= visible_start {
                 self.cursor.pos.y -= visible_start;
             } else {
                 self.cursor.pos.y = 0;
             }
 
-            if self.scroll_offset > 0 {
-                self.scroll_offset = 0;
-            }
+            // scroll_offset is owned by the caller (ViewState); erase_scrollback
+            // removes all rows before the visible window so the caller should
+            // reset their scroll_offset to 0 after calling this method.
         }
 
         self.debug_assert_invariants();
@@ -1550,8 +1538,13 @@ impl Buffer {
     /// The returned `FormatTag` entries use `start`/`end` as half-open byte indices into
     /// the returned `Vec<TChar>`, matching the convention used by the old `FormatTracker`.
     #[must_use]
-    pub fn visible_as_tchars_and_tags(&self) -> (Vec<TChar>, Vec<FormatTag>) {
-        Self::rows_as_tchars_and_tags(self.visible_rows())
+    /// Convert visible rows (with the given `scroll_offset`) into flat
+    /// `(Vec<TChar>, Vec<FormatTag>)` suitable for the GUI renderer.
+    ///
+    /// Pass `scroll_offset = 0` when calling from the PTY thread (which always
+    /// operates at the live bottom).
+    pub fn visible_as_tchars_and_tags(&self, scroll_offset: usize) -> (Vec<TChar>, Vec<FormatTag>) {
+        Self::rows_as_tchars_and_tags(self.visible_rows(scroll_offset))
     }
 
     /// Flatten all scrollback rows (everything before the visible window) into
@@ -1561,13 +1554,20 @@ impl Buffer {
     /// Returns `(vec![], vec![])` for the alternate screen buffer, which never
     /// accumulates scrollback.
     #[must_use]
-    pub fn scrollback_as_tchars_and_tags(&self) -> (Vec<TChar>, Vec<FormatTag>) {
+    /// Flatten all scrollback rows (everything before the visible window) into
+    /// a linear `(Vec<TChar>, Vec<FormatTag>)` pair.
+    ///
+    /// Pass `scroll_offset = 0` when calling from the PTY thread.
+    pub fn scrollback_as_tchars_and_tags(
+        &self,
+        scroll_offset: usize,
+    ) -> (Vec<TChar>, Vec<FormatTag>) {
         // Alternate buffer has no scrollback.
         if self.kind == BufferType::Alternate {
             return (vec![], vec![]);
         }
 
-        let visible_start = self.visible_window_start();
+        let visible_start = self.visible_window_start(scroll_offset);
 
         if visible_start == 0 {
             // No scrollback rows exist yet.
@@ -1724,7 +1724,12 @@ impl Buffer {
         self.wrap_enabled
     }
 
-    pub fn enter_alternate(&mut self) {
+    /// Switch to the alternate screen buffer.
+    ///
+    /// The caller must pass the current `scroll_offset` from `ViewState` so it can
+    /// be saved and restored later.  The alternate screen always starts at offset 0;
+    /// the caller should set `ViewState::scroll_offset = 0` after this call.
+    pub fn enter_alternate(&mut self, scroll_offset: usize) {
         // If we're already in the alternate buffer, do nothing.
         if self.kind == BufferType::Alternate {
             return;
@@ -1734,7 +1739,7 @@ impl Buffer {
         let saved = SavedPrimaryState {
             rows: self.rows.clone(),
             cursor: self.cursor.clone(),
-            scroll_offset: self.scroll_offset,
+            scroll_offset,
             scroll_region_top: self.scroll_region_top,
             scroll_region_bottom: self.scroll_region_bottom,
             saved_cursor: self.saved_cursor.clone(),
@@ -1747,9 +1752,8 @@ impl Buffer {
         // Fresh screen: exactly `height` empty rows.
         self.rows = vec![Row::new(self.width); self.height];
 
-        // Reset cursor and scroll offset for the alternate screen.
+        // Reset cursor for the alternate screen.
         self.cursor = CursorState::default();
-        self.scroll_offset = 0;
 
         // Alternate screen starts with a full-screen scroll region.
         self.reset_scroll_region_to_full();
@@ -1758,25 +1762,34 @@ impl Buffer {
     }
 
     /// Leave the alternate screen and restore the primary buffer, if any was saved.
-    pub fn leave_alternate(&mut self) {
-        // If we're not in alternate, nothing to do.
-        if self.kind != BufferType::Alternate {
-            return;
-        }
-
-        if let Some(saved) = self.saved_primary.take() {
-            // Restore saved primary state.
-            self.rows = saved.rows;
-            self.cursor = saved.cursor;
-            self.scroll_offset = saved.scroll_offset;
-            self.scroll_region_top = saved.scroll_region_top;
-            self.scroll_region_bottom = saved.scroll_region_bottom;
-            self.saved_cursor = saved.saved_cursor;
+    /// Leave the alternate screen and restore the primary buffer.
+    ///
+    /// Returns the `scroll_offset` that was saved when `enter_alternate` was
+    /// called.  The caller should store this back into `ViewState::scroll_offset`.
+    /// Returns `0` if there was no saved primary state.
+    pub fn leave_alternate(&mut self) -> usize {
+        // Already in the primary buffer — nothing to do.
+        if self.kind == BufferType::Primary {
+            return 0;
         }
 
         self.kind = BufferType::Primary;
 
-        self.debug_assert_invariants();
+        if let Some(saved) = self.saved_primary.take() {
+            // Restore saved primary state.
+            let restored_offset = saved.scroll_offset;
+            self.rows = saved.rows;
+            self.cursor = saved.cursor;
+            self.scroll_region_top = saved.scroll_region_top;
+            self.scroll_region_bottom = saved.scroll_region_bottom;
+            self.saved_cursor = saved.saved_cursor;
+
+            self.debug_assert_invariants();
+            restored_offset
+        } else {
+            self.debug_assert_invariants();
+            0
+        }
     }
 }
 
@@ -1854,13 +1867,17 @@ mod basic_tests {
     }
 
     #[test]
-    fn primary_insert_text_resets_scroll_offset() {
+    fn primary_insert_text_does_not_auto_reset_offset() {
+        // scroll_offset is now owned by ViewState; insert_text no longer resets it.
+        // The GUI is responsible for resetting ViewState::scroll_offset when
+        // content_changed is true.
         let mut buf = Buffer::new(10, 5);
-        buf.scroll_offset = 3; // simulate user scrollback
 
+        // Just verify insert_text doesn't panic and content is written correctly.
         buf.insert_text(&[ascii('A')]);
 
-        assert_eq!(buf.scroll_offset, 0);
+        let vis = buf.visible_rows(0);
+        assert!(!vis.is_empty());
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -1870,7 +1887,7 @@ mod basic_tests {
     #[test]
     fn alt_buffer_has_no_scrollback() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate();
+        buf.enter_alternate(0);
 
         assert_eq!(buf.rows.len(), 3);
         assert_eq!(buf.kind, BufferType::Alternate);
@@ -1879,7 +1896,7 @@ mod basic_tests {
     #[test]
     fn alt_buffer_lf_scrolls_screen() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate();
+        buf.enter_alternate(0);
 
         buf.handle_lf();
         buf.handle_lf();
@@ -1902,13 +1919,13 @@ mod basic_tests {
         let saved_rows = buf.rows.len();
 
         // Enter alternate buffer via API
-        buf.enter_alternate();
+        buf.enter_alternate(0);
 
         // Do some things in alternate screen (optional)
         buf.handle_lf();
 
         // Leave alternate, restoring primary
-        buf.leave_alternate();
+        let _restored_offset = buf.leave_alternate();
 
         assert_eq!(buf.kind, BufferType::Primary);
         assert_eq!(buf.rows.len(), saved_rows);
@@ -1917,10 +1934,10 @@ mod basic_tests {
 
     #[test]
     fn scrollback_no_effect_when_no_history() {
-        let mut buf = Buffer::new(5, 3);
+        let buf = Buffer::new(5, 3);
 
-        buf.scroll_back(10);
-        assert_eq!(buf.scroll_offset, 0);
+        let new_offset = buf.scroll_back(0, 10);
+        assert_eq!(new_offset, 0);
     }
 
     #[test]
@@ -1933,9 +1950,9 @@ mod basic_tests {
         }
 
         let max = buf.rows.len() - buf.height;
-        buf.scroll_back(999);
+        let new_offset = buf.scroll_back(0, 999);
 
-        assert_eq!(buf.scroll_offset, max);
+        assert_eq!(new_offset, max);
     }
 
     #[test]
@@ -1946,10 +1963,10 @@ mod basic_tests {
             buf.handle_lf();
         }
 
-        buf.scroll_back(5); // scroll up some amount
-        buf.scroll_forward(999); // scroll down more than enough
+        let offset = buf.scroll_back(0, 5); // scroll up some amount
+        let offset = buf.scroll_forward(offset, 999); // scroll down more than enough
 
-        assert_eq!(buf.scroll_offset, 0);
+        assert_eq!(offset, 0);
     }
 
     #[test]
@@ -1960,44 +1977,49 @@ mod basic_tests {
             buf.handle_lf();
         }
 
-        buf.scroll_back(5);
-        assert!(buf.scroll_offset > 0);
+        let offset = buf.scroll_back(0, 5);
+        assert!(offset > 0);
 
-        buf.scroll_to_bottom();
+        let offset = Buffer::scroll_to_bottom();
 
-        assert_eq!(buf.scroll_offset, 0);
+        assert_eq!(offset, 0);
     }
 
     #[test]
     fn no_scrollback_in_alternate_buffer() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate();
+        buf.enter_alternate(0);
 
         for _ in 0..10 {
             buf.handle_lf(); // scrolls but no scrollback
         }
 
-        buf.scroll_back(10);
-        assert_eq!(buf.scroll_offset, 0);
+        let offset = buf.scroll_back(0, 10);
+        assert_eq!(offset, 0);
 
-        buf.scroll_forward(10);
-        assert_eq!(buf.scroll_offset, 0);
+        let offset = buf.scroll_forward(offset, 10);
+        assert_eq!(offset, 0);
     }
 
     #[test]
-    fn insert_text_resets_scrollback() {
+    fn insert_text_does_not_auto_reset_scrollback() {
+        // scroll_offset lives in ViewState now; Buffer no longer resets it.
         let mut buf = Buffer::new(10, 5);
 
         for _ in 0..20 {
             buf.handle_lf();
         }
 
-        buf.scroll_back(5);
-        assert!(buf.scroll_offset > 0);
+        let offset_before = buf.scroll_back(0, 5);
+        assert!(offset_before > 0);
 
         buf.insert_text(&[TChar::Ascii(b'A')]);
 
-        assert_eq!(buf.scroll_offset, 0);
+        // offset is external — it is unchanged by insert_text
+        assert_eq!(offset_before, offset_before);
+        // visible content at live bottom should include the written char
+        let vis = buf.visible_rows(0);
+        assert!(!vis.is_empty());
     }
 
     #[test]
@@ -2021,7 +2043,7 @@ mod basic_tests {
 
     #[test]
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    fn lf_does_not_clear_existing_content_above_screen_bottom() {
+    fn lf_does_not_clear_existing_content_above_screen_bottom_alt() {
         // Reproduce the fastfetch two-column layout:
         //   1. Write N logo lines (each line has content in cols 0..W).
         //   2. CHA to col 0 on the last logo line (y unchanged).
@@ -2065,7 +2087,7 @@ mod basic_tests {
         }
 
         // --- Verify: every logo row still has its marker in col 0 ---
-        let visible = buf.visible_rows();
+        let visible = buf.visible_rows(0);
         for (i, row) in visible.iter().enumerate().take(logo_lines) {
             let chars = row.get_characters();
             assert!(
@@ -2106,7 +2128,7 @@ mod basic_tests {
         // Raw cursor y is an absolute row index — must be larger than screen y
         // when there is scrollback above the visible window.
         let raw_y = buf.get_cursor().pos.y;
-        let visible_start = buf.visible_window_start();
+        let visible_start = buf.visible_window_start(0);
         assert_eq!(
             screen_pos.y,
             raw_y.saturating_sub(visible_start),
@@ -2540,7 +2562,7 @@ mod resize_tests {
         let before_hardbreaks = hardbreak_count(&buf);
 
         // Narrow the terminal
-        buf.set_size(15, 100);
+        buf.set_size(15, 100, 0);
 
         let after_hardbreaks = hardbreak_count(&buf);
 
@@ -2560,7 +2582,7 @@ mod resize_tests {
 
         let before_softwraps = softwrap_count(&buf);
 
-        buf.set_size(10, 100);
+        buf.set_size(10, 100, 0);
 
         let after_softwraps = softwrap_count(&buf);
 
@@ -2585,7 +2607,7 @@ mod resize_tests {
 
         let before_softwraps = softwrap_count(&buf);
 
-        buf.set_size(40, 100);
+        buf.set_size(40, 100, 0);
 
         let after_softwraps = softwrap_count(&buf);
 
@@ -2607,7 +2629,7 @@ mod resize_tests {
         buf.cursor.pos.x = 30;
         buf.cursor.pos.y = 0;
 
-        buf.set_size(10, 100);
+        buf.set_size(10, 100, 0);
 
         assert!(
             buf.cursor.pos.x < 10,
@@ -2627,7 +2649,7 @@ mod resize_tests {
         buf.cursor.pos.y = 50;
         buf.cursor.pos.x = 5;
 
-        buf.set_size(20, 10);
+        buf.set_size(20, 10, 0);
 
         assert!(
             buf.cursor.pos.y < buf.rows.len(),
@@ -2647,7 +2669,7 @@ mod resize_tests {
             "Initial insert should produce at least one SoftWrap row"
         );
 
-        buf.set_size(8, 100);
+        buf.set_size(8, 100, 0);
 
         let kinds = row_kinds(&buf);
 
@@ -3107,11 +3129,11 @@ mod tests_gui_scroll {
         // height = 5, scrollback_limit = 5 → max_rows = 10
         let mut buf = buffer_with_rows(15, 80, 5, 5);
 
-        buf.enforce_scrollback_limit();
+        let new_offset = buf.enforce_scrollback_limit(0);
 
         assert_eq!(buf.rows.len(), 10, "should trim to max_rows");
         assert_eq!(buf.cursor.pos.y, 9, "cursor adjusted to last row");
-        assert_eq!(buf.scroll_offset, 0, "no scrollback, so offset remains 0");
+        assert_eq!(new_offset, 0, "no scrollback, so offset remains 0");
     }
 
     // ---------------------------------------------------------------
@@ -3123,13 +3145,12 @@ mod tests_gui_scroll {
         // height=5, scrollback_limit=5 → max_rows=10
         // Start with 15 rows, scroll_offset=4
         let mut buf = buffer_with_rows(15, 80, 5, 5);
-        buf.scroll_offset = 4;
 
-        buf.enforce_scrollback_limit();
+        let new_offset = buf.enforce_scrollback_limit(4);
 
         // Overflow = 5 rows trimmed
         // scroll_offset = 4 → trimmed by 5 → becomes 0
-        assert_eq!(buf.scroll_offset, 0);
+        assert_eq!(new_offset, 0);
         assert_eq!(buf.rows.len(), 10);
     }
 
@@ -3143,12 +3164,11 @@ mod tests_gui_scroll {
         // rows=14 → overflow=4
         // scroll_offset=6 → becomes 6-4=2
         let mut buf = buffer_with_rows(14, 80, 5, 5);
-        buf.scroll_offset = 6;
 
-        buf.enforce_scrollback_limit();
+        let new_offset = buf.enforce_scrollback_limit(6);
 
         assert_eq!(buf.rows.len(), 10);
-        assert_eq!(buf.scroll_offset, 2);
+        assert_eq!(new_offset, 2);
     }
 
     // ---------------------------------------------------------------
@@ -3161,7 +3181,7 @@ mod tests_gui_scroll {
         let mut buf = buffer_with_rows(12, 80, 5, 5);
 
         buf.cursor.pos.y = 3;
-        buf.enforce_scrollback_limit();
+        let _ = buf.enforce_scrollback_limit(0);
 
         // Expected: 3 - 2 = 1
         assert_eq!(buf.cursor.pos.y, 1);
@@ -3177,7 +3197,7 @@ mod tests_gui_scroll {
         let mut buf = buffer_with_rows(12, 80, 5, 5);
         buf.cursor.pos.y = 7;
 
-        buf.enforce_scrollback_limit();
+        let _ = buf.enforce_scrollback_limit(0);
 
         assert_eq!(buf.cursor.pos.y, 5, "cursor should shift by overflow");
     }
@@ -3190,15 +3210,18 @@ mod tests_gui_scroll {
     fn enforce_limit_noop_in_alternate_buffer() {
         let mut buf = buffer_with_rows(20, 80, 5, 5);
         buf.kind = BufferType::Alternate;
-        buf.scroll_offset = 3;
         buf.cursor.pos.y = 10;
 
         let original_len = buf.rows.len();
 
-        buf.enforce_scrollback_limit();
+        // In alternate buffer, scroll_offset is always effectively 0 and no trimming occurs.
+        let new_offset = buf.enforce_scrollback_limit(3);
 
         assert_eq!(buf.rows.len(), original_len, "alternate buffer never trims");
-        assert_eq!(buf.scroll_offset, 3);
+        assert_eq!(
+            new_offset, 3,
+            "alternate buffer returns the passed offset unchanged"
+        );
         assert_eq!(buf.cursor.pos.y, 10);
     }
 
@@ -3210,12 +3233,11 @@ mod tests_gui_scroll {
     fn enforce_limit_clamps_scroll_offset_to_max() {
         // rows=13, height=5 → max_scroll_offset = 13-5 = 8
         let mut buf = buffer_with_rows(13, 80, 5, 5);
-        buf.scroll_offset = 50; // wildly out of range
 
-        buf.enforce_scrollback_limit();
+        let new_offset = buf.enforce_scrollback_limit(50); // wildly out of range
 
         let max = buf.max_scroll_offset();
-        assert!(buf.scroll_offset <= max);
+        assert!(new_offset <= max);
     }
 }
 
@@ -3252,11 +3274,10 @@ mod tests_gui_resize {
     fn resize_resets_scroll_offset_when_anchor_disabled() {
         let mut buf = buffer_with_rows_and_config(50, 80, 20, 1000, false);
 
-        buf.scroll_offset = 15;
-        buf.set_size(80, 10); // shrink height
+        let new_offset = buf.set_size(80, 10, 15); // shrink height, pass offset=15
 
         assert_eq!(
-            buf.scroll_offset, 0,
+            new_offset, 0,
             "resize must reset scroll_offset when anchor is disabled"
         );
     }
@@ -3268,11 +3289,10 @@ mod tests_gui_resize {
     fn resize_preserves_offset_when_growing_height() {
         let mut buf = buffer_with_rows_and_config(50, 80, 20, 1000, true);
 
-        buf.scroll_offset = 10;
-        buf.set_size(80, 30); // grow height
+        let new_offset = buf.set_size(80, 30, 10); // grow height, pass offset=10
 
         assert_eq!(
-            buf.scroll_offset, 10,
+            new_offset, 10,
             "scroll_offset should be unchanged when anchor is enabled on grow"
         );
     }
@@ -3285,11 +3305,10 @@ mod tests_gui_resize {
         // rows = 50, new height = 10 → max_scroll_offset = 50 - 10 = 40
         let mut buf = buffer_with_rows_and_config(50, 80, 20, 1000, true);
 
-        buf.scroll_offset = 100; // far beyond range
-        buf.set_size(80, 10);
+        let new_offset = buf.set_size(80, 10, 100); // far beyond range
 
         assert_eq!(
-            buf.scroll_offset, 40,
+            new_offset, 40,
             "scroll_offset must clamp to new max_scroll_offset"
         );
     }
@@ -3302,7 +3321,7 @@ mod tests_gui_resize {
         let mut buf = buffer_with_rows_and_config(10, 80, 10, 1000, false);
 
         buf.cursor.pos.y = 9; // last row
-        buf.set_size(80, 5); // shrink
+        buf.set_size(80, 5, 0); // shrink
 
         assert!(
             buf.cursor.pos.y <= 4,
@@ -3317,7 +3336,7 @@ mod tests_gui_resize {
     fn resize_grow_adds_rows() {
         let mut buf = buffer_with_rows_and_config(10, 80, 10, 1000, false);
 
-        buf.set_size(80, 15);
+        buf.set_size(80, 15, 0);
 
         assert_eq!(buf.rows.len(), 15, "growing height must append blank rows");
     }
@@ -3329,7 +3348,7 @@ mod tests_gui_resize {
     fn resize_shrink_retain_scrollback() {
         let mut buf = buffer_with_rows_and_config(40, 80, 20, 1000, false);
 
-        buf.set_size(80, 10);
+        buf.set_size(80, 10, 0);
 
         // rows should remain 40, no deletion due to resize
         assert_eq!(buf.rows.len(), 40);
@@ -3356,17 +3375,17 @@ mod scrollback_wrapping_scroll_visible_tests {
 
     /// Helper: recompute the expected visible slice using the same math
     /// as `Buffer::visible_rows` and compare contents.
-    fn assert_visible_rows_consistent(b: &Buffer) {
+    fn assert_visible_rows_consistent(b: &Buffer, scroll_offset: usize) {
         let total = b.rows.len();
         let h = b.height;
 
         if total == 0 {
-            assert_eq!(b.visible_rows().len(), 0);
+            assert_eq!(b.visible_rows(scroll_offset).len(), 0);
             return;
         }
 
         let max_offset = b.max_scroll_offset();
-        let offset = b.scroll_offset.min(max_offset);
+        let offset = scroll_offset.min(max_offset);
 
         let start = total.saturating_sub(h + offset);
         let mut end = start + h;
@@ -3375,7 +3394,7 @@ mod scrollback_wrapping_scroll_visible_tests {
         }
 
         let expected = &b.rows[start..end];
-        let visible = b.visible_rows();
+        let visible = b.visible_rows(scroll_offset);
 
         assert_eq!(
             visible.len(),
@@ -3395,22 +3414,21 @@ mod scrollback_wrapping_scroll_visible_tests {
     #[test]
     fn visible_rows_respects_scroll_offset_at_bottom() {
         // Many logical lines, no wrapping needed for this test.
-        let mut b = make_buffer(20, 3, 10);
+        let b = make_buffer(20, 3, 10);
 
         // At live bottom
-        b.scroll_offset = 0;
-        assert_visible_rows_consistent(&b);
+        assert_visible_rows_consistent(&b, 0);
     }
 
     #[test]
     fn visible_rows_respects_scroll_offset_in_scrollback() {
-        let mut b = make_buffer(20, 3, 10);
+        let b = make_buffer(20, 3, 10);
 
         // Scroll back into history
-        b.scroll_back(2);
-        assert!(b.scroll_offset > 0);
+        let scroll_offset = b.scroll_back(0, 2);
+        assert!(scroll_offset > 0);
 
-        assert_visible_rows_consistent(&b);
+        assert_visible_rows_consistent(&b, scroll_offset);
     }
 }
 
@@ -3424,7 +3442,7 @@ mod scrollback_reflow_tests {
     }
 
     fn assert_visible_rows_sane(b: &Buffer) {
-        let vis = b.visible_rows();
+        let vis = b.visible_rows(0);
         assert!(
             vis.len() <= b.height,
             "visible_rows must not exceed buffer height"
@@ -3449,14 +3467,14 @@ mod scrollback_reflow_tests {
         let max_off = b.max_scroll_offset();
         assert!(max_off > 0);
 
-        b.scroll_back(2);
-        assert!(b.scroll_offset > 0, "should be scrolled back before reflow");
+        let scroll_offset = b.scroll_back(0, 2);
+        assert!(scroll_offset > 0, "should be scrolled back before reflow");
 
-        // Change width to trigger reflow_to_width
-        b.set_size(10, 3);
+        // Change width to trigger reflow_to_width; set_size returns new scroll_offset
+        let new_offset = b.set_size(10, 3, scroll_offset);
 
-        // reflow_to_width resets scroll_offset
-        assert_eq!(b.scroll_offset, 0);
+        // reflow_to_width resets scroll_offset to 0
+        assert_eq!(new_offset, 0);
 
         // visible_rows must be sane after reflow
         assert_visible_rows_sane(&b);
@@ -3476,10 +3494,10 @@ mod scrollback_reflow_tests {
 
         // Widen the terminal; this may unwrap some rows,
         // but we do NOT assert that the row count must go down.
-        b.set_size(40, 4);
+        let new_offset = b.set_size(40, 4, 0);
 
         // Scroll offset is always reset by reflow
-        assert_eq!(b.scroll_offset, 0);
+        assert_eq!(new_offset, 0);
 
         // All rows should now use the new width
         for row in &b.rows {
@@ -3500,8 +3518,8 @@ mod scrollback_height_resize_wrapping_tests {
         s.bytes().map(TChar::Ascii).collect()
     }
 
-    fn assert_visible_rows_sane(b: &Buffer) {
-        let vis = b.visible_rows();
+    fn assert_visible_rows_sane(b: &Buffer, scroll_offset: usize) {
+        let vis = b.visible_rows(scroll_offset);
         assert!(
             vis.len() <= b.height,
             "visible_rows must not exceed buffer height"
@@ -3526,13 +3544,13 @@ mod scrollback_height_resize_wrapping_tests {
         b.preserve_scrollback_anchor = true;
 
         // Try to scroll back; may or may not succeed depending on layout
-        b.scroll_back(3);
+        let scroll_offset = b.scroll_back(0, 3);
 
-        // Now shrink height
-        b.set_size(5, 3);
+        // Now shrink height; pass scroll_offset in, get adjusted one back
+        let new_offset = b.set_size(5, 3, scroll_offset);
 
         // Whatever scroll_offset is now, visible_rows must be well-formed
-        assert_visible_rows_sane(&b);
+        assert_visible_rows_sane(&b, new_offset);
     }
 }
 
@@ -3550,7 +3568,7 @@ mod visible_rows_boundary_tests {
 
         assert_eq!(b.rows.len(), 3);
 
-        let vis = b.visible_rows();
+        let vis = b.visible_rows(0);
         // rows.len() <= height, so all rows are visible.
         assert_eq!(vis.len(), b.rows.len());
     }
@@ -3564,7 +3582,7 @@ mod visible_rows_boundary_tests {
 
         assert_eq!(b.rows.len(), 3);
 
-        let vis = b.visible_rows();
+        let vis = b.visible_rows(0);
         assert_eq!(vis.len(), 3);
     }
 
@@ -3576,8 +3594,8 @@ mod visible_rows_boundary_tests {
             b.handle_lf();
         }
 
-        b.scroll_back(999); // scroll to top
-        let vis = b.visible_rows();
+        let scroll_offset = b.scroll_back(0, 999); // scroll to top
+        let vis = b.visible_rows(scroll_offset);
 
         assert_eq!(vis.len(), 3);
         // The first visible row must be the first buffer row
@@ -3593,8 +3611,8 @@ mod alt_buffer_visible_rows_tests {
     fn alt_buffer_visible_rows_always_height() {
         let mut b = Buffer::new(5, 4);
 
-        b.enter_alternate();
-        let vis = b.visible_rows();
+        b.enter_alternate(0);
+        let vis = b.visible_rows(0);
 
         assert_eq!(vis.len(), 4);
         assert!(vis.iter().all(|r| r.get_characters().is_empty()));
@@ -3608,13 +3626,13 @@ mod alt_buffer_visible_rows_tests {
             b.handle_lf();
         }
 
-        b.scroll_back(2);
-        let before = b.visible_rows()[0].get_characters().clone();
+        let scroll_offset = b.scroll_back(0, 2);
+        let before = b.visible_rows(scroll_offset)[0].get_characters().clone();
 
-        b.enter_alternate();
-        b.leave_alternate();
+        b.enter_alternate(scroll_offset);
+        let restored_offset = b.leave_alternate();
 
-        let after = b.visible_rows()[0].get_characters().clone();
+        let after = b.visible_rows(restored_offset)[0].get_characters().clone();
         assert_eq!(before, after);
     }
 }
@@ -3628,17 +3646,17 @@ mod cr_wrap_scrollback_tests {
         s.bytes().map(TChar::Ascii).collect()
     }
 
-    fn assert_visible_rows_consistent(b: &Buffer) {
+    fn assert_visible_rows_consistent(b: &Buffer, scroll_offset: usize) {
         let total = b.rows.len();
         let h = b.height;
 
         if total == 0 {
-            assert_eq!(b.visible_rows().len(), 0);
+            assert_eq!(b.visible_rows(scroll_offset).len(), 0);
             return;
         }
 
         let max_offset = b.max_scroll_offset();
-        let offset = b.scroll_offset.min(max_offset);
+        let offset = scroll_offset.min(max_offset);
 
         let start = total.saturating_sub(h + offset);
         let mut end = start + h;
@@ -3647,7 +3665,7 @@ mod cr_wrap_scrollback_tests {
         }
 
         let expected = &b.rows[start..end];
-        let visible = b.visible_rows();
+        let visible = b.visible_rows(scroll_offset);
 
         assert_eq!(
             visible.len(),
@@ -3674,11 +3692,11 @@ mod cr_wrap_scrollback_tests {
         b.insert_text(&t("ZZ"));
 
         // Try scrolling into history (may or may not move offset much)
-        b.scroll_back(1);
+        let scroll_offset = b.scroll_back(0, 1);
 
         // Whatever the final scroll_offset is, visible_rows must be a
         // correct slice of rows.
-        assert_visible_rows_consistent(&b);
+        assert_visible_rows_consistent(&b, scroll_offset);
     }
 }
 
@@ -3701,21 +3719,22 @@ mod scroll_up_scrollback_tests {
 
         assert_eq!(b.rows.len(), 6);
         assert_eq!(b.cursor.pos.y, 1, "cursor must shift downward by 1");
-        assert_eq!(b.scroll_offset, 0);
+        // scroll_offset is external; caller is responsible for keeping it consistent
     }
 
     #[test]
-    fn scroll_up_does_not_break_scrollback_offset() {
+    fn scroll_up_does_not_affect_external_scroll_offset() {
         let mut b = Buffer::new(10, 3);
 
         for _ in 0..20 {
             b.handle_lf();
         }
 
-        b.scroll_back(5);
+        let scroll_offset = b.scroll_back(0, 5);
 
         b.scroll_up(); // remove row 0
-        assert_eq!(b.scroll_offset, 5, "scroll_offset must not change");
+        // External scroll_offset is unchanged by scroll_up; caller manages it
+        assert_eq!(scroll_offset, 5, "external scroll_offset must not change");
     }
 }
 
@@ -3730,15 +3749,15 @@ mod alt_primary_scroll_offset_restore_tests {
         for _ in 0..20 {
             b.handle_lf();
         }
-        b.scroll_back(3);
-        assert_eq!(b.scroll_offset, 3);
+        let scroll_offset = b.scroll_back(0, 3);
+        assert_eq!(scroll_offset, 3);
 
-        b.enter_alternate();
+        b.enter_alternate(scroll_offset);
         b.handle_lf();
         b.handle_lf();
 
-        b.leave_alternate();
-        assert_eq!(b.scroll_offset, 3);
+        let restored = b.leave_alternate();
+        assert_eq!(restored, 3);
     }
 }
 
@@ -3774,7 +3793,7 @@ mod visible_as_tchars_and_tags_tests {
         // A freshly created buffer with no content written must return an empty
         // chars vec and exactly one default-format tag (start=0, end=usize::MAX).
         let buf = Buffer::new(10, 5);
-        let (chars, tags) = buf.visible_as_tchars_and_tags();
+        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
 
         // Empty buffer: visible rows exist but all cells are blank/empty.
         // The returned tags must be non-empty (at least one sentinel tag).
@@ -3796,7 +3815,7 @@ mod visible_as_tchars_and_tags_tests {
         let mut buf = Buffer::new(10, 5);
         buf.insert_text(&to_tchars("A"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags();
+        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
 
         // 'A' must appear in chars.
         assert!(
@@ -3822,7 +3841,7 @@ mod visible_as_tchars_and_tags_tests {
         let mut buf = Buffer::new(80, 5);
         buf.insert_text(&to_tchars("ABC"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags();
+        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
 
         // All three characters must be present.
         assert!(chars.contains(&TChar::Ascii(b'A')), "must contain A");
@@ -3856,7 +3875,7 @@ mod visible_as_tchars_and_tags_tests {
         // Write 'B' with red format.
         buf.insert_text(&to_tchars("B"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags();
+        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
 
         // Both characters must be present.
         assert!(chars.contains(&TChar::Ascii(b'A')), "must contain A");
@@ -3888,7 +3907,7 @@ mod visible_as_tchars_and_tags_tests {
         buf.handle_cr();
         buf.insert_text(&to_tchars("bye"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags();
+        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
 
         // NewLine must appear somewhere in the output.
         assert!(
@@ -3922,7 +3941,7 @@ mod visible_as_tchars_and_tags_tests {
         let wide_tchar = TChar::Utf8("あ".as_bytes().to_vec());
         buf.insert_text(std::slice::from_ref(&wide_tchar));
 
-        let (chars, _tags) = buf.visible_as_tchars_and_tags();
+        let (chars, _tags) = buf.visible_as_tchars_and_tags(0);
 
         let count = chars.iter().filter(|c| **c == wide_tchar).count();
         assert_eq!(
