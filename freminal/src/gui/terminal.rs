@@ -1001,12 +1001,12 @@ fn render_terminal_output<Io: FreminalTermInputOutput>(
                 (*previous_pass).clone()
             } else {
                 let (terminal_data, format_data) = terminal_emulator.data_and_format_data_for_gui();
-                if !terminal_data.scrollback.is_empty() {
-                    error!(
-                        "Scrollback is not empty: {}",
-                        terminal_data.scrollback.len()
-                    );
-                }
+                // if !terminal_data.scrollback.is_empty() {
+                //     error!(
+                //         "Scrollback is not empty: {}",
+                //         terminal_data.scrollback.len()
+                //     );
+                // }
 
                 let mut canvas_data = terminal_data.visible;
 

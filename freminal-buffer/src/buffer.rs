@@ -5,7 +5,10 @@
 
 use freminal_common::{
     buffer_states::{
-        buffer_type::BufferType, cursor::CursorState, format_tag::FormatTag, tchar::TChar,
+        buffer_type::BufferType,
+        cursor::{CursorPos, CursorState},
+        format_tag::FormatTag,
+        tchar::TChar,
     },
     config::FontConfig,
 };
@@ -244,6 +247,21 @@ impl Buffer {
     #[must_use]
     pub const fn get_cursor(&self) -> &CursorState {
         &self.cursor
+    }
+
+    /// Return the cursor position in **screen coordinates** (0-indexed, relative
+    /// to the top of the visible window).
+    ///
+    /// Unlike `get_cursor().pos.y`, which is an absolute index into `self.rows`,
+    /// this subtracts `visible_window_start()` so the result is always in the
+    /// range `0..height` and matches what the GUI painter expects.
+    #[must_use]
+    pub fn get_cursor_screen_pos(&self) -> CursorPos {
+        let screen_y = self.cursor_screen_y();
+        CursorPos {
+            x: self.cursor.pos.x,
+            y: screen_y,
+        }
     }
 
     /// Get the rows that should be *visually displayed* in the GUI.
@@ -1957,6 +1975,55 @@ mod basic_tests {
         buf.insert_text(&[TChar::Ascii(b'A')]);
 
         assert_eq!(buf.scroll_offset, 0);
+    }
+
+    #[test]
+    fn cursor_screen_pos_matches_screen_row_with_no_scrollback() {
+        // With fewer rows than height, cursor.pos.y == screen y
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&[TChar::Ascii(b'A')]);
+        buf.handle_lf();
+        buf.insert_text(&[TChar::Ascii(b'B')]);
+
+        let screen_pos = buf.get_cursor_screen_pos();
+        let raw_pos = buf.get_cursor().pos;
+
+        // No scrollback yet — screen y must equal raw y
+        assert_eq!(
+            screen_pos.y, raw_pos.y,
+            "no scrollback: screen y should equal raw y"
+        );
+        assert_eq!(screen_pos.x, raw_pos.x, "x should be unchanged");
+    }
+
+    #[test]
+    fn cursor_screen_pos_is_relative_to_visible_window_with_scrollback() {
+        // Height = 3, write 6 lines → 3 rows of scrollback
+        let mut buf = Buffer::new(10, 3);
+
+        for i in 0..6_u8 {
+            buf.insert_text(&[TChar::Ascii(b'0' + i)]);
+            buf.handle_lf();
+        }
+
+        // Cursor is on the last visible row (screen row 2, 0-indexed)
+        let screen_pos = buf.get_cursor_screen_pos();
+        assert!(
+            screen_pos.y < buf.terminal_height(),
+            "screen y ({}) must be within terminal height ({})",
+            screen_pos.y,
+            buf.terminal_height()
+        );
+
+        // Raw cursor y is an absolute row index — must be larger than screen y
+        // when there is scrollback above the visible window.
+        let raw_y = buf.get_cursor().pos.y;
+        let visible_start = buf.visible_window_start();
+        assert_eq!(
+            screen_pos.y,
+            raw_y.saturating_sub(visible_start),
+            "screen y must equal raw_y minus visible_window_start"
+        );
     }
 }
 

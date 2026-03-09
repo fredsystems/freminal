@@ -336,7 +336,8 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn cursor_pos(&mut self) -> CursorPos {
+    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
+    pub fn cursor_pos(&mut self) -> CursorPos {
         #[cfg(feature = "new-buffer")]
         {
             self.shadow_handler.cursor_pos()

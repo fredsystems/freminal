@@ -107,3 +107,34 @@ fn shadow_handler_handles_resize() {
     assert_eq!(w, 100);
     assert_eq!(h, 30);
 }
+
+#[test]
+fn shadow_handler_scroll_does_not_panic() {
+    let mut state = make_state();
+
+    // Write enough lines to build up scrollback history.
+    for i in 0..50_u8 {
+        let line = format!("scrollback line {i}\r\n");
+        state.handle_incoming_data(line.as_bytes());
+    }
+
+    // Scroll up (backward through history) — positive value.
+    state.scroll(3.0);
+
+    // Scroll down (forward toward the bottom) — negative value.
+    state.scroll(-2.0);
+
+    // Scroll up again past the start (should clamp, not panic).
+    state.scroll(999.0);
+
+    // Scroll down past the bottom (should clamp, not panic).
+    state.scroll(-999.0);
+
+    // Write more data — the shadow handler must reset to the bottom so new
+    // content is visible again.
+    state.handle_incoming_data(b"new data after scroll\r\n");
+
+    let (w, h) = state.get_win_size();
+    assert!(w > 0);
+    assert!(h > 0);
+}

@@ -401,7 +401,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.data_and_format_data_for_gui()
     }
 
-    pub const fn cursor_pos(&mut self) -> CursorPos {
+    pub fn cursor_pos(&mut self) -> CursorPos {
         self.internal.cursor_pos()
     }
 

@@ -453,9 +453,12 @@ impl TerminalHandler {
     }
 
     /// Return the current cursor position in screen coordinates (0-indexed).
+    ///
+    /// This returns coordinates relative to the top of the visible window, so
+    /// the GUI painter can use them directly without any offset adjustment.
     #[must_use]
-    pub const fn cursor_pos(&self) -> CursorPos {
-        self.buffer.get_cursor().pos
+    pub fn cursor_pos(&self) -> CursorPos {
+        self.buffer.get_cursor_screen_pos()
     }
 
     /// Return the current terminal dimensions as `(width, height)`.
