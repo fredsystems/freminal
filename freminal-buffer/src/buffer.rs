@@ -1518,7 +1518,37 @@ impl Buffer {
     /// the returned `Vec<TChar>`, matching the convention used by the old `FormatTracker`.
     #[must_use]
     pub fn visible_as_tchars_and_tags(&self) -> (Vec<TChar>, Vec<FormatTag>) {
-        let rows = self.visible_rows();
+        Self::rows_as_tchars_and_tags(self.visible_rows())
+    }
+
+    /// Flatten all scrollback rows (everything before the visible window) into
+    /// a linear `(Vec<TChar>, Vec<FormatTag>)` pair using the same algorithm as
+    /// [`visible_as_tchars_and_tags`].
+    ///
+    /// Returns `(vec![], vec![])` for the alternate screen buffer, which never
+    /// accumulates scrollback.
+    #[must_use]
+    pub fn scrollback_as_tchars_and_tags(&self) -> (Vec<TChar>, Vec<FormatTag>) {
+        // Alternate buffer has no scrollback.
+        if self.kind == BufferType::Alternate {
+            return (vec![], vec![]);
+        }
+
+        let visible_start = self.visible_window_start();
+
+        if visible_start == 0 {
+            // No scrollback rows exist yet.
+            return (vec![], vec![]);
+        }
+
+        let scrollback_rows = &self.rows[..visible_start];
+        Self::rows_as_tchars_and_tags(scrollback_rows)
+    }
+
+    /// Shared helper: flatten a slice of [`Row`]s into `(Vec<TChar>,
+    /// Vec<FormatTag>)`.  Used by both `visible_as_tchars_and_tags` and
+    /// `scrollback_as_tchars_and_tags` so the merge logic is never duplicated.
+    fn rows_as_tchars_and_tags(rows: &[Row]) -> (Vec<TChar>, Vec<FormatTag>) {
         let mut chars: Vec<TChar> = Vec::new();
         let mut tags: Vec<FormatTag> = Vec::new();
 
@@ -1526,7 +1556,7 @@ impl Buffer {
 
         for (row_idx, row) in rows.iter().enumerate() {
             for cell in row.get_characters() {
-                // Skip wide-glyph continuation cells — the head already covers them.
+                // Skip wide-glyph continuation cells.
                 if cell.is_continuation() {
                     continue;
                 }
@@ -1534,8 +1564,6 @@ impl Buffer {
                 let byte_pos = chars.len();
                 chars.push(cell.tchar().clone());
 
-                // Merge into the previous tag if the format is identical and adjacent,
-                // otherwise open a new tag.
                 let cell_tag = cell.tag();
                 if let Some(last) = tags.last_mut() {
                     if last.end == byte_pos && tags_same_format(last, cell_tag) {
@@ -1567,7 +1595,6 @@ impl Buffer {
             if !is_last_row {
                 let byte_pos = chars.len();
                 chars.push(TChar::NewLine);
-                // The newline inherits the last active format.
                 if let Some(last) = tags.last_mut() {
                     if last.end == byte_pos {
                         last.end += 1;
@@ -1599,14 +1626,23 @@ impl Buffer {
                 },
                 ..FormatTag::default()
             });
-        } else {
-            // Clamp the last tag's end to the actual length (no stale usize::MAX).
-            if let Some(last) = tags.last_mut() {
-                last.end = chars.len();
-            }
+        } else if let Some(last) = tags.last_mut() {
+            last.end = chars.len();
         }
 
         (chars, tags)
+    }
+
+    /// Return the terminal width (columns).
+    #[must_use]
+    pub const fn terminal_width(&self) -> usize {
+        self.width
+    }
+
+    /// Return the terminal height (rows).
+    #[must_use]
+    pub const fn terminal_height(&self) -> usize {
+        self.height
     }
 
     /// Set the current format tag for subsequent text insertions

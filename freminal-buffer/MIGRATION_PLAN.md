@@ -906,7 +906,7 @@ Algorithm:
 
 ### Step 4.2 — Implement `scrollback_as_tchars_and_tags` and the full GUI data API
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 4.2 Why this step exists
 

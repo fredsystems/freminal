@@ -15,5 +15,6 @@ pub mod modes;
 pub mod osc;
 pub mod tchar;
 pub mod terminal_output;
+pub mod terminal_sections;
 pub mod url;
 pub mod window_manipulation;

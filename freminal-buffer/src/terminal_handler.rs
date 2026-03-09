@@ -6,7 +6,7 @@
 use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
-        cursor::{ReverseVideo, StateColors},
+        cursor::{CursorPos, ReverseVideo, StateColors},
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
         line_draw::DecSpecialGraphics,
@@ -19,6 +19,7 @@ use freminal_common::{
         osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
         tchar::TChar,
         terminal_output::TerminalOutput,
+        terminal_sections::TerminalSections,
         url::Url,
         window_manipulation::WindowManipulation,
     },
@@ -422,6 +423,44 @@ impl TerminalHandler {
     /// Handle scroll to bottom
     pub fn handle_scroll_to_bottom(&mut self) {
         self.buffer.scroll_to_bottom();
+    }
+
+    /// Return the complete GUI data set: visible and scrollback content as
+    /// `(TerminalSections<Vec<TChar>>, TerminalSections<Vec<FormatTag>>)`.
+    ///
+    /// This is the primary method the GUI layer should call to obtain all data
+    /// needed to render the terminal.
+    #[must_use]
+    pub fn data_and_format_data_for_gui(
+        &self,
+    ) -> (
+        TerminalSections<Vec<TChar>>,
+        TerminalSections<Vec<FormatTag>>,
+    ) {
+        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags();
+        let (scrollback_chars, scrollback_tags) = self.buffer.scrollback_as_tchars_and_tags();
+        (
+            TerminalSections {
+                scrollback: scrollback_chars,
+                visible: visible_chars,
+            },
+            TerminalSections {
+                scrollback: scrollback_tags,
+                visible: visible_tags,
+            },
+        )
+    }
+
+    /// Return the current cursor position in screen coordinates (0-indexed).
+    #[must_use]
+    pub const fn cursor_pos(&self) -> CursorPos {
+        self.buffer.get_cursor().pos
+    }
+
+    /// Return the current terminal dimensions as `(width, height)`.
+    #[must_use]
+    pub const fn get_win_size(&self) -> (usize, usize) {
+        (self.buffer.terminal_width(), self.buffer.terminal_height())
     }
 
     /// Process an array of `TerminalOutput` commands
@@ -1289,5 +1328,107 @@ mod tests {
         // Screen should be cleared
         let visible = handler.buffer().visible_rows();
         assert_eq!(visible.len(), 24);
+    }
+
+    #[test]
+    fn gui_data_visible_only() {
+        // Write two rows — scrollback must be empty, visible must have content.
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_data(b"row one");
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        handler.handle_data(b"row two");
+
+        let (chars, tags) = handler.data_and_format_data_for_gui();
+
+        // Nothing has scrolled off yet — scrollback must be empty.
+        assert!(
+            chars.scrollback.is_empty(),
+            "scrollback chars must be empty when nothing has scrolled off"
+        );
+        assert!(
+            tags.scrollback.is_empty(),
+            "scrollback tags must be empty when nothing has scrolled off"
+        );
+
+        // Visible section must contain the written text.
+        let visible_str: String = chars
+            .visible
+            .iter()
+            .map(|c| match c {
+                freminal_common::buffer_states::tchar::TChar::Ascii(b) => (*b as char).to_string(),
+                freminal_common::buffer_states::tchar::TChar::Space => " ".to_string(),
+                freminal_common::buffer_states::tchar::TChar::NewLine => "\n".to_string(),
+                freminal_common::buffer_states::tchar::TChar::Utf8(v) => {
+                    String::from_utf8_lossy(v).to_string()
+                }
+            })
+            .collect();
+
+        assert!(
+            visible_str.contains("row one"),
+            "visible must contain 'row one'"
+        );
+        assert!(
+            visible_str.contains("row two"),
+            "visible must contain 'row two'"
+        );
+        assert!(!tags.visible.is_empty(), "visible tags must not be empty");
+    }
+
+    #[test]
+    fn gui_data_scrollback_present() {
+        // Use a very small terminal so lines scroll off quickly.
+        let mut handler = TerminalHandler::new(80, 3);
+
+        // Write more lines than the visible height so some content is pushed into scrollback.
+        for i in 0..10_u8 {
+            handler.handle_data(&[b'A' + i]);
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+
+        let (chars, tags) = handler.data_and_format_data_for_gui();
+
+        // Some content must have scrolled off.
+        assert!(
+            !chars.scrollback.is_empty(),
+            "scrollback chars must be non-empty after many lines"
+        );
+        assert!(
+            !tags.scrollback.is_empty(),
+            "scrollback tags must be non-empty after many lines"
+        );
+
+        // Visible section is still populated.
+        assert!(!chars.visible.is_empty(), "visible chars must not be empty");
+    }
+
+    #[test]
+    fn cursor_pos_accessor() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Move the cursor to a known position then verify the accessor.
+        handler.handle_cursor_pos(Some(5), Some(3));
+
+        let pos = handler.cursor_pos();
+        assert_eq!(
+            pos.x, 4,
+            "cursor x should be 4 (0-indexed from 1-indexed 5)"
+        );
+        assert_eq!(
+            pos.y, 2,
+            "cursor y should be 2 (0-indexed from 1-indexed 3)"
+        );
+    }
+
+    #[test]
+    fn win_size_accessor() {
+        let handler = TerminalHandler::new(132, 48);
+
+        let (w, h) = handler.get_win_size();
+        assert_eq!(w, 132, "width must match constructor argument");
+        assert_eq!(h, 48, "height must match constructor argument");
     }
 }
