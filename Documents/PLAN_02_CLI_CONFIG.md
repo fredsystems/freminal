@@ -149,7 +149,7 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.4 — Implement CLI + TOML precedence for shared options
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `freminal/src/main.rs`
 - **Details:**
   - For options that exist in both CLI and TOML (`--shell`, `--write-logs-to-file`):

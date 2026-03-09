@@ -24,10 +24,9 @@ fn parses_empty_args_defaults() {
     assert!(args.recording.is_none());
     assert!(args.shell.is_none());
     assert!(!args.show_all_debug);
-    #[cfg(debug_assertions)]
-    assert!(args.write_logs_to_file);
-    #[cfg(not(debug_assertions))]
-    assert!(!args.write_logs_to_file);
+    // When the flag is absent, write_logs_to_file is None (unset).
+    // The merge logic in main.rs will fall back to the config/default value.
+    assert!(args.write_logs_to_file.is_none());
     assert!(args.config.is_none());
 }
 
@@ -64,13 +63,13 @@ fn parses_show_all_debug_flag() {
 #[test]
 fn parses_write_logs_to_file_true() {
     let args = parse_from(["freminal", "--write-logs-to-file=true"]).unwrap();
-    assert!(args.write_logs_to_file);
+    assert_eq!(args.write_logs_to_file, Some(true));
 }
 
 #[test]
 fn parses_write_logs_to_file_false() {
     let args = parse_from(["freminal", "--write-logs-to-file=false"]).unwrap();
-    assert!(!args.write_logs_to_file);
+    assert_eq!(args.write_logs_to_file, Some(false));
 }
 
 #[test]
@@ -78,7 +77,7 @@ fn missing_write_logs_to_file_value_defaults_to_true() {
     // With clap, `--write-logs-to-file` without `=value` should default to true
     // (via default_missing_value)
     let args = parse_from(["freminal", "--write-logs-to-file"]).unwrap();
-    assert!(args.write_logs_to_file);
+    assert_eq!(args.write_logs_to_file, Some(true));
 }
 
 #[test]
@@ -144,7 +143,7 @@ fn all_flags_combined() {
     assert_eq!(args.recording.as_deref(), Some("rec.log"));
     assert_eq!(args.shell.as_deref(), Some("/bin/zsh"));
     assert!(args.show_all_debug);
-    assert!(args.write_logs_to_file);
+    assert_eq!(args.write_logs_to_file, Some(true));
     assert_eq!(
         args.config.as_deref(),
         Some(std::path::Path::new("/tmp/config.toml"))
@@ -162,7 +161,7 @@ proptest! {
     fn write_logs_to_file_accepts_boolean_values(val in proptest::bool::ANY) {
         let arg = format!("--write-logs-to-file={}", val);
         let args = parse_from(["freminal", &arg]).unwrap();
-        prop_assert_eq!(args.write_logs_to_file, val);
+        prop_assert_eq!(args.write_logs_to_file, Some(val));
     }
 
     /// Arbitrary strings that do *not* start with `--` should always trigger an error.

@@ -182,6 +182,40 @@ impl Config {
         }
     }
 
+    /// Apply CLI argument overrides on top of the loaded configuration.
+    ///
+    /// For options that exist in both CLI and TOML, CLI takes precedence:
+    ///   CLI > TOML > env var > system config > defaults
+    ///
+    /// Only `Some` values override; `None` means the CLI flag was not specified
+    /// and the TOML value (or default) is kept.
+    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, write_logs_to_file: Option<bool>) {
+        if let Some(shell_path) = shell {
+            self.shell.path = Some(shell_path.to_owned());
+        }
+        if let Some(write) = write_logs_to_file {
+            self.logging.write_to_file = write;
+        }
+    }
+
+    /// Returns the effective `write_logs_to_file` value.
+    ///
+    /// This is a convenience accessor so callers don't need to reach into
+    /// `logging.write_to_file` directly.
+    #[must_use]
+    pub const fn write_logs_to_file(&self) -> bool {
+        self.logging.write_to_file
+    }
+
+    /// Returns the effective shell path, if configured.
+    ///
+    /// Returns `None` when neither CLI nor TOML specified a shell path,
+    /// in which case the system default should be used.
+    #[must_use]
+    pub fn shell_path(&self) -> Option<&str> {
+        self.shell.path.as_deref()
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if !(4.0..=96.0).contains(&self.font.size) {
             return Err(ConfigError::Validation(format!(

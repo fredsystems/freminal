@@ -25,17 +25,18 @@ pub struct Args {
 
     /// Write logs to a file in the current directory.
     ///
-    /// Accepts `--write-logs-to-file=true` or `--write-logs-to-file=false`.
-    /// Defaults to true in debug builds and false in release builds.
+    /// Accepts `--write-logs-to-file`, `--write-logs-to-file=true`, or
+    /// `--write-logs-to-file=false`. When the flag is present without a value,
+    /// it defaults to true. When the flag is absent, the config file value is
+    /// used (falling back to false if not configured).
     #[arg(
         long = "write-logs-to-file",
         value_name = "BOOL",
-        default_value_t = cfg!(debug_assertions),
         num_args = 0..=1,
         require_equals = true,
         default_missing_value = "true",
     )]
-    pub write_logs_to_file: bool,
+    pub write_logs_to_file: Option<bool>,
 
     /// Path to a TOML configuration file (overrides default config locations)
     #[arg(long = "config")]

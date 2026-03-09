@@ -54,6 +54,21 @@ fn main() {
 
     let args = Args::parse();
 
+    // ── 1. Load config and apply CLI overrides ──────────────────────────
+    // Config must be loaded before logging setup so that the merged
+    // `write_logs_to_file` value (CLI > TOML > default) can control
+    // whether log files are created.
+    let mut cfg = match load_config(args.config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("Error: failed to load config: {err:#}");
+            std::process::exit(1);
+        }
+    };
+
+    cfg.apply_cli_overrides(args.shell.as_deref(), args.write_logs_to_file);
+
+    // ── 2. Set up logging ───────────────────────────────────────────────
     let env_filter = if args.show_all_debug {
         EnvFilter::builder()
             .with_default_directive(Level::INFO.into())
@@ -62,7 +77,7 @@ fn main() {
         let winit_directive: Directive = match "winit=off".parse() {
             Ok(d) => d,
             Err(e) => {
-                error!("Failed to parse directive: {}", e);
+                eprintln!("Failed to parse directive: {e}");
                 std::process::exit(1);
             }
         };
@@ -70,7 +85,7 @@ fn main() {
         let wgpu_directive: Directive = match "wgpu=off".parse() {
             Ok(d) => d,
             Err(e) => {
-                error!("Failed to parse directive: {}", e);
+                eprintln!("Failed to parse directive: {e}");
                 std::process::exit(1);
             }
         };
@@ -78,7 +93,7 @@ fn main() {
         let eframe_directive: Directive = match "eframe=off".parse() {
             Ok(d) => d,
             Err(e) => {
-                error!("Failed to parse directive: {}", e);
+                eprintln!("Failed to parse directive: {e}");
                 std::process::exit(1);
             }
         };
@@ -86,7 +101,7 @@ fn main() {
         let egui_directive: Directive = match "egui=off".parse() {
             Ok(d) => d,
             Err(e) => {
-                error!("Failed to parse directive: {}", e);
+                eprintln!("Failed to parse directive: {e}");
                 std::process::exit(1);
             }
         };
@@ -102,7 +117,7 @@ fn main() {
 
     let subscriber = tracing_subscriber::registry().with(env_filter);
 
-    if args.write_logs_to_file {
+    if cfg.write_logs_to_file() {
         let std_out_layer = layer()
             .with_line_number(true)
             .with_span_events(fmt::format::FmtSpan::ACTIVE)
@@ -117,7 +132,7 @@ fn main() {
         {
             Ok(appender) => appender,
             Err(e) => {
-                error!("Failed to create file appender: {}", e);
+                eprintln!("Failed to create file appender: {e}");
                 return;
             }
         };
@@ -135,16 +150,15 @@ fn main() {
     }
 
     info!("Starting freminal");
-
-    let cfg = match load_config(args.config.as_deref()) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            error!("Failed to load config: {:#}", err);
-            std::process::exit(1);
-        }
-    };
-
     debug!("Loaded config: {:#?}", cfg);
+
+    // Propagate the merged shell path back into args so that
+    // TerminalEmulator::new (which reads args.shell) gets the effective
+    // value from the CLI > TOML > default precedence chain.
+    let mut args = args;
+    if args.shell.is_none() {
+        args.shell = cfg.shell_path().map(String::from);
+    }
 
     let res = match TerminalEmulator::new(&args) {
         Ok((terminal, pty_read_rx)) => {
