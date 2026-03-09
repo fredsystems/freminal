@@ -417,12 +417,18 @@ No step should leave the tree in a state where `cargo test --all` fails.
 
 ---
 
-- [ ] **Task 2 — Define `InputEvent` and `WindowCommand` channel types**
+- [x] **Task 2 — Define `InputEvent` and `WindowCommand` channel types**
   - Add `InputEvent` and `WindowCommand` enums to
     `freminal-terminal-emulator/src/io/mod.rs` alongside the existing `PtyRead` / `PtyWrite`.
   - Use the definitions from Section 4.3 and 4.4 exactly.
   - No call sites wired up yet — these are type definitions only.
   - **Verify:** `cargo test --all` passes. `cargo build --all` passes.
+  - ✅ **Completed 2026-03-09.** Added `InputEvent { Key(Vec<u8>), Resize(usize, usize),
+    FocusChange(bool) }` and `WindowCommand { Viewport(WindowManipulation),
+    Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
+    `WindowManipulation` is referenced via its full path from `freminal-common`.
+    No call sites wired up. `cargo build --all` clean, `cargo test --all` passed,
+    no diagnostics.
 
 ---
 
@@ -818,7 +824,7 @@ refactor is stable.
 
 - [ ] Document reviewed and agreed by user
 - [x] Task 1 complete
-- [ ] Task 2 complete
+- [x] Task 2 complete
 - [ ] Task 3 complete (benchmarks written and baselined)
 - [ ] Task 4 complete
 - [ ] Task 5 complete
