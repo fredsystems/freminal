@@ -28,7 +28,7 @@ ignore-hidden = false
 # TOI = "TOI" # Time of impact
 
 [default]
-locale = "en-us"
+locale = "en"
 extend-ignore-identifiers-re = [ # NDK - Native  Development Kit
     "Pn",
     "ratatui",
