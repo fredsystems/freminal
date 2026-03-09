@@ -6,47 +6,15 @@
 pub mod dummy;
 pub use dummy::DummyIo;
 mod pty;
-use anyhow::{Error, Result};
-use conv2::ValueFrom;
-use portable_pty::PtySize;
 pub use pty::FreminalPtyInputOutput;
-// pub type TermIoErr = Box<dyn std::error::Error>;
 
-// pub enum ReadResponse {
-//     Success(usize),
-//     Empty,
-// }
-
-#[derive(Debug)]
-pub struct FreminalTerminalSize {
-    pub width: usize,
-    pub height: usize,
-    pub pixel_width: usize,
-    pub pixel_height: usize,
-}
-
-impl TryFrom<FreminalTerminalSize> for PtySize {
-    type Error = Error;
-
-    fn try_from(value: FreminalTerminalSize) -> Result<Self> {
-        Ok(Self {
-            rows: u16::value_from(value.height)?,
-            cols: u16::value_from(value.width)?,
-            pixel_width: u16::value_from(value.pixel_width)?,
-            pixel_height: u16::value_from(value.pixel_height)?,
-        })
-    }
-}
+// Re-export the shared PTY I/O types from freminal-common so that all crates
+// can use the same definitions without creating a circular dependency.
+pub use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 
 pub struct PtyRead {
     pub buf: Vec<u8>,
     pub read_amount: usize,
-}
-
-#[derive(Debug)]
-pub enum PtyWrite {
-    Write(Vec<u8>),
-    Resize(FreminalTerminalSize),
 }
 
 pub trait FreminalTermInputOutput {

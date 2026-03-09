@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_buffer::terminal_handler::TerminalHandler;
+use freminal_common::pty_write::PtyWrite;
 
 /// Helper to convert a string slice to TChar representation as bytes
 fn text_to_bytes(s: &str) -> Vec<u8> {
@@ -1117,7 +1118,7 @@ fn cursor_report_sends_correct_position() {
     // Move cursor to (4, 2) (0-indexed), send CursorReport → channel receives "\x1b[3;5R".
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
 
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
@@ -1130,9 +1131,13 @@ fn cursor_report_sends_correct_position() {
 
     handler.process_outputs(&[TerminalOutput::CursorReport]);
 
-    let bytes = rx
+    let msg = rx
         .try_recv()
         .expect("CursorReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
         response, "\x1b[3;5R",
@@ -1145,16 +1150,20 @@ fn da1_sends_response() {
     // RequestDeviceAttributes must send the DA1 capability string.
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
 
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
 
     handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
 
-    let bytes = rx
+    let msg = rx
         .try_recv()
         .expect("RequestDeviceAttributes must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
         response, "\x1b[?65;1;2;4;6;17;18;22c",

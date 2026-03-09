@@ -1396,6 +1396,7 @@ dependencies = [
  "assert_cmd",
  "conv2",
  "directories",
+ "portable-pty",
  "predicates",
  "proptest",
  "serde",

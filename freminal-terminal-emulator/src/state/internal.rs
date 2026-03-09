@@ -82,18 +82,10 @@ impl TerminalState {
     pub fn new(write_tx: crossbeam_channel::Sender<PtyWrite>) -> Self {
         let handler = {
             let mut h = NewHandler::new(DEFAULT_WIDTH as usize, DEFAULT_HEIGHT as usize);
-            // Bridge: the new handler writes raw bytes; forward them to the
-            // emulator's PtyWrite::Write channel so the PTY receives them.
-            let (bytes_tx, bytes_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-            h.set_write_tx(bytes_tx);
-            let fwd_tx = write_tx.clone();
-            std::thread::spawn(move || {
-                while let Ok(bytes) = bytes_rx.recv() {
-                    if fwd_tx.send(PtyWrite::Write(bytes)).is_err() {
-                        break;
-                    }
-                }
-            });
+            // Pass the PtyWrite sender directly so the handler can write
+            // escape-sequence responses (DA, CPR, etc.) straight to the PTY
+            // without an intermediate forwarding thread.
+            h.set_write_tx(write_tx.clone());
             h
         };
 

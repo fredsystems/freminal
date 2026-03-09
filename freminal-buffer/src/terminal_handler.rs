@@ -24,6 +24,7 @@ use freminal_common::{
         window_manipulation::WindowManipulation,
     },
     cursor::CursorVisualStyle,
+    pty_write::PtyWrite,
     sgr::SelectGraphicRendition,
 };
 
@@ -45,7 +46,7 @@ pub struct TerminalHandler {
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
     /// Optional channel for writing responses back to the PTY.
-    write_tx: Option<Sender<Vec<u8>>>,
+    write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
 }
@@ -307,7 +308,7 @@ impl TerminalHandler {
 
     /// Set the PTY write channel.  Once set, responses such as CPR and DA1
     /// will be sent through this channel rather than silently discarded.
-    pub fn set_write_tx(&mut self, tx: Sender<Vec<u8>>) {
+    pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
         self.write_tx = Some(tx);
     }
 
@@ -319,7 +320,7 @@ impl TerminalHandler {
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     fn write_to_pty(&self, text: &str) {
         if let Some(tx) = &self.write_tx
-            && let Err(e) = tx.send(text.as_bytes().to_vec())
+            && let Err(e) = tx.send(PtyWrite::Write(text.as_bytes().to_vec()))
         {
             tracing::error!("Failed to write to PTY: {e}");
         }
