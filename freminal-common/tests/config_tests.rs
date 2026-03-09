@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_common::config::{
-    Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, load_config,
+    Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, load_config, save_config,
 };
 use std::io::Write;
 use std::path::Path;
@@ -558,4 +558,123 @@ fn cli_write_logs_false_overrides_toml_true() {
 
     cfg.apply_cli_overrides(None, Some(false));
     assert!(!cfg.write_logs_to_file());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  save_config — serialization / write-back
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn save_default_config_to_explicit_path_creates_valid_file() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("config.toml");
+
+    let cfg = Config::default();
+    save_config(&cfg, Some(&path)).expect("save should succeed");
+
+    // The file should exist and be valid TOML that we can load back.
+    assert!(path.exists(), "config file should be created");
+    let loaded = load_config(Some(&path)).expect("saved config should reload");
+    assert_eq!(loaded.version, cfg.version);
+    assert!((loaded.font.size - cfg.font.size).abs() < f32::EPSILON);
+    assert_eq!(loaded.scrollback.limit, cfg.scrollback.limit);
+}
+
+#[test]
+fn save_config_round_trips_custom_values() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("custom.toml");
+
+    let mut cfg = Config::default();
+    cfg.shell.path = Some("/bin/zsh".to_string());
+    cfg.logging.write_to_file = true;
+    cfg.scrollback.limit = 10_000;
+    cfg.font.size = 16.0;
+    cfg.font.family = Some("JetBrains Mono".to_string());
+    cfg.theme.name = "solarized-dark".to_string();
+
+    save_config(&cfg, Some(&path)).expect("save should succeed");
+
+    let loaded = load_config(Some(&path)).expect("reloaded config should be valid");
+    assert_eq!(loaded.shell.path.as_deref(), Some("/bin/zsh"));
+    assert!(loaded.logging.write_to_file);
+    assert_eq!(loaded.scrollback.limit, 10_000);
+    assert!((loaded.font.size - 16.0).abs() < f32::EPSILON);
+    assert_eq!(loaded.font.family.as_deref(), Some("JetBrains Mono"));
+    assert_eq!(loaded.theme.name, "solarized-dark");
+}
+
+#[test]
+fn save_config_creates_parent_directories() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("nested").join("deep").join("config.toml");
+
+    let cfg = Config::default();
+    save_config(&cfg, Some(&path)).expect("save should create parent dirs");
+    assert!(path.exists());
+}
+
+#[test]
+fn save_config_rejects_invalid_config() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("bad.toml");
+
+    let mut cfg = Config::default();
+    cfg.scrollback.limit = 0; // Invalid: must be >= 1
+
+    let err = save_config(&cfg, Some(&path));
+    assert!(err.is_err(), "should reject invalid scrollback limit");
+    assert!(!path.exists(), "invalid config should not be written");
+}
+
+#[test]
+fn save_config_output_is_valid_toml() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("check.toml");
+
+    let cfg = Config::default();
+    save_config(&cfg, Some(&path)).expect("save should succeed");
+
+    let contents = std::fs::read_to_string(&path).expect("should read file");
+    // Verify it parses as TOML
+    let _: toml::Value = toml::from_str(&contents).expect("output should be valid TOML");
+}
+
+#[test]
+fn save_then_modify_then_save_overwrites() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("overwrite.toml");
+
+    let cfg = Config::default();
+    save_config(&cfg, Some(&path)).expect("first save");
+
+    let mut cfg2 = Config::default();
+    cfg2.scrollback.limit = 8000;
+    save_config(&cfg2, Some(&path)).expect("second save");
+
+    let loaded = load_config(Some(&path)).expect("reload after overwrite");
+    assert_eq!(loaded.scrollback.limit, 8000);
+}
+
+#[test]
+fn save_config_preserves_none_shell_path() {
+    // When shell.path is None, it should not appear in the TOML output
+    // (thanks to skip_serializing_if = "Option::is_none").
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("no_shell.toml");
+
+    let cfg = Config::default();
+    assert!(cfg.shell.path.is_none());
+    save_config(&cfg, Some(&path)).expect("save should succeed");
+
+    let contents = std::fs::read_to_string(&path).expect("should read file");
+    // The [shell] section should exist but not contain "path =".
+    assert!(
+        !contents.contains("path ="),
+        "None shell.path should be omitted from TOML output"
+    );
+
+    // Reloading should still produce None for shell.path.
+    let loaded = load_config(Some(&path)).expect("reload should succeed");
+    assert!(loaded.shell.path.is_none());
 }

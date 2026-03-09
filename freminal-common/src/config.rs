@@ -260,6 +260,16 @@ pub enum ConfigError {
 
     #[error("Invalid configuration: {0}")]
     Validation(String),
+
+    #[error("failed to serialize config: {0}")]
+    Serialize(String),
+
+    #[error("I/O error writing {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// ---------------------------------------------------------------------------------------------
@@ -307,6 +317,46 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
 
     cfg.validate()?;
     Ok(cfg)
+}
+
+/// Saves the configuration to a TOML file.
+///
+/// If `path` is `Some`, the config is written to that exact location.
+/// If `path` is `None`, the config is written to the platform-specific
+/// user config path (e.g. `$XDG_CONFIG_HOME/freminal/config.toml`).
+///
+/// The config is validated before writing so that invalid values are
+/// never persisted to disk.
+///
+/// # Errors
+///
+/// Returns `ConfigError` if validation fails, serialization fails,
+/// the target directory cannot be determined (no home directory), or
+/// the file cannot be written.
+pub fn save_config(config: &Config, path: Option<&Path>) -> Result<(), ConfigError> {
+    config.validate()?;
+
+    let target = match path {
+        Some(p) => p.to_path_buf(),
+        None => user_config_path().ok_or_else(|| {
+            ConfigError::Validation(
+                "cannot determine user config directory (no home directory?)".to_string(),
+            )
+        })?,
+    };
+
+    // Ensure the parent directory exists.
+    if let Some(parent) = target.parent() {
+        create_dir_if_missing(parent);
+    }
+
+    let toml_str =
+        toml::to_string_pretty(config).map_err(|e| ConfigError::Serialize(e.to_string()))?;
+
+    fs::write(&target, toml_str).map_err(|source| ConfigError::Write {
+        path: target,
+        source,
+    })
 }
 
 /// ---------------------------------------------------------------------------------------------

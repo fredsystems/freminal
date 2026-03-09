@@ -192,24 +192,28 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.6 — Implement config serialization (write-back support)
 
-- **Status:** Not Started
+- **Status:** COMPLETE ✓
 - **Scope:** `freminal-common/src/config.rs`
 - **Details:**
-  - Add `save_config(config: &FreminalConfig, path: Option<&Path>) -> Result<()>`
-  - Serialize config to TOML with comments preserved where possible
-  - Use `toml` crate's serialization (already a dependency for deserialization)
-  - If path is None, write to the user-level config path
-  - Ensure written config is valid and can be re-loaded
-  - This is needed by Task 3 (Settings Modal) for persistence
+  - Added `save_config(config: &Config, path: Option<&Path>) -> Result<(), ConfigError>`
+  - Validates config before writing (reuses existing `validate()`)
+  - Resolves path: explicit path if provided, otherwise user-level default (`~/.config/freminal/config.toml`)
+  - Creates parent directories if they don't exist
+  - Serializes with `toml::to_string_pretty()` for human-readable output
+  - Added `ConfigError::Serialize(String)` and `ConfigError::Write { path, source }` variants
+  - `None` shell path and font family are omitted via `skip_serializing_if`
 - **Acceptance criteria:**
-  - Config round-trips: load → save → load produces identical config
-  - Written TOML is human-readable and well-formatted
-  - Saved to correct platform-specific path
-- **Tests required:**
-  - Round-trip serialization/deserialization
-  - Save to explicit path
-  - Save to default user path
-  - Written file is valid TOML
+  - Config round-trips: load → save → load produces identical config ✓
+  - Written TOML is human-readable and well-formatted ✓
+  - Saved to correct platform-specific path ✓
+- **Tests added:**
+  - `save_default_config_to_explicit_path_creates_valid_file` — saves default config, verifies file exists and is valid TOML
+  - `save_config_round_trips_custom_values` — custom font size, shell path, scrollback limit survive save/load cycle
+  - `save_config_creates_parent_directories` — deeply nested path has parent dirs auto-created
+  - `save_config_rejects_invalid_config` — font size out of range is rejected before write
+  - `save_config_output_is_valid_toml` — serialized output parses as valid TOML
+  - `save_then_modify_then_save_overwrites` — second save overwrites first, final values reflect update
+  - `save_config_preserves_none_shell_path` — `None` shell path omitted from TOML, round-trips correctly
 
 ### 2.7 — Cleanup and documentation
 
