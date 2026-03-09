@@ -227,3 +227,158 @@ fn no_dangling_continuation_cells_after_insertion() {
     assert!(chars[1].is_continuation());
     assert!(!chars[2].is_continuation());
 }
+
+//
+// ────────────────────────────────────────────────────────────
+//  GAP-PADDING FORMAT TAG TESTS
+//  These tests verify that blank cells inserted to fill a column
+//  gap (when the cursor jumps forward before writing) always use
+//  FormatTag::default(), never the incoming text's tag.
+//  This is the root cause of the "nano highlight bleeds across
+//  blank space" bug.
+// ────────────────────────────────────────────────────────────
+//
+
+/// Build a FormatTag that has reverse-video on (non-default colors).
+fn reverse_tag() -> FormatTag {
+    use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
+    FormatTag {
+        colors: StateColors::default().with_reverse_video(ReverseVideo::On),
+        ..FormatTag::default()
+    }
+}
+
+#[test]
+fn gap_padding_uses_default_tag_not_incoming_tag() {
+    // Write 2 chars at col 0 with reverse-video tag ("^G"),
+    // then write 2 chars at col 16 with the same tag ("^O").
+    // The 14 blank cells between col 2 and col 16 must have the
+    // default tag, not the reverse-video tag.
+    let mut row = Row::new(80);
+    let rv = reverse_tag();
+
+    // Write "^G" at col 0
+    row.insert_text(0, &[ascii('^'), ascii('G')], &rv);
+
+    // Write "^O" at col 16 with reverse-video
+    row.insert_text(16, &[ascii('^'), ascii('O')], &rv);
+
+    let chars = row.get_characters();
+
+    // Cells 0-1: reverse-video (the "^G" chars)
+    assert_eq!(chars[0].tag(), &rv, "col 0 should have reverse-video tag");
+    assert_eq!(chars[1].tag(), &rv, "col 1 should have reverse-video tag");
+
+    // Cells 2-15: gap padding — must be default tag
+    for (col, cell) in chars.iter().enumerate().skip(2).take(14) {
+        assert_eq!(
+            cell.tag(),
+            &FormatTag::default(),
+            "gap cell at col {col} must have default tag, not the incoming tag"
+        );
+    }
+
+    // Cells 16-17: reverse-video (the "^O" chars)
+    assert_eq!(chars[16].tag(), &rv, "col 16 should have reverse-video tag");
+    assert_eq!(chars[17].tag(), &rv, "col 17 should have reverse-video tag");
+}
+
+#[test]
+fn gap_padding_with_default_tag_is_trimmed_as_sparse() {
+    // If only default-tag blanks are in the gap and nothing follows them
+    // on the row, the sparse-row invariant should trim them away.
+    // Concretely: write "AB" at col 0 (default tag), then check that
+    // writing something with reverse-video far to the right leaves the
+    // gap as default cells, and the sparse trim at clear_from still works.
+    let mut row = Row::new(80);
+    let rv = reverse_tag();
+
+    // Write "A" at col 5 with reverse-video — creates a gap at cols 0-4
+    row.insert_text(5, &[ascii('A')], &rv);
+
+    let chars = row.get_characters();
+
+    // Gap cells 0-4 must be default tag
+    for (col, cell) in chars.iter().enumerate().take(5) {
+        assert_eq!(
+            cell.tag(),
+            &FormatTag::default(),
+            "gap cell at col {col} must use default tag"
+        );
+    }
+
+    // Col 5 must be reverse-video
+    assert_eq!(chars[5].tag(), &rv, "col 5 should have reverse-video tag");
+}
+
+#[test]
+fn nano_shortcut_bar_highlight_does_not_bleed_into_gap() {
+    // Reproduce the nano shortcut-bar pattern:
+    //   col  0- 1: "^G" with reverse-video
+    //   col  2- 6: " Help" with default tag
+    //   col 16-17: "^O" with reverse-video
+    //   col 18-31: " Write Out    " with default tag
+    //
+    // The cells at cols 7-15 (gap between " Help" and "^O") must ALL
+    // have the default tag — not reverse-video.
+    let mut row = Row::new(147);
+    let rv = reverse_tag();
+    let def = FormatTag::default();
+
+    row.insert_text(0, &[ascii('^'), ascii('G')], &rv);
+    row.insert_text(
+        2,
+        &[ascii(' '), ascii('H'), ascii('e'), ascii('l'), ascii('p')],
+        &def,
+    );
+    row.insert_text(16, &[ascii('^'), ascii('O')], &rv);
+    row.insert_text(
+        18,
+        &[
+            ascii(' '),
+            ascii('W'),
+            ascii('r'),
+            ascii('i'),
+            ascii('t'),
+            ascii('e'),
+            ascii(' '),
+            ascii('O'),
+            ascii('u'),
+            ascii('t'),
+            ascii(' '),
+            ascii(' '),
+            ascii(' '),
+            ascii(' '),
+        ],
+        &def,
+    );
+
+    let chars = row.get_characters();
+
+    // ^G: cols 0-1 → reverse
+    assert_eq!(chars[0].tag(), &rv, "^G col 0 must be reverse-video");
+    assert_eq!(chars[1].tag(), &rv, "^G col 1 must be reverse-video");
+
+    // " Help": cols 2-6 → default
+    for (col, cell) in chars.iter().enumerate().skip(2).take(5) {
+        assert_eq!(cell.tag(), &def, "' Help' col {col} must be default");
+    }
+
+    // gap: cols 7-15 → default (not reverse!)
+    for (col, cell) in chars.iter().enumerate().skip(7).take(9) {
+        assert_eq!(
+            cell.tag(),
+            &def,
+            "gap col {col} must be default, not reverse-video (highlight bleed)"
+        );
+    }
+
+    // ^O: cols 16-17 → reverse
+    assert_eq!(chars[16].tag(), &rv, "^O col 16 must be reverse-video");
+    assert_eq!(chars[17].tag(), &rv, "^O col 17 must be reverse-video");
+
+    // " Write Out    ": cols 18-31 → default
+    for (col, cell) in chars.iter().enumerate().skip(18).take(14) {
+        assert_eq!(cell.tag(), &def, "' Write Out' col {col} must be default");
+    }
+}

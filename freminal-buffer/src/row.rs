@@ -209,11 +209,14 @@ impl Row {
 
             // -----------------------------------------------------------
             // Pad up to current column with blanks if there's a gap.
+            // These cells were never explicitly written to, so they must
+            // carry the default format rather than the incoming text's tag.
             // -----------------------------------------------------------
             if col > self.cells.len() {
                 let pad = col - self.cells.len();
                 for _ in 0..pad {
-                    self.cells.push(Cell::new(TChar::Space, tag.clone()));
+                    self.cells
+                        .push(Cell::new(TChar::Space, FormatTag::default()));
                 }
             }
 
@@ -231,7 +234,7 @@ impl Row {
             let target_len = (col + w).min(self.width);
             if self.cells.len() < target_len {
                 self.cells
-                    .resize(target_len, Cell::new(TChar::Space, tag.clone()));
+                    .resize(target_len, Cell::new(TChar::Space, FormatTag::default()));
             }
 
             // After resize, col must be within bounds; double-check defensively.
