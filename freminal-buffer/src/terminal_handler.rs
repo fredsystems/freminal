@@ -338,6 +338,44 @@ impl TerminalHandler {
         }
     }
 
+    /// Handle DA2 — Secondary Device Attributes.
+    /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
+    pub fn handle_secondary_device_attributes(&mut self) {
+        self.write_to_pty("\x1b[>65;0;0c");
+    }
+
+    /// Handle `XTVersion` — respond with the Freminal version string as an XTerm-style response.
+    /// Responds with `DCS > | Freminal <version> ST`.
+    pub fn handle_xt_version(&mut self) {
+        let version = env!("CARGO_PKG_VERSION");
+        self.write_to_pty(&format!("\x1bP>|Freminal {version}\x1b\\"));
+    }
+
+    /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
+    /// Responds with `DCS > | Freminal <version> ST`.
+    pub fn handle_device_name_and_version(&mut self) {
+        let version = env!("CARGO_PKG_VERSION");
+        self.write_to_pty(&format!("\x1bP>|Freminal {version}\x1b\\"));
+    }
+
+    /// Handle a DCS (Device Control String) sequence.
+    ///
+    /// Most DCS sequences sent by applications like nvim are informational queries.
+    /// Unknown or unsupported sequences are silently logged and ignored — they must
+    /// never panic.
+    pub fn handle_device_control_string(&self, dcs: &[u8]) {
+        // Log at debug level so we can see what nvim and others send without noise.
+        tracing::debug!("DCS received (ignored): {}", String::from_utf8_lossy(dcs));
+    }
+
+    /// Handle an APC (Application Program Command) sequence.
+    ///
+    /// APC sequences are application-defined and rarely require a response.
+    /// Silently log and ignore.
+    pub fn handle_application_program_command(&self, apc: &[u8]) {
+        tracing::debug!("APC received (ignored): {}", String::from_utf8_lossy(apc));
+    }
+
     /// Handle CPR — Cursor Position Report.
     /// Responds with `ESC [ <row> ; <col> R` (1-indexed).
     pub fn handle_cursor_report(&mut self) {
@@ -550,13 +588,13 @@ impl TerminalHandler {
 
             // === Unimplemented Operations - TODO ===
             TerminalOutput::Bell => {
-                todo!("Bell not yet implemented");
+                tracing::debug!("Bell (ignored)");
             }
             TerminalOutput::ApplicationKeypadMode => {
-                todo!("ApplicationKeypadMode not yet implemented");
+                tracing::warn!("ApplicationKeypadMode not yet implemented (ignored)");
             }
             TerminalOutput::NormalKeypadMode => {
-                todo!("NormalKeypadMode not yet implemented");
+                tracing::warn!("NormalKeypadMode not yet implemented (ignored)");
             }
             TerminalOutput::Erase(n) => {
                 self.handle_erase_chars(*n);
@@ -605,109 +643,63 @@ impl TerminalHandler {
                 self.handle_request_device_attributes();
             }
             TerminalOutput::EightBitControl => {
-                todo!("Eight bit control not yet implemented");
+                tracing::warn!("EightBitControl not yet implemented (ignored)");
             }
             TerminalOutput::SevenBitControl => {
-                todo!("Seven bit control not yet implemented");
+                tracing::warn!("SevenBitControl not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelOne => {
-                todo!("ANSI conformance level 1 not yet implemented");
+                tracing::warn!("AnsiConformanceLevelOne not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelTwo => {
-                todo!("ANSI conformance level 2 not yet implemented");
+                tracing::warn!("AnsiConformanceLevelTwo not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelThree => {
-                todo!("ANSI conformance level 3 not yet implemented");
+                tracing::warn!("AnsiConformanceLevelThree not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightTop => {
-                todo!("Double line height top not yet implemented");
+                tracing::debug!("DoubleLineHeightTop not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightBottom => {
-                todo!("Double line height bottom not yet implemented");
+                tracing::debug!("DoubleLineHeightBottom not yet implemented (ignored)");
             }
             TerminalOutput::SingleWidthLine => {
-                todo!("Single width line not yet implemented");
+                tracing::debug!("SingleWidthLine not yet implemented (ignored)");
             }
             TerminalOutput::DoubleWidthLine => {
-                todo!("Double width line not yet implemented");
+                tracing::debug!("DoubleWidthLine not yet implemented (ignored)");
             }
             TerminalOutput::ScreenAlignmentTest => {
-                todo!("Screen alignment test not yet implemented");
+                tracing::warn!("ScreenAlignmentTest not yet implemented (ignored)");
             }
-            TerminalOutput::CharsetDefault => {
-                todo!("Charset default not yet implemented");
-            }
-            TerminalOutput::CharsetUTF8 => {
-                todo!("Charset UTF8 not yet implemented");
-            }
-            TerminalOutput::CharsetG0 => {
-                todo!("Charset G0 not yet implemented");
-            }
-            TerminalOutput::CharsetG1 => {
-                todo!("Charset G1 not yet implemented");
-            }
-            TerminalOutput::CharsetG1AsGR => {
-                todo!("Charset G1 as GR not yet implemented");
-            }
-            TerminalOutput::CharsetG2 => {
-                todo!("Charset G2 not yet implemented");
-            }
-            TerminalOutput::CharsetG2AsGR => {
-                todo!("Charset G2 as GR not yet implemented");
-            }
-            TerminalOutput::CharsetG2AsGL => {
-                todo!("Charset G2 as GL not yet implemented");
-            }
-            TerminalOutput::CharsetG3 => {
-                todo!("Charset G3 not yet implemented");
-            }
-            TerminalOutput::CharsetG3AsGR => {
-                todo!("Charset G3 as GR not yet implemented");
-            }
-            TerminalOutput::CharsetG3AsGL => {
-                todo!("Charset G3 as GL not yet implemented");
-            }
-            TerminalOutput::DecSpecial => {
-                todo!("DEC special not yet implemented");
-            }
-            TerminalOutput::CharsetUK => {
-                todo!("Charset UK not yet implemented");
-            }
-            TerminalOutput::CharsetUS => {
-                todo!("Charset US not yet implemented");
-            }
-            TerminalOutput::CharsetUSASCII => {
-                todo!("Charset US ASCII not yet implemented");
-            }
-            TerminalOutput::CharsetDutch => {
-                todo!("Charset Dutch not yet implemented");
-            }
-            TerminalOutput::CharsetFinnish => {
-                todo!("Charset Finnish not yet implemented");
-            }
-            TerminalOutput::CharsetFrench => {
-                todo!("Charset French not yet implemented");
-            }
-            TerminalOutput::CharsetFrenchCanadian => {
-                todo!("Charset French Canadian not yet implemented");
-            }
-            TerminalOutput::CharsetGerman => {
-                todo!("Charset German not yet implemented");
-            }
-            TerminalOutput::CharsetItalian => {
-                todo!("Charset Italian not yet implemented");
-            }
-            TerminalOutput::CharsetNorwegianDanish => {
-                todo!("Charset Norwegian/Danish not yet implemented");
-            }
-            TerminalOutput::CharsetSpanish => {
-                todo!("Charset Spanish not yet implemented");
-            }
-            TerminalOutput::CharsetSwedish => {
-                todo!("Charset Swedish not yet implemented");
-            }
-            TerminalOutput::CharsetSwiss => {
-                todo!("Charset Swiss not yet implemented");
+            TerminalOutput::CharsetDefault
+            | TerminalOutput::CharsetUTF8
+            | TerminalOutput::CharsetG0
+            | TerminalOutput::CharsetG1
+            | TerminalOutput::CharsetG1AsGR
+            | TerminalOutput::CharsetG2
+            | TerminalOutput::CharsetG2AsGR
+            | TerminalOutput::CharsetG2AsGL
+            | TerminalOutput::CharsetG3
+            | TerminalOutput::CharsetG3AsGR
+            | TerminalOutput::CharsetG3AsGL
+            | TerminalOutput::DecSpecial
+            | TerminalOutput::CharsetUK
+            | TerminalOutput::CharsetUS
+            | TerminalOutput::CharsetUSASCII
+            | TerminalOutput::CharsetDutch
+            | TerminalOutput::CharsetFinnish
+            | TerminalOutput::CharsetFrench
+            | TerminalOutput::CharsetFrenchCanadian
+            | TerminalOutput::CharsetGerman
+            | TerminalOutput::CharsetItalian
+            | TerminalOutput::CharsetNorwegianDanish
+            | TerminalOutput::CharsetSpanish
+            | TerminalOutput::CharsetSwedish
+            | TerminalOutput::CharsetSwiss => {
+                tracing::debug!(
+                    "Charset/line-drawing designation not yet implemented (ignored): {output}"
+                );
             }
             TerminalOutput::SaveCursor => {
                 self.handle_save_cursor();
@@ -716,31 +708,31 @@ impl TerminalHandler {
                 self.handle_restore_cursor();
             }
             TerminalOutput::CursorToLowerLeftCorner => {
-                todo!("Cursor to lower left corner not yet implemented");
+                tracing::warn!("CursorToLowerLeftCorner not yet implemented (ignored)");
             }
             TerminalOutput::ResetDevice => {
-                todo!("Reset device not yet implemented");
+                tracing::warn!("ResetDevice not yet implemented (ignored)");
             }
             TerminalOutput::MemoryLock => {
-                todo!("Memory lock not yet implemented");
+                tracing::warn!("MemoryLock not yet implemented (ignored)");
             }
             TerminalOutput::MemoryUnlock => {
-                todo!("Memory unlock not yet implemented");
+                tracing::warn!("MemoryUnlock not yet implemented (ignored)");
             }
-            TerminalOutput::DeviceControlString(_dcs) => {
-                todo!("Device control string not yet implemented");
+            TerminalOutput::DeviceControlString(dcs) => {
+                self.handle_device_control_string(dcs);
             }
-            TerminalOutput::ApplicationProgramCommand(_apc) => {
-                todo!("Application program command not yet implemented");
+            TerminalOutput::ApplicationProgramCommand(apc) => {
+                self.handle_application_program_command(apc);
             }
             TerminalOutput::RequestDeviceNameAndVersion => {
-                todo!("Request device name and version not yet implemented");
+                self.handle_device_name_and_version();
             }
             TerminalOutput::RequestSecondaryDeviceAttributes { param: _param } => {
-                todo!("Request secondary device attributes not yet implemented");
+                self.handle_secondary_device_attributes();
             }
             TerminalOutput::RequestXtVersion => {
-                todo!("Request Xt version not yet implemented");
+                self.handle_xt_version();
             }
             // Silently ignore invalid, skipped, and any future variants
             TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {

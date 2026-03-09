@@ -503,21 +503,21 @@ fn encode_egui_mouse_pos_as_usize(pos: Pos2, character_size: (f32, f32)) -> (usi
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
             if pos.x > 0.0 {
-                error!("Failed to convert {} to usize. Using default of 255", pos.x);
+                debug!("Mouse x ({}) out of range, clamping to 255", pos.x);
                 255
             } else {
-                error!("Failed to convert {} to usize. Using default of 0", pos.x);
+                debug!("Mouse x ({}) out of range, clamping to 0", pos.x);
                 0
             }
         });
     let y = ((pos.y / character_size.1).floor())
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
-            if pos.x > 0.0 {
-                error!("Failed to convert {} to usize. Using default of 255", pos.y);
+            if pos.y > 0.0 {
+                debug!("Mouse y ({}) out of range, clamping to 255", pos.y);
                 255
             } else {
-                error!("Failed to convert {} to usize. Using default of 0", pos.y);
+                debug!("Mouse y ({}) out of range, clamping to 0", pos.y);
                 0
             }
         });
@@ -1215,36 +1215,6 @@ impl FreminalTerminalWidget {
         self.terminal_fonts.clone()
     }
 
-    #[must_use]
-    pub fn calculate_available_size(&self, ui: &Ui, font: &TerminalFont) -> (usize, usize) {
-        let character_size = get_char_size(ui.ctx(), font);
-        let width_chars =
-            match ((ui.available_width() / character_size.0).floor()).approx_as::<usize>() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to calculate width chars: {}", e);
-                    10
-                }
-            };
-
-        let height_chars =
-            match ((ui.available_height() / character_size.1).floor()).approx_as::<usize>() {
-                Ok(v) => {
-                    if v > 1 {
-                        v - 1
-                    } else {
-                        1
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to calculate height chars: {}", e);
-                    10
-                }
-            };
-
-        (width_chars, height_chars)
-    }
-
     #[allow(clippy::too_many_lines)]
     pub fn show<Io: FreminalTermInputOutput>(
         &mut self,
@@ -1259,27 +1229,14 @@ impl FreminalTerminalWidget {
 
             terminal_emulator.internal.set_theme(theme);
 
-            let (width_chars, height_chars) = terminal_emulator.get_win_size();
-            let width_chars = match f32::value_from(width_chars) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to convert width chars to f32: {}", e);
-                    10.0
-                }
-            };
+            // Claim the full available space directly — no round-trip through PTY row count.
+            let available = ui.available_size();
+            ui.set_min_size(available);
 
-            let height_chars = match f32::value_from(height_chars) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to convert height chars to f32: {}", e);
-                    10.0
-                }
-            };
-
-            ui.set_width((width_chars + 0.5) * self.character_size.0);
-            ui.set_height((height_chars + 0.5) * self.character_size.1);
+            // max_line_width drives the text layout; derive it from the actual pixel width.
+            let max_line_width = (available.x / self.character_size.0).floor();
             self.previous_font_size = Some(self.font_defs.size);
-            self.max_line_width = width_chars;
+            self.max_line_width = max_line_width;
             terminal_emulator.set_previous_pass_invalid();
 
             let repeat_characters = terminal_emulator.internal.should_repeat_keys();

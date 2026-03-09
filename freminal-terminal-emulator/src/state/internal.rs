@@ -361,7 +361,9 @@ impl TerminalState {
         );
         self.get_current_buffer().cursor_state.pos = response.new_cursor_pos;
 
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "new-buffer")]
+        self.shadow_handler.handle_resize(width, height);
+        #[cfg(all(debug_assertions, not(feature = "new-buffer")))]
         self.shadow_handler.handle_resize(width, height);
 
         response
