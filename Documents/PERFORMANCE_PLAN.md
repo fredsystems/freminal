@@ -971,7 +971,7 @@ begins. A broken compilation state between sessions is acceptable if noted expli
 
 ---
 
-#### 9.5-A — Add `dirty: bool` to `Row` and instrument all mutation sites
+#### 9.5-A — Add `dirty: bool` to `Row` and instrument all mutation sites ✅
 
 **Files touched:** `freminal-buffer/src/row.rs`, `freminal-buffer/src/buffer.rs`
 
