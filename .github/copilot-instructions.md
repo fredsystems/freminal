@@ -24,6 +24,7 @@ freminal-terminal-emulator < freminal (GUI binary). Plus xtask for CI.
 - Changes to rendering, PTY, or buffer code require before/after benchmarks
 - If no benchmark exists for changed code, create one
 - Task plan documents (`Documents/PLAN_XX_*.md`) must be updated on completion
+- All work on feature branches, never direct to main. No `--no-verify`.
 
 ## Build & Test
 

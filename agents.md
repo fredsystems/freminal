@@ -124,6 +124,32 @@ Provides subcommands: `ci`, `build`, `check`, `lint`, `test`, `coverage`, `deny`
 
 ---
 
+## Branch & Commit Workflow
+
+### Feature Branches
+
+- All implementation work MUST be done on feature branches, never directly on `main`.
+- Branch naming convention: `task-NN/short-description` (e.g., `task-02/cli-config`,
+  `task-06/test-gaps`).
+- Each major task (as defined in `Documents/MASTER_PLAN.md`) gets its own branch.
+- Subtasks within a task are committed to that task's branch.
+- Branches are merged to `main` via pull request after the task is complete.
+
+### Pre-Commit Hooks
+
+- The `--no-verify` flag is **FORBIDDEN** on commits. All commits must pass pre-commit hooks.
+- Pre-commit hooks enforce formatting, linting, and other quality checks.
+- If a pre-commit hook fails, the agent MUST fix the issue and commit again — not skip the hook.
+- The only exception is if the user explicitly requests `--no-verify` for a specific commit.
+
+### Commit Discipline
+
+- Commits should be atomic: one logical change per commit.
+- Commit messages follow conventional commits format (e.g., `feat:`, `fix:`, `test:`, `docs:`).
+- Each commit must leave `cargo test --all` passing (no broken intermediate states).
+
+---
+
 ## Development Environment & Verification
 
 ### Build & Test Commands

@@ -11,6 +11,16 @@ and plan document maintenance rules.
 
 ---
 
+## Branch & Workflow Rules
+
+- All implementation work is done on **feature branches**, never directly on `main`.
+- Branch naming: `task-NN/short-description` (e.g., `task-02/cli-config`).
+- **Pre-commit hooks must NOT be skipped** — `--no-verify` is forbidden.
+- Each task branch is merged to `main` via pull request after completion.
+- See `agents.md` "Branch & Commit Workflow" section for full rules.
+
+---
+
 ## Task Summary
 
 | #   | Task                         | Plan Document                 | Status      | Dependencies |
