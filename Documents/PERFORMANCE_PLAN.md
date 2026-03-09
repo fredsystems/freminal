@@ -432,7 +432,7 @@ No step should leave the tree in a state where `cargo test --all` fails.
 
 ---
 
-- [ ] **Task 3 — Write and baseline the benchmark suite**
+- [x] **Task 3 — Write and baseline the benchmark suite**
   - Implement all benchmarks described in Section 8 across all three crates before any
     optimisation work begins. The benchmarks must compile and produce stable numbers against the
     current (pre-refactor) code.
@@ -448,6 +448,14 @@ No step should leave the tree in a state where `cargo test --all` fails.
   - Save a formal baseline: `cargo bench --all -- --save-baseline before_refactor`
   - **Verify:** All benchmarks compile. All benchmarks produce output (no panics, no
     empty results). Baseline is saved successfully.
+  - ✅ **Completed 2026-03-09.** All three benchmark files rewritten/augmented. Added
+    `bench_fixtures` feature to `freminal-buffer/Cargo.toml` to gate the file-based variant.
+    Replaced the no-op stub in `buffer_benches.rs` with 7 real benchmarks. Rewrote
+    `render_loop_bench.rs` with `iter_batched` (fresh terminal per sample), removed the
+    meaningless `logic_only` benchmark, added ANSI-heavy, bursty, and snapshot variants.
+    Replaced all deprecated `criterion::black_box` calls with `std::hint::black_box`.
+    All 18 benchmarks pass `--test` (no panics). Baseline saved per-crate via
+    `--save-baseline before_refactor`. Numbers recorded in Section 8.2.
 
 ---
 
@@ -660,16 +668,44 @@ The goal is a suite that:
 
 **Pre-refactor baseline (captured before Task 3):**
 
-| Benchmark                                             | Time     | Throughput                              |
-| ----------------------------------------------------- | -------- | --------------------------------------- |
-| `buffer_insert_large_line/insert_full/506680`         | ~1.82 s  | ~279 Kelem/s                            |
-| `buffer_insert_chunks/insert_chunks_1000/507`         | ~38.1 ms | ~13.3 Melem/s                           |
-| `buffer_resize/reflow_width/40`                       | ~1.83 s  | —                                       |
-| `buffer_resize/shrink_height/20`                      | ~1.79 s  | —                                       |
-| `softwrap_heavy/wrap_long_line_to_width_10`           | ~393 µs  | —                                       |
-| `render_terminal_text/feed_data_incremental/1k_lines` | ~4.12 ms | —                                       |
-| `render_terminal_text/logic_only/1k_lines`            | ~177 ps  | (meaningless — measures needs_redraw()) |
-| `render_terminal_text/full_egui/1k_lines`             | ~1.57 ms | —                                       |
+**`freminal-buffer` (`buffer_row_bench.rs`) — inline 500 000-elem dataset:**
+
+| Benchmark                                                    | Time      | Throughput      |
+| ------------------------------------------------------------ | --------- | --------------- |
+| `buffer_insert_large_line/insert_full/500000`                | ~1.32 s   | ~378 Kelem/s    |
+| `buffer_insert_chunks/insert_chunks_1000/500`                | ~35.1 ms  | ~14.2 Melem/s   |
+| `buffer_resize/reflow_width/40`                              | ~1.35 s   | —               |
+| `buffer_resize/shrink_height/20`                             | ~1.33 s   | —               |
+| `softwrap_heavy/wrap_long_line_to_width_10`                  | ~361 µs   | —               |
+| `bench_visible_flatten/visible_200x50`                       | ~30.5 µs  | ~327 Melem/s    |
+| `bench_scrollback_flatten/scrollback_1024_rows`              | ~289 µs   | ~283 Melem/s    |
+| `bench_insert_with_color_changes/color_change_every_8_chars` | ~141 µs   | ~28.4 Melem/s   |
+| `bench_cursor_ops/cup_then_data_24x80`                       | ~61.0 µs  | ~31.5 Melem/s   |
+| `bench_lf_heavy/lf_4100_times`                               | ~3.89 ms  | ~1.05 Melem/s   |
+| `bench_erase_display/erase_to_end_of_display_80x24`          | ~22.8 µs  | —               |
+
+**`freminal-terminal-emulator` (`buffer_benches.rs`):**
+
+| Benchmark                                            | Time      | Throughput      |
+| ---------------------------------------------------- | --------- | --------------- |
+| `bench_parse_plain_text/parser_push/4096`            | ~9.74 µs  | ~401 MiB/s      |
+| `bench_parse_sgr_heavy/parser_push_sgr/4097`         | ~98.7 µs  | ~39.6 MiB/s     |
+| `bench_parse_cup_writes/parse_and_handle_80x24`      | ~118 µs   | ~16.8 MiB/s     |
+| `bench_parse_bursty/bursty_10_small_plus_1_large`    | ~278 µs   | ~14.2 MiB/s     |
+| `bench_handle_incoming_data/handle_incoming_data_4096` | ~276 µs | ~14.2 MiB/s     |
+| `bench_data_and_format_for_gui/flatten_80x24`        | ~5.81 µs  | ~330 Melem/s    |
+| `bench_build_snapshot/build_snapshot_80x24`          | ~16.1 µs  | ~119 Melem/s    |
+
+**`freminal` (`render_loop_bench.rs`):**
+
+| Benchmark                                                          | Time      | Throughput    |
+| ------------------------------------------------------------------ | --------- | ------------- |
+| `render_terminal_text/feed_data_incremental/100_lines`             | ~383 µs   | ~12.9 MiB/s   |
+| `render_terminal_text/feed_data_incremental/1000_lines`            | ~5.94 ms  | ~8.35 MiB/s   |
+| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/24_lines`    | ~281 µs   | ~20.2 MiB/s   |
+| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/240_lines`   | ~2.43 ms  | ~23.5 MiB/s   |
+| `render_terminal_text_bursty/feed_data_bursty_5_rounds`            | ~1.46 ms  | ~13.9 MiB/s   |
+| `render_terminal_text_snapshot/build_snapshot_after_ansi_feed`     | ~47.3 µs  | ~40.6 Melem/s |
 
 **Post-refactor results (to be filled in after Task 12):**
 
@@ -825,7 +861,7 @@ refactor is stable.
 - [ ] Document reviewed and agreed by user
 - [x] Task 1 complete
 - [x] Task 2 complete
-- [ ] Task 3 complete (benchmarks written and baselined)
+- [x] Task 3 complete (benchmarks written and baselined)
 - [ ] Task 4 complete
 - [ ] Task 5 complete
 - [ ] Task 6 complete

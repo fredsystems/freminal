@@ -21,6 +21,11 @@ crossbeam-channel.workspace = true
 freminal-common = { path = "../freminal-common" }
 
 # dev dependencies
+[features]
+# Enable file-based benchmark fixtures (requires ../speed_tests/10000_lines.txt to exist).
+# Not enabled by default so CI does not depend on the external file.
+bench_fixtures = []
+
 [dev-dependencies]
 criterion.workspace = true
 test-log.workspace = true
