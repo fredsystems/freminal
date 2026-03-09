@@ -1266,7 +1266,158 @@ with the new numbers.
 
 ---
 
-## 10. Open Questions
+## 10. Render Path Investigation — `painter.text()` per Glyph
+
+### Problem
+
+During heavy PTY output (e.g. `cat` of a 10 000-line file), freminal takes ~10+ seconds to render
+while WezTerm does the same in an eyeblink. Investigation confirmed the bottleneck is **not** PTY
+processing or snapshot building — both are fast. The bottleneck is the GUI render path.
+
+Two compounding issues were identified:
+
+#### Issue A — One `painter.text()` call per character, per frame
+
+`render_terminal_text` calls `painter.text()` once per glyph. Internally, `painter.text()` does:
+
+```text
+painter.text(pos, anchor, c, font_id, color)
+  → layout_no_wrap(c.to_string(), font_id, color)   // allocates a new single-glyph Galley
+  → painter.galley(rect.min, galley, color)          // tessellates into a Mesh
+```
+
+For a 24×80 visible window that is 1 920 Galley allocations + 1 920 tessellation calls per frame.
+Every single one is discarded at the end of the frame. There is no caching, no batching, no GPU
+reuse.
+
+The correct path is:
+
+```text
+painter.layout_job(job)   // one Galley covering all 1 920 characters + all format sections
+→ painter.galley(pos, galley, fallback_color)  // one tessellation → one GPU draw call
+```
+
+The tessellator already performs per-row clip-rect culling inside `tessellate_text`, so rows
+scrolled off-screen cost nothing even in a single large Galley.
+
+#### Issue B — `request_repaint()` called after every `handle_incoming_data()`
+
+The PTY consumer thread calls `ctx.request_repaint()` after processing every batch. During a fast
+`cat`, the PTY thread produces thousands of batches per second, resulting in thousands of repaint
+requests per second. The GUI renders every one of them — each time paying the full 1 920-glyph
+cost — even though `ArcSwap` only keeps the latest snapshot and most intermediate frames are
+immediately overwritten.
+
+Fix: replace `ctx.request_repaint()` with `ctx.request_repaint_after(Duration::from_millis(8))`
+to cap the effective repaint rate at ~120 fps regardless of PTY output speed.
+
+### Why the Previous `ui.label(LayoutJob)` Attempt Failed
+
+A previous attempt to use the `LayoutJob` → `ui.label()` path was abandoned because egui's layout
+engine introduced spacing problems:
+
+- **(a) Extra vertical gap between lines** — `ui.label()` uses the font's natural `row_height`
+  plus `item_spacing`, causing lines to drift apart on some font/DPI combinations.
+- **(c) Horizontal spacing between characters was off** — the font's natural glyph advance did
+  not exactly match the measured `glyph_width('W')`, causing misalignment across a full row.
+
+### Fix Plan
+
+#### Part 1 — Switch to `painter.layout_job` → `painter.galley` (high impact)
+
+**Do not use `ui.label()`**. Instead:
+
+1. Keep `ui.allocate_exact_size(vec2(total_width, total_height), Sense::hover())` exactly as-is.
+   This claims the correct rect and returns the `Pos2` origin we place the galley at.
+
+2. Replace the per-character loop with:
+
+   ```rust
+   let galley = ui.ctx().fonts(|f| f.layout_job(job));
+   painter.galley(rect.left_top(), galley, fallback_color);
+   ```
+
+3. Fix spacing issue **(a)** by setting `line_height: Some(row_height)` on every `TextFormat`
+   section built in `process_tags`. This locks every row to exactly `row_height` pixels
+   regardless of font metrics, eliminating inter-line drift.
+
+4. Fix spacing issue **(c)** by computing `extra_letter_spacing` once at the top of
+   `render_terminal_text`:
+
+   ```rust
+   let natural_advance = ui.ctx().fonts(|f| f.glyph_width(&font_id, 'W'));
+   let extra_letter_spacing = glyph_width - natural_advance;
+   ```
+
+   Then set `extra_letter_spacing` on every `TextFormat` section. For the bundled Freminal
+   monospace font this should be 0.0 or near-zero. If it is non-zero, this corrects it with one
+   `fonts` call total instead of one per character.
+
+5. Background cell fills (`rect_filled` per cell for non-transparent backgrounds) must remain as
+   explicit `painter.rect_filled()` calls — the Galley handles glyph background colour via
+   `TextFormat::background`, but that uses the font's own bounding box, not a full terminal cell.
+   For terminals with coloured backgrounds, a pre-pass of `rect_filled` per coloured cell remains
+   necessary. This pre-pass is already bounded by the number of _coloured_ cells, not total cells.
+
+**Files to change:** `freminal/src/gui/terminal.rs`
+
+- `render_terminal_text`: remove per-character loop; add single `layout_job` + `galley` call.
+- `process_tags`: add `line_height: Some(row_height)` and `extra_letter_spacing` to each
+  `TextFormat` built for a section. This requires `row_height` and `extra_letter_spacing` to be
+  passed in as parameters (both are computed once in `render_terminal_text`).
+- `add_terminal_data_to_ui`: pass `row_height` and `extra_letter_spacing` through.
+
+**Verification:**
+
+- `cargo test --all` passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- Manual smoke test: `cat` a 10 000-line file; rendering should complete in under 1 second.
+- Manual visual check: monospace grid alignment is pixel-perfect at default font size and at
+  increased font size (font size change exercises the `extra_letter_spacing` recalculation).
+
+#### Part 2 — Cap repaint rate (low effort, high impact during heavy output)
+
+In `freminal-terminal-emulator/src/interface.rs`, change `request_repaint` from:
+
+```rust
+fn request_repaint(&self) {
+    if let Some(ctx) = &self.ctx {
+        ctx.request_repaint();
+    }
+}
+```
+
+to:
+
+```rust
+fn request_repaint(&self) {
+    if let Some(ctx) = &self.ctx {
+        ctx.request_repaint_after(std::time::Duration::from_millis(8));
+    }
+}
+```
+
+This caps the PTY thread's repaint requests at ~120 fps. Combined with Part 1, a `cat` of 10 000
+lines should be visually instantaneous — the GUI renders the final state at the next frame
+boundary rather than trying to render every intermediate state.
+
+**Note:** `request_repaint_after` schedules a repaint _at least_ that far in the future. If the
+GUI is already scheduled to repaint sooner (e.g. due to user input), the sooner repaint wins.
+This is the correct behaviour.
+
+**Files to change:** `freminal-terminal-emulator/src/interface.rs`
+
+- `request_repaint()` method: one-line change.
+
+**Verification:**
+
+- `cargo test --all` passes (no behaviour change under test).
+- Manual: key input, mouse, and resize remain responsive (repaint is not delayed for input events,
+  only for PTY-driven repaints).
+
+---
+
+## 11. Open Questions
 
 1. **Snapshot granularity.** Should `build_snapshot` be called after every `handle_incoming_data`
    invocation, or should it be batched? Under very heavy PTY output the PTY thread might produce
@@ -1298,7 +1449,7 @@ with the new numbers.
 
 ---
 
-## 11. Overall Progress
+## 12. Overall Progress
 
 - [ ] Document reviewed and agreed by user
 - [x] Task 1 complete
