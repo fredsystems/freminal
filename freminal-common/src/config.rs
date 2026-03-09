@@ -265,10 +265,8 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         }
     }
 
-    // 4. Explicit CLI override
-    if let Some(path) = explicit_path
-        && path.is_file()
-    {
+    // 4. Explicit CLI override — if the user specified --config, the file MUST exist.
+    if let Some(path) = explicit_path {
         let partial = load_partial(path)?;
         cfg.apply_partial(partial);
     }

@@ -3,8 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::config::{Config, LoggingConfig, ScrollbackConfig, ShellConfig, load_config};
+use freminal_common::config::{
+    Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, load_config,
+};
 use std::io::Write;
+use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// Helper: write TOML content to a temp file and load it via `load_config`.
@@ -398,4 +401,53 @@ fn logging_write_to_file_string_is_parse_error() {
     let err = load_from_toml(toml).expect_err("string bool should fail");
     let msg = err.to_string();
     assert!(msg.contains("TOML parse error"), "error: {msg}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Explicit --config path behavior
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn explicit_config_path_that_does_not_exist_returns_io_error() {
+    let path = Path::new("/tmp/freminal_nonexistent_test_config_12345.toml");
+    assert!(!path.exists(), "test precondition: file should not exist");
+
+    let err = load_config(Some(path)).expect_err("missing explicit path should fail");
+    assert!(
+        matches!(err, ConfigError::Io { .. }),
+        "expected ConfigError::Io, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("freminal_nonexistent_test_config_12345.toml"),
+        "error should mention the path: {msg}"
+    );
+}
+
+#[test]
+fn explicit_config_path_that_exists_loads_successfully() {
+    let toml = r#"
+        version = 1
+        [scrollback]
+        limit = 7777
+    "#;
+    let mut file = NamedTempFile::new().expect("failed to create temp file");
+    file.write_all(toml.as_bytes())
+        .expect("failed to write temp file");
+
+    let cfg = load_config(Some(file.path())).expect("valid explicit path should succeed");
+    assert_eq!(cfg.scrollback.limit, 7777);
+}
+
+#[test]
+fn no_explicit_config_path_uses_layered_defaults() {
+    // When no explicit path is given, load_config should succeed with defaults
+    // (assuming no user/system config files override anything in the test environment).
+    // We can't fully control what's on disk, but at minimum it shouldn't error.
+    let result = load_config(None);
+    assert!(
+        result.is_ok(),
+        "load_config(None) should succeed: {:?}",
+        result.err()
+    );
 }

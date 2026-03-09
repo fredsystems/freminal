@@ -131,7 +131,7 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.3 — Wire --config flag to config loading
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `freminal/src/main.rs`, `freminal-common/src/config.rs`
 - **Details:**
   - Pass `--config` path from CLI args to `load_config()`
