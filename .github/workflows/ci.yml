@@ -55,9 +55,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
-        # We target 1.91.0 because it is the minimum supported version of Rust. If that build fails, or we rely on language features
+        # We target 1.92.0 because it is the minimum supported version of Rust. If that build fails, or we rely on language features
         # added in later versions, we'll have to bump the minimum version of rust.
-        toolchain: ["1.91.0", "stable", "nightly"]
+        toolchain: ["1.92.0", "stable", "nightly"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
