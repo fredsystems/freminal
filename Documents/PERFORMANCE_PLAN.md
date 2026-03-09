@@ -4,12 +4,13 @@
 
 ---
 
-## ⚠️ Instructions for Future Agents ⚠️
+## Agent Protocol
 
 This document is the single source of truth for the performance refactor. It is used by both
 humans and agents to track progress.
 
-**If you are an agent working from this document, you MUST follow this protocol exactly:**
+**Agents working from this document must follow the Multi-Step Task Protocol defined in
+`agents.md`.** Additionally, for this specific document:
 
 1. Read this entire document before doing anything.
 2. Find the first unchecked task (`- [ ]`) in the Implementation Checklist (Section 7).

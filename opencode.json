@@ -1,0 +1,43 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["agents.md", "Documents/PERFORMANCE_PLAN.md"],
+  "formatter": {
+    "rustfmt": {
+      "command": ["rustfmt", "--edition", "2024", "$FILE"],
+      "extensions": [".rs"]
+    }
+  },
+  "command": {
+    "ci": {
+      "template": "Run the full CI suite with `cargo xtask ci`. Fix any errors that arise. Report the final pass/fail status.",
+      "description": "Run full CI and fix errors"
+    },
+    "test": {
+      "template": "Run `cargo test --all`. If any tests fail, diagnose and fix them. Report results.",
+      "description": "Run all tests and fix failures"
+    },
+    "bench": {
+      "template": "Run `cargo bench --all` and report results. Compare against any saved baselines if available.",
+      "description": "Run all benchmarks"
+    },
+    "verify": {
+      "template": "Run the full verification suite:\n1. `cargo test --all`\n2. `cargo clippy --all-targets --all-features -- -D warnings`\n3. `cargo-machete`\nReport pass/fail for each step. Fix any issues found.",
+      "description": "Run full verification suite"
+    },
+    "check-file": {
+      "template": "Review the file $ARGUMENTS for correctness, clippy compliance, panic-free code (no unwrap/expect in production), and adherence to the rules in agents.md. Report any issues found.",
+      "description": "Audit a single file against project rules",
+      "agent": "plan"
+    }
+  },
+  "agent": {
+    "general": {
+      "description": "General-purpose sub-agent for focused implementation tasks. Uses Sonnet for cost-efficient parallel execution.",
+      "model": "github-copilot/claude-sonnet-4.6"
+    },
+    "explore": {
+      "description": "Fast read-only agent for codebase exploration and analysis.",
+      "model": "github-copilot/claude-sonnet-4.6"
+    }
+  }
+}
