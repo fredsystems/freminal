@@ -1,6 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": ["agents.md", "Documents/PERFORMANCE_PLAN.md"],
+  "instructions": [
+    "agents.md",
+    "Documents/PERFORMANCE_PLAN.md",
+    "Documents/MASTER_PLAN.md"
+  ],
   "formatter": {
     "rustfmt": {
       "command": ["rustfmt", "--edition", "2024", "$FILE"],

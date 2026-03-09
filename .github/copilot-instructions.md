@@ -20,6 +20,10 @@ freminal-terminal-emulator < freminal (GUI binary). Plus xtask for CI.
 - All public APIs must have tests
 - Changes must preserve the lock-free architecture
 - Enforced: `#![deny(clippy::unwrap_used, clippy::expect_used)]`
+- Testing is mandatory for all new features, bug fixes, and refactors
+- Changes to rendering, PTY, or buffer code require before/after benchmarks
+- If no benchmark exists for changed code, create one
+- Task plan documents (`Documents/PLAN_XX_*.md`) must be updated on completion
 
 ## Build & Test
 
@@ -32,4 +36,5 @@ freminal-terminal-emulator < freminal (GUI binary). Plus xtask for CI.
 ## Reference
 
 See `agents.md` in the project root for full agent instructions, architecture
-details, crate-specific guidance, and coding standards.
+details, crate-specific guidance, coding standards, and mandatory testing/benchmarking rules.
+See `Documents/MASTER_PLAN.md` for the task roadmap and individual plan documents.

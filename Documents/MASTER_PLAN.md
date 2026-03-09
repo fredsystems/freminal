@@ -1,0 +1,160 @@
+# MASTER_PLAN.md — Freminal Feature Roadmap
+
+## Overview
+
+This document orchestrates six major development tasks for Freminal. Each task has a dedicated
+planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
+any of these tasks MUST read this document first for context on dependencies and ordering.
+
+All tasks are governed by the rules in `agents.md`, including the mandatory testing, benchmarking,
+and plan document maintenance rules.
+
+---
+
+## Task Summary
+
+| #   | Task                         | Plan Document                 | Status      | Dependencies |
+| --- | ---------------------------- | ----------------------------- | ----------- | ------------ |
+| 1   | Glyph Atlas + Custom Painter | `PLAN_01_GLYPH_ATLAS.md`      | Not Started | None         |
+| 2   | CLI Args + TOML Config       | `PLAN_02_CLI_CONFIG.md`       | Not Started | None         |
+| 3   | Settings Modal               | `PLAN_03_SETTINGS_MODAL.md`   | Not Started | Task 2       |
+| 4   | Deployment Flake             | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
+| 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
+| 6   | Test Gap Coverage            | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
+
+---
+
+## Dependency Graph
+
+```text
+Task 1 (Glyph Atlas + Shaping Infra) ──► Task 5 (Font Ligatures)
+
+Task 2 (CLI Args + TOML Config) ──┬──► Task 3 (Settings Modal)
+                                   └──► Task 4 (Deployment Flake)
+
+Task 6 (Test Gap Coverage) ── independent, can run any time
+```
+
+### Dependency Details
+
+**Task 1 → Task 5:** Task 1 introduces the rustybuzz text shaping infrastructure (font parsing,
+shaping pipeline, glyph-to-texture flow). Task 5 builds on this by enabling OpenType ligature
+features in the shaping calls. Task 5 cannot begin until Task 1's shaping infrastructure is
+complete and merged.
+
+**Task 2 → Task 3:** Task 3 (Settings Modal) needs a complete, well-structured config system to
+display and modify. Task 2 extends the config with all CLI flags surfaced as TOML options and adds
+the `--config` override path. The Settings Modal writes back to TOML, so the config schema must be
+stable first.
+
+**Task 2 → Task 4:** Task 4 (Deployment Flake) generates `config.toml` from Nix attributes. The
+home-manager module must mirror the final config schema, so Task 2's config extensions must be
+complete first.
+
+**Task 6:** Independent. Can run before, during, or after any other task. Recommended to start
+early since it improves safety for all subsequent work.
+
+---
+
+## Recommended Execution Order
+
+### Phase 1 — Foundation (Parallel)
+
+Run these three tasks in parallel since they have no dependencies on each other:
+
+- **Task 2** — CLI Args + TOML Config (foundation for Tasks 3 & 4)
+- **Task 6** — Test Gap Coverage (improves safety net for everything)
+- **Task 1** — Glyph Atlas + Custom Painter (largest task, long lead time)
+
+### Phase 2 — Dependents (After Phase 1 completes)
+
+These tasks depend on Phase 1 completions:
+
+- **Task 3** — Settings Modal (requires Task 2)
+- **Task 4** — Deployment Flake (requires Task 2)
+- **Task 5** — Font Ligatures (requires Task 1)
+
+Tasks 3 and 4 can run in parallel with each other. Task 5 can run in parallel with Tasks 3 and 4,
+but only after Task 1 is complete.
+
+```text
+Phase 1:  ├── Task 2 (CLI/Config) ────────────┤
+          ├── Task 6 (Test Gaps) ──────────────┤
+          ├── Task 1 (Glyph Atlas) ────────────────────────────────┤
+          │                                    │                   │
+Phase 2:  │                                    ├── Task 3 (Modal) ─┤
+          │                                    ├── Task 4 (Flake) ─┤
+          │                                                        ├── Task 5 (Ligatures) ─┤
+```
+
+---
+
+## Agent Assignment Guidelines
+
+### Model Selection
+
+- **Claude Sonnet** (`github-copilot/claude-sonnet-4.6`): Use for well-scoped subtasks with clear
+  instructions. Appropriate for most implementation work within individual tasks.
+- **Claude Opus**: Use for orchestration, architectural decisions, complex cross-cutting work,
+  and plan document creation/updates.
+
+### Parallelism Strategy
+
+Within each task, subtasks may be parallelizable. Refer to individual plan documents for
+intra-task parallelism guidance. Cross-task parallelism follows the dependency graph above.
+
+---
+
+## Cross-Cutting Concerns
+
+### Config Schema Evolution
+
+Tasks 2, 3, and 4 all interact with the config schema:
+
+- Task 2 defines the schema (Rust structs + TOML format)
+- Task 3 reads and writes the schema (settings UI + persistence)
+- Task 4 mirrors the schema (Nix attrs → TOML generation)
+
+Any config schema changes after Task 2 is complete must be propagated to Tasks 3 and 4.
+
+### Rendering Pipeline
+
+Tasks 1 and 5 both modify the rendering pipeline:
+
+- Task 1 replaces the entire rendering approach (char-by-char → glyph atlas + custom painter)
+- Task 5 adds ligature support to the shaping layer introduced by Task 1
+
+After Task 1, the rendering pipeline will look fundamentally different. Any rendering-related
+work in other tasks (e.g., font size changes from the Settings Modal) must account for the
+new architecture.
+
+### Benchmark Baselines
+
+- Task 1 will dramatically change render performance characteristics. New baselines must be
+  established after Task 1 completes.
+- Task 6 may add new benchmarks as part of test gap coverage. These become part of the
+  permanent benchmark suite.
+
+---
+
+## Completion Tracking
+
+Update this section as tasks complete:
+
+| Task | Started | Completed | Notes |
+| ---- | ------- | --------- | ----- |
+| 1    | —       | —         |       |
+| 2    | —       | —         |       |
+| 3    | —       | —         |       |
+| 4    | —       | —         |       |
+| 5    | —       | —         |       |
+| 6    | —       | —         |       |
+
+---
+
+## References
+
+- `agents.md` — Agent rules, architecture, verification suite
+- `Documents/PERFORMANCE_PLAN.md` — Completed performance refactor (Tasks 1-12)
+- `Documents/TODO.md` — Version roadmap
+- `config_example.toml` — Current config format

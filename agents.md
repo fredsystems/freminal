@@ -233,6 +233,56 @@ generalized from the protocol used successfully in `Documents/PERFORMANCE_PLAN.m
 
 ---
 
+## Mandatory Testing & Benchmarking Rules
+
+These rules apply to ALL agents and ALL implementation work going forward.
+
+### Testing Is Mandatory
+
+- Every new feature, bug fix, or refactor MUST include tests that cover the new/changed behavior.
+- "It compiles and existing tests pass" is insufficient — new code must have NEW tests.
+- If an area has no existing tests, the implementing agent must create the test infrastructure
+  (test module, test helpers, fixtures) as part of the task.
+- Task completion is contingent on all tests passing. A task is NOT complete until
+  `cargo test --all` passes with zero failures.
+
+### Benchmarking for Performance-Sensitive Code
+
+- If changes touch the **rendering pipeline**, **PTY I/O**, or **buffer operations**, the agent
+  MUST capture benchmark numbers **before and after** the change and include them in the
+  completion report.
+- Relevant benchmark suites:
+  - Rendering: `freminal/benches/render_loop_bench.rs`
+  - Buffer: `freminal-buffer/benches/buffer_row_bench.rs`
+  - Emulator/Parser: `freminal-terminal-emulator/benches/buffer_benches.rs`
+- If no appropriate benchmark exists for the code being changed, the agent MUST create a new
+  benchmark as part of the task before proceeding with the change.
+- Performance regressions must be justified and documented, or the change must be revised.
+
+### Plan Document Maintenance
+
+- Each major task has a planning document in `Documents/PLAN_XX_*.md`.
+- The agent executing a task MUST update its plan document with:
+  - Subtask completion status (mark completed items, add completion dates)
+  - Any deviations from the plan with justification
+  - Benchmark results if applicable
+  - Issues discovered during implementation
+- The master plan (`Documents/MASTER_PLAN.md`) must also be updated when a major task
+  changes status (started, blocked, completed).
+
+### Task Completion Criteria
+
+A task is complete ONLY when ALL of the following are true:
+
+1. All subtasks in the plan document are marked complete
+2. `cargo test --all` passes
+3. `cargo clippy --all-targets --all-features -- -D warnings` passes
+4. `cargo-machete` passes
+5. Benchmarks show no unexplained regressions (for render/PTY/buffer changes)
+6. Plan document is updated with completion status and notes
+
+---
+
 ## Working Modes
 
 Agents may be instructed to operate in one of the following modes:
