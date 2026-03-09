@@ -26,6 +26,7 @@ pub mod buffer_states;
 pub mod colors;
 pub mod config;
 pub mod cursor;
+pub mod pty_write;
 pub mod scroll;
 pub mod sgr;
 pub mod terminal_size;

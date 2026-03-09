@@ -24,8 +24,10 @@ use freminal_common::{
         window_manipulation::WindowManipulation,
     },
     cursor::CursorVisualStyle,
+    pty_write::PtyWrite,
     sgr::SelectGraphicRendition,
 };
+use std::borrow::Cow;
 
 use crate::buffer::Buffer;
 
@@ -45,7 +47,7 @@ pub struct TerminalHandler {
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
     /// Optional channel for writing responses back to the PTY.
-    write_tx: Option<Sender<Vec<u8>>>,
+    write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
 }
@@ -84,7 +86,7 @@ impl TerminalHandler {
             return;
         }
 
-        let remapped: Vec<u8> = apply_dec_special(data, &self.character_replace);
+        let remapped: Cow<[u8]> = apply_dec_special(data, &self.character_replace);
         if let Ok(text) = TChar::from_vec(&remapped) {
             self.buffer.insert_text(&text);
         }
@@ -235,12 +237,15 @@ impl TerminalHandler {
 
     /// Handle entering alternate screen
     pub fn handle_enter_alternate(&mut self) {
-        self.buffer.enter_alternate();
+        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
+        // correct wiring happens in Task 7/8.
+        self.buffer.enter_alternate(0);
     }
 
     /// Handle leaving alternate screen
     pub fn handle_leave_alternate(&mut self) {
-        self.buffer.leave_alternate();
+        // Returns the saved scroll_offset; discarded here until ViewState is wired (Task 7/8).
+        let _restored_offset = self.buffer.leave_alternate();
     }
 
     /// Handle DECAWM — enable or disable soft-wrapping.
@@ -304,7 +309,7 @@ impl TerminalHandler {
 
     /// Set the PTY write channel.  Once set, responses such as CPR and DA1
     /// will be sent through this channel rather than silently discarded.
-    pub fn set_write_tx(&mut self, tx: Sender<Vec<u8>>) {
+    pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
         self.write_tx = Some(tx);
     }
 
@@ -316,7 +321,7 @@ impl TerminalHandler {
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     fn write_to_pty(&self, text: &str) {
         if let Some(tx) = &self.write_tx
-            && let Err(e) = tx.send(text.as_bytes().to_vec())
+            && let Err(e) = tx.send(PtyWrite::Write(text.as_bytes().to_vec()))
         {
             tracing::error!("Failed to write to PTY: {e}");
         }
@@ -430,22 +435,35 @@ impl TerminalHandler {
 
     /// Handle resize
     pub fn handle_resize(&mut self, width: usize, height: usize) {
-        self.buffer.set_size(width, height);
+        // scroll_offset lives in `ViewState` (Task 4). Pass 0 temporarily;
+        // correct wiring happens in Task 7/8.
+        let _new_offset = self.buffer.set_size(width, height, 0);
     }
 
-    /// Handle scroll back (user scrolling)
-    pub fn handle_scroll_back(&mut self, lines: usize) {
-        self.buffer.scroll_back(lines);
+    /// Compute new `scroll_offset` after scrolling back by `lines`.
+    ///
+    /// The caller must pass the current offset and store the returned value
+    /// into `ViewState::scroll_offset`.
+    #[must_use]
+    pub fn handle_scroll_back(&self, scroll_offset: usize, lines: usize) -> usize {
+        self.buffer.scroll_back(scroll_offset, lines)
     }
 
-    /// Handle scroll forward (user scrolling)
-    pub fn handle_scroll_forward(&mut self, lines: usize) {
-        self.buffer.scroll_forward(lines);
+    /// Compute new `scroll_offset` after scrolling forward by `lines`.
+    ///
+    /// The caller must pass the current offset and store the returned value
+    /// into `ViewState::scroll_offset`.
+    #[must_use]
+    pub fn handle_scroll_forward(&self, scroll_offset: usize, lines: usize) -> usize {
+        self.buffer.scroll_forward(scroll_offset, lines)
     }
 
-    /// Handle scroll to bottom
-    pub fn handle_scroll_to_bottom(&mut self) {
-        self.buffer.scroll_to_bottom();
+    /// Returns 0 — the scroll offset for the live bottom view.
+    ///
+    /// The caller should store this into `ViewState::scroll_offset`.
+    #[must_use]
+    pub const fn handle_scroll_to_bottom() -> usize {
+        Buffer::scroll_to_bottom()
     }
 
     /// Return the complete GUI data set: visible and scrollback content as
@@ -455,13 +473,15 @@ impl TerminalHandler {
     /// needed to render the terminal.
     #[must_use]
     pub fn data_and_format_data_for_gui(
-        &self,
+        &mut self,
     ) -> (
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags();
-        let (scrollback_chars, scrollback_tags) = self.buffer.scrollback_as_tchars_and_tags();
+        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
+        // correct wiring happens in Task 7/8.
+        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags(0);
+        let (scrollback_chars, scrollback_tags) = self.buffer.scrollback_as_tchars_and_tags(0);
         (
             TerminalSections {
                 scrollback: scrollback_chars,
@@ -493,6 +513,17 @@ impl TerminalHandler {
     #[must_use]
     pub const fn is_alternate_screen(&self) -> bool {
         self.buffer.is_alternate_screen()
+    }
+
+    /// Return `true` if any row in the visible window (at the given scroll
+    /// offset) has been mutated since it was last flattened into the cache.
+    ///
+    /// The PTY thread always passes `scroll_offset = 0`.  When this returns
+    /// `false`, `build_snapshot` can skip flattening and reuse the previous
+    /// `visible_chars` / `visible_tags` vectors.
+    #[must_use]
+    pub fn any_visible_dirty(&self, scroll_offset: usize) -> bool {
+        self.buffer.any_visible_dirty(scroll_offset)
     }
 
     /// Process an array of `TerminalOutput` commands
@@ -740,9 +771,12 @@ impl TerminalHandler {
 /// the slice is copied verbatim.
 ///
 /// Reference: <https://en.wikipedia.org/wiki/DEC_Special_Graphics>
-fn apply_dec_special(data: &[u8], mode: &DecSpecialGraphics) -> Vec<u8> {
+///
+/// Returns `Cow::Borrowed(data)` when no remapping is needed (`DontReplace` mode),
+/// avoiding any heap allocation in the overwhelmingly common case.
+fn apply_dec_special<'a>(data: &'a [u8], mode: &DecSpecialGraphics) -> Cow<'a, [u8]> {
     match mode {
-        DecSpecialGraphics::DontReplace => data.to_vec(),
+        DecSpecialGraphics::DontReplace => Cow::Borrowed(data),
         DecSpecialGraphics::Replace => {
             let mut out = Vec::with_capacity(data.len() * 3);
             for &b in data {
@@ -782,7 +816,7 @@ fn apply_dec_special(data: &[u8], mode: &DecSpecialGraphics) -> Vec<u8> {
                     _ => out.push(b),
                 }
             }
-            out
+            Cow::Owned(out)
         }
     }
 }
@@ -1195,7 +1229,7 @@ mod tests {
         handler.handle_erase_in_line(0);
 
         // The line should be partially cleared
-        let rows = handler.buffer().visible_rows();
+        let rows = handler.buffer().visible_rows(0);
         assert!(rows.len() >= 2);
     }
 
@@ -1213,7 +1247,7 @@ mod tests {
         // Insert a line
         handler.handle_insert_lines(1);
 
-        let rows = handler.buffer().visible_rows();
+        let rows = handler.buffer().visible_rows(0);
         // Should have inserted a blank line, pushing content down
         assert!(rows.len() >= 2);
     }
@@ -1313,7 +1347,7 @@ mod tests {
 
         // Screen should be cleared — buffer only grew to 2 rows (one per Data+Newline),
         // so visible_rows() returns those 2 rows (both now empty after ClearDisplay).
-        let visible = handler.buffer().visible_rows();
+        let visible = handler.buffer().visible_rows(0);
         assert_eq!(visible.len(), 2);
         // Both rows must be empty after the clear.
         for row in visible {

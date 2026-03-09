@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use conv2::ConvUtil;
-use eframe::egui::{self, Context};
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -52,11 +51,7 @@ pub struct TerminalState {
     pub parser: FreminalAnsiParser,
     pub modes: TerminalModes,
     pub write_tx: crossbeam_channel::Sender<PtyWrite>,
-    pub changed: bool,
-    pub ctx: Option<Context>,
     pub leftover_data: Option<Vec<u8>>,
-    pub mouse_position: Option<egui::Pos2>,
-    pub window_focused: bool,
     pub window_commands: Vec<WindowManipulation>,
     pub theme: Theme,
     pub cursor_visual_style: CursorVisualStyle,
@@ -78,8 +73,6 @@ impl PartialEq for TerminalState {
     fn eq(&self, other: &Self) -> bool {
         self.parser == other.parser
             && self.modes == other.modes
-            && self.changed == other.changed
-            && self.ctx == other.ctx
             && self.leftover_data == other.leftover_data
     }
 }
@@ -89,18 +82,10 @@ impl TerminalState {
     pub fn new(write_tx: crossbeam_channel::Sender<PtyWrite>) -> Self {
         let handler = {
             let mut h = NewHandler::new(DEFAULT_WIDTH as usize, DEFAULT_HEIGHT as usize);
-            // Bridge: the new handler writes raw bytes; forward them to the
-            // emulator's PtyWrite::Write channel so the PTY receives them.
-            let (bytes_tx, bytes_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-            h.set_write_tx(bytes_tx);
-            let fwd_tx = write_tx.clone();
-            std::thread::spawn(move || {
-                while let Ok(bytes) = bytes_rx.recv() {
-                    if fwd_tx.send(PtyWrite::Write(bytes)).is_err() {
-                        break;
-                    }
-                }
-            });
+            // Pass the PtyWrite sender directly so the handler can write
+            // escape-sequence responses (DA, CPR, etc.) straight to the PTY
+            // without an intermediate forwarding thread.
+            h.set_write_tx(write_tx.clone());
             h
         };
 
@@ -108,11 +93,7 @@ impl TerminalState {
             parser: FreminalAnsiParser::new(),
             modes: TerminalModes::default(),
             write_tx,
-            changed: false,
-            ctx: None,
             leftover_data: None,
-            mouse_position: None,
-            window_focused: true,
             window_commands: Vec::new(),
             theme: Theme::default(),
             cursor_visual_style: CursorVisualStyle::default(),
@@ -157,31 +138,6 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn is_changed(&self) -> bool {
-        self.changed
-    }
-
-    pub const fn set_state_changed(&mut self) {
-        self.changed = true;
-    }
-
-    pub const fn clear_changed(&mut self) {
-        self.changed = false;
-    }
-
-    pub fn set_ctx(&mut self, ctx: Context) {
-        if self.ctx.is_none() {
-            self.ctx = Some(ctx);
-        }
-    }
-
-    fn request_redraw(&self) {
-        if let Some(ctx) = &self.ctx {
-            ctx.request_repaint();
-        }
-    }
-
-    #[must_use]
     pub const fn get_win_size(&mut self) -> (usize, usize) {
         self.handler.get_win_size()
     }
@@ -218,9 +174,10 @@ impl TerminalState {
         self.modes.cursor_key.clone()
     }
 
-    pub fn set_window_focused(&mut self, focused: bool) {
-        self.window_focused = focused;
-
+    /// Send the focus-change escape sequence to the PTY if focus reporting is enabled.
+    ///
+    /// This no longer touches `window_focused`; the GUI owns that field on `ViewState`.
+    pub fn send_focus_event(&mut self, focused: bool) {
         if self.modes.focus_reporting == XtMseWin::Disabled {
             return;
         }
@@ -258,12 +215,54 @@ impl TerminalState {
         );
 
         // Strip any trailing incomplete UTF-8 sequence and save it for next time.
-        let mut leftover_bytes = vec![];
-        while let Err(_e) = String::from_utf8(incoming.clone()) {
-            let Some(p) = incoming.pop() else { break };
-            leftover_bytes.insert(0, p);
-        }
-        if !leftover_bytes.is_empty() {
+        //
+        // A UTF-8 sequence is at most 4 bytes, so any split can leave at most
+        // 3 trailing bytes that are part of an incomplete sequence.  We scan
+        // only the tail — no full-buffer clone required.
+        //
+        // The algorithm:
+        //   1. Walk backwards over the last 3 bytes (or fewer if the buffer is
+        //      shorter) looking for a non-continuation byte (i.e. a leading byte
+        //      of a multi-byte sequence: 0xC0–0xFF) that starts a sequence whose
+        //      declared length extends past the end of the buffer.
+        //   2. If we find such a byte, everything from that position onwards is
+        //      the incomplete tail; split it off.
+        //   3. If every byte in the tail is a valid ASCII byte or a complete
+        //      sequence we leave the buffer unchanged — no allocation at all.
+        let split_at: Option<usize> = {
+            let len = incoming.len();
+            // Scan at most the last 3 bytes (max continuation bytes in UTF-8).
+            let scan_start = len.saturating_sub(3);
+            let mut found = None;
+            for i in (scan_start..len).rev() {
+                let b = incoming[i];
+                // Leading byte of a 2-byte sequence: 110x xxxx
+                // Leading byte of a 3-byte sequence: 1110 xxxx
+                // Leading byte of a 4-byte sequence: 1111 0xxx
+                let seq_len = if b & 0b1110_0000 == 0b1100_0000 {
+                    2
+                } else if b & 0b1111_0000 == 0b1110_0000 {
+                    3
+                } else if b & 0b1111_1000 == 0b1111_0000 {
+                    4
+                } else {
+                    // ASCII or continuation byte — not a leading byte, keep scanning.
+                    continue;
+                };
+                // If the declared sequence extends past the end of the buffer,
+                // this leading byte begins an incomplete sequence.
+                if i + seq_len > len {
+                    found = Some(i);
+                }
+                // Whether or not it's incomplete we stop scanning: a leading byte
+                // can only appear once per sequence.
+                break;
+            }
+            found
+        };
+
+        if let Some(split) = split_at {
+            let leftover_bytes = incoming.split_off(split);
             match self.leftover_data {
                 Some(ref mut self_leftover) => {
                     self_leftover.splice(0..0, leftover_bytes);
@@ -288,8 +287,6 @@ impl TerminalState {
             debug!("Data processing time: {}μs", elapsed.as_micros());
         }
 
-        self.set_state_changed();
-        self.request_redraw();
         debug!("Finished handling incoming data");
     }
 
@@ -333,10 +330,13 @@ impl TerminalState {
         if scroll < 0.0 {
             scroll *= -1.0;
             let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
-            self.handler.handle_scroll_back(n);
+            // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
+            // The returned new offset is discarded until ViewState is wired (Task 7/8).
+            let _new_offset = self.handler.handle_scroll_back(0, n);
         } else {
             let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
-            self.handler.handle_scroll_forward(n);
+            // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
+            let _new_offset = self.handler.handle_scroll_forward(0, n);
         }
     }
 

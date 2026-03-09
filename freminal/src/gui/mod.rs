@@ -3,26 +3,28 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-// FIXME: we should probably not do this?
-#![allow(clippy::significant_drop_tightening)]
-
 use std::sync::Arc;
 
 use crate::gui::colors::internal_color_to_egui;
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use conv2::ConvUtil;
+use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
 use fonts::get_char_size;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
-use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::FreminalPtyInputOutput;
-use parking_lot::FairMutex;
+use freminal_common::pty_write::PtyWrite;
+use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use terminal::FreminalTerminalWidget;
+use view_state::ViewState;
+
 pub mod colors;
 pub mod fonts;
 pub mod mouse;
 pub mod terminal;
+pub mod view_state;
 
 fn set_egui_options(ctx: &egui::Context) {
     ctx.style_mut(|style| {
@@ -38,53 +40,80 @@ fn set_egui_options(ctx: &egui::Context) {
     ctx.options_mut(|options| {
         options.zoom_with_keyboard = false;
     });
-
-    // ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
 }
+
 struct FreminalGui {
-    terminal_emulator: Arc<FairMutex<TerminalEmulator<FreminalPtyInputOutput>>>,
+    /// The latest terminal snapshot published by the PTY consumer thread.
+    /// Loaded lock-free via a single atomic pointer swap.
+    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+
     terminal_widget: FreminalTerminalWidget,
+    view_state: ViewState,
     window_title_stack: Vec<String>,
     _config: Config,
+
+    /// Channel sender used to deliver input events (key, resize, focus) to the
+    /// PTY consumer thread.
+    input_tx: Sender<InputEvent>,
+
+    /// Sender used to write raw bytes back to the PTY (for Report* responses).
+    pty_write_tx: Sender<PtyWrite>,
+
+    /// Receiver for window manipulation commands produced by the PTY thread.
+    window_cmd_rx: Receiver<WindowCommand>,
 }
 
 impl FreminalGui {
     fn new(
         cc: &eframe::CreationContext<'_>,
-        terminal_emulator: Arc<FairMutex<TerminalEmulator<FreminalPtyInputOutput>>>,
+        arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
         config: Config,
+        input_tx: Sender<InputEvent>,
+        pty_write_tx: Sender<PtyWrite>,
+        window_cmd_rx: Receiver<WindowCommand>,
     ) -> Self {
         set_egui_options(&cc.egui_ctx);
 
         Self {
-            terminal_emulator,
+            arc_swap,
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
+            view_state: ViewState::new(),
             window_title_stack: Vec::new(),
             _config: config,
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
         }
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Send a raw PTY response string via the write channel.
+///
+/// Used by `handle_window_manipulation` to respond to Report* queries without
+/// going through the emulator.
+fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
+    if let Err(e) = pty_write_tx.send(PtyWrite::Write(response.as_bytes().to_vec())) {
+        error!("Failed to send PTY response: {e}");
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn handle_window_manipulation(
     ui: &egui::Ui,
-    terminal_emulator: &mut TerminalEmulator<FreminalPtyInputOutput>,
+    window_cmd_rx: &Receiver<WindowCommand>,
+    pty_write_tx: &Sender<PtyWrite>,
     font_width: usize,
     font_height: usize,
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
+    snap: &TerminalSnapshot,
 ) {
-    let window_commands: Vec<_> = terminal_emulator
-        .internal
-        .window_commands
-        .drain(..)
-        .collect();
-    // FIXME: when we end up muxxing/tabbing this, some of these events related to window size/position needs to be adjusted.
-    // Additionally, the terms "root window" and "terminal" in the spec are mildly confusing.
-    // My assumption, which needs to be researched, is that the root window is the size of the entire window (including the title bar, etc)
-    // and the terminal is the size of the text area aka the visible terminal.
-    // https://teratermproject.github.io/manual/5/en/about/ctrlseq.html
-    for window_event in window_commands {
+    // Drain all pending WindowCommands for this frame.
+    while let Ok(wc) = window_cmd_rx.try_recv() {
+        let window_event = match wc {
+            WindowCommand::Viewport(cmd) | WindowCommand::Report(cmd) => cmd,
+        };
+
         match window_event {
             WindowManipulation::DeIconifyWindow => {
                 ui.ctx()
@@ -125,8 +154,6 @@ fn handle_window_manipulation(
                 let width = width.approx_as::<f32>().unwrap_or_default() + width_difference;
                 let height = height.approx_as::<f32>().unwrap_or_default() + height_difference;
 
-                // FIXME: We can have an off by one because of all the rounding that happens with font height/width
-
                 ui.ctx()
                     .send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(width, height)));
             }
@@ -144,10 +171,9 @@ fn handle_window_manipulation(
                     .send_viewport_cmd(ViewportCommand::Fullscreen(!current_status));
             }
             WindowManipulation::ReportWindowState => {
-                let current_status = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
-                terminal_emulator
-                    .internal
-                    .report_window_state(current_status);
+                let minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+                let response = if minimized { "\x1b[2t" } else { "\x1b[1t" };
+                send_pty_response(pty_write_tx, response);
             }
             WindowManipulation::ReportWindowPositionWholeWindow => {
                 let position = ui
@@ -169,9 +195,7 @@ fn handle_window_manipulation(
                     0
                 });
 
-                terminal_emulator
-                    .internal
-                    .report_window_position(pos_x, pos_y);
+                send_pty_response(pty_write_tx, &format!("\x1b[3;{pos_x};{pos_y}t"));
             }
             WindowManipulation::ReportWindowPositionTextArea => {
                 let position = ui
@@ -201,86 +225,77 @@ fn handle_window_manipulation(
                         0
                     });
 
-                terminal_emulator
-                    .internal
-                    .report_window_position(pos_x, pos_y);
+                send_pty_response(pty_write_tx, &format!("\x1b[3;{pos_x};{pos_y}t"));
             }
             WindowManipulation::ReportWindowSizeInPixels => {
-                let position = ui.ctx().input(|i| {
+                let rect = ui.ctx().input(|i| {
                     i.raw.viewport().outer_rect.unwrap_or_else(|| {
                         error!("Failed to get viewport position. Using 0 as default");
                         egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(0.0, 0.0))
                     })
                 });
 
-                let width = position.max.x - position.min.x;
-                let height = position.max.y - position.min.y;
+                let width = (rect.max.x - rect.min.x)
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to convert width to usize: {e}. Using 0 as default");
+                        0
+                    });
+                let height = (rect.max.y - rect.min.y)
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to convert height to usize: {e}. Using 0 as default");
+                        0
+                    });
 
-                let pos_x = width.approx_as::<usize>().unwrap_or_else(|e| {
-                    error!("Failed to convert position x to usize: {e}. Using 0 as default");
-                    0
-                });
-                let pos_y = height.approx_as::<usize>().unwrap_or_else(|e| {
-                    error!("Failed to convert position y to usize: {e}. Using 0 as default");
-                    0
-                });
-
-                terminal_emulator.internal.report_window_size(pos_x, pos_y);
+                send_pty_response(pty_write_tx, &format!("\x1b[4;{height};{width}t"));
             }
             WindowManipulation::ReportWindowTextAreaSizeInPixels => {
                 let size = ui.ctx().content_rect().max;
-                let pos_x = size.x.approx_as::<usize>().unwrap_or_else(|e| {
-                    error!("Failed to convert position x to usize: {e}. Using 0 as default");
+                let width = size.x.approx_as::<usize>().unwrap_or_else(|e| {
+                    error!("Failed to convert width to usize: {e}. Using 0 as default");
                     0
                 });
-                let pos_y = size.y.approx_as::<usize>().unwrap_or_else(|e| {
-                    error!("Failed to convert position y to usize: {e}. Using 0 as default");
+                let height = size.y.approx_as::<usize>().unwrap_or_else(|e| {
+                    error!("Failed to convert height to usize: {e}. Using 0 as default");
                     0
                 });
 
-                terminal_emulator.internal.report_window_size(pos_x, pos_y);
+                send_pty_response(pty_write_tx, &format!("\x1b[4;{height};{width}t"));
             }
             WindowManipulation::ReportRootWindowSizeInPixels => {
-                let position = ui.ctx().input(|i| {
+                let rect = ui.ctx().input(|i| {
                     i.raw.viewport().outer_rect.unwrap_or_else(|| {
                         error!("Failed to get viewport position. Using 0 as default");
                         egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(0.0, 0.0))
                     })
                 });
 
-                let width = position.max.x - position.min.x;
-                let height = position.max.y - position.min.y;
+                let width = (rect.max.x - rect.min.x)
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to convert width to usize: {e}. Using 0 as default");
+                        0
+                    });
+                let height = (rect.max.y - rect.min.y)
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to convert height to usize: {e}. Using 0 as default");
+                        0
+                    });
 
-                let pos_x = width.approx_as::<usize>().unwrap_or_else(|e| {
-                    error!("Failed to convert position x to usize: {e}. Using 0 as default");
-                    0
-                });
-                let pos_y = height.approx_as::<usize>().unwrap_or_else(|e| {
-                    error!("Failed to convert position y to usize: {e}. Using 0 as default");
-                    0
-                });
-
-                terminal_emulator
-                    .internal
-                    .report_root_window_size(pos_x, pos_y);
+                send_pty_response(pty_write_tx, &format!("\x1b[5;{height};{width}t"));
             }
             WindowManipulation::ReportCharacterSizeInPixels => {
-                terminal_emulator
-                    .internal
-                    .report_character_size(font_width, font_height);
+                send_pty_response(pty_write_tx, &format!("\x1b[6;{font_height};{font_width}t"));
             }
             WindowManipulation::ReportTerminalSizeInCharacters => {
-                let (width, height) = terminal_emulator.internal.get_win_size();
-                terminal_emulator
-                    .internal
-                    .report_terminal_size_in_characters(width, height);
+                let (width, height) = (snap.term_width, snap.term_height);
+                send_pty_response(pty_write_tx, &format!("\x1b[8;{height};{width}t"));
             }
-            // FIXME: I don't know if this is right
             WindowManipulation::ReportRootWindowSizeInCharacters => {
-                let (width, height) = terminal_emulator.internal.get_win_size();
-                terminal_emulator
-                    .internal
-                    .report_root_terminal_size_in_characters(width, height);
+                let (width, height) = (snap.term_width, snap.term_height);
+                send_pty_response(pty_write_tx, &format!("\x1b[9;{height};{width}t"));
             }
             WindowManipulation::ReportIconLabel => {
                 let title = ui.ctx().input(|r| r.raw.viewport().title.clone());
@@ -288,7 +303,7 @@ fn handle_window_manipulation(
                     error!("Failed to get viewport title. Using Freminal");
                     "Freminal".to_string()
                 });
-                terminal_emulator.internal.report_icon_label(&title);
+                send_pty_response(pty_write_tx, &format!("\x1b]L{title}\x1b\\"));
             }
             WindowManipulation::ReportTitle => {
                 let title = ui.ctx().input(|r| r.raw.viewport().title.clone());
@@ -296,7 +311,7 @@ fn handle_window_manipulation(
                     error!("Failed to get viewport title. Using Freminal");
                     "Freminal".to_string()
                 });
-                terminal_emulator.internal.report_title(&title);
+                send_pty_response(pty_write_tx, &format!("\x1b]l{title}\x1b\\"));
             }
             WindowManipulation::SetTitleBarText(title) => {
                 ui.ctx()
@@ -308,7 +323,6 @@ fn handle_window_manipulation(
                     error!("Failed to get viewport title. Using Freminal");
                     "Freminal".to_string()
                 });
-
                 title_stack.push(title);
             }
             WindowManipulation::RestoreWindowTitleFromStack => {
@@ -320,8 +334,8 @@ fn handle_window_manipulation(
                         .send_viewport_cmd(egui::ViewportCommand::Title("Freminal".to_string()));
                 }
             }
-            // These are ignored. eGui doesn't give us a stacking order thing (that I can tell)
-            // refresh window is already happening because we ended up here.
+            // These are ignored. eGui doesn't give us a stacking order thing (that I can tell).
+            // Refresh window is already happening because we ended up here.
             WindowManipulation::RefreshWindow
             | WindowManipulation::LowerWindowToBottomOfStackingOrder
             | WindowManipulation::RaiseWindowToTopOfStackingOrder => (),
@@ -331,12 +345,11 @@ fn handle_window_manipulation(
 
 impl eframe::App for FreminalGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // log the frame time
-        // time now
         debug!("Starting new frame");
-        //#[cfg(debug_assertions)]
         let now = std::time::Instant::now();
-        let mut waited = std::time::Duration::ZERO;
+
+        // Load the latest snapshot from the PTY thread — no lock, single atomic load.
+        let snap = self.arc_swap.load();
 
         let panel_response = CentralPanel::default().show(ctx, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.
@@ -369,29 +382,38 @@ impl eframe::App for FreminalGui {
                 })
                 .max(1);
 
-            let t_wait = std::time::Instant::now();
-            let mut lock = self.terminal_emulator.lock();
-            waited = t_wait.elapsed();
-
-            if let Err(e) = lock.set_win_size(width_chars, height_chars, font_width, font_height) {
-                error!("failed to set window size {e}");
+            // Debounced resize: only send an InputEvent::Resize when the
+            // character-cell dimensions actually change.
+            let new_size = (width_chars, height_chars);
+            if new_size != self.view_state.last_sent_size {
+                if let Err(e) = self.input_tx.send(InputEvent::Resize(
+                    width_chars,
+                    height_chars,
+                    font_width,
+                    font_height,
+                )) {
+                    error!("Failed to send resize event: {e}");
+                } else {
+                    self.view_state.last_sent_size = new_size;
+                }
             }
 
             let window_width = ctx.input(|i: &egui::InputState| i.content_rect());
 
             handle_window_manipulation(
                 ui,
-                &mut lock,
+                &self.window_cmd_rx,
+                &self.pty_write_tx,
                 font_width,
                 font_height,
                 window_width,
                 &mut self.window_title_stack,
+                &snap,
             );
 
-            // we want to set the default text and background color based on
-            // lock.internal.is_normal_display
-
-            if lock.internal.is_normal_display() {
+            // Update background color based on whether the terminal is in
+            // normal (non-inverted) display mode.
+            if snap.is_normal_display {
                 ui.ctx().style_mut(|style| {
                     style.visuals.window_fill = internal_color_to_egui(
                         freminal_common::colors::TerminalColor::DefaultBackground,
@@ -409,7 +431,13 @@ impl eframe::App for FreminalGui {
                 });
             }
 
-            self.terminal_widget.show(ui, &mut lock);
+            self.terminal_widget.show(
+                ui,
+                &snap,
+                &mut self.view_state,
+                &self.input_tx,
+                &self.pty_write_tx,
+            );
 
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(16));
@@ -419,24 +447,14 @@ impl eframe::App for FreminalGui {
             self.terminal_widget.show_options(ui);
         });
 
-        //#[cfg(debug_assertions)]
-        // log the frame time
         let elapsed = now.elapsed();
-        //#[cfg(debug_assertions)]
-        // show either elapsed as micros or millis, depending on the duration
         let frame_time = if elapsed.as_millis() > 0 {
             format!("Frame time={}ms", elapsed.as_millis())
         } else {
             format!("Frame time={}μs", elapsed.as_micros())
         };
 
-        let lock_time = if waited.as_millis() > 0 {
-            format!(" Lock time={}ms", waited.as_millis())
-        } else {
-            format!(" Lock time={}μs", waited.as_micros())
-        };
-
-        debug!("{}{}", frame_time, lock_time);
+        debug!("{}", frame_time);
     }
 }
 
@@ -445,15 +463,27 @@ impl eframe::App for FreminalGui {
 /// # Errors
 /// Will return an error if the GUI fails to run
 pub fn run(
-    terminal_emulator: Arc<FairMutex<TerminalEmulator<FreminalPtyInputOutput>>>,
+    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     config: Config,
+    input_tx: Sender<InputEvent>,
+    pty_write_tx: Sender<PtyWrite>,
+    window_cmd_rx: Receiver<WindowCommand>,
 ) -> Result<()> {
     let native_options = eframe::NativeOptions::default();
 
     match eframe::run_native(
         "Freminal",
         native_options,
-        Box::new(move |cc| Ok(Box::new(FreminalGui::new(cc, terminal_emulator, config)))),
+        Box::new(move |cc| {
+            Ok(Box::new(FreminalGui::new(
+                cc,
+                arc_swap,
+                config,
+                input_tx,
+                pty_write_tx,
+                window_cmd_rx,
+            )))
+        }),
     ) {
         Ok(()) => Ok(()),
         Err(e) => Err(anyhow::anyhow!(e.to_string())),

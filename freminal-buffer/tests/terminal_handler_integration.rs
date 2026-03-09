@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_buffer::terminal_handler::TerminalHandler;
+use freminal_common::pty_write::PtyWrite;
 
 /// Helper to convert a string slice to TChar representation as bytes
 fn text_to_bytes(s: &str) -> Vec<u8> {
@@ -20,7 +21,7 @@ fn test_simple_text_insertion() {
     assert_eq!(handler.buffer().get_cursor().pos.y, 0);
 
     // Buffer grows dynamically; only the rows that have been written exist.
-    let visible = handler.buffer().visible_rows();
+    let visible = handler.buffer().visible_rows(0);
     assert_eq!(visible.len(), 1);
 }
 
@@ -144,7 +145,7 @@ fn test_insert_delete_lines() {
     // Insert a line - should push Line B down
     handler.handle_insert_lines(1);
 
-    let visible = handler.buffer().visible_rows();
+    let visible = handler.buffer().visible_rows(0);
     assert!(visible.len() >= 3);
 
     // Delete a line
@@ -286,7 +287,7 @@ fn test_real_world_sequence() {
     handler.handle_cursor_pos(Some(1), Some(24));
     handler.handle_data(&text_to_bytes("Bottom line"));
 
-    let visible = handler.buffer().visible_rows();
+    let visible = handler.buffer().visible_rows(0);
     assert_eq!(visible.len(), 24);
 }
 
@@ -331,14 +332,15 @@ fn test_user_scrolling() {
         handler.handle_newline();
     }
 
-    // User scrolls back
-    handler.handle_scroll_back(10);
+    // User scrolls back (scroll_offset lives in ViewState; pass 0 temporarily)
+    let scroll_offset = handler.handle_scroll_back(0, 10);
 
     // User scrolls forward
-    handler.handle_scroll_forward(5);
+    let scroll_offset = handler.handle_scroll_forward(scroll_offset, 5);
 
     // Return to bottom
-    handler.handle_scroll_to_bottom();
+    let _scroll_offset = TerminalHandler::handle_scroll_to_bottom();
+    let _ = scroll_offset;
 }
 
 #[test]
@@ -437,7 +439,7 @@ fn test_process_outputs_api() {
 
     // Buffer grows dynamically; 4 rows of content were written (prompt+cmd,
     // total 48, file listing, new prompt).
-    let visible = handler.buffer().visible_rows();
+    let visible = handler.buffer().visible_rows(0);
     assert_eq!(visible.len(), 4);
 }
 
@@ -687,7 +689,7 @@ fn alternate_enter_clears_screen() {
     handler.process_outputs(&[TerminalOutput::Data(b"primary content".to_vec())]);
 
     // Verify primary has content.
-    let primary_row = handler.buffer().visible_rows();
+    let primary_row = handler.buffer().visible_rows(0);
     assert!(
         !primary_row.is_empty(),
         "primary buffer should have visible rows after data"
@@ -699,7 +701,7 @@ fn alternate_enter_clears_screen() {
     )))]);
 
     // Alternate screen must show only blank rows.
-    let alt_rows = handler.buffer().visible_rows();
+    let alt_rows = handler.buffer().visible_rows(0);
     for row in alt_rows {
         for cell in row.get_characters() {
             assert!(
@@ -737,7 +739,7 @@ fn alternate_leave_restores_content() {
     )))]);
 
     // The first visible row should contain the original primary content.
-    let rows = handler.buffer().visible_rows();
+    let rows = handler.buffer().visible_rows(0);
     let first_row = &rows[0];
     let content: String = first_row
         .get_characters()
@@ -918,7 +920,7 @@ fn wrap_enabled_default() {
         "cursor x must be 5 after the 5-char overflow"
     );
 
-    let visible = handler.buffer().visible_rows();
+    let visible = handler.buffer().visible_rows(0);
     // Row 1 should have cells (at least the 5 overflow chars).
     assert!(
         visible.len() > 1,
@@ -1061,7 +1063,7 @@ fn osc_url_sets_format() {
     // Write text after the URL
     handler.handle_data(b"plain");
 
-    let rows = handler.buffer().visible_rows();
+    let rows = handler.buffer().visible_rows(0);
     let row = &rows[0];
 
     // Cells 0-4 ("click") must have a URL tag.
@@ -1116,7 +1118,7 @@ fn cursor_report_sends_correct_position() {
     // Move cursor to (4, 2) (0-indexed), send CursorReport → channel receives "\x1b[3;5R".
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
 
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
@@ -1129,9 +1131,13 @@ fn cursor_report_sends_correct_position() {
 
     handler.process_outputs(&[TerminalOutput::CursorReport]);
 
-    let bytes = rx
+    let msg = rx
         .try_recv()
         .expect("CursorReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
         response, "\x1b[3;5R",
@@ -1144,16 +1150,20 @@ fn da1_sends_response() {
     // RequestDeviceAttributes must send the DA1 capability string.
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
 
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
 
     handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
 
-    let bytes = rx
+    let msg = rx
         .try_recv()
         .expect("RequestDeviceAttributes must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
         response, "\x1b[?65;1;2;4;6;17;18;22c",
@@ -1220,8 +1230,8 @@ fn dec_special_replace_lower_right_corner() {
     )]);
     handler.handle_data(&[0x6a]);
 
-    let rows = handler.buffer().visible_rows();
-    let cell = rows[0]
+    let visible_rows = handler.buffer().visible_rows(0);
+    let cell = visible_rows[0]
         .get_char_at(0)
         .expect("cell 0 must exist after writing");
     assert_eq!(
@@ -1238,8 +1248,8 @@ fn dec_special_dont_replace_passthrough() {
 
     handler.handle_data(&[0x6a]);
 
-    let rows = handler.buffer().visible_rows();
-    let cell = rows[0]
+    let visible_rows = handler.buffer().visible_rows(0);
+    let cell = visible_rows[0]
         .get_char_at(0)
         .expect("cell 0 must exist after writing");
     assert_eq!(
@@ -1272,9 +1282,9 @@ fn dec_special_toggle() {
     )]);
     handler.handle_data(&[0x6a]);
 
-    let rows = handler.buffer().visible_rows();
-    let cell0 = rows[0].get_char_at(0).expect("cell 0 must exist");
-    let cell1 = rows[0].get_char_at(1).expect("cell 1 must exist");
+    let visible_rows = handler.buffer().visible_rows(0);
+    let cell0 = visible_rows[0].get_char_at(0).expect("cell 0 must exist");
+    let cell1 = visible_rows[0].get_char_at(1).expect("cell 1 must exist");
 
     assert_eq!(
         cell0.tchar(),
@@ -1304,8 +1314,8 @@ fn dec_special_all_passthrough_above_7e() {
     // 0x41 = 'A' (below 0x5F — also not remapped)
     handler.handle_data(&[0x41]);
 
-    let rows = handler.buffer().visible_rows();
-    let cell = rows[0].get_char_at(0).expect("cell 0 must exist");
+    let visible_rows = handler.buffer().visible_rows(0);
+    let cell = visible_rows[0].get_char_at(0).expect("cell 0 must exist");
     assert_eq!(
         cell.tchar(),
         &freminal_common::buffer_states::tchar::TChar::Ascii(0x41),

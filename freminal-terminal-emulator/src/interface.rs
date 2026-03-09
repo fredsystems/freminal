@@ -4,10 +4,27 @@
 // https://opensource.org/licenses/MIT.
 
 use std::borrow::Cow;
+use std::sync::Arc;
+
+/// Cached flat representation of the visible window stored between snapshots.
+///
+/// Two separate `Arc<Vec<T>>` fields match the types in `TerminalSnapshot`
+/// directly, so the clean path (no dirty rows) is a pair of refcount bumps
+/// with no `Vec` allocation.
+type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>)>;
+
+/// Cached `Arc<Vec<Row>>` stored between snapshots.
+///
+/// `TerminalSnapshot.rows` is included for future scrollback rendering but is
+/// not read by the GUI today.  Re-cloning the entire rows `Vec` on every call
+/// to `build_snapshot` dominates the clean-path cost.  We cache it here and
+/// only rebuild it when the dirty check says at least one visible row changed.
+type CachedRows = Option<Arc<Vec<freminal_buffer::row::Row>>>;
 
 use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
+use crate::snapshot::TerminalSnapshot;
 use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, unbounded};
@@ -242,6 +259,23 @@ pub struct TerminalEmulator<Io: FreminalTermInputOutput> {
     write_tx: crossbeam_channel::Sender<PtyWrite>,
     ctx: Option<egui::Context>,
     previous_pass_valid: bool,
+    changed: bool,
+    /// Cached flat representation of the visible window from the last
+    /// `build_snapshot` call.  `None` until the first snapshot is built.
+    ///
+    /// Stored as two separate `Arc<Vec<T>>` matching the types in
+    /// `TerminalSnapshot`, so the clean path (no dirty rows) hands them
+    /// directly into the snapshot with a refcount bump — no Vec allocation.
+    previous_visible_snap: VisibleSnap,
+    /// Cached `Arc<Vec<Row>>` from the last snapshot.  Reused on the clean
+    /// path so we avoid cloning the whole rows `Vec` when no row changed.
+    /// Invalidated alongside `previous_visible_snap` on buffer-type switches.
+    cached_rows: CachedRows,
+    /// Whether the previous snapshot was taken while in the alternate screen
+    /// buffer.  Used to detect primary↔alternate transitions and invalidate
+    /// `previous_visible_snap` so stale content is never reused across a
+    /// buffer switch.
+    previous_was_alternate: bool,
 }
 
 impl TerminalEmulator<DummyIo> {
@@ -261,6 +295,10 @@ impl TerminalEmulator<DummyIo> {
             write_tx,
             ctx: None,
             previous_pass_valid: false,
+            changed: false,
+            previous_visible_snap: None,
+            cached_rows: None,
+            previous_was_alternate: false,
         }
     }
 }
@@ -296,62 +334,53 @@ impl TerminalEmulator<FreminalPtyInputOutput> {
             write_tx,
             ctx: None,
             previous_pass_valid: false,
+            changed: false,
+            previous_visible_snap: None,
+            cached_rows: None,
+            previous_was_alternate: false,
         };
         Ok((ret, pty_rx))
     }
 }
 
 impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
+    /// Return a clone of the PTY write sender.
+    ///
+    /// Used by `main.rs` to pass the real write channel to the GUI before the
+    /// emulator is moved into the PTY consumer thread.  The GUI uses it to
+    /// send `PtyWrite::Write` responses for Report* window manipulation
+    /// commands without going through the emulator lock.
+    #[must_use]
+    pub fn clone_write_tx(&self) -> crossbeam_channel::Sender<PtyWrite> {
+        self.write_tx.clone()
+    }
+
     pub fn get_cursor_visual_style(&self) -> CursorVisualStyle {
         self.internal.get_cursor_visual_style()
-    }
-
-    pub const fn set_mouse_position_from_move_event(&mut self, pos: &egui::Pos2) {
-        self.internal.mouse_position = Some(*pos);
-    }
-
-    pub fn set_mouse_position(&mut self, pos: &Option<egui::Vec2>) {
-        // info!("Setting mouse position: {pos:?}");
-        self.internal.mouse_position = pos.map(|pos| egui::Pos2 {
-            x: pos[0],
-            y: pos[1],
-        });
-    }
-
-    pub const fn get_mouse_position(&self) -> Option<egui::Pos2> {
-        self.internal.mouse_position
     }
 
     pub const fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
         self.internal.is_mouse_hovered_on_url(mouse_position)
     }
 
-    pub fn set_window_focused(&mut self, focused: bool) {
-        self.internal.set_window_focused(focused);
-
-        if !focused {
-            self.internal.mouse_position = None;
-        }
-    }
-
+    /// Store the egui context if we don't have one yet, so we can call
+    /// `request_repaint()` from the PTY consumer thread.
     pub fn set_egui_ctx_if_missing(&mut self, ctx: egui::Context) {
         if self.ctx.is_none() {
-            self.ctx = Some(ctx.clone());
-            self.internal.set_ctx(ctx);
+            self.ctx = Some(ctx);
         }
     }
 
-    pub fn request_redraw(&mut self) {
-        debug!("Terminal Emulator: Requesting redraw");
-        self.previous_pass_valid = false;
+    fn request_repaint(&self) {
         if let Some(ctx) = &self.ctx {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(8));
         }
     }
 
     pub const fn set_previous_pass_invalid(&mut self) {
         self.previous_pass_valid = false;
     }
+
     pub const fn set_previous_pass_valid(&mut self) {
         self.previous_pass_valid = true;
     }
@@ -361,14 +390,25 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     }
 
     pub const fn needs_redraw(&mut self) -> bool {
-        let internal = if self.internal.is_changed() {
-            self.internal.clear_changed();
+        let has_new_data = if self.changed {
+            self.changed = false;
             true
         } else {
             false
         };
 
-        !self.previous_pass_valid || internal
+        !self.previous_pass_valid || has_new_data
+    }
+
+    /// Process a chunk of raw PTY bytes.
+    ///
+    /// This wraps `TerminalState::handle_incoming_data`, marks the emulator as
+    /// changed, and requests an egui repaint so the GUI wakes up on the next
+    /// frame.
+    pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
+        self.internal.handle_incoming_data(incoming);
+        self.changed = true;
+        self.request_repaint();
     }
 
     pub const fn get_win_size(&mut self) -> (usize, usize) {
@@ -397,10 +437,44 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
                 pixel_height: font_pixel_height,
             }))?;
 
-            self.request_redraw();
+            self.previous_pass_valid = false;
+            self.request_repaint();
         }
 
         Ok(())
+    }
+
+    /// Handle a resize event delivered via the `InputEvent` channel.
+    ///
+    /// This is called by the PTY consumer thread (or, currently, the inline
+    /// `input_rx` receiver in `main.rs`) when the GUI detects a change in
+    /// terminal dimensions.  It updates the emulator's internal size and
+    /// forwards a `PtyWrite::Resize` to the PTY writer so the kernel's tty
+    /// layer sees the new window size.
+    ///
+    /// Unlike `set_win_size`, this method does not need to return `Result`
+    /// because send failures are logged rather than propagated — the caller
+    /// is on the consumer thread which has no caller to propagate to.
+    pub fn handle_resize_event(
+        &mut self,
+        width_chars: usize,
+        height_chars: usize,
+        font_pixel_width: usize,
+        font_pixel_height: usize,
+    ) {
+        self.internal.set_win_size(width_chars, height_chars);
+
+        if let Err(e) = self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
+            width: width_chars,
+            height: height_chars,
+            pixel_width: font_pixel_width,
+            pixel_height: font_pixel_height,
+        })) {
+            error!("Failed to send resize to PTY: {e}");
+        }
+
+        self.previous_pass_valid = false;
+        self.request_repaint();
     }
 
     /// Write to the terminal
@@ -409,6 +483,20 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     /// Will error if the terminal cannot be locked
     pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
         self.internal.write(to_write)
+    }
+
+    /// Write raw bytes directly to the PTY write channel.
+    ///
+    /// Used by the PTY consumer thread to forward keyboard input bytes that
+    /// arrived via `InputEvent::Key(bytes)` without re-encoding them through
+    /// `TerminalInput`.
+    ///
+    /// # Errors
+    /// Returns an error if the send to the PTY write channel fails.
+    pub fn write_raw_bytes(&self, bytes: &[u8]) -> Result<()> {
+        self.write_tx
+            .send(PtyWrite::Write(bytes.to_vec()))
+            .map_err(|e| anyhow::anyhow!("Failed to send raw bytes to PTY: {e}"))
     }
 
     pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
@@ -438,5 +526,116 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
 
     pub const fn show_cursor(&mut self) -> bool {
         self.internal.show_cursor()
+    }
+
+    /// Build a point-in-time snapshot of the terminal state.
+    ///
+    /// This is cheap to call: the visible content is flattened here on the
+    /// PTY thread so the GUI render path never has to do it.  The raw rows are
+    /// wrapped in an `Arc` so the GUI can inspect scrollback without a copy.
+    ///
+    /// `content_changed` is `true` only when the visible flat content differs
+    /// from the previous snapshot.  Cursor-only moves do not set it because
+    /// cursor position is carried separately in the snapshot struct.
+    #[must_use]
+    pub fn build_snapshot(&mut self) -> TerminalSnapshot {
+        // ── Cheap immutable reads (no &mut borrow of handler needed) ────────
+        let (term_width, term_height) = self.internal.handler.get_win_size();
+        let total_rows = self.internal.handler.buffer().get_rows().len();
+        let is_alternate_screen = self.internal.handler.is_alternate_screen();
+
+        // ── Invalidate the snap cache on primary ↔ alternate screen switch ───
+        //
+        // When the buffer type changes, the previous visible_snap belongs to
+        // the other buffer and must never be reused for the new one.
+        if is_alternate_screen != self.previous_was_alternate {
+            self.previous_visible_snap = None;
+            self.cached_rows = None;
+            self.previous_was_alternate = is_alternate_screen;
+        }
+
+        // ── Determine whether any visible row changed since last snapshot ────
+        //
+        // The PTY thread always operates at scroll_offset = 0.
+        let any_dirty = self.internal.handler.any_visible_dirty(0);
+
+        // ── Produce (visible_chars, visible_tags, content_changed, rows) ───────
+        let (visible_chars, visible_tags, content_changed, snap_rows) = if any_dirty {
+            // At least one visible row is dirty — re-flatten via the cache.
+            // `data_and_format_data_for_gui` calls `visible_as_tchars_and_tags`
+            // which updates the per-row cache and clears dirty flags in one pass.
+            let (chars, tags) = self.internal.data_and_format_data_for_gui();
+            let vc = Arc::new(chars.visible);
+            let vt = Arc::new(tags.visible);
+
+            // `content_changed` is true when the flat content actually differs
+            // from the previous snapshot (guards against spurious redraws from
+            // dirty flags set on rows that were ultimately written with the same
+            // bytes, e.g. cursor-blink redraws).
+            let changed = self
+                .previous_visible_snap
+                .as_ref()
+                .is_none_or(|(prev_chars, _)| prev_chars.as_ref() != vc.as_ref());
+
+            // Rebuild the rows Arc — rows changed so we need a fresh clone.
+            let new_rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
+            self.cached_rows = Some(Arc::clone(&new_rows));
+            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
+            (vc, vt, changed, new_rows)
+        } else if let Some((prev_chars, prev_tags)) = &self.previous_visible_snap {
+            // No visible row is dirty — reuse cached Arcs.
+            // This is a refcount bump only: no Vec allocation, no memcpy.
+            let rows = self.cached_rows.as_ref().map_or_else(
+                || Arc::new(self.internal.handler.buffer().get_rows().clone()),
+                Arc::clone,
+            );
+            (Arc::clone(prev_chars), Arc::clone(prev_tags), false, rows)
+        } else {
+            // First-ever snapshot and nothing is marked dirty yet (e.g. the
+            // buffer was just created).  Flatten once to populate the cache.
+            let (chars, tags) = self.internal.data_and_format_data_for_gui();
+            let vc = Arc::new(chars.visible);
+            let vt = Arc::new(tags.visible);
+            let new_rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
+            self.cached_rows = Some(Arc::clone(&new_rows));
+            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
+            (vc, vt, true, new_rows)
+        };
+
+        // ── Remaining cheap reads ────────────────────────────────────────────
+        let cursor_pos = self.internal.cursor_pos();
+        let show_cursor = self.internal.show_cursor();
+        let cursor_visual_style = self.internal.get_cursor_visual_style();
+        let is_normal_display = self.internal.is_normal_display();
+
+        let bracketed_paste = self.internal.modes.bracketed_paste.clone();
+        let mouse_tracking = self.internal.modes.mouse_tracking.clone();
+        let repeat_keys = self.internal.should_repeat_keys();
+        let cursor_key_app_mode = {
+            use freminal_common::buffer_states::modes::decckm::Decckm;
+            self.internal.get_cursor_key_mode() == Decckm::Application
+        };
+        let skip_draw = self.internal.skip_draw_always();
+
+        TerminalSnapshot {
+            visible_chars,
+            visible_tags,
+            rows: snap_rows,
+            total_rows,
+            height: term_height,
+            cursor_pos,
+            show_cursor,
+            cursor_visual_style,
+            is_alternate_screen,
+            is_normal_display,
+            term_width,
+            term_height,
+            content_changed,
+            bracketed_paste,
+            mouse_tracking,
+            repeat_keys,
+            cursor_key_app_mode,
+            skip_draw,
+        }
     }
 }

@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 freminal-buffer = { path = "../freminal-buffer" }
@@ -43,3 +44,6 @@ vergen.workspace = true
 [[bench]]
 name = "buffer_benches"
 harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["arc-swap"]

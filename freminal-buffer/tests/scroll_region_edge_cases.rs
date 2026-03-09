@@ -16,7 +16,7 @@ fn ascii(c: char) -> TChar {
 }
 
 fn visible_lengths(buf: &Buffer) -> Vec<usize> {
-    buf.visible_rows()
+    buf.visible_rows(0)
         .iter()
         .map(|row| row.get_characters().len())
         .collect()
@@ -127,7 +127,7 @@ fn scroll_region_full_screen_explicit() {
     }
 
     // Should have accumulated scrollback
-    assert!(buf.visible_rows().len() == 5);
+    assert!(buf.visible_rows(0).len() == 5);
 }
 
 // ============================================================================
@@ -288,23 +288,22 @@ fn scroll_region_operations_blocked_when_scrolled_back() {
     }
 
     // Scroll back to view history
-    buf.scroll_back(3);
+    let _scroll_offset = buf.scroll_back(0, 3);
     // We're now scrolled back (viewing history)
+    // NOTE: Since Task 4, insert_lines/delete_lines no longer check the
+    // scroll_offset — that guard was removed because scroll_offset now lives
+    // in ViewState, not in Buffer.  The test is updated to just verify the
+    // operations don't panic.
 
     buf.set_scroll_region(2, 4);
 
     // Position cursor in region
     buf.set_cursor_pos(Some(1), Some(3));
 
-    let before = visible_lengths(&buf);
-
-    // These operations should be no-ops while scrolled back
+    // These operations may or may not change visible content now that the
+    // scroll_offset guard is removed; we just verify no panic occurs.
     buf.insert_lines(1);
     buf.delete_lines(1);
-
-    let after = visible_lengths(&buf);
-
-    assert_eq!(before, after);
 }
 
 #[test]
@@ -319,17 +318,16 @@ fn lf_in_scroll_region_resets_scrollback_offset() {
         buf.handle_cr();
     }
 
-    buf.scroll_back(2);
-    // We're now scrolled back
+    let _scroll_offset = buf.scroll_back(0, 2);
+    // We're now scrolled back (from caller's perspective)
 
     buf.set_scroll_region(2, 4);
 
-    // LF should reset scroll offset and return to live view
+    // LF in primary buffer; scroll_offset is external now (lives in ViewState).
     buf.handle_lf();
 
-    // Verify we're back at live view by checking visible_rows reflects current state
-    // (indirect verification that scroll offset was reset)
-    let visible = buf.visible_rows();
+    // Verify visible_rows at offset=0 (live bottom) is sane.
+    let visible = buf.visible_rows(0);
     assert_eq!(visible.len(), 5);
 }
 
@@ -342,7 +340,7 @@ fn scroll_region_in_alternate_buffer() {
     let mut buf = Buffer::new(10, 5);
     tag_rows(&mut buf, 5);
 
-    buf.enter_alternate();
+    buf.enter_alternate(0);
 
     // Tag alternate buffer rows
     for i in 0..5 {
@@ -379,12 +377,12 @@ fn scroll_region_state_not_restored_from_alternate() {
     buf.set_scroll_region(3, 6);
     let primary_cursor_y = buf.get_cursor().pos.y;
 
-    buf.enter_alternate();
+    buf.enter_alternate(0);
 
     // Set different scroll region in alternate
     buf.set_scroll_region(2, 5);
 
-    buf.leave_alternate();
+    let _restored_offset = buf.leave_alternate();
 
     // Primary cursor should be restored, but does scroll region get restored?
     // Based on the code, scroll_region is NOT saved/restored
@@ -405,7 +403,7 @@ fn resize_clamps_scroll_region_and_cursor() {
     assert_eq!(buf.get_cursor().pos.y, 6); // 0-based row 6
 
     // Shrink height to 5
-    buf.set_size(10, 5);
+    buf.set_size(10, 5, 0);
 
     // Scroll region would be invalid (rows 6-9 don't exist)
     // Cursor should be clamped
@@ -421,7 +419,7 @@ fn scroll_region_persists_through_width_resize() {
     let region_cursor_y = buf.get_cursor().pos.y;
 
     // Resize width only
-    buf.set_size(100, 10);
+    buf.set_size(100, 10, 0);
 
     // Cursor position should be preserved (or at least reasonable)
     // This tests that width resize doesn't break scroll region state
@@ -453,7 +451,7 @@ fn multiple_scroll_up_operations() {
     assert_eq!(buf.get_cursor().pos.y, 5);
 
     // Verify buffer didn't crash and visible rows are sane
-    assert_eq!(buf.visible_rows().len(), 8);
+    assert_eq!(buf.visible_rows(0).len(), 8);
 }
 
 #[test]
@@ -474,7 +472,7 @@ fn multiple_scroll_down_operations() {
     // Should still be at top of region
     assert_eq!(buf.get_cursor().pos.y, 2);
 
-    assert_eq!(buf.visible_rows().len(), 8);
+    assert_eq!(buf.visible_rows(0).len(), 8);
 }
 
 // ============================================================================

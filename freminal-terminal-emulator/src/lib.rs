@@ -28,6 +28,7 @@ pub mod error;
 pub mod interface;
 pub mod io;
 // pub mod playback;
+pub mod snapshot;
 pub mod state;
 
 #[macro_use]
