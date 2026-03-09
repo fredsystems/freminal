@@ -960,15 +960,299 @@ common case. The `Replace` arm returns `Cow::Owned(out)` as before. `handle_data
 hold `Cow<[u8]>` and pass a deref to `TChar::from_vec`. Added `use std::borrow::Cow` to the
 import block.
 
-### 9.5 — Dirty-Row Tracking in Buffer (High effort, in progress)
+### 9.5 — Dirty-Row Tracking in Buffer (High effort — split into three sub-tasks)
 
-Add a `dirty: bool` flag to each `Row`, cleared when the row is snapshotted and set on any
-mutation. `visible_as_tchars_and_tags` (called by `build_snapshot`) can then skip clean rows and
-reuse a cached flat representation, making the snapshot cost O(changed rows) instead of O(all
-visible rows).
+**Goal:** Make `build_snapshot` cost O(changed rows) instead of O(all visible rows) by adding a
+`dirty` flag to each `Row` and maintaining a per-row flat-representation cache in `Buffer`.
 
-Defer until the simpler wins in 9.1–9.4 are implemented and profiled, and the architecture
-refactor is stable.
+This is too large for a single agent session. It has been broken into three sequential sub-tasks
+(9.5-A, 9.5-B, 9.5-C). Each sub-task must leave `cargo test --all` passing before the next
+begins. A broken compilation state between sessions is acceptable if noted explicitly.
+
+---
+
+#### 9.5-A — Add `dirty: bool` to `Row` and instrument all mutation sites
+
+**Files touched:** `freminal-buffer/src/row.rs`, `freminal-buffer/src/buffer.rs`
+
+**What to do:**
+
+1. Add `dirty: bool` to `Row`:
+
+   ```rust
+   pub struct Row {
+       cells: Vec<Cell>,
+       width: usize,
+       pub origin: RowOrigin,
+       pub join: RowJoin,
+       pub dirty: bool,   // ← new field
+   }
+   ```
+
+2. All constructors (`new`, `new_with_origin`, `from_cells`) must set `dirty: true`.
+   Newly created rows are always dirty — they have never been snapshotted.
+
+3. Every mutating method on `Row` must set `self.dirty = true` at entry (or on any
+   code path that actually changes cells). The full list as of this writing:
+   - `clear()`
+   - `clear_from()`
+   - `clear_to()`
+   - `clear_with_tag()`
+   - `insert_text()` — set dirty only when `InsertResponse::Consumed` is returned
+     (i.e. at least one cell was written). If `Leftover { leftover_start: 0 }` is
+     returned immediately (col >= width, nothing written), do NOT set dirty.
+   - `insert_spaces_at()`
+   - `erase_cells_at()`
+   - `delete_cells_at()`
+   - `cleanup_wide_overwrite()` (private — sets dirty because it blanks cells)
+
+4. In `Buffer`, every site that directly replaces a row by assignment also produces a
+   dirty row. The new `Row::new*` constructors already set `dirty: true`, so the
+   following sites are handled automatically as long as constructors are correct:
+   - `push_row` — calls `Row::new_with_origin`
+   - `scroll_slice_up` — assigns `self.rows[last] = Row::new(self.width)`
+   - `scroll_slice_down` — assigns `self.rows[first] = Row::new(self.width)`
+   - `scroll_up` — `self.rows.push(Row::new(self.width))`
+   - `handle_lf` — `self.rows.push(Row::new_with_origin(...))`
+   - `resize_height` — `self.rows.push(Row::new(self.width))`
+
+   Additionally, `scroll_slice_up` and `scroll_slice_down` copy rows by cloning:
+
+   ```rust
+   let next = self.rows[row_idx + 1].clone();
+   self.rows[row_idx] = next;
+   ```
+
+   The clone preserves the source row's `dirty` flag — that is **correct** (if the
+   source was dirty the copy is also dirty; if clean the copy inherits the clean
+   state and will be re-snapshotted if it moves into the visible window).
+
+5. `reflow_to_width` tears down `self.rows` and rebuilds it from scratch via
+   `Row::from_cells`. Since all new rows from `from_cells` set `dirty: true` by
+   construction, no extra work is needed here.
+
+6. `enforce_scrollback_limit` calls `self.rows.drain(0..overflow)`. This removes
+   rows from the front, shifting all row indices. The dirty flags of surviving rows
+   are unaffected and remain correct (a previously-clean row is still clean after the
+   drain).
+
+7. Add a `pub fn mark_clean(&mut self)` method to `Row`:
+
+   ```rust
+   pub fn mark_clean(&mut self) {
+       self.dirty = false;
+   }
+   ```
+
+   This will be called by the snapshot machinery in 9.5-B.
+
+**Verification:** `cargo test --all` passes. No behaviour change — dirty is set but
+never read yet. Clippy clean.
+
+**Hint for the next session (9.5-B):** The `dirty` field needs to be ignored in all
+`PartialEq` / `Debug` derives that are used in tests. Since `Row` derives `Clone`
+but not `PartialEq`, there is no immediate issue. `Cell` and `Row` test helpers in
+`row_tests.rs` compare cell content directly; they do not go through `Row::eq`.
+No changes to tests should be needed beyond updating the struct literal constructors
+in `from_cells` calls if any tests construct `Row` directly via struct syntax (check
+with `grep -r 'Row {' freminal-buffer`).
+
+---
+
+#### 9.5-B — Per-row flat-representation cache in `Buffer`
+
+**Files touched:** `freminal-buffer/src/buffer.rs`, `freminal-buffer/src/terminal_handler.rs`
+
+**Depends on:** 9.5-A complete and passing.
+
+**What to do:**
+
+Add a `row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>` field to `Buffer`.
+`None` means the row is dirty (not yet cached); `Some(...)` holds the last-good flat
+representation for that row.
+
+```rust
+pub struct Buffer {
+    // ... existing fields ...
+
+    /// Per-row flat-representation cache.  Index matches `self.rows`.
+    /// `None` = dirty (must be re-flattened on next snapshot).
+    /// `Some((chars, tags))` = clean (can be reused directly).
+    row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+}
+```
+
+Rules for keeping `row_cache` consistent with `self.rows`:
+
+- **`push_row` / any `self.rows.push`:** also push `None` to `row_cache`.
+- **`self.rows.drain(0..n)`:** also `row_cache.drain(0..n)`.
+- **`scroll_slice_up(first, last)`:** rotate the cache entries the same way rows are
+  rotated, then set `row_cache[last] = None` (the new blank row is dirty).
+- **`scroll_slice_down(first, last)`:** same in reverse; set `row_cache[first] = None`.
+- **`scroll_up`:** `row_cache.remove(0)` then `row_cache.push(None)`.
+- **`reflow_to_width`:** `row_cache = vec![None; self.rows.len()]` after the new rows
+  are installed (all rows are dirty post-reflow by construction, so this is correct).
+- **`resize_height` (grow):** push `None` for each new row added.
+- **`resize_height` (shrink):** truncate `row_cache` to match.
+- **`enter_alternate` / `leave_alternate`:** save and restore the cache alongside the
+  rows, exactly as `SavedPrimaryState` saves cursor and scroll offset. Add a
+  `row_cache: Vec<Option<...>>` field to `SavedPrimaryState`.
+
+Change `rows_as_tchars_and_tags` to accept `&mut [Row]` and `&mut Vec<Option<...>>`
+so it can populate the cache for dirty rows and mark them clean:
+
+```rust
+fn rows_as_tchars_and_tags_cached(
+    rows: &mut [Row],
+    cache: &mut Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+) -> (Vec<TChar>, Vec<FormatTag>) {
+    // For each row:
+    //   if row.dirty || cache[i].is_none():
+    //     flatten the row → (row_chars, row_tags)
+    //     cache[i] = Some((row_chars, row_tags))
+    //     row.mark_clean()
+    //   else:
+    //     use cache[i].as_ref().unwrap()
+    // Then merge all per-row results with NewLine separators (same tag-merge
+    // logic as the current rows_as_tchars_and_tags).
+}
+```
+
+Keep the existing `rows_as_tchars_and_tags` signature as a thin wrapper that calls
+the new function, so external call sites (benchmarks etc.) are not broken.
+
+Update `visible_as_tchars_and_tags` and `scrollback_as_tchars_and_tags` to pass
+`&mut self.row_cache` slices. Because these methods now mutate the cache they will
+need `&mut self` receivers (they are already called from `&mut self` contexts, so
+this is fine).
+
+**Invariant to enforce in `debug_assert_invariants`:**
+
+```rust
+assert_eq!(self.rows.len(), self.row_cache.len(),
+    "row_cache length {} != rows length {}", self.row_cache.len(), self.rows.len());
+```
+
+**Verification:** `cargo test --all` passes. The cache is populated but
+`build_snapshot` still calls the full flatten path — that is intentional; 9.5-C
+wires it up. Clippy clean.
+
+**Hint:** The tag-merge step in `rows_as_tchars_and_tags` merges _across_ row
+boundaries (a tag that ends at exactly the start of a NewLine separator is extended
+rather than split). When using the cache, individual row tag-vectors have their
+`start`/`end` offsets relative to that row's character slice, not the global flat
+vector. The cache should store **raw per-row** tag offsets (starting at 0 for each
+row); the merge step re-computes global offsets each time. This is simpler and
+correct: the cache saves the cell-iteration work, not the merge work. The merge is
+O(visible rows), which is fast (typically 24–50 iterations with no allocation if
+every row is clean).
+
+---
+
+#### 9.5-C — Wire `build_snapshot` to honour the cache; fix `content_changed`
+
+**Files touched:** `freminal-terminal-emulator/src/interface.rs`,
+`freminal-terminal-emulator/src/snapshot.rs`
+
+**Depends on:** 9.5-B complete and passing.
+
+**What to do:**
+
+1. Add a `previous_visible_snap: Option<(Vec<TChar>, Vec<FormatTag>)>` field to
+   `TerminalEmulator` (or to `TerminalState`). This holds the last published
+   visible flat representation so `build_snapshot` can return it unchanged when no
+   visible row is dirty.
+
+   ```rust
+   pub struct TerminalEmulator<Io: FreminalTermInputOutput> {
+       pub internal: TerminalState,
+       pub changed: bool,
+       ctx: Option<egui::Context>,
+       previous_visible_snap: Option<(Vec<TChar>, Vec<FormatTag>)>,
+   }
+   ```
+
+2. In `build_snapshot`, check whether any visible row is dirty before flattening:
+
+   ```rust
+   pub fn build_snapshot(&mut self) -> TerminalSnapshot {
+       let (term_width, term_height) = self.internal.handler.get_win_size();
+       // ... other cheap reads ...
+
+       let any_visible_dirty = {
+           let vis_start = self.internal.handler.buffer().visible_window_start(0);
+           let vis_end = (vis_start + term_height)
+               .min(self.internal.handler.buffer().get_rows().len());
+           self.internal.handler.buffer().get_rows()[vis_start..vis_end]
+               .iter()
+               .any(|r| r.dirty)
+       };
+
+       let (visible_chars, visible_tags, content_changed) = if any_visible_dirty {
+           let (chars, tags) = self.internal.data_and_format_data_for_gui();  // uses cache
+           let changed = self.previous_visible_snap.as_ref()
+               .map_or(true, |(pc, _)| pc != &chars.visible);
+           self.previous_visible_snap = Some((chars.visible.clone(), tags.visible.clone()));
+           (chars.visible, tags.visible, changed)
+       } else if let Some((chars, tags)) = &self.previous_visible_snap {
+           (chars.clone(), tags.clone(), false)  // nothing changed
+       } else {
+           // First call ever; no previous snap.
+           let (chars, tags) = self.internal.data_and_format_data_for_gui();
+           self.previous_visible_snap = Some((chars.visible.clone(), tags.visible.clone()));
+           (chars.visible, tags.visible, true)
+       };
+
+       TerminalSnapshot {
+           visible_chars,
+           visible_tags,
+           content_changed,   // ← now correctly false when nothing changed
+           // ... rest unchanged ...
+       }
+   }
+   ```
+
+   **Important:** `visible_window_start` is currently `pub(crate)` in `buffer.rs`.
+   You will need to make it `pub` or add a dedicated `pub fn any_visible_dirty(&self,
+scroll_offset: usize) -> bool` method to `Buffer` and expose it through
+   `TerminalHandler`. The latter is cleaner and avoids leaking the index arithmetic.
+
+3. The `content_changed` flag in `TerminalSnapshot` can now be `false`. The GUI
+   currently does not act on `content_changed` (it renders every frame regardless),
+   but it should eventually use it to skip `render_terminal_output` on unchanged
+   frames. Wiring that optimisation is out of scope here — just ensure the flag
+   value is correct.
+
+4. Remove the `// content_changed: true` hardcoded comment from `interface.rs`.
+
+**Verification:** `cargo test --all` passes. Confirm with a benchmark run that
+`bench_build_snapshot` improves vs. the baseline recorded in Section 8.2 (~16 µs
+target → ideally < 5 µs for a static screen). Clippy clean. Update Section 8.2
+with the new numbers.
+
+**Edge cases to test:**
+
+- Snapshot after a purely-scrollback write (cursor in scrollback, visible unchanged):
+  `content_changed` must be `false`.
+- Snapshot after cursor movement only (no cell mutation): `content_changed` must be
+  `false` because cursor position is carried separately in the snapshot and does not
+  affect `visible_chars`.
+- Snapshot after `erase_display`: all visible rows are dirty; `content_changed` must
+  be `true`.
+- Snapshot after `enter_alternate` / `leave_alternate`: the alternate buffer starts
+  all-dirty; switching back to primary should restore the primary cache and set
+  `content_changed` only if the primary visible rows actually changed while the
+  alternate was active (they don't, so it should be `false` for a static primary).
+
+---
+
+**Overall verification for 9.5 (all three sub-tasks):**
+
+- `cargo test --all`: 498+ tests pass, 0 fail.
+- `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+- `cargo machete`: no unused dependencies.
+- `cargo bench --all -- --baseline before_refactor`: update Section 8.2 numbers.
+- Pre-commit hooks: all pass.
 
 ---
 
@@ -1019,4 +1303,6 @@ refactor is stable.
 - [ ] Task 10 complete
 - [ ] Task 11 complete (dead code deleted, clippy clean)
 - [ ] Task 12 complete (benchmarks re-baselined, results recorded)
-- [ ] Phase 3 (Section 9 optimisations) planned
+- [ ] Phase 3 — 9.5-A complete (dirty flag on Row, all mutation sites instrumented)
+- [ ] Phase 3 — 9.5-B complete (per-row cache in Buffer, cache coherence maintained)
+- [ ] Phase 3 — 9.5-C complete (build_snapshot uses cache, content_changed correct)
