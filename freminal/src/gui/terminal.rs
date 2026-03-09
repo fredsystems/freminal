@@ -802,16 +802,8 @@ pub enum UiData<'a> {
     PreviousPass(UiJobAction),
 }
 
-/// Bundles the font-related rendering configuration that `process_tags` needs.
-/// Grouping these into a struct keeps `process_tags` within clippy's
-/// `too_many_arguments` limit (≤ 7).
-struct FontRenderConfig<'a> {
-    terminal_fonts: &'a TerminalFont,
-    font_defs: &'a FontConfig,
-    row_height: f32,
-}
-
 fn setup_job(ui: &Ui, data_utf8: &str) -> (egui::text::LayoutJob, egui::TextFormat) {
+    let width = ui.available_width();
     let style = ui.style();
     let text_style = &style.text_styles[&TextStyle::Monospace];
 
@@ -819,12 +811,9 @@ fn setup_job(ui: &Ui, data_utf8: &str) -> (egui::text::LayoutJob, egui::TextForm
         data_utf8.to_string(),
         text_style.clone(),
         style.visuals.text_color(),
-        // Disable auto-wrapping: terminal lines are delimited by explicit '\n'
-        // characters, so the galley must never wrap at the widget boundary.
-        f32::INFINITY,
+        width,
     );
-    // Redundant with INFINITY but be explicit: do not break in the middle of words.
-    job.wrap.break_anywhere = false;
+    job.wrap.break_anywhere = true;
     let textformat = job.sections[0].format.clone();
     job.sections.clear();
 
@@ -836,7 +825,8 @@ fn process_tags(
     data_len: usize,
     textformat: &mut TextFormat,
     job: &mut LayoutJob,
-    font_cfg: &FontRenderConfig<'_>,
+    terminal_fonts: &TerminalFont,
+    font_defs: &FontConfig,
     #[cfg(feature = "validation")] buffer: &[u8],
 ) {
     let mut range;
@@ -872,14 +862,9 @@ fn process_tags(
             range.end = data_len;
         }
 
-        textformat.font_id.family = font_cfg
-            .terminal_fonts
-            .get_family(&tag.font_decorations, &tag.font_weight);
-        textformat.font_id.size = font_cfg.font_defs.size;
-        // Pin each section to exactly one terminal row height so the galley
-        // does not drift when the natural line-height of the font differs from
-        // our cell grid.
-        textformat.line_height = Some(font_cfg.row_height);
+        textformat.font_id.family =
+            terminal_fonts.get_family(&tag.font_decorations, &tag.font_weight);
+        textformat.font_id.size = font_defs.size;
         let make_faint = tag.font_decorations.contains(&FontDecorations::Faint);
         textformat.color = internal_color_to_egui(color, make_faint);
         // FIXME: ????? should background be faint? I feel like no, but....
@@ -919,7 +904,7 @@ fn process_tags(
 pub fn render_terminal_text(
     ui: &mut egui::Ui,
     full_text: &str,
-    job: egui::text::LayoutJob,
+    job: &egui::text::LayoutJob,
     font_size: f32,
     max_line_width: f32,
 ) -> egui::Response {
@@ -932,6 +917,7 @@ pub fn render_terminal_text(
     // Need mutable access for glyph metrics
     let glyph_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'W'));
     let row_height = ui.ctx().fonts_mut(|f| f.row_height(&font_id));
+    let baseline_offset = row_height;
 
     // Compute total size — roughly estimate height based on newlines
     let num_lines = full_text.chars().filter(|&c| c == '\n').count() + 1;
@@ -950,68 +936,97 @@ pub fn render_terminal_text(
         ui.allocate_exact_size(egui::vec2(total_width, total_height), egui::Sense::hover());
 
     let painter = ui.painter();
+
     let origin = rect.left_top();
+    let mut x = origin.x;
+    let mut y = origin.y;
+    let mut baseline_y = y + baseline_offset;
+    let mut char_line_count: usize = 0;
 
-    // ------------------------------------------------------------------
-    // Background pre-pass
-    //
-    // Walk sections once to paint colored cell backgrounds.  This is
-    // bounded by the number of format sections (typically << num chars)
-    // and avoids doing it inside the glyph tessellator.
-    // ------------------------------------------------------------------
-    {
-        let mut x = origin.x;
-        let mut y = origin.y;
-        let mut char_line_count: usize = 0;
+    for section in &job.sections {
+        let format = &section.format;
+        let font_id = format.font_id.clone();
+        let text_color = format.color;
+        let bg_color = format.background;
 
-        for section in &job.sections {
-            let bg_color = section.format.background;
-            let section_text = &full_text[section.byte_range.clone()];
+        // Text slice for this section
+        let section_text = &full_text[section.byte_range.clone()];
 
-            if bg_color == egui::Color32::TRANSPARENT {
-                // Still need to advance the cursor position for this section.
-                for c in section_text.chars() {
-                    if c == '\n' || char_line_count > max_line_width {
-                        x = origin.x;
-                        y += row_height;
-                        char_line_count = 0;
-                        if c == '\n' {
-                            continue;
-                        }
-                    }
-                    x += glyph_width;
-                    char_line_count += 1;
-                }
-            } else {
-                for c in section_text.chars() {
-                    if c == '\n' || char_line_count > max_line_width {
-                        x = origin.x;
-                        y += row_height;
-                        char_line_count = 0;
-                        if c == '\n' {
-                            continue;
-                        }
-                    }
-                    let bg_rect = egui::Rect::from_min_size(
-                        egui::pos2(x, y),
-                        egui::vec2(glyph_width, row_height),
-                    );
-                    painter.rect_filled(bg_rect, 0.0, bg_color);
-                    x += glyph_width;
-                    char_line_count += 1;
+        // Hoist the per-section natural-width lookup above the inner loop.
+        // For a monospace font every glyph in the section shares the same
+        // font_id, so a single fonts_mut call suffices.  Wide glyphs that
+        // exceed `glyph_width` will still be scaled individually below, but
+        // the common-case measurement no longer requires a Mutex acquisition
+        // per character (~20 000 acquisitions per frame at 200×50).
+        let section_cell_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'W'));
+
+        for c in section_text.chars() {
+            if c == '\n' || char_line_count > max_line_width {
+                x = origin.x;
+                y += row_height;
+                baseline_y = y + baseline_offset;
+                char_line_count = 0;
+
+                if c == '\n' {
+                    continue;
                 }
             }
+
+            // 1) Draw background cell
+            if bg_color != egui::Color32::TRANSPARENT {
+                let bg_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, y),
+                    egui::vec2(glyph_width, row_height),
+                );
+                painter.rect_filled(bg_rect, 0.0, bg_color);
+            }
+
+            // 2) Start from section font
+            let mut glyph_font = font_id.clone();
+
+            // 3) Use the pre-hoisted width for this section.
+            //    For the rare case of a glyph that is genuinely wider than a
+            //    standard cell (e.g. some CJK characters in a non-CJK font),
+            //    `section_cell_width` will equal `glyph_width` and the scale
+            //    branch below will be a no-op — correct behaviour is preserved.
+            let natural_width = section_cell_width;
+
+            let mut draw_x = x;
+            let mut draw_y = baseline_y;
+
+            // 4) If it wants to be wider than our cell, scale AND center it
+            if natural_width > glyph_width && natural_width > 0.0 {
+                let scale = glyph_width / natural_width;
+                glyph_font.size *= scale;
+
+                // --- Horizontal centering ---
+                let scaled_width = natural_width * scale;
+                let dx = (glyph_width - scaled_width) * 0.5;
+                draw_x += dx;
+
+                // --- Vertical centering ---
+                let full_height = font_id.size; // original unscaled glyph height
+                let scaled_height = glyph_font.size; // after scaling
+                let dy = (full_height - scaled_height) * 0.5;
+
+                draw_y -= dy; // baseline_y is bottom anchor; move up half the difference
+            }
+
+            // 5) Draw glyph
+            painter.text(
+                egui::pos2(draw_x, draw_y),
+                egui::Align2::LEFT_BOTTOM,
+                c.to_string(),
+                glyph_font,
+                text_color,
+            );
+
+            // 6) Advance by one cell
+
+            x += glyph_width;
+            char_line_count += 1;
         }
     }
-
-    // ------------------------------------------------------------------
-    // Galley pass — lay out and tessellate the entire visible text in one
-    // shot.  `layout_job` is cached by egui's font system (keyed on the
-    // job hash), so repeated identical frames are essentially free.
-    // ------------------------------------------------------------------
-    let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
-    let fallback_color = ui.visuals().text_color();
-    painter.galley(origin, galley, fallback_color);
 
     response
 }
@@ -1042,24 +1057,14 @@ fn add_terminal_data_to_ui(
         }
     }
 
-    // We need the row height before building the job so that process_tags can
-    // stamp `line_height` on every section.  One fonts_mut call here is
-    // cheaper than one per section inside process_tags.
-    let font_id = egui::FontId::monospace(font_defs.size);
-    let row_height = ui.ctx().fonts_mut(|f| f.row_height(&font_id));
-
-    let font_render_cfg = FontRenderConfig {
-        terminal_fonts,
-        font_defs,
-        row_height,
-    };
     let (mut job, mut textformat) = setup_job(ui, &data_utf8);
     process_tags(
         &adjusted_format_data,
         data_len,
         &mut textformat,
         &mut job,
-        &font_render_cfg,
+        terminal_fonts,
+        font_defs,
         #[cfg(feature = "validation")]
         data_utf8.as_bytes(),
     );
@@ -1071,12 +1076,12 @@ fn add_terminal_data_to_ui(
                 adjusted_format_data: adjusted_format_data.clone(),
             };
             let response =
-                render_terminal_text(ui, &data_utf8, job, font_defs.size, max_line_width);
+                render_terminal_text(ui, &data_utf8, &job, font_defs.size, max_line_width);
             Ok((response, Some(response_data)))
         }
         UiData::PreviousPass(_) => {
             let response =
-                render_terminal_text(ui, &data_utf8, job, font_defs.size, max_line_width);
+                render_terminal_text(ui, &data_utf8, &job, font_defs.size, max_line_width);
             Ok((response, None))
         }
     }
