@@ -9,7 +9,7 @@
 //! loop and has no business being inside the `TerminalEmulator` or `Buffer`.
 //! It is never shared with the PTY thread.
 //!
-//! See the architecture plan (Documents/PERFORMANCE_PLAN.md, Section 4.5).
+//! See the architecture plan (`Documents/PERFORMANCE_PLAN.md`, Section 4.5).
 
 use eframe::egui;
 
