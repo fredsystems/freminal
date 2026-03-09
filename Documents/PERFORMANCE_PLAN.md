@@ -1460,7 +1460,7 @@ This is the correct behaviour.
 - [x] Task 6 complete
 - [x] Task 7 complete
 - [x] Task 8 complete (`FairMutex` eliminated)
-- [ ] Task 9 complete
+- [x] Task 9 complete
 - [ ] Task 10 complete
 - [ ] Task 11 complete (dead code deleted, clippy clean)
 - [ ] Task 12 complete (benchmarks re-baselined, results recorded)
