@@ -67,6 +67,14 @@ impl TerminalHandler {
         }
     }
 
+    /// Return a new handler with the given scrollback limit instead of the
+    /// default (4000).  Builder-style chaining method.
+    #[must_use]
+    pub fn with_scrollback_limit(mut self, limit: usize) -> Self {
+        self.buffer = self.buffer.with_scrollback_limit(limit);
+        self
+    }
+
     /// Get a reference to the underlying buffer
     #[must_use]
     pub const fn buffer(&self) -> &Buffer {
@@ -1458,5 +1466,17 @@ mod tests {
         let (w, h) = handler.get_win_size();
         assert_eq!(w, 132, "width must match constructor argument");
         assert_eq!(h, 48, "height must match constructor argument");
+    }
+
+    #[test]
+    fn default_scrollback_limit_is_4000() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.buffer().scrollback_limit(), 4000);
+    }
+
+    #[test]
+    fn with_scrollback_limit_overrides_default() {
+        let handler = TerminalHandler::new(80, 24).with_scrollback_limit(200);
+        assert_eq!(handler.buffer().scrollback_limit(), 200);
     }
 }

@@ -170,11 +170,14 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 
 ### 2.5 — Wire scrollback limit to buffer
 
-- **Status:** Not Started
-- **Scope:** `freminal-terminal-emulator/src/interface.rs`, `freminal-buffer/src/buffer.rs`
+- **Status:** Complete
+- **Scope:** `freminal-buffer/src/buffer.rs`, `freminal-buffer/src/terminal_handler.rs`, `freminal-terminal-emulator/src/state/internal.rs`, `freminal-terminal-emulator/src/interface.rs`, `freminal/src/main.rs`
 - **Details:**
-  - Replace hardcoded `4000` in `Buffer::new()` with configurable value
-  - Pass scrollback limit from config through `TerminalEmulator` to `Buffer`
+  - Added `Buffer::with_scrollback_limit(self, limit)` builder method and `Buffer::scrollback_limit()` getter
+  - Added `TerminalHandler::with_scrollback_limit(self, limit)` builder method
+  - Extended `TerminalState::new()` and `TerminalEmulator::new()` with `scrollback_limit: Option<usize>` parameter
+  - Production call in `main.rs` passes `Some(cfg.scrollback.limit)`
+  - All 110+ existing test/bench call sites unchanged (default 4000 preserved)
   - Validate at config load time (already done in 2.2)
 - **Acceptance criteria:**
   - Scrollback limit configurable via TOML and respected by buffer
@@ -182,6 +185,10 @@ limit = 4000   # Max scrollback lines (currently hardcoded)
 - **Tests required:**
   - Buffer respects custom scrollback limit
   - Default scrollback limit is 4000
+- **Tests added:**
+  - `buffer::scrollback_limit_tests` — 4 tests (default, override, enforced, zero)
+  - `terminal_handler::tests` — 2 tests (default, override)
+  - `shadow_handler` — 3 tests (default, custom, None)
 
 ### 2.6 — Implement config serialization (write-back support)
 

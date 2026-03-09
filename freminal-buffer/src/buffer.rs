@@ -128,6 +128,21 @@ impl Buffer {
         }
     }
 
+    /// Return a new buffer with the given scrollback limit instead of the
+    /// default (4000).  This is a builder-style method intended for
+    /// production use where the value comes from user configuration.
+    #[must_use]
+    pub const fn with_scrollback_limit(mut self, limit: usize) -> Self {
+        self.scrollback_limit = limit;
+        self
+    }
+
+    /// The maximum number of off-screen rows retained above the visible area.
+    #[must_use]
+    pub const fn scrollback_limit(&self) -> usize {
+        self.scrollback_limit
+    }
+
     /// Internal consistency checks for debug builds.
     ///
     /// This is called from most mutating entry points. In release builds
@@ -4108,5 +4123,62 @@ mod visible_as_tchars_and_tags_tests {
             count, 1,
             "wide char must appear exactly once in output (continuation must be skipped)"
         );
+    }
+}
+
+// ============================================================================
+// Scrollback limit wiring tests
+// ============================================================================
+
+#[cfg(test)]
+mod scrollback_limit_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    #[test]
+    fn default_scrollback_limit_is_4000() {
+        let buf = Buffer::new(10, 5);
+        assert_eq!(buf.scrollback_limit(), 4000);
+    }
+
+    #[test]
+    fn with_scrollback_limit_overrides_default() {
+        let buf = Buffer::new(10, 5).with_scrollback_limit(500);
+        assert_eq!(buf.scrollback_limit(), 500);
+    }
+
+    #[test]
+    fn custom_scrollback_limit_is_enforced() {
+        // Set a very small scrollback limit and verify the buffer respects it.
+        let limit = 5;
+        let height = 3;
+        let mut buf = Buffer::new(10, height).with_scrollback_limit(limit);
+
+        // Push enough lines to exceed the scrollback limit.
+        // Each LF at the bottom creates one scrollback row.
+        let ch = [ascii('A')];
+        for _ in 0..(limit + height + 10) {
+            buf.insert_text(&ch);
+            buf.handle_lf();
+        }
+
+        // Total rows should be at most scrollback_limit + height.
+        assert!(
+            buf.rows.len() <= limit + height,
+            "rows.len()={} should be <= limit+height={}",
+            buf.rows.len(),
+            limit + height,
+        );
+    }
+
+    #[test]
+    fn with_scrollback_limit_zero_still_creates_buffer() {
+        // Zero is an unusual limit but should not panic.
+        let buf = Buffer::new(10, 5).with_scrollback_limit(0);
+        assert_eq!(buf.scrollback_limit(), 0);
     }
 }

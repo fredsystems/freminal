@@ -138,3 +138,35 @@ fn shadow_handler_scroll_does_not_panic() {
     assert!(w > 0);
     assert!(h > 0);
 }
+
+#[test]
+fn terminal_state_default_scrollback_limit() {
+    let state = TerminalState::default();
+    assert_eq!(
+        state.handler.buffer().scrollback_limit(),
+        4000,
+        "default TerminalState should use the compiled-in scrollback limit"
+    );
+}
+
+#[test]
+fn terminal_state_custom_scrollback_limit() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let state = TerminalState::new(tx, Some(123));
+    assert_eq!(
+        state.handler.buffer().scrollback_limit(),
+        123,
+        "TerminalState::new with Some(123) should wire the limit through"
+    );
+}
+
+#[test]
+fn terminal_state_none_scrollback_limit_uses_default() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let state = TerminalState::new(tx, None);
+    assert_eq!(
+        state.handler.buffer().scrollback_limit(),
+        4000,
+        "TerminalState::new with None should keep the default 4000"
+    );
+}

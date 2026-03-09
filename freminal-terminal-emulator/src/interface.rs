@@ -298,9 +298,12 @@ impl TerminalEmulator {
 
     /// Create a new terminal emulator
     ///
+    /// `scrollback_limit` overrides the default scrollback history size when
+    /// `Some(n)` is provided.  `None` keeps the compiled-in default (4000).
+    ///
     /// # Errors
     ///
-    pub fn new(args: &Args) -> Result<(Self, Receiver<PtyRead>)> {
+    pub fn new(args: &Args, scrollback_limit: Option<usize>) -> Result<(Self, Receiver<PtyRead>)> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
 
@@ -321,7 +324,7 @@ impl TerminalEmulator {
         }
 
         let ret = Self {
-            internal: TerminalState::new(write_tx.clone()),
+            internal: TerminalState::new(write_tx.clone(), scrollback_limit),
             _io: Some(io),
             write_tx,
             previous_visible_snap: None,

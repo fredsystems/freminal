@@ -160,7 +160,7 @@ fn main() {
         args.shell = cfg.shell_path().map(String::from);
     }
 
-    let res = match TerminalEmulator::new(&args) {
+    let res = match TerminalEmulator::new(&args, Some(cfg.scrollback.limit)) {
         Ok((terminal, pty_read_rx)) => {
             // Shared snapshot published by the PTY thread, consumed lock-free by the GUI.
             let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =

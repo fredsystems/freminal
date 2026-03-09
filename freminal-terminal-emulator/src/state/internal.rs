@@ -65,7 +65,7 @@ impl Default for TerminalState {
     /// This method should never really be used. It was added to allow the test suite to pass.
     /// The problem here is that you most likely really really want a rx channel to go with the tx channel.
     fn default() -> Self {
-        Self::new(crossbeam_channel::unbounded().0)
+        Self::new(crossbeam_channel::unbounded().0, None)
     }
 }
 
@@ -78,10 +78,20 @@ impl PartialEq for TerminalState {
 }
 
 impl TerminalState {
+    /// Create a new `TerminalState`.
+    ///
+    /// `scrollback_limit` overrides the default scrollback history size when
+    /// `Some(n)` is provided.  `None` keeps the compiled-in default (4000).
     #[must_use]
-    pub fn new(write_tx: crossbeam_channel::Sender<PtyWrite>) -> Self {
+    pub fn new(
+        write_tx: crossbeam_channel::Sender<PtyWrite>,
+        scrollback_limit: Option<usize>,
+    ) -> Self {
         let handler = {
             let mut h = NewHandler::new(DEFAULT_WIDTH as usize, DEFAULT_HEIGHT as usize);
+            if let Some(limit) = scrollback_limit {
+                h = h.with_scrollback_limit(limit);
+            }
             // Pass the PtyWrite sender directly so the handler can write
             // escape-sequence responses (DA, CPR, etc.) straight to the PTY
             // without an intermediate forwarding thread.
