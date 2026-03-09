@@ -1,10 +1,10 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::window_manipulation::WindowManipulation; // adjust module path if needed
-use proptest::prelude::*;
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+use proptest::{prop_assert, prop_assert_eq, proptest};
 use std::convert::TryFrom;
 
 /// ---------- Deterministic Unit Tests ----------

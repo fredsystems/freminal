@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -7,7 +7,8 @@
 //! Exercises valid modes, default params, overflow, and malformed sequences,
 //! and verifies parser recovery.
 
-use freminal_terminal_emulator::ansi::*;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 fn push_seq(seq: &str) -> Vec<TerminalOutput> {
     let mut parser = FreminalAnsiParser::default();

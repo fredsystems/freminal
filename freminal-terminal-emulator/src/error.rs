@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -50,4 +50,6 @@ pub enum ParserFailures {
     UnhandledDACommand(String),
     #[error("Invalid request device name and version (XTVERSION) set position sequence: {0}")]
     UnhandledXTVERSIONCommand(String),
+    #[error("Invalid cursor (VPA) vertical position absolute sequence: {0}")]
+    UnhandledVPACommand(String),
 }

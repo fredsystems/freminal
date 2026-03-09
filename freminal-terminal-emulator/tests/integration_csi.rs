@@ -1,11 +1,11 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 //! Integration tests for CSI cursor movement and SGR attribute combinations
 
-use freminal_terminal_emulator::ansi::*;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 #[test]
 fn csi_cursor_and_color_sequence() {

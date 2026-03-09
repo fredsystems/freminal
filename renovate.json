@@ -16,7 +16,7 @@
   "prConcurrentLimit": 0,
   "prHourlyLimit": 0,
   "prCreation": "immediate",
-  "automerge": true,
+  "automerge": false,
   "platformAutomerge": true,
   "nix": {
     "enabled": true
@@ -26,11 +26,6 @@
       "matchManagers": ["github-actions", "nix"],
       "matchUpdateTypes": ["major", "minor", "patch", "pin"],
       "automerge": true
-    },
-    {
-      "matchManagers": ["cargo"],
-      "matchUpdateTypes": ["major", "minor", "patch", "pin"],
-      "automerge": false
     }
   ]
 }

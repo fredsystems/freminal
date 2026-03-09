@@ -1,0 +1,38 @@
+[package]
+name = "freminal-buffer"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tracing.workspace = true
+crossbeam-channel.workspace = true
+freminal-common = { path = "../freminal-common" }
+
+# dev dependencies
+[dev-dependencies]
+criterion.workspace = true
+test-log.workspace = true
+proptest.workspace = true
+crossbeam-channel.workspace = true
+# assert_cmd.workspace = true
+# predicates.workspace = true
+
+
+[build-dependencies]
+vergen.workspace = true
+
+[[bench]]
+name = "buffer_row_bench"
+harness = false

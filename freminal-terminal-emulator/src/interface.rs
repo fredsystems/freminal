@@ -1,26 +1,25 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use std::borrow::Cow;
 
-use crate::ansi_components::modes::dectcem::Dectcem;
-use crate::format_tracker::FormatTag;
 use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
-use crate::state::{
-    cursor::CursorPos, data::TerminalSections, internal::TerminalState, term_char::TChar,
-};
+use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
-use crossbeam_channel::{unbounded, Receiver};
+use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui;
 
-use freminal_common::args::Args;
-use freminal_common::cursor::CursorVisualStyle;
-use freminal_common::terminal_size::DEFAULT_HEIGHT;
-use freminal_common::terminal_size::DEFAULT_WIDTH;
+use freminal_common::buffer_states::cursor::CursorPos;
+use freminal_common::buffer_states::format_tag::FormatTag;
+
+use freminal_common::{
+    args::Args, buffer_states::tchar::TChar, cursor::CursorVisualStyle,
+    terminal_size::DEFAULT_HEIGHT, terminal_size::DEFAULT_WIDTH,
+};
 
 const fn char_to_ctrl_code(c: u8) -> u8 {
     // https://catern.com/posts/terminal_quirks.html
@@ -75,10 +74,13 @@ pub enum TerminalInput {
     InFocus,
     LostFocus,
     KeyPad(u8),
+    // Function keys F1–F12
+    FunctionKey(u8),
 }
 
 impl TerminalInput {
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn to_payload(&self, decckm_mode: bool, keypad_mode: bool) -> TerminalInputPayload {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
@@ -173,6 +175,25 @@ impl TerminalInput {
             Self::PageDown => TerminalInputPayload::Many(b"\x1b[6~"),
             Self::LostFocus => TerminalInputPayload::Many(b"\x1b[O"),
             Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
+            Self::FunctionKey(n) => match n {
+                1 => TerminalInputPayload::Many(b"\x1bOP"),
+                2 => TerminalInputPayload::Many(b"\x1bOQ"),
+                3 => TerminalInputPayload::Many(b"\x1bOR"),
+                4 => TerminalInputPayload::Many(b"\x1bOS"),
+                5 => TerminalInputPayload::Many(b"\x1b[15~"),
+                6 => TerminalInputPayload::Many(b"\x1b[17~"),
+                7 => TerminalInputPayload::Many(b"\x1b[18~"),
+                8 => TerminalInputPayload::Many(b"\x1b[19~"),
+                9 => TerminalInputPayload::Many(b"\x1b[20~"),
+                10 => TerminalInputPayload::Many(b"\x1b[21~"),
+                11 => TerminalInputPayload::Many(b"\x1b[23~"),
+                12 => TerminalInputPayload::Many(b"\x1b[24~"),
+                _ => {
+                    warn!("Unhandled function key: F{n}");
+                    TerminalInputPayload::Many(b"")
+                }
+            },
         }
     }
 }
@@ -301,7 +322,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.mouse_position
     }
 
-    pub fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
+    pub const fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
         self.internal.is_mouse_hovered_on_url(mouse_position)
     }
 
@@ -339,7 +360,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.skip_draw_always()
     }
 
-    pub fn needs_redraw(&mut self) -> bool {
+    pub const fn needs_redraw(&mut self) -> bool {
         let internal = if self.internal.is_changed() {
             self.internal.clear_changed();
             true
@@ -365,9 +386,10 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         font_pixel_width: usize,
         font_pixel_height: usize,
     ) -> Result<()> {
-        let response = self.internal.set_win_size(width_chars, height_chars);
+        let (old_width, old_height) = self.internal.get_win_size();
+        self.internal.set_win_size(width_chars, height_chars);
 
-        if response.changed {
+        if old_width != width_chars || old_height != height_chars {
             self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
                 width: width_chars,
                 height: height_chars,
@@ -390,7 +412,15 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     }
 
     pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
-        self.internal.data(include_scrollback)
+        let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui();
+        if include_scrollback {
+            chars
+        } else {
+            TerminalSections {
+                scrollback: vec![],
+                visible: chars.visible,
+            }
+        }
     }
 
     pub fn data_and_format_data_for_gui(
@@ -402,12 +432,11 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.data_and_format_data_for_gui()
     }
 
-    pub const fn cursor_pos(&mut self) -> CursorPos {
+    pub fn cursor_pos(&mut self) -> CursorPos {
         self.internal.cursor_pos()
     }
 
-    pub fn show_cursor(&mut self) -> bool {
-        self.internal.get_current_buffer().show_cursor == Dectcem::Show
-            && self.internal.show_cursor()
+    pub const fn show_cursor(&mut self) -> bool {
+        self.internal.show_cursor()
     }
 }

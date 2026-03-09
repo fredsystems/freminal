@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen and the ratatui project contributors
+// Copyright (C) 2024-2026 Fred Clausen and the ratatui project contributors
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -177,7 +177,7 @@ fn ci() -> Result<()> {
     deny()?;
     machete()?;
     build()?;
-    // test()?;
+    test()?;
     Ok(())
 }
 

@@ -1,32 +1,44 @@
 [workspace]
-members = ["freminal", "freminal-common", "freminal-terminal-emulator", "xtask"]
-default-members = ["freminal", "freminal-common", "freminal-terminal-emulator"]
-resolver = "2"
+members = [
+  "freminal",
+  "freminal-buffer",
+  "freminal-common",
+  "freminal-terminal-emulator",
+  "xtask",
+]
+default-members = [
+  "freminal",
+  "freminal-buffer",
+  "freminal-common",
+  "freminal-terminal-emulator",
+]
+resolver = "3"
 
 [workspace.package]
-edition = "2021"
-authors = ["Fred Clausen"]
+edition = "2024"
 license = "MIT"
 description = "A terminal emulator written in Rust"
 repository = "https://github.com/fredclausen/freminal"
 documentation = "https://github.com/fred/freminal/README.md"
 homepage = "https://github.com/fredclausen/freminal"
 readme = "README.md"
-rust-version = "1.91.0"
+rust-version = "1.92.0"
+keywords = ["terminal", "emulator", "vt100", "tty", "terminal-emulator"]
+categories = ["command-line-utilities", "development-tools"]
 version = "0.1.0"
 
 [workspace.metadata.cargo-machete]
 ignored = ["vergen"]
 
 [workspace.dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 cargo_metadata = "0.23.1"
-clap = { version = "4.5.54", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["cargo_metadata"] }
 clap-verbosity-flag = "3.0.4"
 color-eyre = "0.6.5"
 conv2 = "0.4.2"
-criterion = "0.8.0"
+criterion = "0.8.2"
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
 duct = "1.1.1"
@@ -47,7 +59,7 @@ portable-pty = "0.9.0"
 serde = { version = "1.0.228", features = ["derive"] }
 sys-locale = "0.3.2"
 tar = "0.4.44"
-toml = "0.9.11"
+toml = "1.0.6"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-appender = "0.2.3"
@@ -57,11 +69,12 @@ tracing-subscriber = { version = "0.3.20", features = [
   "parking_lot",
 ] }
 unicode-segmentation = "1.12.0"
+unicode-width = "0.2.2"
 test-log = { version = "0.2.18", features = ["trace"] }
-tempfile = "3.23.0"
+tempfile = "3.26.0"
 vergen = { version = "9.0.6", features = ["build", "cargo", "rustc", "si"] }
 
 # dev
-proptest = "1.9.0"
+proptest = "1.10.0"
 assert_cmd = "2.1.1"
-predicates = "3.1.3"
+predicates = "3.1.4"

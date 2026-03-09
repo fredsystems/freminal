@@ -47,7 +47,7 @@
               enableXtask = true;
               extraExcludes = [
                 "^speed_tests/"
-                "^Documents/"
+                "^Documents/reference"
                 "^res/"
                 "typos.toml"
               ];
@@ -83,6 +83,7 @@
                 pkgs.cargo-bundle
                 pkgs.typos
                 pkgs.vttest
+                pkgs.markdownlint-cli2
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.cargo-llvm-cov

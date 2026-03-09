@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -13,8 +13,8 @@ use anyhow::Result;
 use conv2::ConvUtil;
 use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
 use fonts::get_char_size;
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
-use freminal_common::window_manipulation::WindowManipulation;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::FreminalPtyInputOutput;
 use parking_lot::FairMutex;
@@ -339,24 +339,35 @@ impl eframe::App for FreminalGui {
         let mut waited = std::time::Duration::ZERO;
 
         let panel_response = CentralPanel::default().show(ctx, |ui| {
-            let (width_chars, height_chars) = self
-                .terminal_widget
-                .calculate_available_size(ui, &self.terminal_widget.get_terminal_fonts());
-            let (font_width, font_height) =
+            // Compute char size once and reuse for both PTY sizing and widget layout.
+            let (char_w, char_h) =
                 get_char_size(ui.ctx(), &self.terminal_widget.get_terminal_fonts());
 
-            let font_width = font_width.round().approx_as::<usize>().unwrap_or_else(|e| {
+            let font_width = char_w.round().approx_as::<usize>().unwrap_or_else(|e| {
                 error!("Failed to convert font width to usize: {e}. Using 12 as default");
                 12
             });
 
-            let font_height = font_height
-                .round()
+            let font_height = char_h.round().approx_as::<usize>().unwrap_or_else(|e| {
+                error!("Failed to convert font height to usize: {e}. Using 12 as default");
+                12
+            });
+
+            let available = ui.available_size();
+            let width_chars = (available.x / char_w)
+                .floor()
                 .approx_as::<usize>()
                 .unwrap_or_else(|e| {
-                    error!("Failed to convert font height to usize: {e}. Using 12 as default");
-                    12
+                    error!("Failed to calculate width chars: {e}");
+                    10
                 });
+            let height_chars = ((available.y / char_h).floor())
+                .approx_as::<usize>()
+                .unwrap_or_else(|e| {
+                    error!("Failed to calculate height chars: {e}");
+                    10
+                })
+                .max(1);
 
             let t_wait = std::time::Instant::now();
             let mut lock = self.terminal_emulator.lock();

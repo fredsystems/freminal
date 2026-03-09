@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -54,11 +54,7 @@ pub fn lookup_256_color_by_index(index: usize) -> TerminalColor {
 pub const fn cube_component(value: usize, modifier: usize) -> usize {
     let i = ((value - 16) / modifier) % 6;
 
-    if i == 0 {
-        0
-    } else {
-        (14135 + 10280 * i) / 256
-    }
+    if i == 0 { 0 } else { (14135 + 10280 * i) / 256 }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

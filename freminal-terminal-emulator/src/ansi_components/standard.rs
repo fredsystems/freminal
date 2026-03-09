@@ -1,10 +1,12 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::{ParserOutcome, TerminalOutput};
-use crate::ansi_components::line_draw::DecSpecialGraphics;
+use freminal_common::buffer_states::line_draw::DecSpecialGraphics;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+use crate::ansi::ParserOutcome;
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 
 #[derive(Eq, PartialEq, Debug)]
@@ -375,24 +377,9 @@ impl StandardParser {
                         '|' => output.push(TerminalOutput::CharsetG3AsGR),
                         '}' => output.push(TerminalOutput::CharsetG2AsGR),
                         '~' => output.push(TerminalOutput::CharsetG1AsGR),
-                        'M' => {
-                            output.push(TerminalOutput::SetCursorPosRel {
-                                x: None,
-                                y: Some(-1),
-                            });
-                        }
-                        'D' => {
-                            output.push(TerminalOutput::SetCursorPosRel {
-                                x: None,
-                                y: Some(1),
-                            });
-                        }
-                        'E' => {
-                            output.push(TerminalOutput::SetCursorPosRel {
-                                x: Some(1),
-                                y: Some(1),
-                            });
-                        }
+                        'M' => output.push(TerminalOutput::ReverseIndex),
+                        'D' => output.push(TerminalOutput::Index),
+                        'E' => output.push(TerminalOutput::NextLine),
                         _ => {
                             output.push(TerminalOutput::Invalid);
                             return ParserOutcome::Invalid(

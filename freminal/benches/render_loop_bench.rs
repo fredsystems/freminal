@@ -1,4 +1,4 @@
-// Copyright (C) 2024–2025 Fred Clausen
+// Copyright (C) 2024–2026 Fred Clausen
 // Use of this source code is governed by an MIT-style license
 // that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -7,7 +7,7 @@
 //! 1. "logic_only" – tests terminal logic without running the egui pipeline.
 //! 2. "full_egui"  – runs the full FreminalTerminalWidget::show() under a headless egui::Context.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use egui::{Context, Ui};
 use freminal::gui::terminal::FreminalTerminalWidget;
 use freminal_terminal_emulator::{interface::TerminalEmulator, io::DummyIo};

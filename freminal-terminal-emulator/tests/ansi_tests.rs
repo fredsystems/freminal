@@ -1,13 +1,18 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::{cursor::CursorVisualStyle, window_manipulation::WindowManipulation};
-use freminal_terminal_emulator::ansi::*;
-use proptest::prelude::*;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::{
+    buffer_states::window_manipulation::WindowManipulation, cursor::CursorVisualStyle,
+};
+use freminal_terminal_emulator::ansi::{
+    FreminalAnsiParser, ParserInner, extract_param, parse_param_as,
+    split_params_into_colon_delimited_usize, split_params_into_semicolon_delimited_usize,
+};
+use proptest::{prelude::any, prop_assert_eq, proptest};
 use std::fmt::Write;
-
 // ---------- TerminalOutput Display Tests ----------
 
 #[test]

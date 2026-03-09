@@ -1,35 +1,40 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
 use crate::gui::{
+    TerminalEmulator,
     fonts::FontConfig,
     mouse::{
-        handle_pointer_button, handle_pointer_moved, handle_pointer_scroll, FreminalMousePosition,
-        PreviousMouseState,
+        FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
+        handle_pointer_scroll,
     },
-    TerminalEmulator,
 };
 
-use freminal_common::{config::Config, cursor::CursorVisualStyle};
+use freminal_common::{
+    buffer_states::{
+        cursor::CursorPos, fonts::FontDecorations, format_tag::FormatTag,
+        modes::rl_bracket::RlBracket, tchar::TChar,
+    },
+    config::Config,
+    cursor::CursorVisualStyle,
+};
 use freminal_terminal_emulator::{
-    ansi_components::modes::rl_bracket::RlBracket,
-    format_tracker::FormatTag,
-    interface::{collect_text, TerminalInput},
+    interface::{TerminalInput, collect_text},
     io::FreminalTermInputOutput,
-    state::{cursor::CursorPos, fonts::FontDecorations, internal::Theme, term_char::TChar},
+    state::internal::Theme,
 };
 
 use eframe::egui::{
-    self, scroll_area::ScrollBarVisibility, text::LayoutJob, Color32, Context, CursorIcon,
-    DragValue, Event, InputState, Key, Modifiers, OpenUrl, OutputCommand, PointerButton, Pos2,
-    Rect, Stroke, TextFormat, TextStyle, Ui,
+    self, Color32, Context, CursorIcon, DragValue, Event, InputState, Key, Modifiers, OpenUrl,
+    OutputCommand, PointerButton, Pos2, Rect, Stroke, TextFormat, TextStyle, Ui,
+    scroll_area::ScrollBarVisibility, text::LayoutJob,
 };
 
 use super::{
     colors::internal_color_to_egui,
-    fonts::{get_char_size, setup_font_files, TerminalFont},
+    fonts::{TerminalFont, get_char_size, setup_font_files},
 };
 use anyhow::Result;
 use conv2::{ApproxFrom, ConvUtil, RoundToZero, ValueFrom};
@@ -41,15 +46,48 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
         assert!(name.len() == 1);
         let name_c = name.as_bytes()[0];
         return Some(vec![TerminalInput::Ctrl(name_c)].into());
-    } else if key == Key::OpenBracket {
-        return Some([TerminalInput::Ctrl(b'[')].as_ref().into());
-    } else if key == Key::CloseBracket {
-        return Some([TerminalInput::Ctrl(b']')].as_ref().into());
-    } else if key == Key::Backslash {
-        return Some([TerminalInput::Ctrl(b'\\')].as_ref().into());
     }
 
-    None
+    // https://catern.com/posts/terminal_quirks.html
+    // https://en.wikipedia.org/wiki/C0_and_C1_control_codes
+    //
+    // Ctrl + special/punctuation keys follow the rule: code = ascii & 0x1F
+    // For uppercase letters 0x40–0x5F, this maps cleanly to 0x00–0x1F.
+    // For other characters we apply the same mask, but note that punctuation
+    // codes only make sense for characters whose ASCII value has bit 5 or 6
+    // set.  The well-known mappings used by terminals (and nano) are listed
+    // below with their resulting control byte.
+    match key {
+        // These three follow the same 0x40-range rule as letters
+        Key::OpenBracket => Some([TerminalInput::Ctrl(b'[')].as_ref().into()), // 0x1B ESC
+        Key::CloseBracket => Some([TerminalInput::Ctrl(b']')].as_ref().into()), // 0x1D GS
+        Key::Backslash => Some([TerminalInput::Ctrl(b'\\')].as_ref().into()),  // 0x1C FS
+
+        // Ctrl+Space => 0x00 NUL  (0x20 & 0x1F = 0x00)
+        Key::Space => Some([TerminalInput::Ctrl(b' ')].as_ref().into()),
+
+        // Ctrl+- => 0x1F US  (nano "Undo")
+        // Ctrl+/ => 0x1F US  (nano "Go to Line" / same byte as Ctrl+_)
+        // Ctrl+7 => 0x1F US  (same as Ctrl+_ / Ctrl+- / Ctrl+/)
+        Key::Minus | Key::Slash | Key::Num7 => Some([TerminalInput::Ascii(0x1F)].as_ref().into()),
+
+        // Digit row: Ctrl+2..8 produce the C0 bytes that letters cannot reach
+        // Ctrl+2 => 0x00 NUL  (same as Ctrl+Space / Ctrl+@)
+        Key::Num2 => Some([TerminalInput::Ascii(0x00)].as_ref().into()),
+        // Ctrl+3 => 0x1B ESC  (same as Ctrl+[)
+        Key::Num3 => Some([TerminalInput::Ascii(0x1B)].as_ref().into()),
+        // Ctrl+4 => 0x1C FS   (same as Ctrl+\)
+        Key::Num4 => Some([TerminalInput::Ascii(0x1C)].as_ref().into()),
+        // Ctrl+5 => 0x1D GS   (same as Ctrl+])
+        Key::Num5 => Some([TerminalInput::Ascii(0x1D)].as_ref().into()),
+        // Ctrl+6 => 0x1E RS   (same as Ctrl+^)
+        Key::Num6 => Some([TerminalInput::Ascii(0x1E)].as_ref().into()),
+
+        // Ctrl+8 => 0x7F DEL
+        Key::Num8 => Some([TerminalInput::Ascii(0x7F)].as_ref().into()),
+
+        _ => None,
+    }
 }
 
 #[allow(
@@ -106,11 +144,17 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 }
             }
             // https://github.com/emilk/egui/issues/3653
+            // egui-winit intercepts Ctrl+C and Ctrl+X at the platform layer and converts them
+            // to Event::Copy and Event::Cut respectively, before they can reach us as
+            // Event::Key { key: Key::C/X, ctrl: true }.  We must handle both synthetic events
+            // here so that terminal apps (e.g. nano ^C interrupt, ^X exit) receive the correct
+            // C0 control bytes.
             // FIXME: Technically not correct if we were on a mac, but also we are using linux
             // syscalls so we'd have to solve that before this is a problem
             Event::Copy => [TerminalInput::Ctrl(b'c')].as_ref().into(),
+            Event::Cut => [TerminalInput::Ctrl(b'x')].as_ref().into(),
             Event::Key {
-                key: Key::J | Key::K,
+                key: Key::J,
                 pressed: true,
                 modifiers: Modifiers { ctrl: true, .. },
                 ..
@@ -188,6 +232,67 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 pressed: true,
                 ..
             } => [TerminalInput::Tab].as_ref().into(),
+
+            Event::Key {
+                key: Key::F1,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(1)].as_ref().into(),
+            Event::Key {
+                key: Key::F2,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(2)].as_ref().into(),
+            Event::Key {
+                key: Key::F3,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(3)].as_ref().into(),
+            Event::Key {
+                key: Key::F4,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(4)].as_ref().into(),
+            Event::Key {
+                key: Key::F5,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(5)].as_ref().into(),
+            Event::Key {
+                key: Key::F6,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(6)].as_ref().into(),
+            Event::Key {
+                key: Key::F7,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(7)].as_ref().into(),
+            Event::Key {
+                key: Key::F8,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(8)].as_ref().into(),
+            Event::Key {
+                key: Key::F9,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(9)].as_ref().into(),
+            Event::Key {
+                key: Key::F10,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(10)].as_ref().into(),
+            Event::Key {
+                key: Key::F11,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(11)].as_ref().into(),
+            Event::Key {
+                key: Key::F12,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(12)].as_ref().into(),
 
             // log any Event::Key that we don't handle
             // Event::Key { key, pressed: true, .. } => {
@@ -398,21 +503,21 @@ fn encode_egui_mouse_pos_as_usize(pos: Pos2, character_size: (f32, f32)) -> (usi
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
             if pos.x > 0.0 {
-                error!("Failed to convert {} to usize. Using default of 255", pos.x);
+                debug!("Mouse x ({}) out of range, clamping to 255", pos.x);
                 255
             } else {
-                error!("Failed to convert {} to usize. Using default of 0", pos.x);
+                debug!("Mouse x ({}) out of range, clamping to 0", pos.x);
                 0
             }
         });
     let y = ((pos.y / character_size.1).floor())
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
-            if pos.x > 0.0 {
-                error!("Failed to convert {} to usize. Using default of 255", pos.y);
+            if pos.y > 0.0 {
+                debug!("Mouse y ({}) out of range, clamping to 255", pos.y);
                 255
             } else {
-                error!("Failed to convert {} to usize. Using default of 0", pos.y);
+                debug!("Mouse y ({}) out of range, clamping to 0", pos.y);
                 0
             }
         });
@@ -996,12 +1101,12 @@ fn render_terminal_output<Io: FreminalTermInputOutput>(
                 (*previous_pass).clone()
             } else {
                 let (terminal_data, format_data) = terminal_emulator.data_and_format_data_for_gui();
-                if !terminal_data.scrollback.is_empty() {
-                    error!(
-                        "Scrollback is not empty: {}",
-                        terminal_data.scrollback.len()
-                    );
-                }
+                // if !terminal_data.scrollback.is_empty() {
+                //     error!(
+                //         "Scrollback is not empty: {}",
+                //         terminal_data.scrollback.len()
+                //     );
+                // }
 
                 let mut canvas_data = terminal_data.visible;
 
@@ -1110,36 +1215,6 @@ impl FreminalTerminalWidget {
         self.terminal_fonts.clone()
     }
 
-    #[must_use]
-    pub fn calculate_available_size(&self, ui: &Ui, font: &TerminalFont) -> (usize, usize) {
-        let character_size = get_char_size(ui.ctx(), font);
-        let width_chars =
-            match ((ui.available_width() / character_size.0).floor()).approx_as::<usize>() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to calculate width chars: {}", e);
-                    10
-                }
-            };
-
-        let height_chars =
-            match ((ui.available_height() / character_size.1).floor()).approx_as::<usize>() {
-                Ok(v) => {
-                    if v > 1 {
-                        v - 1
-                    } else {
-                        1
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to calculate height chars: {}", e);
-                    10
-                }
-            };
-
-        (width_chars, height_chars)
-    }
-
     #[allow(clippy::too_many_lines)]
     pub fn show<Io: FreminalTermInputOutput>(
         &mut self,
@@ -1154,27 +1229,14 @@ impl FreminalTerminalWidget {
 
             terminal_emulator.internal.set_theme(theme);
 
-            let (width_chars, height_chars) = terminal_emulator.get_win_size();
-            let width_chars = match f32::value_from(width_chars) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to convert width chars to f32: {}", e);
-                    10.0
-                }
-            };
+            // Claim the full available space directly — no round-trip through PTY row count.
+            let available = ui.available_size();
+            ui.set_min_size(available);
 
-            let height_chars = match f32::value_from(height_chars) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to convert height chars to f32: {}", e);
-                    10.0
-                }
-            };
-
-            ui.set_width((width_chars + 0.5) * self.character_size.0);
-            ui.set_height((height_chars + 0.5) * self.character_size.1);
+            // max_line_width drives the text layout; derive it from the actual pixel width.
+            let max_line_width = (available.x / self.character_size.0).floor();
             self.previous_font_size = Some(self.font_defs.size);
-            self.max_line_width = width_chars;
+            self.max_line_width = max_line_width;
             terminal_emulator.set_previous_pass_invalid();
 
             let repeat_characters = terminal_emulator.internal.should_repeat_keys();
@@ -1220,10 +1282,8 @@ impl FreminalTerminalWidget {
                 .render(ui, self.previous_pass.canvas_area, Color32::BLUE);
 
             if terminal_emulator.show_cursor() {
-                let color = internal_color_to_egui(
-                    terminal_emulator.internal.get_current_buffer().cursor_color,
-                    false,
-                );
+                let color =
+                    internal_color_to_egui(terminal_emulator.internal.cursor_color(), false);
 
                 let cursor_style = terminal_emulator.get_cursor_visual_style();
 

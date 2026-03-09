@@ -1,4 +1,4 @@
-// Copyright (C) 2024-2025 Fred Clausen
+// Copyright (C) 2024-2026 Fred Clausen
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
@@ -6,7 +6,8 @@
 //! Parser-level tests for CUB, CUU, and DCH CSI commands.
 //! These ensure deterministic `TerminalOutput` emission and error path stability.
 
-use freminal_terminal_emulator::ansi::*;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 /// Pushes an ANSI sequence through the parser and returns the resulting outputs.
 fn push_seq(seq: &str) -> Vec<TerminalOutput> {
