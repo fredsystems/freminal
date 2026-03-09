@@ -37,6 +37,7 @@ fn gen_ascii_tchars(n: usize) -> Vec<TChar> {
 
 /// Generate `n` TChar values with a newline inserted every `line_len` chars,
 /// simulating a file with many short lines.
+#[allow(dead_code)]
 fn gen_line_tchars(n: usize, line_len: usize) -> Vec<TChar> {
     (0..n)
         .map(|i| {

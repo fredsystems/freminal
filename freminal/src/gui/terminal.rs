@@ -10,6 +10,7 @@ use crate::gui::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
         handle_pointer_scroll,
     },
+    view_state::ViewState,
 };
 
 use freminal_common::{
@@ -98,6 +99,7 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
 fn write_input_to_terminal<Io: FreminalTermInputOutput>(
     input: &InputState,
     terminal_emulator: &mut TerminalEmulator<Io>,
+    view_state: &mut ViewState,
     character_size_x: f32,
     character_size_y: f32,
     last_reported_mouse_pos: Option<PreviousMouseState>,
@@ -324,21 +326,23 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 }
             }
             Event::PointerGone => {
-                terminal_emulator.set_mouse_position(&None);
+                view_state.mouse_position = None;
                 last_reported_mouse_pos = None;
                 continue;
             }
             Event::WindowFocused(focused) => {
-                terminal_emulator.set_window_focused(*focused);
+                view_state.window_focused = *focused;
+                terminal_emulator.internal.send_focus_event(*focused);
 
                 if !*focused {
+                    view_state.mouse_position = None;
                     last_reported_mouse_pos = None;
                 }
 
                 continue;
             }
             Event::PointerMoved(pos) => {
-                terminal_emulator.set_mouse_position_from_move_event(pos);
+                view_state.mouse_position = Some(*pos);
                 let (x, y) =
                     encode_egui_mouse_pos_as_usize(*pos, (character_size_x, character_size_y));
 
@@ -1220,6 +1224,7 @@ impl FreminalTerminalWidget {
         &mut self,
         ui: &mut Ui,
         terminal_emulator: &mut TerminalEmulator<Io>,
+        view_state: &mut ViewState,
     ) {
         let frame_response = egui::Frame::new().show(ui, |ui| {
             self.character_size = get_char_size(ui.ctx(), &self.terminal_fonts);
@@ -1245,6 +1250,7 @@ impl FreminalTerminalWidget {
                     write_input_to_terminal(
                         input_state,
                         terminal_emulator,
+                        view_state,
                         self.character_size.0,
                         self.character_size.1,
                         self.previous_mouse_state.clone(),
@@ -1298,7 +1304,7 @@ impl FreminalTerminalWidget {
             }
 
             // lets see if we're hovering over a URL
-            if let Some(mouse_position) = terminal_emulator.get_mouse_position() {
+            if let Some(mouse_position) = view_state.mouse_position {
                 // convert the mouse position x and y to character positions
                 let mut x = ((mouse_position.x / self.character_size.0).floor())
                     .approx_as::<usize>()

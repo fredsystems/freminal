@@ -154,7 +154,6 @@ fn main() {
                     if let Ok(read) = rx.recv() {
                         terminal
                             .lock()
-                            .internal
                             .handle_incoming_data(&read.buf[0..read.read_amount]);
                     }
                 }

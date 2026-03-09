@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use conv2::ConvUtil;
-use eframe::egui::{self, Context};
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -52,11 +51,7 @@ pub struct TerminalState {
     pub parser: FreminalAnsiParser,
     pub modes: TerminalModes,
     pub write_tx: crossbeam_channel::Sender<PtyWrite>,
-    pub changed: bool,
-    pub ctx: Option<Context>,
     pub leftover_data: Option<Vec<u8>>,
-    pub mouse_position: Option<egui::Pos2>,
-    pub window_focused: bool,
     pub window_commands: Vec<WindowManipulation>,
     pub theme: Theme,
     pub cursor_visual_style: CursorVisualStyle,
@@ -78,8 +73,6 @@ impl PartialEq for TerminalState {
     fn eq(&self, other: &Self) -> bool {
         self.parser == other.parser
             && self.modes == other.modes
-            && self.changed == other.changed
-            && self.ctx == other.ctx
             && self.leftover_data == other.leftover_data
     }
 }
@@ -108,11 +101,7 @@ impl TerminalState {
             parser: FreminalAnsiParser::new(),
             modes: TerminalModes::default(),
             write_tx,
-            changed: false,
-            ctx: None,
             leftover_data: None,
-            mouse_position: None,
-            window_focused: true,
             window_commands: Vec::new(),
             theme: Theme::default(),
             cursor_visual_style: CursorVisualStyle::default(),
@@ -157,31 +146,6 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn is_changed(&self) -> bool {
-        self.changed
-    }
-
-    pub const fn set_state_changed(&mut self) {
-        self.changed = true;
-    }
-
-    pub const fn clear_changed(&mut self) {
-        self.changed = false;
-    }
-
-    pub fn set_ctx(&mut self, ctx: Context) {
-        if self.ctx.is_none() {
-            self.ctx = Some(ctx);
-        }
-    }
-
-    fn request_redraw(&self) {
-        if let Some(ctx) = &self.ctx {
-            ctx.request_repaint();
-        }
-    }
-
-    #[must_use]
     pub const fn get_win_size(&mut self) -> (usize, usize) {
         self.handler.get_win_size()
     }
@@ -218,9 +182,10 @@ impl TerminalState {
         self.modes.cursor_key.clone()
     }
 
-    pub fn set_window_focused(&mut self, focused: bool) {
-        self.window_focused = focused;
-
+    /// Send the focus-change escape sequence to the PTY if focus reporting is enabled.
+    ///
+    /// This no longer touches `window_focused`; the GUI owns that field on `ViewState`.
+    pub fn send_focus_event(&mut self, focused: bool) {
         if self.modes.focus_reporting == XtMseWin::Disabled {
             return;
         }
@@ -288,8 +253,6 @@ impl TerminalState {
             debug!("Data processing time: {}μs", elapsed.as_micros());
         }
 
-        self.set_state_changed();
-        self.request_redraw();
         debug!("Finished handling incoming data");
     }
 

@@ -244,6 +244,7 @@ pub struct TerminalEmulator<Io: FreminalTermInputOutput> {
     write_tx: crossbeam_channel::Sender<PtyWrite>,
     ctx: Option<egui::Context>,
     previous_pass_valid: bool,
+    changed: bool,
 }
 
 impl TerminalEmulator<DummyIo> {
@@ -263,6 +264,7 @@ impl TerminalEmulator<DummyIo> {
             write_tx,
             ctx: None,
             previous_pass_valid: false,
+            changed: false,
         }
     }
 }
@@ -298,6 +300,7 @@ impl TerminalEmulator<FreminalPtyInputOutput> {
             write_tx,
             ctx: None,
             previous_pass_valid: false,
+            changed: false,
         };
         Ok((ret, pty_rx))
     }
@@ -308,44 +311,19 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.get_cursor_visual_style()
     }
 
-    pub const fn set_mouse_position_from_move_event(&mut self, pos: &egui::Pos2) {
-        self.internal.mouse_position = Some(*pos);
-    }
-
-    pub fn set_mouse_position(&mut self, pos: &Option<egui::Vec2>) {
-        // info!("Setting mouse position: {pos:?}");
-        self.internal.mouse_position = pos.map(|pos| egui::Pos2 {
-            x: pos[0],
-            y: pos[1],
-        });
-    }
-
-    pub const fn get_mouse_position(&self) -> Option<egui::Pos2> {
-        self.internal.mouse_position
-    }
-
     pub const fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
         self.internal.is_mouse_hovered_on_url(mouse_position)
     }
 
-    pub fn set_window_focused(&mut self, focused: bool) {
-        self.internal.set_window_focused(focused);
-
-        if !focused {
-            self.internal.mouse_position = None;
-        }
-    }
-
+    /// Store the egui context if we don't have one yet, so we can call
+    /// `request_repaint()` from the PTY consumer thread.
     pub fn set_egui_ctx_if_missing(&mut self, ctx: egui::Context) {
         if self.ctx.is_none() {
-            self.ctx = Some(ctx.clone());
-            self.internal.set_ctx(ctx);
+            self.ctx = Some(ctx);
         }
     }
 
-    pub fn request_redraw(&mut self) {
-        debug!("Terminal Emulator: Requesting redraw");
-        self.previous_pass_valid = false;
+    fn request_repaint(&self) {
         if let Some(ctx) = &self.ctx {
             ctx.request_repaint();
         }
@@ -354,6 +332,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     pub const fn set_previous_pass_invalid(&mut self) {
         self.previous_pass_valid = false;
     }
+
     pub const fn set_previous_pass_valid(&mut self) {
         self.previous_pass_valid = true;
     }
@@ -363,14 +342,25 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     }
 
     pub const fn needs_redraw(&mut self) -> bool {
-        let internal = if self.internal.is_changed() {
-            self.internal.clear_changed();
+        let has_new_data = if self.changed {
+            self.changed = false;
             true
         } else {
             false
         };
 
-        !self.previous_pass_valid || internal
+        !self.previous_pass_valid || has_new_data
+    }
+
+    /// Process a chunk of raw PTY bytes.
+    ///
+    /// This wraps `TerminalState::handle_incoming_data`, marks the emulator as
+    /// changed, and requests an egui repaint so the GUI wakes up on the next
+    /// frame.
+    pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
+        self.internal.handle_incoming_data(incoming);
+        self.changed = true;
+        self.request_repaint();
     }
 
     pub const fn get_win_size(&mut self) -> (usize, usize) {
@@ -399,7 +389,8 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
                 pixel_height: font_pixel_height,
             }))?;
 
-            self.request_redraw();
+            self.previous_pass_valid = false;
+            self.request_repaint();
         }
 
         Ok(())

@@ -44,3 +44,6 @@ vergen.workspace = true
 [[bench]]
 name = "buffer_benches"
 harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["arc-swap"]

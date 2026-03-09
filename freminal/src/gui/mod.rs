@@ -19,6 +19,7 @@ use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::FreminalPtyInputOutput;
 use parking_lot::FairMutex;
 use terminal::FreminalTerminalWidget;
+use view_state::ViewState;
 pub mod colors;
 pub mod fonts;
 pub mod mouse;
@@ -45,6 +46,7 @@ fn set_egui_options(ctx: &egui::Context) {
 struct FreminalGui {
     terminal_emulator: Arc<FairMutex<TerminalEmulator<FreminalPtyInputOutput>>>,
     terminal_widget: FreminalTerminalWidget,
+    view_state: ViewState,
     window_title_stack: Vec<String>,
     _config: Config,
 }
@@ -60,6 +62,7 @@ impl FreminalGui {
         Self {
             terminal_emulator,
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
+            view_state: ViewState::new(),
             window_title_stack: Vec::new(),
             _config: config,
         }
@@ -410,7 +413,8 @@ impl eframe::App for FreminalGui {
                 });
             }
 
-            self.terminal_widget.show(ui, &mut lock);
+            self.terminal_widget
+                .show(ui, &mut lock, &mut self.view_state);
 
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(16));
