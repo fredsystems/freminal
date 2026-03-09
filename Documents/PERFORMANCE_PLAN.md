@@ -536,7 +536,7 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
 
 ---
 
-- [ ] **Task 6 — Collapse the internal PTY write forwarding thread**
+- [x] **Task 6 — Collapse the internal PTY write forwarding thread**
   - In `TerminalState::new()` in `freminal-terminal-emulator/src/state/internal.rs`, remove the
     `bytes_tx` / `bytes_rx` channel pair and the spawned forwarding thread.
   - Update `TerminalHandler::set_write_tx` (in `freminal-buffer/src/terminal_handler.rs`) to
@@ -546,6 +546,21 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
   - Pass the existing `write_tx: Sender<PtyWrite>` from `TerminalState` directly into the handler.
   - **Verify:** `cargo test --all` passes. PTY write-back responses (device attribute queries,
     cursor position reports, etc.) still function correctly end-to-end.
+  - ✅ **Completed 2026-03-09.** `PtyWrite` and `FreminalTerminalSize` moved to
+    `freminal-common/src/pty_write.rs` (with `portable-pty` added as a workspace dep of
+    `freminal-common` so the `TryFrom<FreminalTerminalSize> for PtySize` impl compiles there).
+    `freminal-terminal-emulator/src/io/mod.rs` now re-exports both types from `freminal-common`
+    and drops its own local definitions and the now-redundant `TryFrom` impl.
+    `TerminalHandler::set_write_tx` signature changed from `Sender<Vec<u8>>` to
+    `Sender<PtyWrite>`; `write_to_pty` wraps the byte slice in `PtyWrite::Write(...)`.
+    `TerminalState::new()` removes the `bytes_tx`/`bytes_rx` unbounded channel pair and the
+    spawned forwarding thread; it now calls `h.set_write_tx(write_tx.clone())` directly.
+    Two integration tests in `freminal-buffer/tests/terminal_handler_integration.rs` updated to
+    create `unbounded::<PtyWrite>()` channels and unwrap the `Write` variant before asserting on
+    the response bytes. Committed as 32aed9a.
+    `cargo test --all`: 498 passed, 0 failed.
+    `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+    `cargo-machete`: no unused dependencies.
 
 ---
 
@@ -906,7 +921,7 @@ refactor is stable.
 - [x] Task 3 complete (benchmarks written and baselined)
 - [x] Task 4 complete
 - [x] Task 5 complete
-- [ ] Task 6 complete
+- [x] Task 6 complete
 - [ ] Task 7 complete
 - [ ] Task 8 complete (`FairMutex` eliminated)
 - [ ] Task 9 complete
