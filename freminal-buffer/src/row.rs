@@ -26,6 +26,7 @@ pub struct Row {
     width: usize,
     pub origin: RowOrigin,
     pub join: RowJoin,
+    pub dirty: bool,
 }
 
 impl Row {
@@ -36,6 +37,7 @@ impl Row {
             width,
             origin: RowOrigin::ScrollFill,
             join: RowJoin::NewLogicalLine,
+            dirty: true,
         }
     }
 
@@ -46,6 +48,7 @@ impl Row {
             width,
             origin,
             join,
+            dirty: true,
         }
     }
 
@@ -61,11 +64,19 @@ impl Row {
             width,
             origin,
             join,
+            dirty: true,
         }
     }
 
     pub fn clear(&mut self) {
+        self.dirty = true;
         self.cells.clear();
+    }
+
+    /// Mark this row as clean (its flat representation is up-to-date in the cache).
+    /// Called by the snapshot machinery after producing a cached flat representation.
+    pub const fn mark_clean(&mut self) {
+        self.dirty = false;
     }
 
     /// Logical row width (number of *columns*), not number of occupied cells.
@@ -125,6 +136,7 @@ impl Row {
     /// - If overwriting a continuation, clear the head + all its continuations.
     /// - If overwriting a head, clear its continuations.
     fn cleanup_wide_overwrite(&mut self, col: usize) {
+        self.dirty = true;
         if col >= self.cells.len() {
             return;
         }
@@ -184,6 +196,9 @@ impl Row {
                 final_col: col, // typically == self.width
             };
         }
+
+        // At least one cell will be written; mark dirty up front.
+        self.dirty = true;
 
         // ---------------------------------------------------------------
         // Walk each character and try to insert it.
@@ -283,6 +298,8 @@ impl Row {
             return;
         }
 
+        self.dirty = true;
+
         // How many blanks can actually be inserted within the logical row width?
         let insert_len = n.min(width.saturating_sub(col));
 
@@ -343,6 +360,8 @@ impl Row {
         if col >= self.cells.len() {
             return;
         }
+
+        self.dirty = true;
         for i in col..self.cells.len() {
             self.cells[i] = Cell::blank_with_tag(tag.clone());
         }
@@ -360,6 +379,9 @@ impl Row {
     /// Clear cells from the beginning up to and including `col`
     pub fn clear_to(&mut self, col: usize, tag: &FormatTag) {
         let end = col.min(self.cells.len());
+        if end > 0 {
+            self.dirty = true;
+        }
         for i in 0..end {
             self.cells[i] = Cell::blank_with_tag(tag.clone());
         }
@@ -367,6 +389,7 @@ impl Row {
 
     /// Clear the entire row with blanks using the given format tag
     pub fn clear_with_tag(&mut self, _tag: &FormatTag) {
+        self.dirty = true;
         self.cells.clear();
     }
 
@@ -384,6 +407,8 @@ impl Row {
         if n == 0 || col >= self.width {
             return;
         }
+
+        self.dirty = true;
 
         let end = (col + n).min(self.width);
 
@@ -439,6 +464,8 @@ impl Row {
         if n == 0 || col >= self.cells.len() {
             return;
         }
+
+        self.dirty = true;
 
         // --- Wide-glyph cleanup: find the real start of deletion --------
         let mut start = col;
