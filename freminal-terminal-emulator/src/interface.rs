@@ -74,10 +74,13 @@ pub enum TerminalInput {
     InFocus,
     LostFocus,
     KeyPad(u8),
+    // Function keys F1–F12
+    FunctionKey(u8),
 }
 
 impl TerminalInput {
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn to_payload(&self, decckm_mode: bool, keypad_mode: bool) -> TerminalInputPayload {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
@@ -172,6 +175,25 @@ impl TerminalInput {
             Self::PageDown => TerminalInputPayload::Many(b"\x1b[6~"),
             Self::LostFocus => TerminalInputPayload::Many(b"\x1b[O"),
             Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
+            // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
+            Self::FunctionKey(n) => match n {
+                1 => TerminalInputPayload::Many(b"\x1bOP"),
+                2 => TerminalInputPayload::Many(b"\x1bOQ"),
+                3 => TerminalInputPayload::Many(b"\x1bOR"),
+                4 => TerminalInputPayload::Many(b"\x1bOS"),
+                5 => TerminalInputPayload::Many(b"\x1b[15~"),
+                6 => TerminalInputPayload::Many(b"\x1b[17~"),
+                7 => TerminalInputPayload::Many(b"\x1b[18~"),
+                8 => TerminalInputPayload::Many(b"\x1b[19~"),
+                9 => TerminalInputPayload::Many(b"\x1b[20~"),
+                10 => TerminalInputPayload::Many(b"\x1b[21~"),
+                11 => TerminalInputPayload::Many(b"\x1b[23~"),
+                12 => TerminalInputPayload::Many(b"\x1b[24~"),
+                _ => {
+                    warn!("Unhandled function key: F{n}");
+                    TerminalInputPayload::Many(b"")
+                }
+            },
         }
     }
 }

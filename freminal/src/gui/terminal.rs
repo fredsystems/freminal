@@ -46,15 +46,48 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
         assert!(name.len() == 1);
         let name_c = name.as_bytes()[0];
         return Some(vec![TerminalInput::Ctrl(name_c)].into());
-    } else if key == Key::OpenBracket {
-        return Some([TerminalInput::Ctrl(b'[')].as_ref().into());
-    } else if key == Key::CloseBracket {
-        return Some([TerminalInput::Ctrl(b']')].as_ref().into());
-    } else if key == Key::Backslash {
-        return Some([TerminalInput::Ctrl(b'\\')].as_ref().into());
     }
 
-    None
+    // https://catern.com/posts/terminal_quirks.html
+    // https://en.wikipedia.org/wiki/C0_and_C1_control_codes
+    //
+    // Ctrl + special/punctuation keys follow the rule: code = ascii & 0x1F
+    // For uppercase letters 0x40–0x5F, this maps cleanly to 0x00–0x1F.
+    // For other characters we apply the same mask, but note that punctuation
+    // codes only make sense for characters whose ASCII value has bit 5 or 6
+    // set.  The well-known mappings used by terminals (and nano) are listed
+    // below with their resulting control byte.
+    match key {
+        // These three follow the same 0x40-range rule as letters
+        Key::OpenBracket => Some([TerminalInput::Ctrl(b'[')].as_ref().into()), // 0x1B ESC
+        Key::CloseBracket => Some([TerminalInput::Ctrl(b']')].as_ref().into()), // 0x1D GS
+        Key::Backslash => Some([TerminalInput::Ctrl(b'\\')].as_ref().into()),  // 0x1C FS
+
+        // Ctrl+Space => 0x00 NUL  (0x20 & 0x1F = 0x00)
+        Key::Space => Some([TerminalInput::Ctrl(b' ')].as_ref().into()),
+
+        // Ctrl+- => 0x1F US  (nano "Undo")
+        // Ctrl+/ => 0x1F US  (nano "Go to Line" / same byte as Ctrl+_)
+        // Ctrl+7 => 0x1F US  (same as Ctrl+_ / Ctrl+- / Ctrl+/)
+        Key::Minus | Key::Slash | Key::Num7 => Some([TerminalInput::Ascii(0x1F)].as_ref().into()),
+
+        // Digit row: Ctrl+2..8 produce the C0 bytes that letters cannot reach
+        // Ctrl+2 => 0x00 NUL  (same as Ctrl+Space / Ctrl+@)
+        Key::Num2 => Some([TerminalInput::Ascii(0x00)].as_ref().into()),
+        // Ctrl+3 => 0x1B ESC  (same as Ctrl+[)
+        Key::Num3 => Some([TerminalInput::Ascii(0x1B)].as_ref().into()),
+        // Ctrl+4 => 0x1C FS   (same as Ctrl+\)
+        Key::Num4 => Some([TerminalInput::Ascii(0x1C)].as_ref().into()),
+        // Ctrl+5 => 0x1D GS   (same as Ctrl+])
+        Key::Num5 => Some([TerminalInput::Ascii(0x1D)].as_ref().into()),
+        // Ctrl+6 => 0x1E RS   (same as Ctrl+^)
+        Key::Num6 => Some([TerminalInput::Ascii(0x1E)].as_ref().into()),
+
+        // Ctrl+8 => 0x7F DEL
+        Key::Num8 => Some([TerminalInput::Ascii(0x7F)].as_ref().into()),
+
+        _ => None,
+    }
 }
 
 #[allow(
@@ -111,11 +144,17 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 }
             }
             // https://github.com/emilk/egui/issues/3653
+            // egui-winit intercepts Ctrl+C and Ctrl+X at the platform layer and converts them
+            // to Event::Copy and Event::Cut respectively, before they can reach us as
+            // Event::Key { key: Key::C/X, ctrl: true }.  We must handle both synthetic events
+            // here so that terminal apps (e.g. nano ^C interrupt, ^X exit) receive the correct
+            // C0 control bytes.
             // FIXME: Technically not correct if we were on a mac, but also we are using linux
             // syscalls so we'd have to solve that before this is a problem
             Event::Copy => [TerminalInput::Ctrl(b'c')].as_ref().into(),
+            Event::Cut => [TerminalInput::Ctrl(b'x')].as_ref().into(),
             Event::Key {
-                key: Key::J | Key::K,
+                key: Key::J,
                 pressed: true,
                 modifiers: Modifiers { ctrl: true, .. },
                 ..
@@ -193,6 +232,67 @@ fn write_input_to_terminal<Io: FreminalTermInputOutput>(
                 pressed: true,
                 ..
             } => [TerminalInput::Tab].as_ref().into(),
+
+            Event::Key {
+                key: Key::F1,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(1)].as_ref().into(),
+            Event::Key {
+                key: Key::F2,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(2)].as_ref().into(),
+            Event::Key {
+                key: Key::F3,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(3)].as_ref().into(),
+            Event::Key {
+                key: Key::F4,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(4)].as_ref().into(),
+            Event::Key {
+                key: Key::F5,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(5)].as_ref().into(),
+            Event::Key {
+                key: Key::F6,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(6)].as_ref().into(),
+            Event::Key {
+                key: Key::F7,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(7)].as_ref().into(),
+            Event::Key {
+                key: Key::F8,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(8)].as_ref().into(),
+            Event::Key {
+                key: Key::F9,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(9)].as_ref().into(),
+            Event::Key {
+                key: Key::F10,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(10)].as_ref().into(),
+            Event::Key {
+                key: Key::F11,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(11)].as_ref().into(),
+            Event::Key {
+                key: Key::F12,
+                pressed: true,
+                ..
+            } => [TerminalInput::FunctionKey(12)].as_ref().into(),
 
             // log any Event::Key that we don't handle
             // Event::Key { key, pressed: true, .. } => {
