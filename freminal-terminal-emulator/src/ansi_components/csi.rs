@@ -8,6 +8,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::csi_commands::{
     cha::ansi_parser_inner_csi_finished_set_cursor_position_g,
+    cnl::ansi_parser_inner_csi_finished_cnl, cpl::ansi_parser_inner_csi_finished_cpl,
     cub::ansi_parser_inner_csi_finished_move_cursor_left,
     cud::ansi_parser_inner_csi_finished_move_down, cuf::ansi_parser_inner_csi_finished_move_right,
     cup::ansi_parser_inner_csi_finished_set_position_h,
@@ -17,7 +18,7 @@ use super::csi_commands::{
     decscusr::ansi_parser_inner_csi_finished_set_position_q,
     decslpp::ansi_parser_inner_csi_finished_set_position_t,
     decstbm::ansi_parser_inner_csi_set_top_and_bottom_margins,
-    ech::ansi_parser_inner_csi_finished_set_position_x,
+    dl::ansi_parser_inner_csi_finished_dl, ech::ansi_parser_inner_csi_finished_set_position_x,
     ed::ansi_parser_inner_csi_finished_set_position_j,
     el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
     il::ansi_parser_inner_csi_finished_set_position_l,
@@ -166,6 +167,12 @@ impl AnsiCsiParser {
             AnsiCsiParserState::Finished(b'D') => {
                 ansi_parser_inner_csi_finished_move_cursor_left(&self.params, output)
             }
+            AnsiCsiParserState::Finished(b'E') => {
+                ansi_parser_inner_csi_finished_cnl(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'F') => {
+                ansi_parser_inner_csi_finished_cpl(&self.params, output)
+            }
             AnsiCsiParserState::Finished(b'H' | b'f') => {
                 ansi_parser_inner_csi_finished_set_position_h(&self.params, output)
             }
@@ -180,6 +187,9 @@ impl AnsiCsiParser {
             }
             AnsiCsiParserState::Finished(b'L') => {
                 ansi_parser_inner_csi_finished_set_position_l(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'M') => {
+                ansi_parser_inner_csi_finished_dl(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'P') => {
                 ansi_parser_inner_csi_finished_set_position_p(&self.params, output)

@@ -84,7 +84,7 @@ These items fix bugs that cause vttest failures and break basic shell output.
 
 ### 7.1 — Fix DECSTBM double-decrement bug
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 1 — Critical
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (lines 212-216), `freminal-buffer/src/buffer.rs` (lines 1198-1225)
 - **Details:**
@@ -111,7 +111,7 @@ These items fix bugs that cause vttest failures and break basic shell output.
 
 ### 7.2 — Wire DL (CSI M) to dispatch table
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 1 — Critical
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs` (dispatch table, ~line 156-244)
 - **Details:**
@@ -136,7 +136,7 @@ These items fix bugs that cause vttest failures and break basic shell output.
 
 ### 7.3 — Implement tab stop infrastructure and HT handler
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 1 — Critical
 - **Scope:** `freminal-buffer/src/buffer.rs`, `freminal-terminal-emulator/src/ansi.rs` (C0 dispatch, lines 133-168)
 - **Details:**
@@ -172,7 +172,7 @@ These items fix bugs that cause vttest failures and break basic shell output.
 
 ### 7.4 — Handle VT (0x0B) and FF (0x0C) as LF
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 1 — Critical
 - **Scope:** `freminal-terminal-emulator/src/ansi.rs` (C0 dispatch, lines 133-168)
 - **Details:**
@@ -193,7 +193,7 @@ These items fix bugs that cause vttest failures and break basic shell output.
 
 ### 7.5 — Handle NUL (0x00) and DEL (0x7F)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 1 — Critical
 - **Scope:** `freminal-terminal-emulator/src/ansi.rs` (C0 dispatch, lines 133-168)
 - **Details:**
@@ -214,7 +214,7 @@ These items fix bugs that cause vttest failures and break basic shell output.
 
 ### 7.6 — Implement CNL (CSI E) and CPL (CSI F)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 1 — Critical
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs` (dispatch table), `freminal-buffer/src/terminal_handler.rs`
 - **Details:**

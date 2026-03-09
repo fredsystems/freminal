@@ -32,6 +32,8 @@ pub enum ParserFailures {
     UnhandledELCommand(String),
     #[error("Invalid cursor (IL) set position sequence: {0}")]
     UnhandledILCommand(String),
+    #[error("Invalid delete lines (DL) sequence: {0}")]
+    UnhandledDLCommand(String),
     #[error("Invalid cursor (SGR) set position sequence: {0}")]
     UnhandledSGRCommand(String),
     #[error("Invalid cursor (ICH) set position sequence: {0}")]
@@ -52,4 +54,8 @@ pub enum ParserFailures {
     UnhandledXTVERSIONCommand(String),
     #[error("Invalid cursor (VPA) vertical position absolute sequence: {0}")]
     UnhandledVPACommand(String),
+    #[error("Invalid cursor next line (CNL) sequence: {0}")]
+    UnhandledCNLCommand(String),
+    #[error("Invalid cursor previous line (CPL) sequence: {0}")]
+    UnhandledCPLCommand(String),
 }

@@ -81,6 +81,11 @@ pub struct Buffer {
     /// When disabled, the region is full-screen: [0, height-1]
     scroll_region_top: usize,
     scroll_region_bottom: usize,
+
+    /// Tab stops as a boolean vector indexed by column.
+    /// `tab_stops[c] == true` means column `c` is a tab stop.
+    /// Default: every 8 columns (8, 16, 24, ...).
+    tab_stops: Vec<bool>,
 }
 
 /// Everything we need to restore when leaving alternate buffer.
@@ -98,6 +103,15 @@ pub struct SavedPrimaryState {
 }
 
 impl Buffer {
+    /// Generate default tab stops at every 8 columns for the given width.
+    fn default_tab_stops(width: usize) -> Vec<bool> {
+        let mut stops = vec![false; width];
+        for i in (8..width).step_by(8) {
+            stops[i] = true;
+        }
+        stops
+    }
+
     /// Creates a new Buffer with the specified width and height.
     #[must_use]
     pub fn new(width: usize, height: usize) -> Self {
@@ -125,6 +139,7 @@ impl Buffer {
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
             scroll_region_bottom: height.saturating_sub(1),
+            tab_stops: Self::default_tab_stops(width),
         }
     }
 
@@ -490,6 +505,11 @@ impl Buffer {
         self.width = new_width;
         self.height = new_height;
 
+        // Regenerate tab stops when width changes
+        if width_changed {
+            self.tab_stops = Self::default_tab_stops(new_width);
+        }
+
         // Ensure every row's max_width matches the new buffer width
         if width_changed {
             for row in &mut self.rows {
@@ -814,6 +834,26 @@ impl Buffer {
         // This MUST be the only post-condition for backspace.
         debug_assert!(self.cursor.pos.y < self.rows.len());
         debug_assert!(self.cursor.pos.x < self.width);
+    }
+
+    /// Advance the cursor to the next tab stop (HT / 0x09).
+    ///
+    /// If the cursor is already at or past the last tab stop, it moves to
+    /// the rightmost column.  HT never wraps to the next line.
+    pub fn advance_to_next_tab_stop(&mut self) {
+        let col = self.cursor.pos.x;
+        let max_col = self.width.saturating_sub(1);
+
+        // Search for the next tab stop after the current column
+        let next = self
+            .tab_stops
+            .iter()
+            .enumerate()
+            .skip(col + 1)
+            .find(|&(_, &is_stop)| is_stop)
+            .map(|(i, _)| i);
+
+        self.cursor.pos.x = next.map_or(max_col, |stop| stop.min(max_col));
     }
 
     pub fn handle_lf(&mut self) {
@@ -1222,6 +1262,12 @@ impl Buffer {
         // exist yet — the buffer may have fewer than `height` rows when still
         // filling up on first use.
         self.set_cursor_pos(Some(0), Some(top));
+    }
+
+    /// Return the current scroll region as 0-based inclusive `(top, bottom)`.
+    #[must_use]
+    pub const fn scroll_region(&self) -> (usize, usize) {
+        (self.scroll_region_top, self.scroll_region_bottom)
     }
 
     /// Index in `rows` of the first visible line.

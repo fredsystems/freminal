@@ -4,6 +4,8 @@
 // https://opensource.org/licenses/MIT.
 
 pub mod cha;
+pub mod cnl;
+pub mod cpl;
 pub mod cub;
 pub mod cud;
 pub mod cuf;
@@ -14,6 +16,7 @@ pub mod decrqm;
 pub mod decscusr;
 pub mod decslpp;
 pub mod decstbm;
+pub mod dl;
 pub mod ech;
 pub mod ed;
 pub mod el;

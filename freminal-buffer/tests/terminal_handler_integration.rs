@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_buffer::terminal_handler::TerminalHandler;
+use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::pty_write::PtyWrite;
 
 /// Helper to convert a string slice to TChar representation as bytes
@@ -115,17 +116,24 @@ fn test_erase_line_operations() {
 fn test_scroll_region_operations() {
     let mut handler = TerminalHandler::new(80, 24);
 
-    // Set scroll region to lines 5-20 (1-indexed from parser)
+    // Set scroll region to lines 5-20 (1-based from parser)
     handler.handle_set_scroll_region(5, 20);
 
-    // Fill some content
+    // Verify scroll region was set correctly (0-based: 4, 19)
+    let (top, bottom) = handler.buffer().scroll_region();
+    assert_eq!(top, 4, "scroll region top should be 0-based 4");
+    assert_eq!(bottom, 19, "scroll region bottom should be 0-based 19");
+
+    // Fill some content — should scroll within the region
     for i in 0..25 {
         handler.handle_data(&text_to_bytes(&format!("Line {}", i)));
         handler.handle_newline();
     }
 
-    // Should have scrolling behavior within the region
-    // (exact behavior depends on cursor position and scroll region implementation)
+    // Scroll region should still be the same after writing content
+    let (top, bottom) = handler.buffer().scroll_region();
+    assert_eq!(top, 4);
+    assert_eq!(bottom, 19);
 }
 
 #[test]
@@ -559,6 +567,57 @@ fn test_process_outputs_insert_delete_operations() {
     handler.process_outputs(&outputs);
 
     assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+}
+
+#[test]
+fn test_process_outputs_delete_lines() {
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let mut handler = TerminalHandler::new(10, 5);
+    handler.handle_enter_alternate();
+
+    // Fill 5 visible rows
+    let outputs = vec![
+        TerminalOutput::Data(b"AAAAAAAAAA".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"BBBBBBBBBB".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"CCCCCCCCCC".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"DDDDDDDDDD".to_vec()),
+        TerminalOutput::Newline,
+        TerminalOutput::CarriageReturn,
+        TerminalOutput::Data(b"EEEEEEEEEE".to_vec()),
+        // Move cursor to row 2 (1-based)
+        TerminalOutput::SetCursorPos {
+            x: Some(1),
+            y: Some(2),
+        },
+        // Delete 1 line at cursor → row B is removed, C/D/E shift up,
+        // bottom row becomes blank
+        TerminalOutput::DeleteLines(1),
+    ];
+    handler.process_outputs(&outputs);
+
+    let visible = handler.buffer().visible_rows(0);
+    // Row 0 should still be "A..."
+    let row0_text: String = visible[0]
+        .get_characters()
+        .iter()
+        .map(|c| c.into_utf8())
+        .collect();
+    assert!(row0_text.starts_with("AAAAAAAAAA"), "row 0: {row0_text}");
+
+    // Row 1 should now be "C..." (was row 2 before delete)
+    let row1_text: String = visible[1]
+        .get_characters()
+        .iter()
+        .map(|c| c.into_utf8())
+        .collect();
+    assert!(row1_text.starts_with("CCCCCCCCCC"), "row 1: {row1_text}");
 }
 
 #[test]
@@ -1746,5 +1805,153 @@ fn vpa_nano_bottom_bar_sequence() {
         handler.cursor_pos().y,
         1,
         "nano's ESC[2d should land on screen row 1 (0-based)"
+    );
+}
+
+// =============================================================================
+// Subtask 7.6: CNL (Cursor Next Line) and CPL (Cursor Previous Line)
+// =============================================================================
+
+#[test]
+fn test_cnl_moves_cursor_down_and_to_column_one() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Position cursor at column 10, row 0
+    handler.handle_data(&text_to_bytes("0123456789"));
+    assert_eq!(handler.cursor_pos().x, 10);
+    assert_eq!(handler.cursor_pos().y, 0);
+
+    // CNL with default param (1) — move down 1 line, cursor to column 0
+    handler.process_outputs(&[
+        TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(1),
+        },
+        TerminalOutput::SetCursorPos {
+            x: Some(1),
+            y: None,
+        },
+    ]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        0,
+        "CNL should move cursor to column 0"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        1,
+        "CNL should move cursor down 1 line"
+    );
+}
+
+#[test]
+fn test_cnl_with_explicit_count() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Position cursor at column 5, row 2
+    handler.handle_data(&text_to_bytes("Hello"));
+    handler.process_outputs(&[TerminalOutput::SetCursorPosRel {
+        x: None,
+        y: Some(2),
+    }]);
+    assert_eq!(handler.cursor_pos().x, 5);
+    assert_eq!(handler.cursor_pos().y, 2);
+
+    // CNL 3 — move down 3 lines, cursor to column 0
+    handler.process_outputs(&[
+        TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(3),
+        },
+        TerminalOutput::SetCursorPos {
+            x: Some(1),
+            y: None,
+        },
+    ]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        0,
+        "CNL 3 should move cursor to column 0"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        5,
+        "CNL 3 should move cursor down 3 lines from row 2 to row 5"
+    );
+}
+
+#[test]
+fn test_cpl_moves_cursor_up_and_to_column_one() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Position cursor at column 10, row 5
+    handler.handle_data(&text_to_bytes("0123456789"));
+    handler.process_outputs(&[TerminalOutput::SetCursorPosRel {
+        x: None,
+        y: Some(5),
+    }]);
+    assert_eq!(handler.cursor_pos().x, 10);
+    assert_eq!(handler.cursor_pos().y, 5);
+
+    // CPL with default param (1) — move up 1 line, cursor to column 0
+    handler.process_outputs(&[
+        TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        },
+        TerminalOutput::SetCursorPos {
+            x: Some(1),
+            y: None,
+        },
+    ]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        0,
+        "CPL should move cursor to column 0"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        4,
+        "CPL should move cursor up 1 line"
+    );
+}
+
+#[test]
+fn test_cpl_with_explicit_count() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Position cursor at column 15, row 10
+    handler.handle_data(&text_to_bytes("0123456789ABCDE"));
+    handler.process_outputs(&[TerminalOutput::SetCursorPosRel {
+        x: None,
+        y: Some(10),
+    }]);
+    assert_eq!(handler.cursor_pos().x, 15);
+    assert_eq!(handler.cursor_pos().y, 10);
+
+    // CPL 4 — move up 4 lines, cursor to column 0
+    handler.process_outputs(&[
+        TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-4),
+        },
+        TerminalOutput::SetCursorPos {
+            x: Some(1),
+            y: None,
+        },
+    ]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        0,
+        "CPL 4 should move cursor to column 0"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        6,
+        "CPL 4 should move cursor up 4 lines from row 10 to row 6"
     );
 }
