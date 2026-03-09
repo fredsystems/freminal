@@ -3,8 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-pub mod dummy;
-pub use dummy::DummyIo;
 mod pty;
 pub use pty::FreminalPtyInputOutput;
 
@@ -15,12 +13,6 @@ pub use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 pub struct PtyRead {
     pub buf: Vec<u8>,
     pub read_amount: usize,
-}
-
-pub trait FreminalTermInputOutput {
-    // fn read(&mut self, buf: &mut [u8]);
-    // fn write(&mut self, buf: &[u8]);
-    // fn set_win_size(&mut self, width: usize, height: usize);
 }
 
 /// Events sent from the GUI thread to the PTY processing thread.

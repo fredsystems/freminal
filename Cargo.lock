@@ -1418,7 +1418,6 @@ dependencies = [
  "conv2",
  "criterion",
  "crossbeam-channel",
- "eframe",
  "freminal-buffer",
  "freminal-common",
  "portable-pty",

@@ -5,7 +5,7 @@
 
 use std::{io::Write, path::Path};
 
-use super::{FreminalTermInputOutput, PtyRead, PtyWrite};
+use super::{PtyRead, PtyWrite};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
@@ -223,8 +223,6 @@ pub fn run_terminal(
 
     Ok(())
 }
-
-impl FreminalTermInputOutput for FreminalPtyInputOutput {}
 
 impl FreminalPtyInputOutput {
     /// Create a new `FreminalPtyInputOutput` instance.

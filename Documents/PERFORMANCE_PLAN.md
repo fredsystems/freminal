@@ -678,7 +678,7 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
 
 ---
 
-- [ ] **Task 9 — Refactor `FreminalTerminalWidget::show()` to take `&TerminalSnapshot`**
+- [x] **Task 9 — Refactor `FreminalTerminalWidget::show()` to take `&TerminalSnapshot`**
   - Remove the `Io: FreminalTermInputOutput` type parameter from `show()`,
     `render_terminal_output()`, `add_terminal_data_to_ui()`, and all related functions in
     `freminal/src/gui/terminal.rs`.
@@ -705,10 +705,16 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
     into `show()`.
   - **Verify:** `cargo test --all` passes. The application renders correctly. Input works.
     Cursor is painted at the correct position from snapshot data.
+  - ✅ **Completed during Task 8 (2026-03-09).** The `Io` type parameter was already removed
+    from `show()`, `render_terminal_output()`, `write_input_to_terminal()`, and all related
+    functions in `terminal.rs` as part of the Task 8 refactor that eliminated the `FairMutex`.
+    `FreminalTerminalWidget` is a fully concrete struct with no generic parameters. `show()`
+    already accepts `&TerminalSnapshot`, `&mut ViewState`, `&Sender<InputEvent>`, and
+    `&Sender<PtyWrite>`. No further changes needed.
 
 ---
 
-- [ ] **Task 10 — Refactor `handle_window_manipulation`**
+- [x] **Task 10 — Refactor `handle_window_manipulation`**
   - Change the signature of `handle_window_manipulation` in `freminal/src/gui/mod.rs` to:
 
     ```text
@@ -731,6 +737,13 @@ Report(WindowManipulation) }` to `freminal-terminal-emulator/src/io/mod.rs`.
   - **Verify:** `cargo test --all` passes. Window manipulation commands (title changes,
     resize-to-columns, minimize, fullscreen, etc.) work correctly. Report\* responses reach the
     PTY.
+  - ✅ **Completed during Task 8 (2026-03-09).** `handle_window_manipulation` was rewritten
+    as a free function with the target signature during the Task 8 FairMutex elimination.
+    It drains `window_cmd_rx` via `try_recv()`, builds Report\* responses inline via
+    `send_pty_response()`, and handles Viewport variants with `send_viewport_cmd()`. An
+    additional `snap: &TerminalSnapshot` parameter was added (beyond the plan spec) to
+    read `term_width`/`term_height` for `ReportTerminalSizeInCharacters` and
+    `ReportRootWindowSizeInCharacters`. No emulator reference is used.
 
 ---
 
@@ -1461,8 +1474,8 @@ This is the correct behaviour.
 - [x] Task 6 complete
 - [x] Task 7 complete
 - [x] Task 8 complete (`FairMutex` eliminated)
-- [ ] Task 9 complete
-- [ ] Task 10 complete
+- [x] Task 9 complete (completed during Task 8)
+- [x] Task 10 complete (completed during Task 8)
 - [ ] Task 11 complete (dead code deleted, clippy clean)
 - [ ] Task 12 complete (benchmarks re-baselined, results recorded)
 - [x] Phase 3 — 9.5-A complete (dirty flag on Row, all mutation sites instrumented)

@@ -21,14 +21,12 @@ type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>)>;
 /// only rebuild it when the dirty check says at least one visible row changed.
 type CachedRows = Option<Arc<Vec<freminal_buffer::row::Row>>>;
 
-use crate::io::DummyIo;
 use crate::io::FreminalPtyInputOutput;
-use crate::io::{FreminalTermInputOutput, FreminalTerminalSize, PtyRead, PtyWrite};
+use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
-use crossbeam_channel::{Receiver, unbounded};
-use eframe::egui;
+use crossbeam_channel::{unbounded, Receiver};
 
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
@@ -253,13 +251,12 @@ pub fn split_format_data_for_scrollback(
     }
 }
 
-pub struct TerminalEmulator<Io: FreminalTermInputOutput> {
+pub struct TerminalEmulator {
     pub internal: TerminalState,
-    _io: Io,
+    /// Kept alive for RAII (holds the terminfo `TempDir`).
+    /// `None` in headless/benchmark mode where no PTY is started.
+    _io: Option<FreminalPtyInputOutput>,
     write_tx: crossbeam_channel::Sender<PtyWrite>,
-    ctx: Option<egui::Context>,
-    previous_pass_valid: bool,
-    changed: bool,
     /// Cached flat representation of the visible window from the last
     /// `build_snapshot` call.  `None` until the first snapshot is built.
     ///
@@ -278,11 +275,11 @@ pub struct TerminalEmulator<Io: FreminalTermInputOutput> {
     previous_was_alternate: bool,
 }
 
-impl TerminalEmulator<DummyIo> {
-    /// Creates a dummy terminal emulator for headless benchmarks or UI tests.
+impl TerminalEmulator {
+    /// Creates a headless terminal emulator for benchmarks or tests.
     ///
     /// This version skips PTY setup and I/O threads, initializing only the
-    /// fields required for GUI rendering.
+    /// fields required for data processing and snapshot building.
     #[must_use]
     pub fn dummy_for_bench() -> Self {
         use crossbeam_channel::unbounded;
@@ -291,19 +288,14 @@ impl TerminalEmulator<DummyIo> {
 
         Self {
             internal: TerminalState::default(),
-            _io: DummyIo,
+            _io: None,
             write_tx,
-            ctx: None,
-            previous_pass_valid: false,
-            changed: false,
             previous_visible_snap: None,
             cached_rows: None,
             previous_was_alternate: false,
         }
     }
-}
 
-impl TerminalEmulator<FreminalPtyInputOutput> {
     /// Create a new terminal emulator
     ///
     /// # Errors
@@ -330,20 +322,15 @@ impl TerminalEmulator<FreminalPtyInputOutput> {
 
         let ret = Self {
             internal: TerminalState::new(write_tx.clone()),
-            _io: io,
+            _io: Some(io),
             write_tx,
-            ctx: None,
-            previous_pass_valid: false,
-            changed: false,
             previous_visible_snap: None,
             cached_rows: None,
             previous_was_alternate: false,
         };
         Ok((ret, pty_rx))
     }
-}
 
-impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     /// Return a clone of the PTY write sender.
     ///
     /// Used by `main.rs` to pass the real write channel to the GUI before the
@@ -355,6 +342,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.write_tx.clone()
     }
 
+    #[must_use]
     pub fn get_cursor_visual_style(&self) -> CursorVisualStyle {
         self.internal.get_cursor_visual_style()
     }
@@ -363,52 +351,16 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.is_mouse_hovered_on_url(mouse_position)
     }
 
-    /// Store the egui context if we don't have one yet, so we can call
-    /// `request_repaint()` from the PTY consumer thread.
-    pub fn set_egui_ctx_if_missing(&mut self, ctx: egui::Context) {
-        if self.ctx.is_none() {
-            self.ctx = Some(ctx);
-        }
-    }
-
-    fn request_repaint(&self) {
-        if let Some(ctx) = &self.ctx {
-            ctx.request_repaint_after(std::time::Duration::from_millis(8));
-        }
-    }
-
-    pub const fn set_previous_pass_invalid(&mut self) {
-        self.previous_pass_valid = false;
-    }
-
-    pub const fn set_previous_pass_valid(&mut self) {
-        self.previous_pass_valid = true;
-    }
-
+    #[must_use]
     pub fn skip_draw_always(&self) -> bool {
         self.internal.skip_draw_always()
     }
 
-    pub const fn needs_redraw(&mut self) -> bool {
-        let has_new_data = if self.changed {
-            self.changed = false;
-            true
-        } else {
-            false
-        };
-
-        !self.previous_pass_valid || has_new_data
-    }
-
     /// Process a chunk of raw PTY bytes.
     ///
-    /// This wraps `TerminalState::handle_incoming_data`, marks the emulator as
-    /// changed, and requests an egui repaint so the GUI wakes up on the next
-    /// frame.
+    /// This wraps `TerminalState::handle_incoming_data` for the consumer thread.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         self.internal.handle_incoming_data(incoming);
-        self.changed = true;
-        self.request_repaint();
     }
 
     pub const fn get_win_size(&mut self) -> (usize, usize) {
@@ -436,9 +388,6 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
                 pixel_width: font_pixel_width,
                 pixel_height: font_pixel_height,
             }))?;
-
-            self.previous_pass_valid = false;
-            self.request_repaint();
         }
 
         Ok(())
@@ -472,9 +421,6 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         })) {
             error!("Failed to send resize to PTY: {e}");
         }
-
-        self.previous_pass_valid = false;
-        self.request_repaint();
     }
 
     /// Write to the terminal

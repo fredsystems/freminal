@@ -27,8 +27,8 @@
 //! the render benchmarks will be updated to the snapshot-based form described
 //! in Section 8.5 of the performance plan.
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use freminal_terminal_emulator::{interface::TerminalEmulator, io::DummyIo};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use freminal_terminal_emulator::interface::TerminalEmulator;
 use std::time::Duration;
 
 // ---------------------------------------------------------------
@@ -111,7 +111,7 @@ fn bursty_payload(rounds: usize) -> Vec<Vec<u8>> {
 // ---------------------------------------------------------------
 // Helper: make a fresh DummyIo terminal
 // ---------------------------------------------------------------
-fn make_terminal() -> TerminalEmulator<DummyIo> {
+fn make_terminal() -> TerminalEmulator {
     TerminalEmulator::dummy_for_bench()
 }
 
