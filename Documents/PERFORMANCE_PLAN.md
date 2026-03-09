@@ -1059,7 +1059,7 @@ with `grep -r 'Row {' freminal-buffer`).
 
 ---
 
-#### 9.5-B — Per-row flat-representation cache in `Buffer`
+#### 9.5-B — Per-row flat-representation cache in `Buffer` ✅
 
 **Files touched:** `freminal-buffer/src/buffer.rs`, `freminal-buffer/src/terminal_handler.rs`
 
