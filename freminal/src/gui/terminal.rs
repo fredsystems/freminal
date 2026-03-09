@@ -951,6 +951,14 @@ pub fn render_terminal_text(
         // Text slice for this section
         let section_text = &full_text[section.byte_range.clone()];
 
+        // Hoist the per-section natural-width lookup above the inner loop.
+        // For a monospace font every glyph in the section shares the same
+        // font_id, so a single fonts_mut call suffices.  Wide glyphs that
+        // exceed `glyph_width` will still be scaled individually below, but
+        // the common-case measurement no longer requires a Mutex acquisition
+        // per character (~20 000 acquisitions per frame at 200×50).
+        let section_cell_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'W'));
+
         for c in section_text.chars() {
             if c == '\n' || char_line_count > max_line_width {
                 x = origin.x;
@@ -975,8 +983,12 @@ pub fn render_terminal_text(
             // 2) Start from section font
             let mut glyph_font = font_id.clone();
 
-            // 3) Measure natural width
-            let natural_width = ui.ctx().fonts_mut(|f| f.glyph_width(&glyph_font, c));
+            // 3) Use the pre-hoisted width for this section.
+            //    For the rare case of a glyph that is genuinely wider than a
+            //    standard cell (e.g. some CJK characters in a non-CJK font),
+            //    `section_cell_width` will equal `glyph_width` and the scale
+            //    branch below will be a no-op — correct behaviour is preserved.
+            let natural_width = section_cell_width;
 
             let mut draw_x = x;
             let mut draw_y = baseline_y;

@@ -27,6 +27,7 @@ use freminal_common::{
     pty_write::PtyWrite,
     sgr::SelectGraphicRendition,
 };
+use std::borrow::Cow;
 
 use crate::buffer::Buffer;
 
@@ -85,7 +86,7 @@ impl TerminalHandler {
             return;
         }
 
-        let remapped: Vec<u8> = apply_dec_special(data, &self.character_replace);
+        let remapped: Cow<[u8]> = apply_dec_special(data, &self.character_replace);
         if let Ok(text) = TChar::from_vec(&remapped) {
             self.buffer.insert_text(&text);
         }
@@ -759,9 +760,12 @@ impl TerminalHandler {
 /// the slice is copied verbatim.
 ///
 /// Reference: <https://en.wikipedia.org/wiki/DEC_Special_Graphics>
-fn apply_dec_special(data: &[u8], mode: &DecSpecialGraphics) -> Vec<u8> {
+///
+/// Returns `Cow::Borrowed(data)` when no remapping is needed (`DontReplace` mode),
+/// avoiding any heap allocation in the overwhelmingly common case.
+fn apply_dec_special<'a>(data: &'a [u8], mode: &DecSpecialGraphics) -> Cow<'a, [u8]> {
     match mode {
-        DecSpecialGraphics::DontReplace => data.to_vec(),
+        DecSpecialGraphics::DontReplace => Cow::Borrowed(data),
         DecSpecialGraphics::Replace => {
             let mut out = Vec::with_capacity(data.len() * 3);
             for &b in data {
@@ -801,7 +805,7 @@ fn apply_dec_special(data: &[u8], mode: &DecSpecialGraphics) -> Vec<u8> {
                     _ => out.push(b),
                 }
             }
-            out
+            Cow::Owned(out)
         }
     }
 }

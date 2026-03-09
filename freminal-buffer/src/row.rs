@@ -180,7 +180,7 @@ impl Row {
         // ---------------------------------------------------------------
         if col >= self.width {
             return InsertResponse::Leftover {
-                data: text.to_vec(),
+                leftover_start: 0,
                 final_col: col, // typically == self.width
             };
         }
@@ -194,7 +194,7 @@ impl Row {
             // If we've reached the row's width, nothing else fits here.
             if col >= self.width {
                 return InsertResponse::Leftover {
-                    data: text[i..].to_vec(),
+                    leftover_start: i,
                     final_col: col,
                 };
             }
@@ -202,7 +202,7 @@ impl Row {
             // If this glyph would overflow, stop here and wrap remaining text.
             if col + w > self.width {
                 return InsertResponse::Leftover {
-                    data: text[i..].to_vec(),
+                    leftover_start: i,
                     final_col: col,
                 };
             }
@@ -240,7 +240,7 @@ impl Row {
             // After resize, col must be within bounds; double-check defensively.
             if col >= self.cells.len() {
                 return InsertResponse::Leftover {
-                    data: text[i..].to_vec(),
+                    leftover_start: i,
                     final_col: col,
                 };
             }

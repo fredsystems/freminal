@@ -900,7 +900,7 @@ do not need a `TerminalEmulator` at all.
 These are independent of the architecture refactor and should be done after Task 12 is complete.
 Each is a self-contained change that does not affect the architecture.
 
-### 9.1 — UTF-8 Leftover Detection (Medium priority)
+### 9.1 — UTF-8 Leftover Detection (Medium priority) ✅
 
 **Location:** `freminal-terminal-emulator/src/state/internal.rs` — `handle_incoming_data()`
 
@@ -909,7 +909,14 @@ buffer (up to 4096 bytes) to detect an incomplete UTF-8 sequence at the tail. A 
 at most 4 bytes. Scanning only the last 3 bytes is sufficient to detect any incomplete sequence
 without cloning the full buffer.
 
-### 9.2 — `remaining.to_vec()` in `Buffer::insert_text` (Medium priority)
+✅ **Completed.** Replaced the clone-heavy `while let Err` loop with an O(1) tail scan over at
+most the last 3 bytes. The algorithm walks backwards looking for a leading byte whose declared
+sequence length extends past the end of the buffer. When an incomplete sequence is found,
+`Vec::split_off` is used to move just those bytes into `self.leftover_data` — no full-buffer
+clone occurs in the common case (pure ASCII or complete sequences). The existing semantics are
+fully preserved: split sequences are reassembled correctly on the next call.
+
+### 9.2 — `remaining.to_vec()` in `Buffer::insert_text` (Medium priority) ✅
 
 **Location:** `freminal-buffer/src/buffer.rs` — `Buffer::insert_text()`
 
@@ -917,7 +924,15 @@ without cloning the full buffer.
 an index cursor into the original slice. The `Leftover` variant of `InsertResponse` would return
 a start index rather than an owned `Vec<TChar>`.
 
-### 9.3 — Font Metric Queries Inside Character Loop (Medium priority)
+✅ **Completed.** `InsertResponse::Leftover` was changed from `{ data: Vec<TChar>, final_col }`
+to `{ leftover_start: usize, final_col }`. `Row::insert_text` now returns the index into its
+`text` input at which the un-inserted portion begins — no `to_vec()` anywhere. `Buffer::insert_text`
+replaced `let mut remaining = text.to_vec()` with `let mut start: usize = 0` and advances the
+cursor on each `Leftover` return (`start += leftover_start`), passing `&text[start..]` to the
+next row. All tests in `row_tests.rs` that matched on the old `data` field were updated to assert
+`&text[leftover_start..]` instead.
+
+### 9.3 — Font Metric Queries Inside Character Loop (Medium priority) ✅
 
 **Location:** `freminal/src/gui/terminal.rs` — `render_terminal_text()`
 
@@ -925,7 +940,13 @@ a start index rather than an owned `Vec<TChar>`.
 and `row_height`. Both values are constant for a monospace font for the duration of a frame. Hoist
 both calls above the loop. Eliminates ~20,000 `Mutex` acquisitions per frame at 200×50.
 
-### 9.4 — `apply_dec_special` Allocates on Every `handle_data` Call (Low priority)
+✅ **Completed.** Added a `section_cell_width` variable hoisted above the inner character loop,
+computed once per section via `ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'W'))`. The
+per-character `fonts_mut` call for `natural_width` was replaced with `section_cell_width`. The
+`glyph_width` and `row_height` calls that were already above the outer section loop (used for
+layout sizing) remain; only the redundant per-character call inside the inner loop was eliminated.
+
+### 9.4 — `apply_dec_special` Allocates on Every `handle_data` Call (Low priority) ✅
 
 **Location:** `freminal-buffer/src/terminal_handler.rs` — `handle_data()`
 
@@ -933,7 +954,13 @@ both calls above the loop. Eliminates ~20,000 `Mutex` acquisitions per frame at 
 even when `character_replace == DecSpecialGraphics::Inactive` (the overwhelmingly common case). Add
 a fast path that returns the input slice directly when the mode is inactive.
 
-### 9.5 — Dirty-Row Tracking in Buffer (High effort, deferred)
+✅ **Completed.** Changed `apply_dec_special` return type from `Vec<u8>` to `Cow<'a, [u8]>`.
+The `DontReplace` arm now returns `Cow::Borrowed(data)` — zero allocation in the overwhelmingly
+common case. The `Replace` arm returns `Cow::Owned(out)` as before. `handle_data` updated to
+hold `Cow<[u8]>` and pass a deref to `TChar::from_vec`. Added `use std::borrow::Cow` to the
+import block.
+
+### 9.5 — Dirty-Row Tracking in Buffer (High effort, in progress)
 
 Add a `dirty: bool` flag to each `Row`, cleared when the row is snapshotted and set on any
 mutation. `visible_as_tchars_and_tags` (called by `build_snapshot`) can then skip clean rows and

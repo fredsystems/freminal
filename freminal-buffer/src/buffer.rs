@@ -267,7 +267,11 @@ impl Buffer {
     }
 
     pub fn insert_text(&mut self, text: &[TChar]) {
-        let mut remaining = text.to_vec();
+        // `start` is an index cursor into the original `text` slice.
+        // We never clone the slice — `InsertResponse::Leftover` now returns
+        // the index at which the un-inserted portion begins, so we just
+        // advance `start` and pass `&text[start..]` on the next iteration.
+        let mut start: usize = 0;
         let mut row_idx = self.cursor.pos.y;
         let mut col = self.cursor.pos.x;
 
@@ -291,7 +295,7 @@ impl Buffer {
                     self.cursor.pos.y = row_idx;
                     // PTY always at scroll_offset=0; return value is always 0 here.
                     let _ = self.enforce_scrollback_limit(0);
-                    return;
+                    return; // nothing left to insert
                 }
 
                 row_idx += 1;
@@ -342,7 +346,7 @@ impl Buffer {
             // ┌─────────────────────────────────────────────┐
             // │ Try to insert into this row.                │
             // └─────────────────────────────────────────────┘
-            match self.rows[row_idx].insert_text(col, &remaining, &tag) {
+            match self.rows[row_idx].insert_text(col, &text[start..], &tag) {
                 InsertResponse::Consumed(final_col) => {
                     // All text fit on this row.
                     self.cursor.pos.x = final_col;
@@ -353,7 +357,10 @@ impl Buffer {
                     return;
                 }
 
-                InsertResponse::Leftover { data, final_col } => {
+                InsertResponse::Leftover {
+                    leftover_start,
+                    final_col,
+                } => {
                     // This row filled; some data remains.
                     self.cursor.pos.x = final_col;
                     self.cursor.pos.y = row_idx;
@@ -367,7 +374,9 @@ impl Buffer {
                         return;
                     }
 
-                    remaining = data;
+                    // Advance the cursor into the original text slice.
+                    // `leftover_start` is relative to `&text[start..]`.
+                    start += leftover_start;
 
                     // Move to next row for continuation.
                     row_idx += 1;

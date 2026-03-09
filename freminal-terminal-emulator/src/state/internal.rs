@@ -215,12 +215,54 @@ impl TerminalState {
         );
 
         // Strip any trailing incomplete UTF-8 sequence and save it for next time.
-        let mut leftover_bytes = vec![];
-        while let Err(_e) = String::from_utf8(incoming.clone()) {
-            let Some(p) = incoming.pop() else { break };
-            leftover_bytes.insert(0, p);
-        }
-        if !leftover_bytes.is_empty() {
+        //
+        // A UTF-8 sequence is at most 4 bytes, so any split can leave at most
+        // 3 trailing bytes that are part of an incomplete sequence.  We scan
+        // only the tail — no full-buffer clone required.
+        //
+        // The algorithm:
+        //   1. Walk backwards over the last 3 bytes (or fewer if the buffer is
+        //      shorter) looking for a non-continuation byte (i.e. a leading byte
+        //      of a multi-byte sequence: 0xC0–0xFF) that starts a sequence whose
+        //      declared length extends past the end of the buffer.
+        //   2. If we find such a byte, everything from that position onwards is
+        //      the incomplete tail; split it off.
+        //   3. If every byte in the tail is a valid ASCII byte or a complete
+        //      sequence we leave the buffer unchanged — no allocation at all.
+        let split_at: Option<usize> = {
+            let len = incoming.len();
+            // Scan at most the last 3 bytes (max continuation bytes in UTF-8).
+            let scan_start = len.saturating_sub(3);
+            let mut found = None;
+            for i in (scan_start..len).rev() {
+                let b = incoming[i];
+                // Leading byte of a 2-byte sequence: 110x xxxx
+                // Leading byte of a 3-byte sequence: 1110 xxxx
+                // Leading byte of a 4-byte sequence: 1111 0xxx
+                let seq_len = if b & 0b1110_0000 == 0b1100_0000 {
+                    2
+                } else if b & 0b1111_0000 == 0b1110_0000 {
+                    3
+                } else if b & 0b1111_1000 == 0b1111_0000 {
+                    4
+                } else {
+                    // ASCII or continuation byte — not a leading byte, keep scanning.
+                    continue;
+                };
+                // If the declared sequence extends past the end of the buffer,
+                // this leading byte begins an incomplete sequence.
+                if i + seq_len > len {
+                    found = Some(i);
+                }
+                // Whether or not it's incomplete we stop scanning: a leading byte
+                // can only appear once per sequence.
+                break;
+            }
+            found
+        };
+
+        if let Some(split) = split_at {
+            let leftover_bytes = incoming.split_off(split);
             match self.leftover_data {
                 Some(ref mut self_leftover) => {
                     self_leftover.splice(0..0, leftover_bytes);

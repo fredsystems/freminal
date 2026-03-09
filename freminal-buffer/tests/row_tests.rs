@@ -75,9 +75,14 @@ fn insert_wide_character_that_overflows() {
     let result = row.insert_text(2, &text, &tag());
 
     match result {
-        InsertResponse::Leftover { data, final_col } => {
+        InsertResponse::Leftover {
+            leftover_start,
+            final_col,
+        } => {
             assert_eq!(final_col, 2);
-            assert_eq!(data, text);
+            // The entire input was rejected because the row was already full.
+            assert_eq!(leftover_start, 0);
+            assert_eq!(&text[leftover_start..], &text[..]);
         }
         _ => panic!("expected Leftover"),
     }
@@ -92,9 +97,16 @@ fn insert_overflows_and_returns_leftover() {
     let result = row.insert_text(3, &text, &tag());
 
     match result {
-        InsertResponse::Leftover { data, final_col } => {
+        InsertResponse::Leftover {
+            leftover_start,
+            final_col,
+        } => {
             assert_eq!(final_col, 5);
-            assert_eq!(data, vec![ascii('l'), ascii('l'), ascii('o')]);
+            // 'H' and 'e' fit (cols 3–4); 'l', 'l', 'o' are the leftover.
+            assert_eq!(
+                &text[leftover_start..],
+                &[ascii('l'), ascii('l'), ascii('o')]
+            );
             assert_eq!(row.get_characters()[3], Cell::new(ascii('H'), tag()));
             assert_eq!(row.get_characters()[4], Cell::new(ascii('e'), tag()));
         }
@@ -176,9 +188,13 @@ fn mixed_overflow_correct_terminal_semantics() {
     let result = row.insert_text(2, &text, &tag());
 
     match result {
-        InsertResponse::Leftover { final_col, data } => {
+        InsertResponse::Leftover {
+            leftover_start,
+            final_col,
+        } => {
             assert_eq!(final_col, 5); // cursor at end
-            assert_eq!(data, vec![ascii('B')]); // only B does not fit
+            // Only 'B' did not fit; it is at index 2 of the input slice.
+            assert_eq!(&text[leftover_start..], &[ascii('B')]);
         }
         _ => panic!("expected leftover"),
     }
