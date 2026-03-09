@@ -15,7 +15,7 @@ use eframe::egui;
 
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
-use freminal_common::buffer_states::modes::dectcem::Dectcem;
+
 use freminal_common::{
     args::Args, buffer_states::tchar::TChar, cursor::CursorVisualStyle,
     terminal_size::DEFAULT_HEIGHT, terminal_size::DEFAULT_WIDTH,
@@ -371,7 +371,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         !self.previous_pass_valid || internal
     }
 
-    pub const fn get_win_size(&mut self) -> (usize, usize) {
+    pub fn get_win_size(&mut self) -> (usize, usize) {
         self.internal.get_win_size()
     }
 
@@ -411,6 +411,22 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     }
 
     pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
+        #[cfg(feature = "new-buffer")]
+        {
+            // Under new-buffer the old flat buffer is gone; return the visible
+            // data from the new handler so callers that still invoke this path
+            // don't panic or fail to compile.
+            let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui();
+            if include_scrollback {
+                chars
+            } else {
+                TerminalSections {
+                    scrollback: vec![],
+                    visible: chars.visible,
+                }
+            }
+        }
+        #[cfg(not(feature = "new-buffer"))]
         self.internal.data(include_scrollback)
     }
 
@@ -428,7 +444,16 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     }
 
     pub fn show_cursor(&mut self) -> bool {
-        self.internal.get_current_buffer().show_cursor == Dectcem::Show
-            && self.internal.show_cursor()
+        // Under new-buffer the old Buffer struct is gone; show_cursor() on
+        // internal already delegates entirely to the new handler.
+        #[cfg(feature = "new-buffer")]
+        {
+            self.internal.show_cursor()
+        }
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            self.internal.get_current_buffer().show_cursor == Dectcem::Show
+                && self.internal.show_cursor()
+        }
     }
 }

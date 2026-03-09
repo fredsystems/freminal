@@ -45,6 +45,26 @@ pub struct TerminalBufferSetWinSizeResponse {
     pub new_cursor_pos: CursorPos,
 }
 
+impl TerminalBufferSetWinSizeResponse {
+    #[must_use]
+    pub const fn new_changed(new_cursor_pos: CursorPos) -> Self {
+        Self {
+            changed: true,
+            _insertion_range: 0..0,
+            new_cursor_pos,
+        }
+    }
+
+    #[must_use]
+    pub const fn new_unchanged(new_cursor_pos: CursorPos) -> Self {
+        Self {
+            changed: false,
+            _insertion_range: 0..0,
+            new_cursor_pos,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug)]
 pub struct TerminalBufferHolder {
     pub buf: Vec<TChar>,

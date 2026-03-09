@@ -1114,10 +1114,9 @@ fn osc_noop_does_not_panic() {
 #[test]
 fn cursor_report_sends_correct_position() {
     // Move cursor to (4, 2) (0-indexed), send CursorReport → channel receives "\x1b[3;5R".
-    use freminal_buffer::terminal_handler::PtyWrite;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
 
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
@@ -1130,10 +1129,10 @@ fn cursor_report_sends_correct_position() {
 
     handler.process_outputs(&[TerminalOutput::CursorReport]);
 
-    let msg = rx
+    let bytes = rx
         .try_recv()
         .expect("CursorReport must send a message to the channel");
-    let response = String::from_utf8(msg.data).expect("response must be valid UTF-8");
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
         response, "\x1b[3;5R",
         "CPR must be ESC[row;colR (1-indexed)"
@@ -1143,20 +1142,19 @@ fn cursor_report_sends_correct_position() {
 #[test]
 fn da1_sends_response() {
     // RequestDeviceAttributes must send the DA1 capability string.
-    use freminal_buffer::terminal_handler::PtyWrite;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
 
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
 
     handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
 
-    let msg = rx
+    let bytes = rx
         .try_recv()
         .expect("RequestDeviceAttributes must send a message to the channel");
-    let response = String::from_utf8(msg.data).expect("response must be valid UTF-8");
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
         response, "\x1b[?65;1;2;4;6;17;18;22c",
         "DA1 response must match the expected capability string"

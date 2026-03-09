@@ -5,57 +5,72 @@
 
 use anyhow::Result;
 use conv2::ConvUtil;
-use core::str;
-use eframe::egui::{self, Color32, Context};
+use eframe::egui::{self, Context};
+use freminal_common::{
+    buffer_states::{
+        cursor::CursorPos,
+        format_tag::FormatTag,
+        mode::TerminalModes,
+        modes::{
+            decarm::Decarm, decckm::Decckm, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+        },
+        tchar::TChar,
+        window_manipulation::WindowManipulation,
+    },
+    cursor::CursorVisualStyle,
+    terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
+};
+
+// Imports used only when the legacy flat buffer is active.
+#[cfg(not(feature = "new-buffer"))]
 use freminal_common::{
     buffer_states::{
         buffer_type::BufferType,
-        cursor::{CursorPos, CursorState, ReverseVideo},
+        cursor::{CursorState, ReverseVideo},
         fonts::{FontDecorations, FontWeight},
-        format_tag::FormatTag,
         line_draw::DecSpecialGraphics,
         line_wrap::LineWrap,
-        mode::{Mode, SetMode, TerminalModes},
+        mode::{Mode, SetMode},
         modes::{
             MouseModeNumber, ReportMode, allow_column_mode_switch::AllowColumnModeSwitch,
-            decarm::Decarm, decawm::Decawm, decckm::Decckm, deccolm::Deccolm, decom::Decom,
-            decsclm::Decsclm, decscnm::Decscnm, dectcem::Dectcem, grapheme::GraphemeClustering,
-            lnm::Lnm, mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround,
-            rl_bracket::RlBracket, sync_updates::SynchronizedUpdates, theme::Theming,
-            xtcblink::XtCBlink, xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
+            decawm::Decawm, deccolm::Deccolm, decom::Decom, decsclm::Decsclm, decscnm::Decscnm,
+            dectcem::Dectcem, grapheme::GraphemeClustering, lnm::Lnm, mouse::MouseTrack,
+            reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket, theme::Theming,
+            xtcblink::XtCBlink, xtextscrn::XtExtscrn,
         },
         osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
-        tchar::TChar,
         terminal_output::TerminalOutput,
-        window_manipulation::WindowManipulation,
     },
     colors::TerminalColor,
-    cursor::CursorVisualStyle,
     scroll::ScrollDirection,
     sgr::SelectGraphicRendition,
-    terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
-#[cfg(debug_assertions)]
+
 use std::time::Instant;
 
 #[cfg(not(feature = "new-buffer"))]
 use crate::interface::split_format_data_for_scrollback;
 use crate::{
     ansi::FreminalAnsiParser,
-    format_tracker::FormatTracker,
     interface::{TerminalInput, TerminalInputPayload, collect_text},
     io::PtyWrite,
-    //state::term_char::display_vec_tchar_as_string,
 };
 
-#[cfg(debug_assertions)]
-use freminal_buffer::terminal_handler::TerminalHandler as ShadowHandler;
+#[cfg(not(feature = "new-buffer"))]
+use crate::format_tracker::FormatTracker;
 
-use super::{
-    buffer::{TerminalBufferHolder, TerminalBufferSetWinSizeResponse},
-    data::TerminalSections,
-};
+#[cfg(feature = "new-buffer")]
+use freminal_buffer::terminal_handler::TerminalHandler as NewHandler;
 
+use super::data::TerminalSections;
+
+#[cfg(not(feature = "new-buffer"))]
+use super::buffer::{TerminalBufferHolder, TerminalBufferSetWinSizeResponse};
+
+#[cfg(feature = "new-buffer")]
+use super::buffer::TerminalBufferSetWinSizeResponse;
+
+#[cfg(not(feature = "new-buffer"))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Buffer {
     pub terminal_buffer: TerminalBufferHolder,
@@ -66,6 +81,7 @@ pub struct Buffer {
     pub cursor_color: TerminalColor,
 }
 
+#[cfg(not(feature = "new-buffer"))]
 impl Default for Buffer {
     fn default() -> Self {
         Self {
@@ -83,6 +99,7 @@ impl Default for Buffer {
     }
 }
 
+#[cfg(not(feature = "new-buffer"))]
 impl Buffer {
     #[must_use]
     pub fn new(width: usize, height: usize, buffer_type: BufferType) -> Self {
@@ -119,27 +136,35 @@ impl From<bool> for Theme {
 #[allow(clippy::struct_excessive_bools)]
 pub struct TerminalState {
     pub parser: FreminalAnsiParser,
-    pub current_buffer: BufferType,
-    pub primary_buffer: Buffer,
-    pub alternate_buffer: Buffer,
     pub modes: TerminalModes,
     pub write_tx: crossbeam_channel::Sender<PtyWrite>,
     pub changed: bool,
     pub ctx: Option<Context>,
     pub leftover_data: Option<Vec<u8>>,
-    pub character_replace: DecSpecialGraphics,
     pub mouse_position: Option<egui::Pos2>,
     pub window_focused: bool,
     pub window_commands: Vec<WindowManipulation>,
-    pub saved_cursor: Option<CursorState>,
     pub theme: Theme,
     pub cursor_visual_style: CursorVisualStyle,
-    /// Shadow handler running the new `freminal-buffer` implementation in
-    /// parallel with the old buffer. Present only in debug builds; used to
-    /// verify that the new buffer produces identical output before the old
-    /// buffer is removed.
-    #[cfg(debug_assertions)]
-    pub shadow_handler: ShadowHandler,
+
+    // === Old buffer fields (compiled out under new-buffer) ===
+    #[cfg(not(feature = "new-buffer"))]
+    pub current_buffer: BufferType,
+    #[cfg(not(feature = "new-buffer"))]
+    pub primary_buffer: Buffer,
+    #[cfg(not(feature = "new-buffer"))]
+    pub alternate_buffer: Buffer,
+    #[cfg(not(feature = "new-buffer"))]
+    pub character_replace: DecSpecialGraphics,
+    #[cfg(not(feature = "new-buffer"))]
+    pub saved_cursor: Option<CursorState>,
+
+    // === New buffer handler (compiled in only under new-buffer) ===
+    /// The new `freminal-buffer` implementation. This is the sole source of
+    /// truth for terminal content, cursor position, and format state when the
+    /// `new-buffer` feature is active (the default).
+    #[cfg(feature = "new-buffer")]
+    pub handler: NewHandler,
 }
 
 impl Default for TerminalState {
@@ -152,53 +177,106 @@ impl Default for TerminalState {
 
 impl PartialEq for TerminalState {
     fn eq(&self, other: &Self) -> bool {
-        self.parser == other.parser
-            && self.primary_buffer == other.primary_buffer
-            && self.alternate_buffer == other.alternate_buffer
-            && self.modes == other.modes
-            && self.changed == other.changed
-            && self.ctx == other.ctx
-            && self.leftover_data == other.leftover_data
-            && self.character_replace == other.character_replace
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            return self.parser == other.parser
+                && self.primary_buffer == other.primary_buffer
+                && self.alternate_buffer == other.alternate_buffer
+                && self.modes == other.modes
+                && self.changed == other.changed
+                && self.ctx == other.ctx
+                && self.leftover_data == other.leftover_data
+                && self.character_replace == other.character_replace;
+        }
+        #[cfg(feature = "new-buffer")]
+        {
+            self.parser == other.parser
+                && self.modes == other.modes
+                && self.changed == other.changed
+                && self.ctx == other.ctx
+                && self.leftover_data == other.leftover_data
+        }
     }
 }
 
 impl TerminalState {
     #[must_use]
     pub fn new(write_tx: crossbeam_channel::Sender<PtyWrite>) -> Self {
+        #[cfg(feature = "new-buffer")]
+        let handler = {
+            let mut h = NewHandler::new(DEFAULT_WIDTH as usize, DEFAULT_HEIGHT as usize);
+            // Bridge: the new handler writes raw bytes; forward them to the
+            // emulator's PtyWrite::Write channel so the PTY receives them.
+            let (bytes_tx, bytes_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+            h.set_write_tx(bytes_tx);
+            let fwd_tx = write_tx.clone();
+            std::thread::spawn(move || {
+                while let Ok(bytes) = bytes_rx.recv() {
+                    if fwd_tx.send(PtyWrite::Write(bytes)).is_err() {
+                        break;
+                    }
+                }
+            });
+            h
+        };
+
         Self {
             parser: FreminalAnsiParser::new(),
-            current_buffer: BufferType::Primary,
-            primary_buffer: Buffer::new(
-                DEFAULT_WIDTH as usize,
-                DEFAULT_HEIGHT as usize,
-                BufferType::Primary,
-            ),
-            alternate_buffer: Buffer::new(
-                DEFAULT_WIDTH as usize,
-                DEFAULT_HEIGHT as usize,
-                BufferType::Alternate,
-            ),
             modes: TerminalModes::default(),
             write_tx,
             changed: false,
             ctx: None,
             leftover_data: None,
-            character_replace: DecSpecialGraphics::DontReplace,
             mouse_position: None,
             window_focused: true,
             window_commands: Vec::new(),
-            saved_cursor: None,
             theme: Theme::default(),
             cursor_visual_style: CursorVisualStyle::default(),
-            #[cfg(debug_assertions)]
-            shadow_handler: ShadowHandler::new(DEFAULT_WIDTH as usize, DEFAULT_HEIGHT as usize),
+
+            #[cfg(not(feature = "new-buffer"))]
+            current_buffer: BufferType::Primary,
+            #[cfg(not(feature = "new-buffer"))]
+            primary_buffer: Buffer::new(
+                DEFAULT_WIDTH as usize,
+                DEFAULT_HEIGHT as usize,
+                BufferType::Primary,
+            ),
+            #[cfg(not(feature = "new-buffer"))]
+            alternate_buffer: Buffer::new(
+                DEFAULT_WIDTH as usize,
+                DEFAULT_HEIGHT as usize,
+                BufferType::Alternate,
+            ),
+            #[cfg(not(feature = "new-buffer"))]
+            character_replace: DecSpecialGraphics::DontReplace,
+            #[cfg(not(feature = "new-buffer"))]
+            saved_cursor: None,
+
+            #[cfg(feature = "new-buffer")]
+            handler,
         }
     }
 
     #[must_use]
     pub fn get_cursor_visual_style(&self) -> CursorVisualStyle {
+        #[cfg(feature = "new-buffer")]
+        return self.handler.cursor_visual_style();
+        #[cfg(not(feature = "new-buffer"))]
         self.cursor_visual_style.clone()
+    }
+
+    /// Return the cursor color.  Under `new-buffer` the cursor color is not
+    /// yet tracked by the new handler, so we return the terminal default.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
+    pub fn cursor_color(&self) -> freminal_common::colors::TerminalColor {
+        #[cfg(feature = "new-buffer")]
+        return freminal_common::colors::TerminalColor::DefaultCursorColor;
+        #[cfg(not(feature = "new-buffer"))]
+        match self.current_buffer {
+            BufferType::Primary => self.primary_buffer.cursor_color,
+            BufferType::Alternate => self.alternate_buffer.cursor_color,
+        }
     }
 
     pub const fn set_theme(&mut self, theme: Theme) {
@@ -219,13 +297,9 @@ impl TerminalState {
     #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
     pub fn show_cursor(&mut self) -> bool {
         #[cfg(feature = "new-buffer")]
-        {
-            self.shadow_handler.show_cursor()
-        }
+        return self.handler.show_cursor();
         #[cfg(not(feature = "new-buffer"))]
-        {
-            self.get_current_buffer().show_cursor()
-        }
+        self.get_current_buffer().show_cursor()
     }
 
     #[must_use]
@@ -267,6 +341,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub const fn get_current_buffer(&mut self) -> &mut Buffer {
         match self.current_buffer {
             BufferType::Primary => &mut self.primary_buffer,
@@ -275,49 +350,66 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn get_win_size(&mut self) -> (usize, usize) {
+    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
+    pub fn get_win_size(&mut self) -> (usize, usize) {
+        #[cfg(feature = "new-buffer")]
+        return self.handler.get_win_size();
+        #[cfg(not(feature = "new-buffer"))]
         self.get_current_buffer().terminal_buffer.get_win_size()
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
         self.get_current_buffer()
             .terminal_buffer
             .data(include_scrollback)
     }
 
+    #[allow(clippy::needless_pass_by_ref_mut)]
+    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
     pub fn is_mouse_hovered_on_url(&mut self, pos: &CursorPos) -> Option<String> {
-        let current_buffer = self.get_current_buffer();
-        let buf_pos = current_buffer.terminal_buffer.cursor_pos_to_buf_pos(pos)?;
-
-        let tags = self.get_current_buffer().format_tracker.tags();
-
-        for tag in tags {
-            if tag.url.is_none() {
-                continue;
-            }
-
-            // check if the cursor pos is within the range of the tag
-            if tag.start <= buf_pos
-                && buf_pos < tag.end
-                && let Some(url) = &tag.url
-            {
-                return Some(url.url.clone());
-            }
+        #[cfg(feature = "new-buffer")]
+        {
+            // The new buffer stores format per-cell; URL hover detection is not yet
+            // ported. Return None until a dedicated accessor is added to TerminalHandler.
+            let _ = pos;
+            None
         }
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            let current_buffer = self.get_current_buffer();
+            let buf_pos = current_buffer.terminal_buffer.cursor_pos_to_buf_pos(pos)?;
 
-        None
+            let tags = self.get_current_buffer().format_tracker.tags();
+
+            for tag in tags {
+                if tag.url.is_none() {
+                    continue;
+                }
+
+                // check if the cursor pos is within the range of the tag
+                if tag.start <= buf_pos
+                    && buf_pos < tag.end
+                    && let Some(url) = &tag.url
+                {
+                    return Some(url.url.clone());
+                }
+            }
+
+            None
+        }
     }
 
+    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
+    #[allow(clippy::needless_pass_by_ref_mut)] // old-buffer path requires &mut self
     pub(crate) fn data_and_format_data_for_gui(
-        &self,
+        &mut self,
     ) -> (
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
         #[cfg(feature = "new-buffer")]
-        {
-            self.shadow_handler.data_and_format_data_for_gui()
-        }
+        return self.handler.data_and_format_data_for_gui();
         #[cfg(not(feature = "new-buffer"))]
         {
             // `data_for_gui` and `format_tracker.tags()` need `&mut self` via
@@ -336,16 +428,11 @@ impl TerminalState {
     }
 
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
     pub fn cursor_pos(&mut self) -> CursorPos {
         #[cfg(feature = "new-buffer")]
-        {
-            self.shadow_handler.cursor_pos()
-        }
+        return self.handler.cursor_pos();
         #[cfg(not(feature = "new-buffer"))]
-        {
-            self.get_current_buffer().cursor_state.pos
-        }
+        self.get_current_buffer().cursor_state.pos
     }
 
     pub fn set_win_size(
@@ -353,20 +440,22 @@ impl TerminalState {
         width: usize,
         height: usize,
     ) -> TerminalBufferSetWinSizeResponse {
-        let current_buffer = self.get_current_buffer();
-        let response = current_buffer.terminal_buffer.set_win_size(
-            width,
-            height,
-            &current_buffer.cursor_state.pos,
-        );
-        self.get_current_buffer().cursor_state.pos = response.new_cursor_pos;
-
         #[cfg(feature = "new-buffer")]
-        self.shadow_handler.handle_resize(width, height);
-        #[cfg(all(debug_assertions, not(feature = "new-buffer")))]
-        self.shadow_handler.handle_resize(width, height);
-
-        response
+        {
+            self.handler.handle_resize(width, height);
+            TerminalBufferSetWinSizeResponse::new_changed(CursorPos::default())
+        }
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            let current_buffer = self.get_current_buffer();
+            let response = current_buffer.terminal_buffer.set_win_size(
+                width,
+                height,
+                &current_buffer.cursor_state.pos,
+            );
+            self.get_current_buffer().cursor_state.pos = response.new_cursor_pos;
+            response
+        }
     }
 
     #[must_use]
@@ -394,6 +483,7 @@ impl TerminalState {
         debug!("Reported focus change to terminal");
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn handle_data(&mut self, data: &[u8]) {
         let data = match self.character_replace {
             //  Code page 1090
@@ -499,6 +589,7 @@ impl TerminalState {
         current_buffer.cursor_state.pos = response.new_cursor_pos;
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub const fn set_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
         let current_buffer = self.get_current_buffer();
         if let Some(x) = x {
@@ -517,6 +608,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub fn set_cursor_pos_rel(&mut self, x: Option<i32>, y: Option<i32>) {
         let current_buffer = self.get_current_buffer();
         if let Some(x) = x {
@@ -555,6 +647,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_forwards(&mut self) {
         let current_buffer = self.get_current_buffer();
         if let Some(buf_pos) = current_buffer
@@ -567,6 +660,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_backwards(&mut self) {
         let current_buffer = self.get_current_buffer();
         if let Some(buf_pos) = current_buffer
@@ -579,6 +673,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_all(&mut self) {
         let current_buffer = self.get_current_buffer();
         current_buffer
@@ -587,6 +682,7 @@ impl TerminalState {
         current_buffer.terminal_buffer.clear_all();
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_visible(&mut self) {
         let current_buffer = self.get_current_buffer();
 
@@ -601,6 +697,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_line_forwards(&mut self) {
         let current_buffer = self.get_current_buffer();
 
@@ -619,6 +716,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_line_backwards(&mut self) {
         let current_buffer = self.get_current_buffer();
 
@@ -637,6 +735,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clear_line(&mut self) {
         let current_buffer = self.get_current_buffer();
 
@@ -655,10 +754,12 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) const fn carriage_return(&mut self) {
         self.get_current_buffer().cursor_state.pos.x = 0;
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn new_line(&mut self) {
         self.get_current_buffer().cursor_state.pos.y += 1;
 
@@ -667,6 +768,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn backspace(&mut self) {
         let current_buffer = self.get_current_buffer();
         debug!("Backspace at {}", current_buffer.cursor_state.pos);
@@ -685,6 +787,7 @@ impl TerminalState {
         debug!("Backspace moved to {}", current_buffer.cursor_state.pos);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn insert_lines(&mut self, num_lines: usize) {
         let current_buffer = self.get_current_buffer();
 
@@ -707,6 +810,7 @@ impl TerminalState {
             .push_range_adjustment(response.inserted_range);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn delete(&mut self, num_chars: usize) {
         let current_buffer = self.get_current_buffer();
 
@@ -723,6 +827,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn erase_forwards(&mut self, num_chars: usize) {
         let current_buffer = self.get_current_buffer();
 
@@ -741,6 +846,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn reset(&mut self) {
         // FIXME: move these to the buffer struct
         let current_buffer = self.get_current_buffer();
@@ -750,6 +856,7 @@ impl TerminalState {
         current_buffer.cursor_state.font_decorations.clear();
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn font_decordations_add_if_not_contains(&mut self, decoration: FontDecorations) {
         let current_buffer = self.get_current_buffer();
 
@@ -765,6 +872,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn font_decorations_remove_if_contains(&mut self, decoration: &FontDecorations) {
         self.get_current_buffer()
             .cursor_state
@@ -772,6 +880,7 @@ impl TerminalState {
             .retain(|d| *d != *decoration);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) const fn set_foreground(&mut self, color: TerminalColor) {
         self.get_current_buffer()
             .cursor_state
@@ -779,6 +888,7 @@ impl TerminalState {
             .set_color(color);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) const fn set_background(&mut self, color: TerminalColor) {
         self.get_current_buffer()
             .cursor_state
@@ -786,6 +896,7 @@ impl TerminalState {
             .set_background_color(color);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) const fn set_underline_color(&mut self, color: TerminalColor) {
         self.get_current_buffer()
             .cursor_state
@@ -793,6 +904,7 @@ impl TerminalState {
             .set_underline_color(color);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) const fn set_reverse_video(&mut self, reverse_video: ReverseVideo) {
         self.get_current_buffer()
             .cursor_state
@@ -800,6 +912,7 @@ impl TerminalState {
             .set_reverse_video(reverse_video);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn sgr(&mut self, sgr: SelectGraphicRendition) {
         match sgr {
             SelectGraphicRendition::NoOp => (),
@@ -883,6 +996,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn insert_spaces(&mut self, num_spaces: usize) {
         let current_buffer = self.get_current_buffer();
 
@@ -894,6 +1008,7 @@ impl TerminalState {
             .push_range_adjustment(response.insertion_range);
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn screen_alignment_test(&mut self) {
         self.reset();
         self.clear_all();
@@ -907,6 +1022,7 @@ impl TerminalState {
         current_buffer.cursor_state.pos = CursorPos::default();
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     #[allow(clippy::too_many_lines)]
     pub(crate) fn set_mode(&mut self, mode: &Mode) {
         match mode {
@@ -1144,6 +1260,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn report_da(&self) {
         // FIXME: I don't know if we're covering all of the supported DA's we should be sending
         // for now, we're sending the following (borrowed from iTerm2):
@@ -1167,6 +1284,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn osc_response(&mut self, osc: AnsiOscType) {
         match osc {
             AnsiOscType::NoOp => (),
@@ -1257,14 +1375,13 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn report_cursor_position(&mut self) {
         let current_buffer = self.get_current_buffer();
-
         let x = current_buffer.cursor_state.pos.x + 1;
         let y = current_buffer.cursor_state.pos.y + 1;
         debug!("Reporting cursor position: {y}, {x}");
         let output = collect_text(&format!("\x1b[{y};{x}R"));
-
         for input in output.iter() {
             if let Err(e) = self.write(input) {
                 error!("Failed to write cursor position: {e}");
@@ -1413,6 +1530,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub(crate) fn clip_buffer_lines(&mut self) {
         match self.current_buffer {
             BufferType::Primary => {
@@ -1448,6 +1566,7 @@ impl TerminalState {
         }
     }
 
+    #[cfg(not(feature = "new-buffer"))]
     pub const fn set_top_and_bottom_margins(&mut self, top: usize, bottom: usize) {
         let current_buffer = self.get_current_buffer();
 
@@ -1460,9 +1579,9 @@ impl TerminalState {
     #[allow(clippy::too_many_lines)]
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         debug!("Handling Incoming Data");
-        #[cfg(debug_assertions)]
         let now = Instant::now();
-        // if we have leftover data, prepend it to the incoming data
+
+        // Reassemble with any leftover bytes from a split UTF-8 sequence.
         let mut incoming = self.leftover_data.take().map_or_else(
             || incoming.to_vec(),
             |leftover_data| {
@@ -1476,28 +1595,34 @@ impl TerminalState {
             },
         );
 
+        // Strip any trailing incomplete UTF-8 sequence and save it for next time.
         let mut leftover_bytes = vec![];
         while let Err(_e) = String::from_utf8(incoming.clone()) {
             let Some(p) = incoming.pop() else { break };
             leftover_bytes.insert(0, p);
         }
-
         if !leftover_bytes.is_empty() {
             match self.leftover_data {
                 Some(ref mut self_leftover) => {
-                    // this should be at the start of the leftover data
                     self_leftover.splice(0..0, leftover_bytes);
                 }
                 None => self.leftover_data = Some(leftover_bytes),
             }
         }
 
-        // verify that the incoming data is utf-8
         let parsed = self.parser.push(&incoming);
 
-        #[cfg(debug_assertions)]
-        self.shadow_handler.process_outputs(&parsed);
+        #[cfg(feature = "new-buffer")]
+        {
+            self.handler.process_outputs(&parsed);
+            // Drain window commands queued by the new handler into the shared vec
+            // so that the GUI's existing drain loop in handle_window_manipulation
+            // can consume them.
+            self.window_commands
+                .extend(self.handler.take_window_commands());
+        }
 
+        #[cfg(not(feature = "new-buffer"))]
         for segment in parsed {
             // if segment is not data, we want to print out the segment
             if let TerminalOutput::Data(data) = &segment {
@@ -1572,14 +1697,10 @@ impl TerminalState {
             }
         }
 
-        // now ensure total lines in buffer isn't too big
+        #[cfg(not(feature = "new-buffer"))]
         self.clip_buffer_lines();
 
-        #[cfg(debug_assertions)]
-        // log the frame time
         let elapsed = now.elapsed();
-        // show either elapsed as micros or millis, depending on the duration
-        #[cfg(debug_assertions)]
         if elapsed.as_millis() > 0 {
             debug!("Data processing time: {}ms", elapsed.as_millis());
         } else {
@@ -1596,10 +1717,8 @@ impl TerminalState {
     /// # Errors
     /// Will return an error if the write fails
     pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
-        match to_write.to_payload(
-            self.get_cursor_key_mode() == Decckm::Application,
-            self.get_cursor_key_mode() == Decckm::Application,
-        ) {
+        let decckm = self.get_cursor_key_mode() == Decckm::Application;
+        match to_write.to_payload(decckm, decckm) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;
             }
@@ -1612,50 +1731,82 @@ impl TerminalState {
     }
 
     pub fn scroll(&mut self, scroll: f32) {
-        if self.current_buffer == BufferType::Alternate {
-            let key = if scroll < 0.0 {
-                TerminalInput::ArrowDown
-            } else {
-                TerminalInput::ArrowUp
-            };
+        #[cfg(feature = "new-buffer")]
+        {
+            // In alternate screen, route scrolling as arrow-key presses.
+            // In primary screen, use the new handler's scroll helpers.
+            let in_alternate = self.handler.is_alternate_screen();
 
-            match self.write(&key) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to scroll: {e}");
+            if in_alternate {
+                let key = if scroll < 0.0 {
+                    TerminalInput::ArrowDown
+                } else {
+                    TerminalInput::ArrowUp
+                };
+                match self.write(&key) {
+                    Ok(()) => (),
+                    Err(e) => error!("Failed to scroll: {e}"),
                 }
+                return;
             }
 
-            return;
+            let mut scroll = scroll.round();
+            if scroll < 0.0 {
+                scroll *= -1.0;
+                let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
+                self.handler.handle_scroll_back(n);
+            } else {
+                let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
+                self.handler.handle_scroll_forward(n);
+            }
         }
 
-        let current_buffer = &mut self.get_current_buffer().terminal_buffer;
-        // convert the scroll to usize, with a minimum of 1
-        let mut scroll = scroll.round();
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            if self.current_buffer == BufferType::Alternate {
+                let key = if scroll < 0.0 {
+                    TerminalInput::ArrowDown
+                } else {
+                    TerminalInput::ArrowUp
+                };
 
-        if scroll < 0.0 {
-            scroll *= -1.0;
-            let scroll_as_usize = match scroll.max(1.0).approx_as::<usize>() {
-                Ok(scroll) => scroll,
-                Err(e) => {
-                    error!("Failed to convert scroll to usize: {e}\nUsing default of 1");
-                    1
+                match self.write(&key) {
+                    Ok(()) => (),
+                    Err(e) => {
+                        error!("Failed to scroll: {e}");
+                    }
                 }
-            };
 
-            let scoller = ScrollDirection::Down(scroll_as_usize);
-            current_buffer.scroll(&scoller);
-        } else {
-            let scroll_as_usize = match scroll.max(1.0).approx_as::<usize>() {
-                Ok(scroll) => scroll,
-                Err(e) => {
-                    error!("Failed to convert scroll to usize: {e}\nUsing default of 1");
-                    1
-                }
-            };
+                return;
+            }
 
-            let scroller = ScrollDirection::Up(scroll_as_usize);
-            current_buffer.scroll(&scroller);
+            let current_buffer = &mut self.get_current_buffer().terminal_buffer;
+            let mut scroll = scroll.round();
+
+            if scroll < 0.0 {
+                scroll *= -1.0;
+                let scroll_as_usize = match scroll.max(1.0).approx_as::<usize>() {
+                    Ok(scroll) => scroll,
+                    Err(e) => {
+                        error!("Failed to convert scroll to usize: {e}\nUsing default of 1");
+                        1
+                    }
+                };
+
+                let scoller = ScrollDirection::Down(scroll_as_usize);
+                current_buffer.scroll(&scoller);
+            } else {
+                let scroll_as_usize = match scroll.max(1.0).approx_as::<usize>() {
+                    Ok(scroll) => scroll,
+                    Err(e) => {
+                        error!("Failed to convert scroll to usize: {e}\nUsing default of 1");
+                        1
+                    }
+                };
+
+                let scroller = ScrollDirection::Up(scroll_as_usize);
+                current_buffer.scroll(&scroller);
+            }
         }
     }
 }

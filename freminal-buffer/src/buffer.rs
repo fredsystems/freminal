@@ -1690,6 +1690,12 @@ impl Buffer {
         (chars, tags)
     }
 
+    /// Return `true` when the alternate screen is currently active.
+    #[must_use]
+    pub const fn is_alternate_screen(&self) -> bool {
+        matches!(self.kind, BufferType::Alternate)
+    }
+
     /// Return the terminal width (columns).
     #[must_use]
     pub const fn terminal_width(&self) -> usize {

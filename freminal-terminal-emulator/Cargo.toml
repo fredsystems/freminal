@@ -19,7 +19,9 @@ categories.workspace = true
 #             instead of the legacy buffer + format-tracker stack.
 #             Enable with: cargo build --features new-buffer
 [features]
+default = ["new-buffer"]
 new-buffer = []
+old-buffer = []   # escape hatch: cargo build --no-default-features --features old-buffer
 
 [dependencies]
 anyhow.workspace = true

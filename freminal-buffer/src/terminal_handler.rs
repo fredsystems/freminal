@@ -34,21 +34,6 @@ use crate::buffer::Buffer;
 /// This is the main entry point for integrating the buffer with a terminal emulator.
 /// It receives parsed terminal sequences (via a TerminalOutput-like enum) and updates
 /// the buffer state accordingly.
-/// Bytes sent to the PTY in response to terminal queries (CPR, DA1, mode reports).
-#[derive(Debug, Clone)]
-pub struct PtyWrite {
-    /// Raw bytes to write back to the running process.
-    pub data: Vec<u8>,
-}
-
-impl PtyWrite {
-    fn new(s: &str) -> Self {
-        Self {
-            data: s.as_bytes().to_vec(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct TerminalHandler {
     buffer: Buffer,
@@ -60,7 +45,7 @@ pub struct TerminalHandler {
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
     /// Optional channel for writing responses back to the PTY.
-    write_tx: Option<Sender<PtyWrite>>,
+    write_tx: Option<Sender<Vec<u8>>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
 }
@@ -319,7 +304,7 @@ impl TerminalHandler {
 
     /// Set the PTY write channel.  Once set, responses such as CPR and DA1
     /// will be sent through this channel rather than silently discarded.
-    pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
+    pub fn set_write_tx(&mut self, tx: Sender<Vec<u8>>) {
         self.write_tx = Some(tx);
     }
 
@@ -330,11 +315,10 @@ impl TerminalHandler {
 
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     fn write_to_pty(&self, text: &str) {
-        if let Some(tx) = &self.write_tx {
-            let msg = PtyWrite::new(text);
-            if let Err(e) = tx.send(msg) {
-                tracing::error!("Failed to write to PTY: {e}");
-            }
+        if let Some(tx) = &self.write_tx
+            && let Err(e) = tx.send(text.as_bytes().to_vec())
+        {
+            tracing::error!("Failed to write to PTY: {e}");
         }
     }
 
@@ -503,6 +487,12 @@ impl TerminalHandler {
     #[must_use]
     pub const fn get_win_size(&self) -> (usize, usize) {
         (self.buffer.terminal_width(), self.buffer.terminal_height())
+    }
+
+    /// Return `true` when the alternate screen buffer is currently active.
+    #[must_use]
+    pub const fn is_alternate_screen(&self) -> bool {
+        self.buffer.is_alternate_screen()
     }
 
     /// Process an array of `TerminalOutput` commands

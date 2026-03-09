@@ -1282,10 +1282,8 @@ impl FreminalTerminalWidget {
                 .render(ui, self.previous_pass.canvas_area, Color32::BLUE);
 
             if terminal_emulator.show_cursor() {
-                let color = internal_color_to_egui(
-                    terminal_emulator.internal.get_current_buffer().cursor_color,
-                    false,
-                );
+                let color =
+                    internal_color_to_egui(terminal_emulator.internal.cursor_color(), false);
 
                 let cursor_style = terminal_emulator.get_cursor_visual_style();
 
