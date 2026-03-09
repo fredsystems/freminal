@@ -1029,7 +1029,7 @@ for debugging.
 
 ### Step 5.2 — Add `new-buffer` feature flag; gate GUI output on it
 
-- [ ] **Done**
+- [x] **Done**
 
 #### 5.2 Why this step exists
 

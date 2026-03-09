@@ -13,6 +13,14 @@ rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+# Feature flags
+# -------------
+# new-buffer: route GUI output through the new freminal-buffer implementation
+#             instead of the legacy buffer + format-tracker stack.
+#             Enable with: cargo build --features new-buffer
+[features]
+new-buffer = []
+
 [dependencies]
 anyhow.workspace = true
 crossbeam-channel.workspace = true

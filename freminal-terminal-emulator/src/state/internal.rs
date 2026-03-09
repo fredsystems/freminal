@@ -38,12 +38,12 @@ use freminal_common::{
 #[cfg(debug_assertions)]
 use std::time::Instant;
 
+#[cfg(not(feature = "new-buffer"))]
+use crate::interface::split_format_data_for_scrollback;
 use crate::{
     ansi::FreminalAnsiParser,
     format_tracker::FormatTracker,
-    interface::{
-        TerminalInput, TerminalInputPayload, collect_text, split_format_data_for_scrollback,
-    },
+    interface::{TerminalInput, TerminalInputPayload, collect_text},
     io::PtyWrite,
     //state::term_char::display_vec_tchar_as_string,
 };
@@ -216,8 +216,16 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn show_cursor(&mut self) -> bool {
-        self.get_current_buffer().show_cursor()
+    #[allow(clippy::missing_const_for_fn)] // cfg-gated paths prevent const
+    pub fn show_cursor(&mut self) -> bool {
+        #[cfg(feature = "new-buffer")]
+        {
+            self.shadow_handler.show_cursor()
+        }
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            self.get_current_buffer().show_cursor()
+        }
     }
 
     #[must_use]
@@ -301,26 +309,42 @@ impl TerminalState {
     }
 
     pub(crate) fn data_and_format_data_for_gui(
-        &mut self,
+        &self,
     ) -> (
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        let (data, offset, end) = self.get_current_buffer().terminal_buffer.data_for_gui();
+        #[cfg(feature = "new-buffer")]
+        {
+            self.shadow_handler.data_and_format_data_for_gui()
+        }
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            // `data_for_gui` and `format_tracker.tags()` need `&mut self` via
+            // `get_current_buffer`, so we replicate the mutable borrow inline.
+            let buf = match self.current_buffer {
+                BufferType::Primary => &self.primary_buffer,
+                BufferType::Alternate => &self.alternate_buffer,
+            };
+            let (data, offset, end) = buf.terminal_buffer.data_for_gui();
 
-        let format_data = split_format_data_for_scrollback(
-            self.get_current_buffer().format_tracker.tags(),
-            offset,
-            end,
-            false,
-        );
+            let format_data =
+                split_format_data_for_scrollback(buf.format_tracker.tags(), offset, end, false);
 
-        (data, format_data)
+            (data, format_data)
+        }
     }
 
     #[must_use]
     pub const fn cursor_pos(&mut self) -> CursorPos {
-        self.get_current_buffer().cursor_state.pos
+        #[cfg(feature = "new-buffer")]
+        {
+            self.shadow_handler.cursor_pos()
+        }
+        #[cfg(not(feature = "new-buffer"))]
+        {
+            self.get_current_buffer().cursor_state.pos
+        }
     }
 
     pub fn set_win_size(
