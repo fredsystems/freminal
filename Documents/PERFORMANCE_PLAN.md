@@ -459,7 +459,7 @@ No step should leave the tree in a state where `cargo test --all` fails.
 
 ---
 
-- [ ] **Task 4 — Move `scroll_offset` out of `Buffer`**
+- [x] **Task 4 — Move `scroll_offset` out of `Buffer`**
   - Remove the `scroll_offset` field from `Buffer` in `freminal-buffer/src/buffer.rs`.
   - Create `freminal/src/gui/view_state.rs` and define the `ViewState` struct as specified in
     Section 4.5. Add `pub mod view_state;` to `freminal/src/gui/mod.rs`.
@@ -474,6 +474,25 @@ No step should leave the tree in a state where `cargo test --all` fails.
   - For now, callers outside the buffer that previously read `scroll_offset` from the buffer
     should be updated to pass `0` temporarily; the correct `ViewState` wiring happens in Task 7.
   - **Verify:** `cargo test --all` passes. All buffer unit tests pass.
+  - ✅ **Completed 2026-03-09.** Removed `scroll_offset` field from `Buffer` struct.
+    Changed `visible_rows`, `visible_window_start`, `visible_as_tchars_and_tags`,
+    `scrollback_as_tchars_and_tags` to accept `scroll_offset: usize` parameter.
+    `set_size(w, h, scroll_offset) -> usize` now takes and returns the offset (reflow
+    resets to 0; resize clamps or resets per `preserve_scrollback_anchor`).
+    `enter_alternate(scroll_offset)` saves the external offset into `SavedPrimaryState`;
+    `leave_alternate() -> usize` returns the restored offset. `enforce_scrollback_limit`
+    takes and returns the adjusted offset. `scroll_back` / `scroll_forward` /
+    `scroll_to_bottom` are now pure functions that compute and return the new offset
+    without mutating `self`. Scroll-reset-on-data guards removed from `insert_text` and
+    `handle_lf`; `scroll_offset > 0` guards removed from `insert_lines` and
+    `delete_lines` (PTY always operates at live bottom). `max_scroll_offset()` made
+    `pub`. All internal PTY-side callers pass `0`. `TerminalHandler::handle_scroll_back
+    / forward` now take and return offset; `handle_scroll_to_bottom` is a const fn.
+    `TerminalState::scroll()` discards returned offsets temporarily (wired in Task 7/8).
+    Created `freminal/src/gui/view_state.rs` with `ViewState` matching Section 4.5 spec.
+    Added `pub mod view_state` to `gui/mod.rs`. Updated all tests (buffer unit tests,
+    integration tests, benchmarks, and external test files). Committed as 758903b.
+    `cargo test --all`: 498 tests passed, 0 failed. `cargo build --all`: clean.
 
 ---
 
