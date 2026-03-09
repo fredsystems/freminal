@@ -214,7 +214,7 @@ impl TerminalHandler {
     }
 
     /// Handle set top and bottom margins (DECSTBM)
-    pub const fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
+    pub fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
         // Parser typically sends 1-indexed values
         let top_zero = top.saturating_sub(1);
         let bottom_zero = bottom.saturating_sub(1);
@@ -1329,9 +1329,17 @@ mod tests {
 
         handler.process_outputs(&outputs);
 
-        // Screen should be cleared
+        // Screen should be cleared — buffer only grew to 2 rows (one per Data+Newline),
+        // so visible_rows() returns those 2 rows (both now empty after ClearDisplay).
         let visible = handler.buffer().visible_rows();
-        assert_eq!(visible.len(), 24);
+        assert_eq!(visible.len(), 2);
+        // Both rows must be empty after the clear.
+        for row in visible {
+            assert!(
+                row.get_characters().is_empty(),
+                "all visible rows must be empty after ClearDisplay"
+            );
+        }
     }
 
     #[test]

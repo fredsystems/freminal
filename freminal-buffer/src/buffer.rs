@@ -102,11 +102,12 @@ impl Buffer {
     /// Creates a new Buffer with the specified width and height.
     #[must_use]
     pub fn new(width: usize, height: usize) -> Self {
-        // Initialize with enough rows to fill the visible area
-        let mut rows = Vec::with_capacity(height.max(1));
-        for _ in 0..height.max(1) {
-            rows.push(Row::new(width));
-        }
+        // Start with a single blank row.  The buffer grows dynamically as
+        // content is written.  Pre-allocating `height` empty rows caused the
+        // visible area to always contain `height` rows, most of which were
+        // blank — the GUI's stick_to_bottom would then display those trailing
+        // blank rows instead of the actual content at the top.
+        let rows = vec![Row::new(width)];
 
         Self {
             rows,
@@ -809,9 +810,17 @@ impl Buffer {
                     //
                     // FAST PATH: FULL-SCREEN REGION
                     //
+                    // When the cursor is above the last visible row we simply move
+                    // it down.  We must NOT clear the destination row if it already
+                    // holds real content (e.g. logo lines written in a previous pass
+                    // before a CUU brought the cursor back up).  We only clear when
+                    // the destination is a pristine ScrollFill placeholder, and we
+                    // only scroll-in a brand-new blank row when the cursor is at the
+                    // very bottom of the visible window.
                     self.cursor.pos.y += 1;
 
                     if self.cursor.pos.y >= self.rows.len() {
+                        // Row doesn't exist yet — always create it fresh.
                         self.rows.push(Row::new_with_origin(
                             self.width,
                             RowOrigin::HardBreak,
@@ -819,9 +828,21 @@ impl Buffer {
                         ));
                     } else {
                         let row = &mut self.rows[self.cursor.pos.y];
-                        row.origin = RowOrigin::HardBreak;
-                        row.join = RowJoin::NewLogicalLine;
-                        row.clear();
+                        if row.origin == RowOrigin::ScrollFill {
+                            // Pristine placeholder: stamp it as a real hard-break
+                            // line but leave its (empty) cell content alone.
+                            row.origin = RowOrigin::HardBreak;
+                            row.join = RowJoin::NewLogicalLine;
+                        } else if sy == self.height.saturating_sub(1) {
+                            // Cursor was at the bottom of the visible window and the
+                            // next slot already has content from old scrollback — this
+                            // is the newly-scrolled-in line, so wipe it.
+                            row.origin = RowOrigin::HardBreak;
+                            row.join = RowJoin::NewLogicalLine;
+                            row.clear();
+                        }
+                        // Otherwise (cursor was above the bottom, row has real
+                        // content): leave the row completely untouched.
                     }
 
                     self.enforce_scrollback_limit();
@@ -836,6 +857,10 @@ impl Buffer {
                     if sy < self.scroll_region_bottom {
                         // Move cursor down inside region
                         self.cursor.pos.y += 1;
+                        // If the row doesn't exist yet (buffer filling up), create it.
+                        while self.cursor.pos.y >= self.rows.len() {
+                            self.push_row(RowOrigin::HardBreak, RowJoin::NewLogicalLine);
+                        }
                     } else {
                         // At bottom margin → scroll region UP
                         self.scroll_region_up_primary();
@@ -1143,17 +1168,17 @@ impl Buffer {
         self.debug_assert_invariants();
     }
 
-    const fn reset_scroll_region_to_full(&mut self) {
+    fn reset_scroll_region_to_full(&mut self) {
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
-        // Reset cursor to home position, consistent with set_scroll_region behavior
-        self.cursor.pos.x = 0;
-        self.cursor.pos.y = 0;
+        // Reset cursor to home position (screen row 0, col 0).
+        // Use set_cursor_pos so rows are created if they don't exist yet.
+        self.set_cursor_pos(Some(0), Some(0));
     }
 
     /// Set DECSTBM scroll region (1-based inclusive).
     /// If invalid, resets to full screen.
-    pub const fn set_scroll_region(&mut self, top1: usize, bottom1: usize) {
+    pub fn set_scroll_region(&mut self, top1: usize, bottom1: usize) {
         // 0 or missing → ignore and reset
         if top1 == 0 || bottom1 == 0 {
             self.reset_scroll_region_to_full();
@@ -1173,9 +1198,11 @@ impl Buffer {
         self.scroll_region_top = top;
         self.scroll_region_bottom = bottom;
 
-        // xterm behavior: move cursor to row 0 of region
-        self.cursor.pos.y = self.scroll_region_top;
-        self.cursor.pos.x = 0;
+        // xterm behavior: move cursor to the top of the new scroll region, col 0.
+        // Use set_cursor_pos (screen coords) so rows are created if they don't
+        // exist yet — the buffer may have fewer than `height` rows when still
+        // filling up on first use.
+        self.set_cursor_pos(Some(0), Some(top));
     }
 
     /// Index in `rows` of the first visible line.
@@ -1355,19 +1382,30 @@ impl Buffer {
     ///
     /// x and y are 0-indexed screen coordinates
     pub fn set_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
-        let new_x = x.unwrap_or(0).min(self.width.saturating_sub(1));
-        let new_y = y.unwrap_or(0).min(self.height.saturating_sub(1));
+        // `None` means "leave this axis unchanged" (e.g. CHA only supplies x,
+        // VPA only supplies y, CUP supplies both).
+        let new_x = match x {
+            Some(col) => col.min(self.width.saturating_sub(1)),
+            None => self.cursor.pos.x,
+        };
 
-        // Convert screen coordinates to buffer coordinates
-        let buffer_y = self.visible_window_start() + new_y;
+        // y is a screen-relative coordinate (0 = top of visible window).
+        // When y is None we keep the current screen row.
+        let new_buffer_y = match y {
+            Some(row) => {
+                let clamped = row.min(self.height.saturating_sub(1));
+                self.visible_window_start() + clamped
+            }
+            None => self.cursor.pos.y,
+        };
 
         // Ensure rows exist up to the target position
-        while buffer_y >= self.rows.len() {
+        while new_buffer_y >= self.rows.len() {
             self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
         }
 
         self.cursor.pos.x = new_x;
-        self.cursor.pos.y = buffer_y;
+        self.cursor.pos.y = new_buffer_y;
         self.debug_assert_invariants();
     }
 
@@ -1798,9 +1836,14 @@ mod basic_tests {
     fn primary_lf_adds_new_row_no_scroll_yet() {
         let mut buf = Buffer::new(5, 3);
 
+        // Buffer starts with 1 row; each LF into a non-existent row creates one.
         buf.handle_lf();
         assert_eq!(buf.cursor.pos.y, 1);
-        assert_eq!(buf.rows.len(), 3); // Buffer initializes with height rows
+        assert_eq!(buf.rows.len(), 2);
+
+        buf.handle_lf();
+        assert_eq!(buf.cursor.pos.y, 2);
+        assert_eq!(buf.rows.len(), 3);
     }
 
     #[test]
@@ -1997,6 +2040,71 @@ mod basic_tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn lf_does_not_clear_existing_content_above_screen_bottom() {
+        // Reproduce the fastfetch two-column layout:
+        //   1. Write N logo lines (each line has content in cols 0..W).
+        //   2. CHA to col 0 on the last logo line (y unchanged).
+        //   3. CUU N  → cursor jumps back to row 0.
+        //   4. For each info row: write info at col W, then LF+CR.
+        //      The LF must NOT clear the logo content already in that row.
+        let logo_lines: usize = 5;
+        let col_split: usize = 10; // logo occupies cols 0..10, info at col 10+
+        let mut buf = Buffer::new(40, 20);
+
+        // --- Step 1: write logo lines ---
+        for i in 0..logo_lines {
+            // Write a recognizable marker so we can verify it survives.
+            let marker = TChar::Ascii(b'A' + i as u8);
+            buf.insert_text(&vec![marker; col_split]);
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+        // Cursor is now at (0, logo_lines).
+
+        // --- Step 2+3: CHA col 0 (no-op on x since already 0) + CUU ---
+        buf.set_cursor_pos(Some(0), None); // CHA — y unchanged
+        buf.move_cursor_relative(0, -(logo_lines as i32)); // CUU
+        assert_eq!(
+            buf.get_cursor_screen_pos().y,
+            0,
+            "after CUU cursor must be at screen row 0"
+        );
+
+        // --- Step 4: write info alongside logo, one row at a time ---
+        for row in 0..logo_lines {
+            // Move to the info column on the current row.
+            buf.move_cursor_relative(col_split as i32, 0);
+
+            let info_char = TChar::Ascii(b'0' + row as u8);
+            buf.insert_text(&[info_char]);
+
+            // LF + CR — must NOT wipe the logo chars in cols 0..col_split.
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+
+        // --- Verify: every logo row still has its marker in col 0 ---
+        let visible = buf.visible_rows();
+        for (i, row) in visible.iter().enumerate().take(logo_lines) {
+            let chars = row.get_characters();
+            assert!(
+                !chars.is_empty(),
+                "row {i} must not be empty after info pass"
+            );
+            let head = match chars[0].tchar() {
+                TChar::Ascii(b) => *b,
+                _ => 0,
+            };
+            assert_eq!(
+                head,
+                b'A' + i as u8,
+                "row {i} col 0: logo marker must survive the info-column LF pass (got {head})"
+            );
+        }
+    }
+
+    #[test]
     fn cursor_screen_pos_is_relative_to_visible_window_with_scrollback() {
         // Height = 3, write 6 lines → 3 rows of scrollback
         let mut buf = Buffer::new(10, 3);
@@ -2023,6 +2131,112 @@ mod basic_tests {
             screen_pos.y,
             raw_y.saturating_sub(visible_start),
             "screen y must equal raw_y minus visible_window_start"
+        );
+    }
+
+    #[test]
+    fn set_cursor_pos_none_y_preserves_current_row() {
+        // CHA (ESC [ n G) sets x only — y must not change.
+        let mut buf = Buffer::new(80, 24);
+
+        // Move cursor to row 5 (0-indexed screen coord)
+        buf.set_cursor_pos(Some(0), Some(5));
+        let row_before = buf.get_cursor().pos.y;
+
+        // CHA: x = Some(10), y = None → only x should change
+        buf.set_cursor_pos(Some(10), None);
+
+        assert_eq!(buf.get_cursor().pos.x, 10, "x should be updated to 10");
+        assert_eq!(
+            buf.get_cursor().pos.y,
+            row_before,
+            "y must not change when y=None (CHA behaviour)"
+        );
+    }
+
+    #[test]
+    fn set_cursor_pos_none_x_preserves_current_column() {
+        // VPA (ESC [ n d) sets y only — x must not change.
+        let mut buf = Buffer::new(80, 24);
+
+        // Move cursor to column 20
+        buf.set_cursor_pos(Some(20), Some(0));
+        assert_eq!(buf.get_cursor().pos.x, 20);
+
+        // VPA: x = None, y = Some(3) → only y should change
+        buf.set_cursor_pos(None, Some(3));
+
+        assert_eq!(
+            buf.get_cursor().pos.x,
+            20,
+            "x must not change when x=None (VPA behaviour)"
+        );
+        assert_eq!(buf.get_cursor_screen_pos().y, 3, "screen y should be 3");
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn fastfetch_cha_cuu_pattern_leaves_cursor_on_correct_row() {
+        // Reproduce the fastfetch rendering pattern:
+        //   1. Print N lines of logo via LF/CR (cursor ends at row N).
+        //   2. ESC[1G  — CHA: move to column 0, KEEP current row.
+        //   3. ESC[NA  — CUU: move up N rows → should land at row 0.
+        //   4. ESC[47C — CUF: move right 47 cols.
+        //   5. Write info text — must land on row 0, col 47, NOT row 0 col 47
+        //      after being reset by a broken CHA.
+        let logo_lines: usize = 21;
+        let mut buf = Buffer::new(100, 100);
+
+        // Step 1: print logo lines with LF (simulates CRLF pairs)
+        for _ in 0..logo_lines {
+            buf.insert_text(&[TChar::Ascii(b'X')]);
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+        // Cursor is now at the start of row `logo_lines` (0-indexed).
+        assert_eq!(
+            buf.get_cursor_screen_pos().y,
+            logo_lines,
+            "after {logo_lines} LFs cursor screen-y should be {logo_lines}",
+        );
+
+        // Step 2: CHA to column 0 — y MUST stay at logo_lines.
+        buf.set_cursor_pos(Some(0), None);
+        assert_eq!(
+            buf.get_cursor_screen_pos().y,
+            logo_lines,
+            "CHA (y=None) must not move cursor off row {logo_lines}",
+        );
+        assert_eq!(buf.get_cursor().pos.x, 0, "CHA should set x to 0");
+
+        // Step 3: CUU logo_lines → cursor should land at screen row 0.
+        buf.move_cursor_relative(0, -(logo_lines as i32));
+        assert_eq!(
+            buf.get_cursor_screen_pos().y,
+            0,
+            "after CUU cursor must be at screen row 0"
+        );
+
+        // Step 4: CUF 47 → column 47.
+        buf.move_cursor_relative(47, 0);
+        assert_eq!(
+            buf.get_cursor().pos.x,
+            47,
+            "CUF should place cursor at col 47"
+        );
+
+        // Step 5: writing here should land on the first row, not some garbage row.
+        let screen_row_before_write = buf.get_cursor_screen_pos().y;
+        buf.insert_text(&[
+            TChar::Ascii(b'I'),
+            TChar::Ascii(b'n'),
+            TChar::Ascii(b'f'),
+            TChar::Ascii(b'o'),
+        ]);
+        assert_eq!(
+            buf.get_cursor_screen_pos().y,
+            screen_row_before_write,
+            "writing info text must stay on the same screen row"
         );
     }
 }
@@ -2233,6 +2447,7 @@ mod pty_behavior_tests {
 
         buf.insert_text(&to_tchars("1234567890")); // full row
         let row0 = buf.cursor.pos.y;
+        let rows_after_insert = buf.rows.len();
 
         buf.handle_cr(); // reset X
         buf.insert_text(&to_tchars("HELLO"));
@@ -2240,8 +2455,8 @@ mod pty_behavior_tests {
         assert_eq!(buf.cursor.pos.y, row0, "CR must not change row");
         assert_eq!(
             buf.rows.len(),
-            100,
-            "No new row must be created beyond initial height"
+            rows_after_insert,
+            "CR+overwrite must not create new rows"
         );
     }
 
@@ -3350,15 +3565,14 @@ mod visible_rows_boundary_tests {
     fn visible_rows_small_buffer_returns_all_rows() {
         let mut b = Buffer::new(10, 5);
 
-        // Buffer starts with height (5) rows
-        // 2 LFs move cursor down but don't add more rows since we're within initial height
+        // Buffer starts with 1 row; 2 LFs grow it to 3 rows (still within height).
         b.handle_lf();
         b.handle_lf();
 
-        assert_eq!(b.rows.len(), 5); // Still at initial height
+        assert_eq!(b.rows.len(), 3);
 
         let vis = b.visible_rows();
-        // Since rows.len() == height, we should get all rows.
+        // rows.len() <= height, so all rows are visible.
         assert_eq!(vis.len(), b.rows.len());
     }
 

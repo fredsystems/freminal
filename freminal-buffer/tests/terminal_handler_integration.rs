@@ -19,8 +19,9 @@ fn test_simple_text_insertion() {
     assert_eq!(handler.buffer().get_cursor().pos.x, 13);
     assert_eq!(handler.buffer().get_cursor().pos.y, 0);
 
+    // Buffer grows dynamically; only the rows that have been written exist.
     let visible = handler.buffer().visible_rows();
-    assert_eq!(visible.len(), 24);
+    assert_eq!(visible.len(), 1);
 }
 
 #[test]
@@ -434,9 +435,10 @@ fn test_process_outputs_api() {
     assert_eq!(handler.buffer().get_cursor().pos.x, 2);
     assert_eq!(handler.buffer().get_cursor().pos.y, 3);
 
-    // Verify we have content
+    // Buffer grows dynamically; 4 rows of content were written (prompt+cmd,
+    // total 48, file listing, new prompt).
     let visible = handler.buffer().visible_rows();
-    assert_eq!(visible.len(), 24);
+    assert_eq!(visible.len(), 4);
 }
 
 #[test]
