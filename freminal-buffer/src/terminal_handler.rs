@@ -6,7 +6,7 @@
 use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
-        cursor::{CursorPos, ReverseVideo, StateColors},
+        cursor::{CursorPos, ReverseVideo},
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
         line_draw::DecSpecialGraphics,

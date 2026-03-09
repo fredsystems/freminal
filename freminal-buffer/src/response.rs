@@ -3,9 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::io::Cursor;
-
-use freminal_common::buffer_states::{cursor::CursorPos, tchar::TChar};
+use freminal_common::buffer_states::tchar::TChar;
 
 pub enum InsertResponse {
     Consumed(usize), // final column

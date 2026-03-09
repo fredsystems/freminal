@@ -18,13 +18,9 @@
 )]
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
-#![allow(dead_code, unused_imports)]
 
 pub mod buffer;
 pub mod cell;
 pub mod response;
 pub mod row;
 pub mod terminal_handler;
-
-#[macro_use]
-extern crate tracing;

@@ -24,7 +24,7 @@
 pub mod ansi;
 pub mod ansi_components;
 pub mod error;
-pub mod format_tracker;
+
 pub mod interface;
 pub mod io;
 // pub mod playback;

@@ -3,14 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::{
-    buffer_states::{
-        buffer_type::BufferType,
-        cursor::{CursorPos, CursorState},
-        format_tag::FormatTag,
-        tchar::TChar,
-    },
-    config::FontConfig,
+use freminal_common::buffer_states::{
+    buffer_type::BufferType,
+    cursor::{CursorPos, CursorState},
+    format_tag::FormatTag,
+    tchar::TChar,
 };
 
 use crate::{
@@ -233,11 +230,6 @@ impl Buffer {
     fn push_row(&mut self, origin: RowOrigin, join: RowJoin) {
         let row = Row::new_with_origin(self.width, origin, join);
         self.rows.push(row);
-    }
-
-    fn push_row_with_kind(&mut self, origin: RowOrigin, join: RowJoin) {
-        self.rows
-            .push(Row::new_with_origin(self.width, origin, join));
     }
 
     #[must_use]
@@ -1230,22 +1222,6 @@ impl Buffer {
         self.cursor.pos.y.saturating_sub(start)
     }
 
-    #[inline]
-    fn at_scroll_region_bottom(&self) -> bool {
-        if self.height == 0 {
-            return false;
-        }
-        self.cursor_screen_y() == self.scroll_region_bottom
-    }
-
-    #[inline]
-    fn at_scroll_region_top(&self) -> bool {
-        if self.height == 0 {
-            return false;
-        }
-        self.cursor_screen_y() == self.scroll_region_top
-    }
-
     /// Convert DECSTBM region (screen coords) into buffer row indices (rows[])
     fn scroll_region_rows(&self) -> (usize, usize) {
         let start = self.visible_window_start();
@@ -1826,8 +1802,6 @@ fn tags_same_format(a: &FormatTag, b: &FormatTag) -> bool {
 #[cfg(test)]
 mod basic_tests {
     use super::*;
-    use crate::row::Row;
-    use freminal_common::buffer_states::buffer_type::BufferType;
     use freminal_common::buffer_states::tchar::TChar;
 
     fn ascii(c: char) -> TChar {
@@ -3248,7 +3222,6 @@ mod tests_gui_scroll {
 #[cfg(test)]
 mod tests_gui_resize {
     use super::*;
-    use crate::buffer::{Buffer, BufferType};
     use crate::row::{Row, RowJoin, RowOrigin};
 
     // Helper: create a buffer with N rows and a given config
@@ -3776,12 +3749,7 @@ mod alt_primary_scroll_offset_restore_tests {
 #[cfg(test)]
 mod visible_as_tchars_and_tags_tests {
     use super::*;
-    use freminal_common::buffer_states::{
-        cursor::StateColors,
-        fonts::{FontDecorations, FontWeight},
-        format_tag::FormatTag,
-        tchar::TChar,
-    };
+    use freminal_common::buffer_states::{fonts::FontWeight, format_tag::FormatTag, tchar::TChar};
     use freminal_common::colors::TerminalColor;
 
     // Helper: convert ASCII &str or &[u8] to Vec<TChar> without fallible operations.

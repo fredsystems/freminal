@@ -322,7 +322,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.mouse_position
     }
 
-    pub fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
+    pub const fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
         self.internal.is_mouse_hovered_on_url(mouse_position)
     }
 
@@ -360,7 +360,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.skip_draw_always()
     }
 
-    pub fn needs_redraw(&mut self) -> bool {
+    pub const fn needs_redraw(&mut self) -> bool {
         let internal = if self.internal.is_changed() {
             self.internal.clear_changed();
             true
@@ -371,7 +371,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         !self.previous_pass_valid || internal
     }
 
-    pub fn get_win_size(&mut self) -> (usize, usize) {
+    pub const fn get_win_size(&mut self) -> (usize, usize) {
         self.internal.get_win_size()
     }
 
@@ -386,9 +386,10 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         font_pixel_width: usize,
         font_pixel_height: usize,
     ) -> Result<()> {
-        let response = self.internal.set_win_size(width_chars, height_chars);
+        let (old_width, old_height) = self.internal.get_win_size();
+        self.internal.set_win_size(width_chars, height_chars);
 
-        if response.changed {
+        if old_width != width_chars || old_height != height_chars {
             self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
                 width: width_chars,
                 height: height_chars,
@@ -411,23 +412,15 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
     }
 
     pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
-        #[cfg(feature = "new-buffer")]
-        {
-            // Under new-buffer the old flat buffer is gone; return the visible
-            // data from the new handler so callers that still invoke this path
-            // don't panic or fail to compile.
-            let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui();
-            if include_scrollback {
-                chars
-            } else {
-                TerminalSections {
-                    scrollback: vec![],
-                    visible: chars.visible,
-                }
+        let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui();
+        if include_scrollback {
+            chars
+        } else {
+            TerminalSections {
+                scrollback: vec![],
+                visible: chars.visible,
             }
         }
-        #[cfg(not(feature = "new-buffer"))]
-        self.internal.data(include_scrollback)
     }
 
     pub fn data_and_format_data_for_gui(
@@ -443,17 +436,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
         self.internal.cursor_pos()
     }
 
-    pub fn show_cursor(&mut self) -> bool {
-        // Under new-buffer the old Buffer struct is gone; show_cursor() on
-        // internal already delegates entirely to the new handler.
-        #[cfg(feature = "new-buffer")]
-        {
-            self.internal.show_cursor()
-        }
-        #[cfg(not(feature = "new-buffer"))]
-        {
-            self.internal.get_current_buffer().show_cursor == Dectcem::Show
-                && self.internal.show_cursor()
-        }
+    pub const fn show_cursor(&mut self) -> bool {
+        self.internal.show_cursor()
     }
 }
