@@ -373,7 +373,7 @@ impl<Io: FreminalTermInputOutput> TerminalEmulator<Io> {
 
     fn request_repaint(&self) {
         if let Some(ctx) = &self.ctx {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(8));
         }
     }
 
