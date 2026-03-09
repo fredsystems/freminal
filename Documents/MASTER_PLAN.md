@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates six major development tasks for Freminal. Each task has a dedicated
+This document orchestrates seven major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -31,6 +31,7 @@ and plan document maintenance rules.
 | 4   | Deployment Flake             | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
 | 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
 | 6   | Test Gap Coverage            | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
+| 7   | Escape Sequence Coverage     | `PLAN_07_ESCAPE_SEQUENCES.md` | Not Started | None         |
 
 ---
 
@@ -43,6 +44,8 @@ Task 2 (CLI Args + TOML Config) ──┬──► Task 3 (Settings Modal)
                                    └──► Task 4 (Deployment Flake)
 
 Task 6 (Test Gap Coverage) ── independent, can run any time
+
+Task 7 (Escape Sequence Coverage) ── independent, can run any time
 ```
 
 ### Dependency Details
@@ -64,16 +67,21 @@ complete first.
 **Task 6:** Independent. Can run before, during, or after any other task. Recommended to start
 early since it improves safety for all subsequent work.
 
+**Task 7:** Independent. Can run before, during, or after any other task. Addresses escape
+sequence correctness — critical for basic terminal compatibility (vttest, vim, tmux, etc.).
+Recommended to start early since it fixes bugs that affect daily use.
+
 ---
 
 ## Recommended Execution Order
 
 ### Phase 1 — Foundation (Parallel)
 
-Run these three tasks in parallel since they have no dependencies on each other:
+Run these four tasks in parallel since they have no dependencies on each other:
 
 - **Task 2** — CLI Args + TOML Config (foundation for Tasks 3 & 4)
 - **Task 6** — Test Gap Coverage (improves safety net for everything)
+- **Task 7** — Escape Sequence Coverage (fixes bugs, improves daily-use compatibility)
 - **Task 1** — Glyph Atlas + Custom Painter (largest task, long lead time)
 
 ### Phase 2 — Dependents (After Phase 1 completes)
@@ -90,6 +98,7 @@ but only after Task 1 is complete.
 ```text
 Phase 1:  ├── Task 2 (CLI/Config) ────────────┤
           ├── Task 6 (Test Gaps) ──────────────┤
+          ├── Task 7 (Escape Sequences) ───────┤
           ├── Task 1 (Glyph Atlas) ────────────────────────────────┤
           │                                    │                   │
 Phase 2:  │                                    ├── Task 3 (Modal) ─┤
@@ -159,6 +168,7 @@ Update this section as tasks complete:
 | 4    | —          | —          | Unblocked (Task 2 complete)     |
 | 5    | —          | —          | Blocked on Task 1               |
 | 6    | —          | —          |                                 |
+| 7    | —          | —          | Audit complete, plan created    |
 
 ---
 
@@ -167,4 +177,5 @@ Update this section as tasks complete:
 - `agents.md` — Agent rules, architecture, verification suite
 - `Documents/PERFORMANCE_PLAN.md` — Completed performance refactor (Tasks 1-12)
 - `Documents/TODO.md` — Version roadmap
+- `Documents/PLAN_07_ESCAPE_SEQUENCES.md` — Escape sequence audit and implementation plan
 - `config_example.toml` — Current config format
