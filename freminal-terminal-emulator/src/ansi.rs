@@ -147,7 +147,8 @@ impl FreminalAnsiParser {
             return Err(());
         }
 
-        if b == b'\n' {
+        // LF (0x0A), VT (0x0B), FF (0x0C) all produce a newline
+        if b == b'\n' || b == 0x0B || b == 0x0C {
             push_data_if_non_empty(data_output, output);
             output.push(TerminalOutput::Newline);
             return Err(());
@@ -162,6 +163,17 @@ impl FreminalAnsiParser {
         if b == 0x07 {
             push_data_if_non_empty(data_output, output);
             output.push(TerminalOutput::Bell);
+            return Err(());
+        }
+
+        if b == 0x09 {
+            push_data_if_non_empty(data_output, output);
+            output.push(TerminalOutput::Tab);
+            return Err(());
+        }
+
+        // NUL (0x00) and DEL (0x7F) are silently ignored
+        if b == 0x00 || b == 0x7F {
             return Err(());
         }
 
@@ -577,6 +589,88 @@ mod tests {
         for o in outputs {
             let _ = format!("{o}");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Subtask 7.4: VT (0x0B) and FF (0x0C) treated as LF
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn vt_produces_newline() {
+        let mut p = FreminalAnsiParser::new();
+        let mut out = Vec::new();
+        let mut data = Vec::new();
+        let r = p.ansi_parser_inner_empty(0x0B, &mut data, &mut out);
+        assert!(r.is_err());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].to_string(), "Newline");
+    }
+
+    #[test]
+    fn ff_produces_newline() {
+        let mut p = FreminalAnsiParser::new();
+        let mut out = Vec::new();
+        let mut data = Vec::new();
+        let r = p.ansi_parser_inner_empty(0x0C, &mut data, &mut out);
+        assert!(r.is_err());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].to_string(), "Newline");
+    }
+
+    #[test]
+    fn vt_and_ff_via_push() {
+        let mut parser = FreminalAnsiParser::new();
+        // Push data containing VT and FF interleaved with text
+        let result = parser.push(b"A\x0BB\x0CC");
+        // Should see: Data("A"), Newline, Data("B"), Newline, Data("C")
+        let newline_count = result
+            .iter()
+            .filter(|o| matches!(o, TerminalOutput::Newline))
+            .count();
+        assert_eq!(newline_count, 2, "VT and FF should each produce a Newline");
+    }
+
+    // -------------------------------------------------------------------------
+    // Subtask 7.5: NUL (0x00) and DEL (0x7F) silently ignored
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn nul_silently_ignored() {
+        let mut p = FreminalAnsiParser::new();
+        let mut out = Vec::new();
+        let mut data = Vec::new();
+        let r = p.ansi_parser_inner_empty(0x00, &mut data, &mut out);
+        assert!(r.is_err());
+        assert!(out.is_empty(), "NUL should produce no output");
+    }
+
+    #[test]
+    fn del_silently_ignored() {
+        let mut p = FreminalAnsiParser::new();
+        let mut out = Vec::new();
+        let mut data = Vec::new();
+        let r = p.ansi_parser_inner_empty(0x7F, &mut data, &mut out);
+        assert!(r.is_err());
+        assert!(out.is_empty(), "DEL should produce no output");
+    }
+
+    #[test]
+    fn nul_and_del_stripped_from_push_output() {
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x00Hello\x7F");
+        // NUL and DEL should not appear in output; we should just get Data("Hello")
+        let combined: Vec<u8> = result
+            .iter()
+            .filter_map(|o| {
+                if let TerminalOutput::Data(d) = o {
+                    Some(d.clone())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+        assert_eq!(combined, b"Hello");
     }
 
     #[test]

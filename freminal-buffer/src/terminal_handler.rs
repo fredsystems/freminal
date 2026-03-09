@@ -115,6 +115,11 @@ impl TerminalHandler {
         self.buffer.handle_backspace();
     }
 
+    /// Handle horizontal tab (HT / 0x09)
+    pub fn handle_tab(&mut self) {
+        self.buffer.advance_to_next_tab_stop();
+    }
+
     /// Handle cursor position (CUP, HVP)
     /// x and y are typically 1-indexed from the parser, so we subtract 1
     pub fn handle_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
@@ -209,11 +214,12 @@ impl TerminalHandler {
     }
 
     /// Handle set top and bottom margins (DECSTBM)
+    ///
+    /// `top` and `bottom` are **1-based inclusive** row numbers, exactly as the
+    /// ANSI parser delivers them.  `Buffer::set_scroll_region` already converts
+    /// 1-based → 0-based internally, so we must NOT subtract here.
     pub fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
-        // Parser typically sends 1-indexed values
-        let top_zero = top.saturating_sub(1);
-        let bottom_zero = bottom.saturating_sub(1);
-        self.buffer.set_scroll_region(top_zero, bottom_zero);
+        self.buffer.set_scroll_region(top, bottom);
     }
 
     /// Handle index (IND)
@@ -593,6 +599,9 @@ impl TerminalHandler {
             TerminalOutput::InsertLines(n) => {
                 self.handle_insert_lines(*n);
             }
+            TerminalOutput::DeleteLines(n) => {
+                self.handle_delete_lines(*n);
+            }
             TerminalOutput::Delete(n) => {
                 self.handle_delete_chars(*n);
             }
@@ -618,6 +627,9 @@ impl TerminalHandler {
             // === Unimplemented Operations - TODO ===
             TerminalOutput::Bell => {
                 tracing::debug!("Bell (ignored)");
+            }
+            TerminalOutput::Tab => {
+                self.buffer.advance_to_next_tab_stop();
             }
             TerminalOutput::ApplicationKeypadMode => {
                 tracing::warn!("ApplicationKeypadMode not yet implemented (ignored)");
@@ -1264,12 +1276,129 @@ mod tests {
     fn test_handle_scroll_region() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        // Set scroll region from line 5 to line 20 (1-indexed from parser)
+        // Set scroll region from line 5 to line 20 (1-based from parser)
         handler.handle_set_scroll_region(5, 20);
 
-        // Buffer should have scroll region set (converted to 0-indexed)
-        // This is hard to verify without exposing scroll region state,
-        // but at least verify it doesn't panic
+        // Buffer stores 0-based inclusive: (4, 19)
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 4, "top should be 0-based (5-1=4)");
+        assert_eq!(bottom, 19, "bottom should be 0-based (20-1=19)");
+    }
+
+    #[test]
+    fn test_handle_scroll_region_full_screen() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // CSI r with no params: parser sends (1, usize::MAX)
+        handler.handle_set_scroll_region(1, usize::MAX);
+
+        // usize::MAX >= height → invalid → resets to full screen [0, 23]
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 0);
+        assert_eq!(bottom, 23);
+    }
+
+    #[test]
+    fn test_handle_scroll_region_single_row() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // top == bottom (1-based) → 0-based top >= bottom → resets to full screen
+        handler.handle_set_scroll_region(5, 5);
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 0);
+        assert_eq!(bottom, 23);
+    }
+
+    #[test]
+    fn test_handle_scroll_region_inverted() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Inverted range → invalid → resets to full screen
+        handler.handle_set_scroll_region(20, 5);
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 0);
+        assert_eq!(bottom, 23);
+    }
+
+    #[test]
+    fn test_handle_scroll_region_bottom_beyond_screen() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // bottom (1-based 30) exceeds height (24) → 0-based 29 >= 24 → resets
+        handler.handle_set_scroll_region(1, 30);
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 0);
+        assert_eq!(bottom, 23);
+    }
+
+    #[test]
+    fn test_handle_scroll_region_exact_full_screen() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // (1, 24) in 1-based → (0, 23) in 0-based → valid, full screen
+        handler.handle_set_scroll_region(1, 24);
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 0);
+        assert_eq!(bottom, 23);
+    }
+
+    #[test]
+    fn test_tab_from_column_0() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Cursor starts at col 0
+        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+        handler.handle_tab();
+        // Should advance to column 8 (first default tab stop)
+        assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    }
+
+    #[test]
+    fn test_tab_from_column_7() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"1234567"); // 7 chars → cursor at col 7
+        handler.handle_tab();
+        // Column 7 → next tab stop is column 8
+        assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    }
+
+    #[test]
+    fn test_tab_from_tab_stop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"12345678"); // 8 chars → cursor at col 8
+        handler.handle_tab();
+        // Column 8 is a tab stop → next is column 16
+        assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    }
+
+    #[test]
+    fn test_tab_multiple() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tab(); // 0 → 8
+        handler.handle_tab(); // 8 → 16
+        handler.handle_tab(); // 16 → 24
+        assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+    }
+
+    #[test]
+    fn test_tab_near_end_of_line() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Move cursor to column 75
+        handler.handle_cursor_pos(Some(76), Some(1)); // 1-based
+        handler.handle_tab();
+        // Last tab stop in 80-col terminal is col 72 (8*9=72).
+        // At col 75, no more tab stops → goes to col 79 (rightmost)
+        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    }
+
+    #[test]
+    fn test_tab_does_not_wrap() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(80), Some(1)); // 1-based → col 79
+        let y_before = handler.buffer().get_cursor().pos.y;
+        handler.handle_tab();
+        // Should stay at col 79, not wrap
+        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+        assert_eq!(handler.buffer().get_cursor().pos.y, y_before);
     }
 
     #[test]
