@@ -26,7 +26,7 @@ and plan document maintenance rules.
 | #   | Task                         | Plan Document                 | Status      | Dependencies |
 | --- | ---------------------------- | ----------------------------- | ----------- | ------------ |
 | 1   | Glyph Atlas + Custom Painter | `PLAN_01_GLYPH_ATLAS.md`      | Not Started | None         |
-| 2   | CLI Args + TOML Config       | `PLAN_02_CLI_CONFIG.md`       | Not Started | None         |
+| 2   | CLI Args + TOML Config       | `PLAN_02_CLI_CONFIG.md`       | Complete    | None         |
 | 3   | Settings Modal               | `PLAN_03_SETTINGS_MODAL.md`   | Not Started | Task 2       |
 | 4   | Deployment Flake             | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
 | 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
@@ -151,14 +151,14 @@ new architecture.
 
 Update this section as tasks complete:
 
-| Task | Started | Completed | Notes |
-| ---- | ------- | --------- | ----- |
-| 1    | —       | —         |       |
-| 2    | —       | —         |       |
-| 3    | —       | —         |       |
-| 4    | —       | —         |       |
-| 5    | —       | —         |       |
-| 6    | —       | —         |       |
+| Task | Started    | Completed  | Notes                           |
+| ---- | ---------- | ---------- | ------------------------------- |
+| 1    | —          | —          |                                 |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config |
+| 3    | —          | —          | Unblocked (Task 2 complete)     |
+| 4    | —          | —          | Unblocked (Task 2 complete)     |
+| 5    | —          | —          | Blocked on Task 1               |
+| 6    | —          | —          |                                 |
 
 ---
 
