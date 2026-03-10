@@ -9,6 +9,7 @@ use freminal_common::{
         cursor::{CursorPos, ReverseVideo},
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
+        ftcs::{FtcsMarker, FtcsState},
         line_draw::DecSpecialGraphics,
         mode::Mode,
         modes::decawm::Decawm,
@@ -56,6 +57,10 @@ pub struct TerminalHandler {
     ///
     /// Stores the decoded path component from `file://hostname/path`.
     current_working_directory: Option<String>,
+    /// Current FTCS (OSC 133) shell integration state.
+    ftcs_state: FtcsState,
+    /// Exit code from the most recent `OSC 133 ; D [; exitcode]` marker.
+    last_exit_code: Option<i32>,
 }
 
 impl TerminalHandler {
@@ -72,6 +77,8 @@ impl TerminalHandler {
             window_commands: Vec::new(),
             last_graphic_char: None,
             current_working_directory: None,
+            ftcs_state: FtcsState::default(),
+            last_exit_code: None,
         }
     }
 
@@ -96,6 +103,8 @@ impl TerminalHandler {
         self.window_commands.clear();
         self.last_graphic_char = None;
         self.current_working_directory = None;
+        self.ftcs_state = FtcsState::default();
+        self.last_exit_code = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -391,6 +400,18 @@ impl TerminalHandler {
         self.current_working_directory.as_deref()
     }
 
+    /// Return the current FTCS (OSC 133) shell integration state.
+    #[must_use]
+    pub const fn ftcs_state(&self) -> FtcsState {
+        self.ftcs_state
+    }
+
+    /// Return the exit code from the most recent `OSC 133 ; D` marker, if any.
+    #[must_use]
+    pub const fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
+    }
+
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     fn write_to_pty(&self, text: &str) {
         if let Some(tx) = &self.write_tx
@@ -502,8 +523,26 @@ impl TerminalHandler {
                     tracing::debug!("OSC 7: CWD set to {:?}", self.current_working_directory);
                 }
             }
-            AnsiOscType::Ftcs(value) => {
-                tracing::debug!("OSC FTCS (ignored): {value}");
+            AnsiOscType::Ftcs(marker) => {
+                tracing::debug!("OSC 133 FTCS marker: {marker}");
+                match &marker {
+                    FtcsMarker::PromptStart => {
+                        self.ftcs_state = FtcsState::InPrompt;
+                    }
+                    FtcsMarker::CommandStart => {
+                        self.ftcs_state = FtcsState::InCommand;
+                    }
+                    FtcsMarker::OutputStart => {
+                        self.ftcs_state = FtcsState::InOutput;
+                    }
+                    FtcsMarker::CommandFinished(exit_code) => {
+                        self.last_exit_code = *exit_code;
+                        // After a command finishes we are back in no specific
+                        // region — the next marker will typically be `A`
+                        // (prompt start) again.
+                        self.ftcs_state = FtcsState::None;
+                    }
+                }
             }
             AnsiOscType::ITerm2 => {
                 tracing::debug!("OSC iTerm2 (ignored)");
@@ -1914,5 +1953,107 @@ mod tests {
     fn cwd_is_none_by_default() {
         let handler = TerminalHandler::new(80, 24);
         assert_eq!(handler.current_working_directory(), None);
+    }
+
+    // ── FTCS / OSC 133 tests ────────────────────────────────────────────
+
+    #[test]
+    fn ftcs_state_default_is_none() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn ftcs_prompt_start_sets_in_prompt() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
+    }
+
+    #[test]
+    fn ftcs_command_start_sets_in_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
+    }
+
+    #[test]
+    fn ftcs_output_start_sets_in_output() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+    }
+
+    #[test]
+    fn ftcs_command_finished_resets_to_none() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+    }
+
+    #[test]
+    fn ftcs_command_finished_captures_exit_code() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(42))));
+        assert_eq!(handler.last_exit_code(), Some(42));
+    }
+
+    #[test]
+    fn ftcs_command_finished_no_exit_code() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn ftcs_full_cycle() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // A → prompt start
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
+
+        // B → command start
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
+
+        // C → output start
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+
+        // D;0 → command finished with exit code 0
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), Some(0));
+    }
+
+    #[test]
+    fn ftcs_exit_code_updated_on_each_d_marker() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.last_exit_code(), Some(0));
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(127))));
+        assert_eq!(handler.last_exit_code(), Some(127));
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn full_reset_clears_ftcs_state() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(1))));
+        assert_eq!(handler.last_exit_code(), Some(1));
+
+        handler.full_reset();
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), None);
     }
 }

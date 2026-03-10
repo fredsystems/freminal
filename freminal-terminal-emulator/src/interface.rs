@@ -601,6 +601,9 @@ impl TerminalEmulator {
             .current_working_directory()
             .map(String::from);
 
+        let ftcs_state = self.internal.handler.ftcs_state();
+        let last_exit_code = self.internal.handler.last_exit_code();
+
         TerminalSnapshot {
             visible_chars,
             visible_tags,
@@ -621,6 +624,8 @@ impl TerminalEmulator {
             cursor_key_app_mode,
             skip_draw,
             cwd,
+            ftcs_state,
+            last_exit_code,
         }
     }
 }

@@ -17,6 +17,7 @@ use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
         format_tag::FormatTag,
+        ftcs::FtcsState,
         modes::{mouse::MouseTrack, rl_bracket::RlBracket},
         tchar::TChar,
     },
@@ -126,6 +127,17 @@ pub struct TerminalSnapshot {
     /// The GUI can use this for tab titles, file-open dialogs, or spawning
     /// new terminals in the same directory.
     pub cwd: Option<String>,
+
+    /// Current FTCS (OSC 133) shell integration state.
+    ///
+    /// Indicates whether the terminal is currently inside a prompt, command
+    /// input, or command output region.
+    pub ftcs_state: FtcsState,
+
+    /// Exit code from the most recent `OSC 133 ; D` marker, if any.
+    ///
+    /// The GUI can use this to display command success/failure indicators.
+    pub last_exit_code: Option<i32>,
 }
 
 impl TerminalSnapshot {
@@ -154,6 +166,8 @@ impl TerminalSnapshot {
             cursor_key_app_mode: false,
             skip_draw: false,
             cwd: None,
+            ftcs_state: FtcsState::default(),
+            last_exit_code: None,
         }
     }
 }

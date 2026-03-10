@@ -8,6 +8,7 @@
 use crate::ansi::ParserOutcome;
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use anyhow::Result;
+use freminal_common::buffer_states::ftcs::parse_ftcs_params;
 use freminal_common::buffer_states::osc::{
     AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
 };
@@ -180,9 +181,26 @@ impl AnsiOscParser {
                             )));
                         }
                         OscTarget::Ftcs => {
-                            output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(
-                                osc_internal_type.to_string(),
-                            )));
+                            // Extract the string tokens after "133" and pass
+                            // them to the FTCS parser.  E.g. for
+                            // `OSC 133 ; D ; 0 ST` → params_strs = ["D", "0"]
+                            let ftcs_strs: Vec<&str> = params
+                                .iter()
+                                .skip(1) // skip the "133" token
+                                .filter_map(|t| match t {
+                                    Some(AnsiOscToken::String(s)) => Some(s.as_str()),
+                                    _ => None,
+                                })
+                                .collect();
+
+                            if let Some(marker) = parse_ftcs_params(&ftcs_strs) {
+                                output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
+                            } else {
+                                tracing::debug!(
+                                    "OSC 133: unrecognised FTCS params: recent='{}'",
+                                    self.seq_trace.as_str()
+                                );
+                            }
                         }
                         OscTarget::RemoteHost => {
                             output.push(TerminalOutput::OscResponse(AnsiOscType::RemoteHost(

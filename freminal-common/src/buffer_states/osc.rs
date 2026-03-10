@@ -6,7 +6,7 @@
 use anyhow::{Error, Result};
 use std::str::FromStr;
 
-use crate::buffer_states::url::Url;
+use crate::buffer_states::{ftcs::FtcsMarker, url::Url};
 
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub enum AnsiOscInternalType {
@@ -159,7 +159,7 @@ pub enum AnsiOscType {
     NoOp,
     RequestColorQueryBackground(AnsiOscInternalType),
     RequestColorQueryForeground(AnsiOscInternalType),
-    Ftcs(String),
+    Ftcs(FtcsMarker),
     // FIXME: We're handling 0 and 2 as just title bar for now
     // if we go tabbed, we'll need to handle 2 differently
     SetTitleBar(String),
@@ -181,7 +181,7 @@ impl std::fmt::Display for AnsiOscType {
             }
             Self::Url(url) => write!(f, "Url({url})"),
             Self::SetTitleBar(value) => write!(f, "SetTitleBar({value:?})"),
-            Self::Ftcs(value) => write!(f, "Ftcs ({value:?})"),
+            Self::Ftcs(marker) => write!(f, "Ftcs ({marker})"),
             Self::RemoteHost(value) => write!(f, "RemoteHost ({value:?})"),
             Self::ResetCursorColor => write!(f, "ResetCursorColor"),
             Self::ITerm2 => write!(f, "ITerm2"),
