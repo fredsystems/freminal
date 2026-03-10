@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod error;
 pub mod fonts;
 pub mod format_tag;
+pub mod ftcs;
 pub mod line_draw;
 pub mod line_wrap;
 pub mod mode;

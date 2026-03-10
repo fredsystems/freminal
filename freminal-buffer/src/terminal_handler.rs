@@ -9,6 +9,7 @@ use freminal_common::{
         cursor::{CursorPos, ReverseVideo},
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
+        ftcs::{FtcsMarker, FtcsState},
         line_draw::DecSpecialGraphics,
         mode::Mode,
         modes::decawm::Decawm,
@@ -23,6 +24,7 @@ use freminal_common::{
         url::Url,
         window_manipulation::WindowManipulation,
     },
+    colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
     pty_write::PtyWrite,
     sgr::SelectGraphicRendition,
@@ -52,6 +54,16 @@ pub struct TerminalHandler {
     window_commands: Vec<WindowManipulation>,
     /// Last graphic character written (for REP — CSI b).
     last_graphic_char: Option<TChar>,
+    /// Current working directory reported by the shell via OSC 7.
+    ///
+    /// Stores the decoded path component from `file://hostname/path`.
+    current_working_directory: Option<String>,
+    /// Current FTCS (OSC 133) shell integration state.
+    ftcs_state: FtcsState,
+    /// Exit code from the most recent `OSC 133 ; D [; exitcode]` marker.
+    last_exit_code: Option<i32>,
+    /// Mutable 256-color palette with optional per-index overrides.
+    palette: ColorPalette,
 }
 
 impl TerminalHandler {
@@ -67,6 +79,10 @@ impl TerminalHandler {
             write_tx: None,
             window_commands: Vec::new(),
             last_graphic_char: None,
+            current_working_directory: None,
+            ftcs_state: FtcsState::default(),
+            last_exit_code: None,
+            palette: ColorPalette::default(),
         }
     }
 
@@ -90,6 +106,10 @@ impl TerminalHandler {
         self.character_replace = DecSpecialGraphics::default();
         self.window_commands.clear();
         self.last_graphic_char = None;
+        self.current_working_directory = None;
+        self.ftcs_state = FtcsState::default();
+        self.last_exit_code = None;
+        self.palette.reset_all();
     }
 
     /// Get a reference to the underlying buffer
@@ -101,6 +121,12 @@ impl TerminalHandler {
     /// Get a mutable reference to the underlying buffer
     pub const fn buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffer
+    }
+
+    /// Get a reference to the 256-color palette.
+    #[must_use]
+    pub const fn palette(&self) -> &ColorPalette {
+        &self.palette
     }
 
     /// Get a reference to the current character format (SGR state).
@@ -286,7 +312,20 @@ impl TerminalHandler {
 
     /// Handle SGR (Select Graphic Rendition) — update `current_format` and propagate to buffer.
     pub fn handle_sgr(&mut self, sgr: &SelectGraphicRendition) {
-        apply_sgr(&mut self.current_format, sgr);
+        // Resolve PaletteIndex colors against the mutable palette before applying.
+        let resolved = match sgr {
+            SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(idx)) => {
+                SelectGraphicRendition::Foreground(self.palette.lookup(usize::from(*idx)))
+            }
+            SelectGraphicRendition::Background(TerminalColor::PaletteIndex(idx)) => {
+                SelectGraphicRendition::Background(self.palette.lookup(usize::from(*idx)))
+            }
+            SelectGraphicRendition::UnderlineColor(TerminalColor::PaletteIndex(idx)) => {
+                SelectGraphicRendition::UnderlineColor(self.palette.lookup(usize::from(*idx)))
+            }
+            _ => *sgr,
+        };
+        apply_sgr(&mut self.current_format, &resolved);
         self.buffer.set_format(self.current_format.clone());
     }
 
@@ -379,6 +418,24 @@ impl TerminalHandler {
         std::mem::take(&mut self.window_commands)
     }
 
+    /// Return the current working directory reported by the shell via OSC 7, if any.
+    #[must_use]
+    pub fn current_working_directory(&self) -> Option<&str> {
+        self.current_working_directory.as_deref()
+    }
+
+    /// Return the current FTCS (OSC 133) shell integration state.
+    #[must_use]
+    pub const fn ftcs_state(&self) -> FtcsState {
+        self.ftcs_state
+    }
+
+    /// Return the exit code from the most recent `OSC 133 ; D` marker, if any.
+    #[must_use]
+    pub const fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
+    }
+
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     fn write_to_pty(&self, text: &str) {
         if let Some(tx) = &self.write_tx
@@ -410,12 +467,298 @@ impl TerminalHandler {
 
     /// Handle a DCS (Device Control String) sequence.
     ///
-    /// Most DCS sequences sent by applications like nvim are informational queries.
-    /// Unknown or unsupported sequences are silently logged and ignored — they must
-    /// never panic.
-    pub fn handle_device_control_string(&self, dcs: &[u8]) {
-        // Log at debug level so we can see what nvim and others send without noise.
-        tracing::debug!("DCS received (ignored): {}", String::from_utf8_lossy(dcs));
+    /// The raw `dcs` payload includes the leading `P` byte and the trailing `ESC \`
+    /// string terminator.  We strip those to get the inner content, then dispatch on
+    /// known DCS sub-commands:
+    ///
+    /// - **DECRQSS** (`$ q <Pt> ST`): Request Selection or Setting.
+    /// - **XTGETTCAP** (`+ q <hex> ST`): xterm termcap/terminfo query.
+    ///
+    /// Unknown or unsupported DCS sub-commands are logged at debug level and ignored.
+    pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
+        // Strip leading 'P' and trailing ESC '\' to get inner content.
+        let inner = Self::strip_dcs_envelope(dcs);
+
+        if let Some(pt) = inner.strip_prefix(b"$q") {
+            self.handle_decrqss(pt);
+        } else if let Some(hex_payload) = inner.strip_prefix(b"+q") {
+            self.handle_xtgettcap(hex_payload);
+        } else {
+            tracing::debug!(
+                "DCS sub-command not recognized (ignored): {}",
+                String::from_utf8_lossy(dcs)
+            );
+        }
+    }
+
+    /// Strip the DCS envelope: leading `P` byte and trailing `ESC \` (if present).
+    fn strip_dcs_envelope(dcs: &[u8]) -> &[u8] {
+        let start = usize::from(dcs.first() == Some(&b'P'));
+        let end = if dcs.len() >= 2 && dcs[dcs.len() - 2] == 0x1b && dcs[dcs.len() - 1] == b'\\' {
+            dcs.len() - 2
+        } else {
+            dcs.len()
+        };
+        if start <= end { &dcs[start..end] } else { &[] }
+    }
+
+    /// Handle DECRQSS — Request Selection or Setting.
+    ///
+    /// `pt` is the setting identifier after stripping the `$q` prefix:
+    /// - `m`     → current SGR attributes
+    /// - `r`     → current scroll region (DECSTBM)
+    /// - `SP q`  → current cursor style (DECSCUSR)  (note: space + q)
+    ///
+    /// Response format: `DCS Ps $ r Pt ST`
+    /// - `Ps = 1` for valid request, `Ps = 0` for invalid.
+    fn handle_decrqss(&self, pt: &[u8]) {
+        match pt {
+            b"m" => {
+                let sgr = self.build_sgr_response();
+                self.write_to_pty(&format!("\x1bP1$r{sgr}m\x1b\\"));
+            }
+            b"r" => {
+                let (top, bottom) = self.buffer.scroll_region();
+                // Respond with 1-based row numbers.
+                let top_1 = top + 1;
+                let bottom_1 = bottom + 1;
+                self.write_to_pty(&format!("\x1bP1$r{top_1};{bottom_1}r\x1b\\"));
+            }
+            // SP q = space (0x20) followed by 'q' (0x71)
+            b" q" => {
+                let style_num = match self.cursor_visual_style() {
+                    CursorVisualStyle::BlockCursorBlink => 1,
+                    CursorVisualStyle::BlockCursorSteady => 2,
+                    CursorVisualStyle::UnderlineCursorBlink => 3,
+                    CursorVisualStyle::UnderlineCursorSteady => 4,
+                    CursorVisualStyle::VerticalLineCursorBlink => 5,
+                    CursorVisualStyle::VerticalLineCursorSteady => 6,
+                };
+                self.write_to_pty(&format!("\x1bP1$r{style_num} q\x1b\\"));
+            }
+            _ => {
+                // Invalid / unrecognized query → DCS 0 $ r ST
+                self.write_to_pty("\x1bP0$r\x1b\\");
+                tracing::debug!(
+                    "DECRQSS: unrecognized setting query: {}",
+                    String::from_utf8_lossy(pt)
+                );
+            }
+        }
+    }
+
+    /// Build the SGR parameter string for the current format state.
+    ///
+    /// Returns a string like `0;1;4;38;2;255;0;0` representing the active SGR
+    /// attributes.  The leading `0` (reset) is always included; individual
+    /// attributes are appended only when they differ from the default.
+    fn build_sgr_response(&self) -> String {
+        let fmt = self.current_format();
+        let mut parts: Vec<String> = vec!["0".to_string()];
+
+        // Font weight
+        if fmt.font_weight == FontWeight::Bold {
+            parts.push("1".to_string());
+        }
+
+        // Font decorations
+        for dec in &fmt.font_decorations {
+            match dec {
+                FontDecorations::Faint => parts.push("2".to_string()),
+                FontDecorations::Italic => parts.push("3".to_string()),
+                FontDecorations::Underline => parts.push("4".to_string()),
+                FontDecorations::Strikethrough => parts.push("9".to_string()),
+            }
+        }
+
+        // Reverse video
+        if fmt.colors.reverse_video == ReverseVideo::On {
+            parts.push("7".to_string());
+        }
+
+        // Foreground color
+        Self::append_color_sgr(&mut parts, fmt.colors.color, true);
+
+        // Background color
+        Self::append_color_sgr(&mut parts, fmt.colors.background_color, false);
+
+        // Underline color (SGR 58)
+        if fmt.colors.underline_color != TerminalColor::DefaultUnderlineColor {
+            Self::append_underline_color_sgr(&mut parts, fmt.colors.underline_color);
+        }
+
+        parts.join(";")
+    }
+
+    /// Append SGR parameters for a foreground (`is_fg = true`) or background color.
+    fn append_color_sgr(parts: &mut Vec<String>, color: TerminalColor, is_fg: bool) {
+        let (base, idx_code, rgb_code) = if is_fg { (30, 38, 38) } else { (40, 48, 48) };
+
+        match color {
+            TerminalColor::Black => parts.push(format!("{base}")),
+            TerminalColor::Red => parts.push(format!("{}", base + 1)),
+            TerminalColor::Green => parts.push(format!("{}", base + 2)),
+            TerminalColor::Yellow => parts.push(format!("{}", base + 3)),
+            TerminalColor::Blue => parts.push(format!("{}", base + 4)),
+            TerminalColor::Magenta => parts.push(format!("{}", base + 5)),
+            TerminalColor::Cyan => parts.push(format!("{}", base + 6)),
+            TerminalColor::White => parts.push(format!("{}", base + 7)),
+            TerminalColor::BrightBlack => parts.push(format!("{}", base + 60)),
+            TerminalColor::BrightRed => parts.push(format!("{}", base + 61)),
+            TerminalColor::BrightGreen => parts.push(format!("{}", base + 62)),
+            TerminalColor::BrightYellow => parts.push(format!("{}", base + 63)),
+            TerminalColor::BrightBlue => parts.push(format!("{}", base + 64)),
+            TerminalColor::BrightMagenta => parts.push(format!("{}", base + 65)),
+            TerminalColor::BrightCyan => parts.push(format!("{}", base + 66)),
+            TerminalColor::BrightWhite => parts.push(format!("{}", base + 67)),
+            TerminalColor::PaletteIndex(idx) => {
+                parts.push(format!("{idx_code};5;{idx}"));
+            }
+            TerminalColor::Custom(r, g, b) => {
+                parts.push(format!("{rgb_code};2;{r};{g};{b}"));
+            }
+            // Default, DefaultBackground, DefaultUnderlineColor, DefaultCursorColor — no SGR needed
+            _ => {}
+        }
+    }
+
+    /// Append SGR 58 (underline color) parameters.
+    fn append_underline_color_sgr(parts: &mut Vec<String>, color: TerminalColor) {
+        match color {
+            TerminalColor::PaletteIndex(idx) => {
+                parts.push(format!("58;5;{idx}"));
+            }
+            TerminalColor::Custom(r, g, b) => {
+                parts.push(format!("58;2;{r};{g};{b}"));
+            }
+            // Named colors as underline color: encode as palette index 0-15
+            TerminalColor::Black => parts.push("58;5;0".to_string()),
+            TerminalColor::Red => parts.push("58;5;1".to_string()),
+            TerminalColor::Green => parts.push("58;5;2".to_string()),
+            TerminalColor::Yellow => parts.push("58;5;3".to_string()),
+            TerminalColor::Blue => parts.push("58;5;4".to_string()),
+            TerminalColor::Magenta => parts.push("58;5;5".to_string()),
+            TerminalColor::Cyan => parts.push("58;5;6".to_string()),
+            TerminalColor::White => parts.push("58;5;7".to_string()),
+            TerminalColor::BrightBlack => parts.push("58;5;8".to_string()),
+            TerminalColor::BrightRed => parts.push("58;5;9".to_string()),
+            TerminalColor::BrightGreen => parts.push("58;5;10".to_string()),
+            TerminalColor::BrightYellow => parts.push("58;5;11".to_string()),
+            TerminalColor::BrightBlue => parts.push("58;5;12".to_string()),
+            TerminalColor::BrightMagenta => parts.push("58;5;13".to_string()),
+            TerminalColor::BrightCyan => parts.push("58;5;14".to_string()),
+            TerminalColor::BrightWhite => parts.push("58;5;15".to_string()),
+            _ => {}
+        }
+    }
+
+    /// Handle XTGETTCAP — xterm termcap/terminfo capability query.
+    ///
+    /// `hex_payload` is the hex-encoded capability name(s) after stripping the `+q`
+    /// prefix.  Multiple capability names may be separated by `;` in the hex payload.
+    ///
+    /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
+    ///           `DCS 0 + r <hex-name> ST` for unknown ones.
+    fn handle_xtgettcap(&self, hex_payload: &[u8]) {
+        let payload_str = String::from_utf8_lossy(hex_payload);
+
+        // Split on ';' to support multiple capability queries in a single DCS.
+        for hex_name in payload_str.split(';') {
+            if hex_name.is_empty() {
+                continue;
+            }
+
+            let Some(cap_name) = Self::hex_decode(hex_name) else {
+                tracing::debug!("XTGETTCAP: invalid hex encoding: {hex_name}");
+                self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
+                continue;
+            };
+
+            if let Some(value) = Self::lookup_termcap(&cap_name) {
+                let hex_value = Self::hex_encode(value);
+                self.write_to_pty(&format!("\x1bP1+r{hex_name}={hex_value}\x1b\\"));
+            } else {
+                tracing::debug!("XTGETTCAP: unknown capability: {cap_name}");
+                self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
+            }
+        }
+    }
+
+    /// Decode a hex-encoded ASCII string (e.g., "524742" → "RGB").
+    fn hex_decode(hex: &str) -> Option<String> {
+        let bytes = hex.as_bytes();
+        if !bytes.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut result = Vec::with_capacity(bytes.len() / 2);
+        let mut i = 0;
+        while i < bytes.len() {
+            let hi = Self::hex_nibble(bytes[i])?;
+            let lo = Self::hex_nibble(bytes[i + 1])?;
+            result.push((hi << 4) | lo);
+            i += 2;
+        }
+        String::from_utf8(result).ok()
+    }
+
+    /// Encode an ASCII string as hex (e.g., "1" → "31").
+    fn hex_encode(s: &str) -> String {
+        let mut result = String::with_capacity(s.len() * 2);
+        for b in s.bytes() {
+            result.push(Self::nibble_to_hex(b >> 4));
+            result.push(Self::nibble_to_hex(b & 0x0F));
+        }
+        result
+    }
+
+    /// Convert a single ASCII hex character to its numeric value.
+    const fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    /// Convert a 4-bit nibble to an uppercase hex character.
+    const fn nibble_to_hex(n: u8) -> char {
+        match n {
+            0..=9 => (b'0' + n) as char,
+            _ => (b'A' + n - 10) as char,
+        }
+    }
+
+    /// Look up a termcap/terminfo capability by decoded name.
+    ///
+    /// Returns `Some(value_str)` for known capabilities, `None` for unknown ones.
+    /// The returned string is the raw value (not yet hex-encoded).
+    fn lookup_termcap(name: &str) -> Option<&'static str> {
+        match name {
+            // RGB — terminal supports direct-color (24-bit) via SGR 38/48;2;R;G;B
+            "RGB" => Some("8/8/8"),
+            // Tc — tmux extension: true color support
+            "Tc" => Some(""),
+            // setrgbf — SGR sequence to set RGB foreground
+            "setrgbf" => Some("\x1b[38;2;%p1%d;%p2%d;%p3%dm"),
+            // setrgbb — SGR sequence to set RGB background
+            "setrgbb" => Some("\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
+            // colors — number of colors supported
+            "colors" | "Co" => Some("256"),
+            // TN — terminal name
+            "TN" => Some("xterm-256color"),
+            // Ms — set selection (clipboard) via OSC 52
+            "Ms" => Some("\x1b]52;%p1%s;%p2%s\x1b\\"),
+            // Se — reset cursor to default style (DECSCUSR 0)
+            "Se" => Some("\x1b[2 q"),
+            // Ss — set cursor style (DECSCUSR)
+            "Ss" => Some("\x1b[%p1%d q"),
+            // Smulx — extended underline (SGR 4:N for curly, dotted, etc.)
+            "Smulx" => Some("\x1b[4:%p1%dm"),
+            // Setulc — set underline color
+            "Setulc" => Some("\x1b[58;2;%p1%d;%p2%d;%p3%dm"),
+            _ => None,
+        }
     }
 
     /// Handle an APC (Application Program Command) sequence.
@@ -481,15 +824,73 @@ impl TerminalHandler {
                 // Hardcoded white foreground: #ffffff
                 self.write_to_pty("\x1b]10;rgb:ff/ff/ff\x1b\\");
             }
-            // Remote host / FTCS / iTerm2 — informational only, no action needed.
+            // Remote host / CWD: OSC 7 ; file://hostname/path ST
             AnsiOscType::RemoteHost(value) => {
-                tracing::debug!("OSC RemoteHost (ignored): {value}");
+                self.current_working_directory = parse_osc7_uri(value);
+                if self.current_working_directory.is_none() {
+                    tracing::warn!("OSC 7: failed to parse URI: {value}");
+                } else {
+                    tracing::debug!("OSC 7: CWD set to {:?}", self.current_working_directory);
+                }
             }
-            AnsiOscType::Ftcs(value) => {
-                tracing::debug!("OSC FTCS (ignored): {value}");
+            AnsiOscType::Ftcs(marker) => {
+                tracing::debug!("OSC 133 FTCS marker: {marker}");
+                match &marker {
+                    FtcsMarker::PromptStart => {
+                        self.ftcs_state = FtcsState::InPrompt;
+                    }
+                    FtcsMarker::CommandStart => {
+                        self.ftcs_state = FtcsState::InCommand;
+                    }
+                    FtcsMarker::OutputStart => {
+                        self.ftcs_state = FtcsState::InOutput;
+                    }
+                    FtcsMarker::CommandFinished(exit_code) => {
+                        self.last_exit_code = *exit_code;
+                        // After a command finishes we are back in no specific
+                        // region — the next marker will typically be `A`
+                        // (prompt start) again.
+                        self.ftcs_state = FtcsState::None;
+                    }
+                }
             }
             AnsiOscType::ITerm2 => {
                 tracing::debug!("OSC iTerm2 (ignored)");
+            }
+
+            // Clipboard: forward to GUI via window_commands
+            AnsiOscType::SetClipboard(sel, content) => {
+                self.window_commands.push(WindowManipulation::SetClipboard(
+                    sel.clone(),
+                    content.clone(),
+                ));
+            }
+            AnsiOscType::QueryClipboard(sel) => {
+                self.window_commands
+                    .push(WindowManipulation::QueryClipboard(sel.clone()));
+            }
+
+            // Palette manipulation: OSC 4 (set/query) and OSC 104 (reset)
+            AnsiOscType::SetPaletteColor(idx, r, g, b) => {
+                self.palette.set(*idx, *r, *g, *b);
+            }
+            AnsiOscType::QueryPaletteColor(idx) => {
+                let (r, g, b) = self.palette.get_rgb(*idx);
+                // Respond with 4-digit hex per channel (xterm convention):
+                // OSC 4 ; index ; rgb:RRRR/GGGG/BBBB ST
+                let response = format!(
+                    "\x1b]4;{idx};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                    u16::from(r) * 257,
+                    u16::from(g) * 257,
+                    u16::from(b) * 257,
+                );
+                self.write_to_pty(&response);
+            }
+            AnsiOscType::ResetPaletteColor(Some(idx)) => {
+                self.palette.reset(*idx);
+            }
+            AnsiOscType::ResetPaletteColor(None) => {
+                self.palette.reset_all();
             }
 
             // NoOp, non-Query color variants, cursor-color reset — nothing to do.
@@ -1058,6 +1459,69 @@ fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
         | SelectGraphicRendition::Subscript
         | SelectGraphicRendition::NeitherSuperscriptNorSubscript
         | SelectGraphicRendition::Unknown(_) => {}
+    }
+}
+
+/// Parse an OSC 7 URI of the form `file://hostname/path` and return the path
+/// component.
+///
+/// The hostname is intentionally ignored — it is only meaningful for network
+/// file-systems and most shells send `localhost` or the local hostname.
+///
+/// Percent-encoded bytes (e.g. `%20` for space) are decoded so the returned
+/// path is a normal filesystem path string.
+///
+/// Returns `None` when the URI does not start with `file://` or has no path.
+fn parse_osc7_uri(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+
+    // The path starts at the first '/' after the hostname.
+    // `file:///path` (empty hostname) → rest = "/path"
+    // `file://hostname/path`          → rest = "hostname/path"
+    let path = if rest.starts_with('/') {
+        rest
+    } else {
+        let slash_pos = rest.find('/')?;
+        &rest[slash_pos..]
+    };
+
+    if path.is_empty() {
+        return None;
+    }
+
+    Some(percent_decode(path))
+}
+
+/// Decode percent-encoded bytes (`%XX`) in a string.
+///
+/// Only valid two-hex-digit sequences are decoded; malformed sequences are
+/// passed through verbatim.
+fn percent_decode(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            output.push(char::from(hi << 4 | lo));
+            i += 3;
+            continue;
+        }
+        output.push(char::from(bytes[i]));
+        i += 1;
+    }
+    output
+}
+
+/// Convert an ASCII hex digit to its numeric value.
+const fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1700,5 +2164,853 @@ mod tests {
     fn with_scrollback_limit_overrides_default() {
         let handler = TerminalHandler::new(80, 24).with_scrollback_limit(200);
         assert_eq!(handler.buffer().scrollback_limit(), 200);
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 7 CWD tracking tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_osc7_uri_with_hostname() {
+        let result = super::parse_osc7_uri("file://myhost/home/user/projects");
+        assert_eq!(result, Some("/home/user/projects".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_empty_hostname() {
+        // file:///path — empty hostname (common on macOS)
+        let result = super::parse_osc7_uri("file:///home/user/projects");
+        assert_eq!(result, Some("/home/user/projects".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_localhost() {
+        let result = super::parse_osc7_uri("file://localhost/tmp");
+        assert_eq!(result, Some("/tmp".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_percent_encoded_space() {
+        let result = super::parse_osc7_uri("file:///home/user/my%20project");
+        assert_eq!(result, Some("/home/user/my project".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_multiple_percent_encodings() {
+        let result = super::parse_osc7_uri("file:///home/user/dir%20with%20spaces/sub%2Fdir");
+        assert_eq!(
+            result,
+            Some("/home/user/dir with spaces/sub/dir".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_osc7_uri_not_file_scheme() {
+        assert_eq!(super::parse_osc7_uri("http://example.com/path"), None);
+        assert_eq!(super::parse_osc7_uri("https://example.com/path"), None);
+        assert_eq!(super::parse_osc7_uri("ftp://host/path"), None);
+    }
+
+    #[test]
+    fn parse_osc7_uri_no_path_after_hostname() {
+        // "file://hostname" with no trailing slash — no path
+        assert_eq!(super::parse_osc7_uri("file://hostname"), None);
+    }
+
+    #[test]
+    fn parse_osc7_uri_empty_string() {
+        assert_eq!(super::parse_osc7_uri(""), None);
+    }
+
+    #[test]
+    fn parse_osc7_uri_just_file_scheme() {
+        assert_eq!(super::parse_osc7_uri("file://"), None);
+    }
+
+    #[test]
+    fn percent_decode_no_encoding() {
+        assert_eq!(super::percent_decode("/home/user"), "/home/user");
+    }
+
+    #[test]
+    fn percent_decode_malformed_sequence() {
+        // %ZZ is not valid hex — pass through verbatim
+        assert_eq!(super::percent_decode("/path%ZZfoo"), "/path%ZZfoo");
+    }
+
+    #[test]
+    fn percent_decode_truncated_at_end() {
+        // % at end of string with not enough chars
+        assert_eq!(super::percent_decode("/path%2"), "/path%2");
+        assert_eq!(super::percent_decode("/path%"), "/path%");
+    }
+
+    #[test]
+    fn handle_osc_remote_host_sets_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+    }
+
+    #[test]
+    fn handle_osc_remote_host_updates_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user/a".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user/a"));
+
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user/b".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user/b"));
+    }
+
+    #[test]
+    fn handle_osc_remote_host_invalid_uri_clears_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // First set a valid CWD
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert!(handler.current_working_directory().is_some());
+
+        // Now send an invalid URI — CWD should be cleared (set to None)
+        handler.handle_osc(&AnsiOscType::RemoteHost("not-a-file-uri".to_string()));
+        assert_eq!(handler.current_working_directory(), None);
+    }
+
+    #[test]
+    fn full_reset_clears_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert!(handler.current_working_directory().is_some());
+
+        handler.full_reset();
+        assert_eq!(handler.current_working_directory(), None);
+    }
+
+    #[test]
+    fn cwd_is_none_by_default() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.current_working_directory(), None);
+    }
+
+    // ── FTCS / OSC 133 tests ────────────────────────────────────────────
+
+    #[test]
+    fn ftcs_state_default_is_none() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn ftcs_prompt_start_sets_in_prompt() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
+    }
+
+    #[test]
+    fn ftcs_command_start_sets_in_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
+    }
+
+    #[test]
+    fn ftcs_output_start_sets_in_output() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+    }
+
+    #[test]
+    fn ftcs_command_finished_resets_to_none() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+    }
+
+    #[test]
+    fn ftcs_command_finished_captures_exit_code() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(42))));
+        assert_eq!(handler.last_exit_code(), Some(42));
+    }
+
+    #[test]
+    fn ftcs_command_finished_no_exit_code() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn ftcs_full_cycle() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // A → prompt start
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
+
+        // B → command start
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
+
+        // C → output start
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+
+        // D;0 → command finished with exit code 0
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), Some(0));
+    }
+
+    #[test]
+    fn ftcs_exit_code_updated_on_each_d_marker() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.last_exit_code(), Some(0));
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(127))));
+        assert_eq!(handler.last_exit_code(), Some(127));
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn full_reset_clears_ftcs_state() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(1))));
+        assert_eq!(handler.last_exit_code(), Some(1));
+
+        handler.full_reset();
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 52 clipboard tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handle_osc_set_clipboard_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetClipboard(
+            "c".to_string(),
+            "hello world".to_string(),
+        ));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(
+            matches!(&cmds[0], WindowManipulation::SetClipboard(sel, content) if sel == "c" && content == "hello world")
+        );
+    }
+
+    #[test]
+    fn handle_osc_query_clipboard_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::QueryClipboard("c".to_string()));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            WindowManipulation::QueryClipboard(sel) if sel == "c"
+        ));
+    }
+
+    #[test]
+    fn handle_osc_set_clipboard_primary_selection() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetClipboard(
+            "p".to_string(),
+            "primary text".to_string(),
+        ));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(
+            matches!(&cmds[0], WindowManipulation::SetClipboard(sel, content) if sel == "p" && content == "primary text")
+        );
+    }
+
+    #[test]
+    fn handle_osc_clipboard_commands_are_drained_by_take() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetClipboard(
+            "c".to_string(),
+            "first".to_string(),
+        ));
+        handler.handle_osc(&AnsiOscType::QueryClipboard("s".to_string()));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 2);
+
+        // After take, window_commands should be empty
+        let cmds2 = handler.take_window_commands();
+        assert!(cmds2.is_empty());
+    }
+
+    // ── Palette (OSC 4 / OSC 104) tests ─────────────────────────────────
+
+    #[test]
+    fn palette_default_is_empty_overrides() {
+        let handler = TerminalHandler::new(80, 24);
+        // By default the palette has no overrides — all lookups hit defaults.
+        assert_eq!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default()
+        );
+    }
+
+    #[test]
+    fn handle_osc_set_palette_color() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xAA, 0xBB, 0xCC));
+
+        let (r, g, b) = handler.palette().get_rgb(42);
+        assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
+    }
+
+    #[test]
+    fn handle_osc_query_palette_color_sends_response() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set index 10 to a known value first.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(10, 0xFF, 0x80, 0x00));
+
+        // Query it.
+        handler.handle_osc(&AnsiOscType::QueryPaletteColor(10));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response from query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("response should be valid UTF-8");
+        };
+        // 0xFF * 257 = 0xFFFF (65535), 0x80 * 257 = 0x8080 (32896), 0x00 * 257 = 0x0000
+        assert_eq!(response, "\x1b]4;10;rgb:ffff/8080/0000\x1b\\");
+    }
+
+    #[test]
+    fn handle_osc_query_palette_default_index() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query index 0 (Black in Catppuccin Mocha) without setting an override.
+        handler.handle_osc(&AnsiOscType::QueryPaletteColor(0));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response from query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("response should be valid UTF-8");
+        };
+        // Index 0 default is (69, 71, 90) -> 69*257=17733=0x4545, 71*257=18247=0x4747,
+        // 90*257=23130=0x5a5a
+        assert_eq!(response, "\x1b]4;0;rgb:4545/4747/5a5a\x1b\\");
+    }
+
+    #[test]
+    fn handle_osc_reset_palette_single_index() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Set index 5 to a custom value.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(5, 0x11, 0x22, 0x33));
+        assert_eq!(handler.palette().get_rgb(5), (0x11, 0x22, 0x33));
+
+        // Reset just index 5.
+        handler.handle_osc(&AnsiOscType::ResetPaletteColor(Some(5)));
+
+        // Should revert to the default for index 5.
+        let default_rgb = freminal_common::colors::default_index_to_rgb(5);
+        assert_eq!(handler.palette().get_rgb(5), default_rgb);
+    }
+
+    #[test]
+    fn handle_osc_reset_palette_all() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Set a few indices.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(0, 0xFF, 0x00, 0x00));
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(100, 0x00, 0xFF, 0x00));
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(255, 0x00, 0x00, 0xFF));
+
+        // Reset all.
+        handler.handle_osc(&AnsiOscType::ResetPaletteColor(None));
+
+        // All should revert to defaults.
+        assert_eq!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default()
+        );
+    }
+
+    #[test]
+    fn handle_sgr_palette_index_resolves_against_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Set index 42 to a custom colour.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xDE, 0xAD, 0x00));
+
+        // Apply SGR foreground with PaletteIndex(42).
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(42),
+        ));
+
+        // The resolved colour should be Custom(0xDE, 0xAD, 0x00), not PaletteIndex(42).
+        let fmt = handler.current_format();
+        assert_eq!(
+            fmt.colors.color,
+            TerminalColor::Custom(0xDE, 0xAD, 0x00),
+            "PaletteIndex should be resolved to Custom via palette lookup"
+        );
+    }
+
+    #[test]
+    fn handle_sgr_palette_index_background_and_underline() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(200, 0xAA, 0xBB, 0xCC));
+
+        // Background
+        handler.handle_sgr(&SelectGraphicRendition::Background(
+            TerminalColor::PaletteIndex(200),
+        ));
+        assert_eq!(
+            handler.current_format().colors.background_color,
+            TerminalColor::Custom(0xAA, 0xBB, 0xCC),
+        );
+
+        // Underline colour
+        handler.handle_sgr(&SelectGraphicRendition::UnderlineColor(
+            TerminalColor::PaletteIndex(200),
+        ));
+        assert_eq!(
+            handler.current_format().colors.underline_color,
+            TerminalColor::Custom(0xAA, 0xBB, 0xCC),
+        );
+    }
+
+    #[test]
+    fn handle_sgr_palette_index_uses_default_when_no_override() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // PaletteIndex(1) with no override → should resolve to the default for index 1.
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(1),
+        ));
+
+        let expected = handler.palette().lookup(1);
+        assert_eq!(
+            handler.current_format().colors.color,
+            expected,
+            "PaletteIndex without override should resolve to default colour"
+        );
+    }
+
+    #[test]
+    fn full_reset_clears_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xFF, 0x00, 0xFF));
+        assert_ne!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default()
+        );
+
+        handler.full_reset();
+
+        assert_eq!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default(),
+            "full_reset must clear all palette overrides"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // DECRQSS tests (DCS $ q ... ST)
+    // ------------------------------------------------------------------
+
+    /// Helper: build a raw DCS payload as the standard parser would produce.
+    /// Format: `P` + content + `ESC \`
+    fn build_dcs_payload(content: &[u8]) -> Vec<u8> {
+        let mut v = vec![b'P'];
+        v.extend_from_slice(content);
+        v.extend_from_slice(b"\x1b\\");
+        v
+    }
+
+    /// Helper: receive the PTY write-back response from a DECRQSS query.
+    fn recv_pty_response(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response from DCS query");
+        };
+        let Ok(s) = String::from_utf8(bytes) else {
+            panic!("DCS response should be valid UTF-8");
+        };
+        s
+    }
+
+    #[test]
+    fn decrqss_sgr_default_attributes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default state: just "0" (reset)
+        assert_eq!(response, "\x1bP1$r0m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_bold_and_italic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Apply bold + italic
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Bold));
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Italic));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;1;3m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_with_fg_color() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+            TerminalColor::Red,
+        )));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;31m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_with_truecolor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+            TerminalColor::Custom(255, 128, 0),
+        )));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;38;2;255;128;0m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_reverse_video() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::ReverseVideo));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;7m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decstbm_default_scroll_region() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"$qr");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default scroll region: full screen [0, 23] → 1-based [1, 24]
+        assert_eq!(response, "\x1bP1$r1;24r\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decstbm_custom_scroll_region() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set scroll region to 1-based rows 5-20
+        handler.handle_set_scroll_region(5, 20);
+
+        let dcs = build_dcs_payload(b"$qr");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r5;20r\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscusr_default_cursor_style() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Note: space + q = DECSCUSR query
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default is BlockCursorSteady = 2
+        assert_eq!(response, "\x1bP1$r2 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscusr_after_style_change() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::UnderlineCursorBlink,
+        ));
+
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r3 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_invalid_query() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"$qZ");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Invalid query → DCS 0 $ r ST
+        assert_eq!(response, "\x1bP0$r\x1b\\");
+    }
+
+    #[test]
+    fn dcs_unknown_subcommand_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // No write_tx set — should not panic even on unknown DCS
+        let dcs = build_dcs_payload(b"!zsome_data");
+        handler.handle_device_control_string(&dcs);
+        // Success = no panic
+    }
+
+    #[test]
+    fn strip_dcs_envelope_handles_minimal_payload() {
+        // Just "P" + ESC '\' — inner content is empty
+        let dcs = b"P\x1b\\";
+        let inner = TerminalHandler::strip_dcs_envelope(dcs);
+        assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn strip_dcs_envelope_preserves_content() {
+        let dcs = b"P$qm\x1b\\";
+        let inner = TerminalHandler::strip_dcs_envelope(dcs);
+        assert_eq!(inner, b"$qm");
+    }
+
+    // ── XTGETTCAP tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn xtgettcap_hex_decode_rgb() {
+        // "RGB" = 0x52 0x47 0x42 → "524742"
+        let decoded = TerminalHandler::hex_decode("524742");
+        assert_eq!(decoded.as_deref(), Some("RGB"));
+    }
+
+    #[test]
+    fn xtgettcap_hex_decode_lowercase() {
+        // "RGB" in lowercase hex
+        let decoded = TerminalHandler::hex_decode("524742");
+        assert_eq!(decoded.as_deref(), Some("RGB"));
+
+        let decoded_lower = TerminalHandler::hex_decode("524742");
+        assert_eq!(decoded_lower.as_deref(), Some("RGB"));
+    }
+
+    #[test]
+    fn xtgettcap_hex_decode_odd_length_fails() {
+        // Odd-length hex string is invalid
+        assert!(TerminalHandler::hex_decode("52474").is_none());
+    }
+
+    #[test]
+    fn xtgettcap_hex_encode_roundtrip() {
+        let original = "RGB";
+        let encoded = TerminalHandler::hex_encode(original);
+        assert_eq!(encoded, "524742");
+        let decoded = TerminalHandler::hex_decode(&encoded);
+        assert_eq!(decoded.as_deref(), Some(original));
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_rgb() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "RGB" → hex "524742"
+        let dcs = build_dcs_payload(b"+q524742");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "8/8/8" → hex "382F382F38"
+        assert_eq!(response, "\x1bP1+r524742=382F382F38\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_colors() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "colors" → hex "636F6C6F7273"
+        let dcs = build_dcs_payload(b"+q636F6C6F7273");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "256" → hex "323536"
+        assert_eq!(response, "\x1bP1+r636F6C6F7273=323536\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_tn() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "TN" → hex "544E"
+        let dcs = build_dcs_payload(b"+q544E");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "xterm-256color" → hex
+        let expected_hex = TerminalHandler::hex_encode("xterm-256color");
+        assert_eq!(response, format!("\x1bP1+r544E={expected_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_unknown_capability() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "UNKN" → hex "554E4B4E"
+        let dcs = build_dcs_payload(b"+q554E4B4E");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP0+r554E4B4E\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_multiple_capabilities() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "RGB" and "TN" separated by ';'
+        // "RGB" = 524742, "TN" = 544E
+        let dcs = build_dcs_payload(b"+q524742;544E");
+        handler.handle_device_control_string(&dcs);
+
+        // Should get two separate responses
+        let response1 = recv_pty_response(&rx);
+        assert_eq!(response1, "\x1bP1+r524742=382F382F38\x1b\\");
+
+        let response2 = recv_pty_response(&rx);
+        let tn_hex = TerminalHandler::hex_encode("xterm-256color");
+        assert_eq!(response2, format!("\x1bP1+r544E={tn_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_tc() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "Tc" → hex "5463"
+        let dcs = build_dcs_payload(b"+q5463");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "Tc" has empty value, so hex-encoded value is ""
+        assert_eq!(response, "\x1bP1+r5463=\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_se() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "Se" → hex "5365"
+        let dcs = build_dcs_payload(b"+q5365");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "\x1b[2 q" → hex "1B5B322071"
+        let expected_hex = TerminalHandler::hex_encode("\x1b[2 q");
+        assert_eq!(response, format!("\x1bP1+r5365={expected_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_setrgbf() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "setrgbf" → hex encode each byte
+        let hex_name = TerminalHandler::hex_encode("setrgbf");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[38;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
     }
 }

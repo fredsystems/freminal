@@ -595,6 +595,14 @@ impl TerminalEmulator {
             self.internal.get_cursor_key_mode() == Decckm::Application
         };
         let skip_draw = self.internal.skip_draw_always();
+        let cwd = self
+            .internal
+            .handler
+            .current_working_directory()
+            .map(String::from);
+
+        let ftcs_state = self.internal.handler.ftcs_state();
+        let last_exit_code = self.internal.handler.last_exit_code();
 
         TerminalSnapshot {
             visible_chars,
@@ -615,6 +623,9 @@ impl TerminalEmulator {
             repeat_keys,
             cursor_key_app_mode,
             skip_draw,
+            cwd,
+            ftcs_state,
+            last_exit_code,
         }
     }
 }

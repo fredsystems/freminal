@@ -8,6 +8,7 @@
 use crate::ansi::ParserOutcome;
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use anyhow::Result;
+use freminal_common::buffer_states::ftcs::parse_ftcs_params;
 use freminal_common::buffer_states::osc::{
     AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
 };
@@ -180,9 +181,35 @@ impl AnsiOscParser {
                             )));
                         }
                         OscTarget::Ftcs => {
-                            output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(
-                                osc_internal_type.to_string(),
-                            )));
+                            // Extract the string tokens after "133" and pass
+                            // them to the FTCS parser.  E.g. for
+                            // `OSC 133 ; D ; 0 ST` → params_strs = ["D", "0"]
+                            let ftcs_strs: Vec<&str> = params
+                                .iter()
+                                .skip(1) // skip the "133" token
+                                .filter_map(|t| match t {
+                                    Some(AnsiOscToken::String(s)) => Some(s.as_str()),
+                                    _ => None,
+                                })
+                                .collect();
+
+                            if let Some(marker) = parse_ftcs_params(&ftcs_strs) {
+                                output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
+                            } else {
+                                tracing::debug!(
+                                    "OSC 133: unrecognised FTCS params: recent='{}'",
+                                    self.seq_trace.as_str()
+                                );
+                            }
+                        }
+                        OscTarget::Clipboard => {
+                            Self::handle_osc_clipboard(&params, &self.seq_trace, output);
+                        }
+                        OscTarget::PaletteColor => {
+                            Self::handle_osc_palette_color(&params, &self.seq_trace, output);
+                        }
+                        OscTarget::ResetPaletteColor => {
+                            Self::handle_osc_reset_palette(&params, output);
                         }
                         OscTarget::RemoteHost => {
                             output.push(TerminalOutput::OscResponse(AnsiOscType::RemoteHost(
@@ -226,9 +253,208 @@ impl AnsiOscParser {
             _ => ParserOutcome::Continue,
         }
     }
+
+    /// Handle OSC 52 clipboard set/query.
+    ///
+    /// `params[0]` = `OscValue(52)`, `params[1]` = selection string, `params[2]` = base64 or `?`.
+    fn handle_osc_clipboard(
+        params: &[Option<AnsiOscToken>],
+        seq_trace: &SequenceTracer,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        let selection = match params.get(1) {
+            Some(Some(AnsiOscToken::String(s))) => s.clone(),
+            _ => "c".to_string(), // default to clipboard
+        };
+
+        match params.get(2) {
+            Some(Some(AnsiOscToken::String(data))) if data == "?" => {
+                output.push(TerminalOutput::OscResponse(AnsiOscType::QueryClipboard(
+                    selection,
+                )));
+            }
+            Some(Some(AnsiOscToken::String(data))) => match freminal_common::base64::decode(data) {
+                Ok(decoded_bytes) => {
+                    let content = String::from_utf8_lossy(&decoded_bytes).into_owned();
+                    output.push(TerminalOutput::OscResponse(AnsiOscType::SetClipboard(
+                        selection, content,
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!("OSC 52: invalid base64 payload: {e}");
+                }
+            },
+            _ => {
+                tracing::debug!(
+                    "OSC 52: missing or invalid payload: recent='{}'",
+                    seq_trace.as_str()
+                );
+            }
+        }
+    }
+    /// Handle OSC 4 (palette color set/query).
+    ///
+    /// Format: `OSC 4 ; index ; spec ST`
+    /// - `spec` = `?` → query palette entry
+    /// - `spec` = `rgb:RR/GG/BB` (1-4 hex digits per channel) → set palette entry
+    /// - `spec` = `#RRGGBB` (6 hex digits) → set palette entry
+    fn handle_osc_palette_color(
+        params: &[Option<AnsiOscToken>],
+        seq_trace: &SequenceTracer,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        // params[0] = OscValue(4), params[1] = index string, params[2] = color spec
+        let index = match params.get(1) {
+            Some(Some(AnsiOscToken::OscValue(v))) => {
+                if *v > 255 {
+                    tracing::debug!("OSC 4: index out of range: {v}");
+                    return;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    *v as u8
+                }
+            }
+            Some(Some(AnsiOscToken::String(s))) => {
+                let Ok(v) = s.parse::<u16>() else {
+                    tracing::debug!("OSC 4: invalid index string: {s}");
+                    return;
+                };
+                if v > 255 {
+                    tracing::debug!("OSC 4: index out of range: {v}");
+                    return;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    v as u8
+                }
+            }
+            _ => {
+                tracing::debug!("OSC 4: missing index: recent='{}'", seq_trace.as_str());
+                return;
+            }
+        };
+
+        let spec = if let Some(Some(AnsiOscToken::String(s))) = params.get(2) {
+            s.as_str()
+        } else {
+            tracing::debug!("OSC 4: missing color spec: recent='{}'", seq_trace.as_str());
+            return;
+        };
+
+        if spec == "?" {
+            output.push(TerminalOutput::OscResponse(AnsiOscType::QueryPaletteColor(
+                index,
+            )));
+            return;
+        }
+
+        if let Some(rgb) = parse_color_spec(spec) {
+            output.push(TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(
+                index, rgb.0, rgb.1, rgb.2,
+            )));
+        } else {
+            tracing::debug!("OSC 4: invalid color spec: {spec}");
+        }
+    }
+
+    /// Handle OSC 104 (reset palette color).
+    ///
+    /// Format: `OSC 104 ST` (reset all) or `OSC 104 ; index ST` (reset one).
+    fn handle_osc_reset_palette(params: &[Option<AnsiOscToken>], output: &mut Vec<TerminalOutput>) {
+        // params[0] = OscValue(104), params[1..] = optional index(es)
+        match params.get(1) {
+            None | Some(None) => {
+                // No index → reset all
+                output.push(TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(
+                    None,
+                )));
+            }
+            Some(Some(AnsiOscToken::OscValue(v))) => {
+                if *v <= 255 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    output.push(TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(
+                        Some(*v as u8),
+                    )));
+                } else {
+                    tracing::debug!("OSC 104: index out of range: {v}");
+                }
+            }
+            Some(Some(AnsiOscToken::String(s))) => {
+                if let Ok(v) = s.parse::<u16>() {
+                    if v <= 255 {
+                        #[allow(clippy::cast_possible_truncation)]
+                        output.push(TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(
+                            Some(v as u8),
+                        )));
+                    } else {
+                        tracing::debug!("OSC 104: index out of range: {v}");
+                    }
+                } else {
+                    tracing::debug!("OSC 104: invalid index: {s}");
+                }
+            }
+        }
+    }
 }
 
-// the terminator of the OSC sequence is a ST (0x5C) or BEL (0x07)
+/// Parse an X11 color spec string to RGB.
+///
+/// Supported formats:
+/// - `rgb:R/G/B` where R, G, B are 1–4 hex digits each (`XParseColor` format)
+/// - `#RRGGBB` (6-digit hex)
+/// - `#RGB` (3-digit hex, expanded to 6)
+fn parse_color_spec(spec: &str) -> Option<(u8, u8, u8)> {
+    if let Some(rest) = spec.strip_prefix("rgb:") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let r = scale_hex_channel(parts[0])?;
+        let g = scale_hex_channel(parts[1])?;
+        let b = scale_hex_channel(parts[2])?;
+        Some((r, g, b))
+    } else if let Some(hex) = spec.strip_prefix('#') {
+        match hex.len() {
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                Some((r, g, b))
+            }
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+                // Expand: 0xA → 0xAA
+                Some((r * 17, g * 17, b * 17))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Scale a 1–4 hex-digit channel value to 8-bit.
+///
+/// `XParseColor` convention:
+/// - 1 digit:  0xH   → (H << 4) | H  (e.g. `a` → 0xaa)
+/// - 2 digits: 0xHH  → HH as-is
+/// - 3 digits: 0xHHH → top 8 bits (shift right 4)
+/// - 4 digits: 0xHHHH → top 8 bits (shift right 8)
+fn scale_hex_channel(s: &str) -> Option<u8> {
+    let v = u16::from_str_radix(s, 16).ok()?;
+    let scaled = match s.len() {
+        1 => (v << 4) | v,
+        2 => v,
+        3 => v >> 4,
+        4 => v >> 8,
+        _ => return None,
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    Some(scaled as u8)
+}
 const fn is_osc_terminator(b: &[u8]) -> bool {
     matches!(b, [.., 0x07] | [.., 0x1b, 0x5c])
 }
@@ -278,4 +504,222 @@ pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option
 pub fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {
     // get the parameter at the index
     params.get(idx).and_then(std::clone::Clone::clone)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // scale_hex_channel tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn scale_hex_channel_1_digit() {
+        // 0xa → (0xa << 4) | 0xa = 0xaa
+        assert_eq!(scale_hex_channel("a"), Some(0xaa));
+        assert_eq!(scale_hex_channel("0"), Some(0x00));
+        assert_eq!(scale_hex_channel("f"), Some(0xff));
+    }
+
+    #[test]
+    fn scale_hex_channel_2_digits() {
+        assert_eq!(scale_hex_channel("ff"), Some(0xff));
+        assert_eq!(scale_hex_channel("00"), Some(0x00));
+        assert_eq!(scale_hex_channel("7f"), Some(0x7f));
+        assert_eq!(scale_hex_channel("ab"), Some(0xab));
+    }
+
+    #[test]
+    fn scale_hex_channel_3_digits() {
+        // 0xfff → 0xfff >> 4 = 0xff
+        assert_eq!(scale_hex_channel("fff"), Some(0xff));
+        // 0x800 → 0x800 >> 4 = 0x80
+        assert_eq!(scale_hex_channel("800"), Some(0x80));
+        assert_eq!(scale_hex_channel("000"), Some(0x00));
+    }
+
+    #[test]
+    fn scale_hex_channel_4_digits() {
+        // 0xffff → 0xffff >> 8 = 0xff
+        assert_eq!(scale_hex_channel("ffff"), Some(0xff));
+        // 0x8000 → 0x8000 >> 8 = 0x80
+        assert_eq!(scale_hex_channel("8000"), Some(0x80));
+        assert_eq!(scale_hex_channel("0000"), Some(0x00));
+    }
+
+    #[test]
+    fn scale_hex_channel_empty_returns_none() {
+        assert_eq!(scale_hex_channel(""), None);
+    }
+
+    #[test]
+    fn scale_hex_channel_5_digits_returns_none() {
+        assert_eq!(scale_hex_channel("fffff"), None);
+    }
+
+    #[test]
+    fn scale_hex_channel_invalid_hex_returns_none() {
+        assert_eq!(scale_hex_channel("zz"), None);
+        assert_eq!(scale_hex_channel("gg"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // parse_color_spec tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_color_spec_rgb_2digit() {
+        assert_eq!(parse_color_spec("rgb:ff/00/80"), Some((0xff, 0x00, 0x80)));
+    }
+
+    #[test]
+    fn parse_color_spec_rgb_1digit() {
+        // 1-digit: a → 0xaa
+        assert_eq!(parse_color_spec("rgb:a/b/c"), Some((0xaa, 0xbb, 0xcc)));
+    }
+
+    #[test]
+    fn parse_color_spec_rgb_4digit() {
+        // 4-digit: ffff → 0xff, 0000 → 0x00
+        assert_eq!(
+            parse_color_spec("rgb:ffff/0000/8000"),
+            Some((0xff, 0x00, 0x80))
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_rgb_mixed_lengths() {
+        // Mixed: 1/2/4 digits
+        assert_eq!(parse_color_spec("rgb:f/ff/ffff"), Some((0xff, 0xff, 0xff)));
+    }
+
+    #[test]
+    fn parse_color_spec_hash_6digit() {
+        assert_eq!(parse_color_spec("#ff0080"), Some((0xff, 0x00, 0x80)));
+        assert_eq!(parse_color_spec("#000000"), Some((0x00, 0x00, 0x00)));
+        assert_eq!(parse_color_spec("#ffffff"), Some((0xff, 0xff, 0xff)));
+    }
+
+    #[test]
+    fn parse_color_spec_hash_3digit() {
+        // #RGB → each expanded by *17: f→ff, 0→00, 8→88
+        assert_eq!(parse_color_spec("#f08"), Some((0xff, 0x00, 0x88)));
+        assert_eq!(parse_color_spec("#abc"), Some((0xaa, 0xbb, 0xcc)));
+    }
+
+    #[test]
+    fn parse_color_spec_invalid_formats() {
+        assert_eq!(parse_color_spec(""), None);
+        assert_eq!(parse_color_spec("notacolor"), None);
+        assert_eq!(parse_color_spec("#12"), None); // wrong length
+        assert_eq!(parse_color_spec("#1234567"), None); // wrong length
+        assert_eq!(parse_color_spec("rgb:"), None); // no channels
+        assert_eq!(parse_color_spec("rgb:ff/00"), None); // only 2 channels
+        assert_eq!(parse_color_spec("rgb:ff/00/80/aa"), None); // 4 channels
+        assert_eq!(parse_color_spec("#zzzzzz"), None); // invalid hex
+    }
+
+    #[test]
+    fn parse_color_spec_rgb_invalid_hex() {
+        assert_eq!(parse_color_spec("rgb:zz/00/00"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 4 / OSC 104 parser integration tests
+    // ------------------------------------------------------------------
+
+    /// Feed an OSC sequence byte-by-byte and collect the output.
+    fn feed_osc(payload: &[u8]) -> Vec<TerminalOutput> {
+        let mut parser = AnsiOscParser::new();
+        let mut output = Vec::new();
+        for &b in payload {
+            parser.ansiparser_inner_osc(b, &mut output);
+        }
+        output
+    }
+
+    #[test]
+    fn osc4_set_palette_color_rgb_format() {
+        // OSC 4 ; 10 ; rgb:ff/00/80 BEL
+        let payload = b"4;10;rgb:ff/00/80\x07";
+        let output = feed_osc(payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(10, 0xff, 0x00, 0x80))
+        ));
+    }
+
+    #[test]
+    fn osc4_set_palette_color_hash_format() {
+        // OSC 4 ; 42 ; #aabbcc ST
+        let payload = b"4;42;#aabbcc\x1b\\";
+        let output = feed_osc(payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(42, 0xaa, 0xbb, 0xcc))
+        ));
+    }
+
+    #[test]
+    fn osc4_query_palette_color() {
+        // OSC 4 ; 5 ; ? BEL
+        let payload = b"4;5;?\x07";
+        let output = feed_osc(payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::QueryPaletteColor(5))
+        ));
+    }
+
+    #[test]
+    fn osc4_invalid_index_out_of_range_no_output() {
+        // Index 300 is > 255, should produce no output
+        let payload = b"4;300;rgb:ff/ff/ff\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn osc4_missing_color_spec_no_output() {
+        // OSC 4 ; 10 BEL (missing color spec)
+        let payload = b"4;10\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn osc104_reset_all() {
+        // OSC 104 BEL
+        let payload = b"104\x07";
+        let output = feed_osc(payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(None))
+        ));
+    }
+
+    #[test]
+    fn osc104_reset_single_index() {
+        // OSC 104 ; 42 BEL
+        let payload = b"104;42\x07";
+        let output = feed_osc(payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(Some(42)))
+        ));
+    }
+
+    #[test]
+    fn osc104_index_out_of_range_no_output() {
+        // OSC 104 ; 300 BEL — index > 255
+        let payload = b"104;300\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
 }

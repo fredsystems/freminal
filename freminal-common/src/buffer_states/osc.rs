@@ -6,7 +6,7 @@
 use anyhow::{Error, Result};
 use std::str::FromStr;
 
-use crate::buffer_states::url::Url;
+use crate::buffer_states::{ftcs::FtcsMarker, url::Url};
 
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub enum AnsiOscInternalType {
@@ -57,6 +57,9 @@ pub enum OscTarget {
     Foreground,
     // https://iterm2.com/documentation-escape-codes.html
     Ftcs,
+    Clipboard,
+    PaletteColor,
+    ResetPaletteColor,
     RemoteHost,
     Url,
     ResetCursorColor,
@@ -98,10 +101,13 @@ impl From<&AnsiOscToken> for OscTarget {
         match value {
             AnsiOscToken::OscValue(0 | 2) => Self::TitleBar,
             AnsiOscToken::OscValue(1) => Self::IconName,
+            AnsiOscToken::OscValue(4) => Self::PaletteColor,
             AnsiOscToken::OscValue(7) => Self::RemoteHost,
             AnsiOscToken::OscValue(8) => Self::Url,
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
+            AnsiOscToken::OscValue(52) => Self::Clipboard,
+            AnsiOscToken::OscValue(104) => Self::ResetPaletteColor,
             AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
             AnsiOscToken::OscValue(133) => Self::Ftcs,
             AnsiOscToken::OscValue(1337) => Self::ITerm2,
@@ -159,7 +165,7 @@ pub enum AnsiOscType {
     NoOp,
     RequestColorQueryBackground(AnsiOscInternalType),
     RequestColorQueryForeground(AnsiOscInternalType),
-    Ftcs(String),
+    Ftcs(FtcsMarker),
     // FIXME: We're handling 0 and 2 as just title bar for now
     // if we go tabbed, we'll need to handle 2 differently
     SetTitleBar(String),
@@ -167,6 +173,16 @@ pub enum AnsiOscType {
     RemoteHost(String),
     ResetCursorColor,
     ITerm2,
+    /// OSC 52 clipboard set: selection name + decoded (plaintext) content.
+    SetClipboard(String, String),
+    /// OSC 52 clipboard query: selection name.
+    QueryClipboard(String),
+    /// OSC 4 set palette color: index, r, g, b.
+    SetPaletteColor(u8, u8, u8, u8),
+    /// OSC 4 query palette color at index.
+    QueryPaletteColor(u8),
+    /// OSC 104 reset palette color at index, or all if `None`.
+    ResetPaletteColor(Option<u8>),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -181,10 +197,17 @@ impl std::fmt::Display for AnsiOscType {
             }
             Self::Url(url) => write!(f, "Url({url})"),
             Self::SetTitleBar(value) => write!(f, "SetTitleBar({value:?})"),
-            Self::Ftcs(value) => write!(f, "Ftcs ({value:?})"),
+            Self::Ftcs(marker) => write!(f, "Ftcs ({marker})"),
             Self::RemoteHost(value) => write!(f, "RemoteHost ({value:?})"),
             Self::ResetCursorColor => write!(f, "ResetCursorColor"),
             Self::ITerm2 => write!(f, "ITerm2"),
+            Self::SetClipboard(sel, content) => write!(f, "SetClipboard({sel:?}, {content:?})"),
+            Self::QueryClipboard(sel) => write!(f, "QueryClipboard({sel:?})"),
+            Self::SetPaletteColor(idx, r, g, b) => {
+                write!(f, "SetPaletteColor({idx}, {r}, {g}, {b})")
+            }
+            Self::QueryPaletteColor(idx) => write!(f, "QueryPaletteColor({idx})"),
+            Self::ResetPaletteColor(idx) => write!(f, "ResetPaletteColor({idx:?})"),
         }
     }
 }

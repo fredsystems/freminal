@@ -339,6 +339,19 @@ fn handle_window_manipulation(
             WindowManipulation::RefreshWindow
             | WindowManipulation::LowerWindowToBottomOfStackingOrder
             | WindowManipulation::RaiseWindowToTopOfStackingOrder => (),
+
+            // OSC 52 clipboard set: copy decoded text to the system clipboard.
+            WindowManipulation::SetClipboard(_sel, content) => {
+                ui.ctx().copy_text(content);
+            }
+
+            // OSC 52 clipboard query: we cannot read the clipboard through
+            // egui's public API, so respond with an empty payload.  This is
+            // the safe/secure default adopted by many terminals.
+            WindowManipulation::QueryClipboard(sel) => {
+                tracing::debug!("OSC 52 query for selection '{sel}' — responding empty");
+                send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};\x1b\\"));
+            }
         }
     }
 }
