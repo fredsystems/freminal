@@ -52,6 +52,10 @@ pub struct TerminalHandler {
     window_commands: Vec<WindowManipulation>,
     /// Last graphic character written (for REP — CSI b).
     last_graphic_char: Option<TChar>,
+    /// Current working directory reported by the shell via OSC 7.
+    ///
+    /// Stores the decoded path component from `file://hostname/path`.
+    current_working_directory: Option<String>,
 }
 
 impl TerminalHandler {
@@ -67,6 +71,7 @@ impl TerminalHandler {
             write_tx: None,
             window_commands: Vec::new(),
             last_graphic_char: None,
+            current_working_directory: None,
         }
     }
 
@@ -90,6 +95,7 @@ impl TerminalHandler {
         self.character_replace = DecSpecialGraphics::default();
         self.window_commands.clear();
         self.last_graphic_char = None;
+        self.current_working_directory = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -379,6 +385,12 @@ impl TerminalHandler {
         std::mem::take(&mut self.window_commands)
     }
 
+    /// Return the current working directory reported by the shell via OSC 7, if any.
+    #[must_use]
+    pub fn current_working_directory(&self) -> Option<&str> {
+        self.current_working_directory.as_deref()
+    }
+
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     fn write_to_pty(&self, text: &str) {
         if let Some(tx) = &self.write_tx
@@ -481,9 +493,14 @@ impl TerminalHandler {
                 // Hardcoded white foreground: #ffffff
                 self.write_to_pty("\x1b]10;rgb:ff/ff/ff\x1b\\");
             }
-            // Remote host / FTCS / iTerm2 — informational only, no action needed.
+            // Remote host / CWD: OSC 7 ; file://hostname/path ST
             AnsiOscType::RemoteHost(value) => {
-                tracing::debug!("OSC RemoteHost (ignored): {value}");
+                self.current_working_directory = parse_osc7_uri(value);
+                if self.current_working_directory.is_none() {
+                    tracing::warn!("OSC 7: failed to parse URI: {value}");
+                } else {
+                    tracing::debug!("OSC 7: CWD set to {:?}", self.current_working_directory);
+                }
             }
             AnsiOscType::Ftcs(value) => {
                 tracing::debug!("OSC FTCS (ignored): {value}");
@@ -1058,6 +1075,69 @@ fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
         | SelectGraphicRendition::Subscript
         | SelectGraphicRendition::NeitherSuperscriptNorSubscript
         | SelectGraphicRendition::Unknown(_) => {}
+    }
+}
+
+/// Parse an OSC 7 URI of the form `file://hostname/path` and return the path
+/// component.
+///
+/// The hostname is intentionally ignored — it is only meaningful for network
+/// file-systems and most shells send `localhost` or the local hostname.
+///
+/// Percent-encoded bytes (e.g. `%20` for space) are decoded so the returned
+/// path is a normal filesystem path string.
+///
+/// Returns `None` when the URI does not start with `file://` or has no path.
+fn parse_osc7_uri(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+
+    // The path starts at the first '/' after the hostname.
+    // `file:///path` (empty hostname) → rest = "/path"
+    // `file://hostname/path`          → rest = "hostname/path"
+    let path = if rest.starts_with('/') {
+        rest
+    } else {
+        let slash_pos = rest.find('/')?;
+        &rest[slash_pos..]
+    };
+
+    if path.is_empty() {
+        return None;
+    }
+
+    Some(percent_decode(path))
+}
+
+/// Decode percent-encoded bytes (`%XX`) in a string.
+///
+/// Only valid two-hex-digit sequences are decoded; malformed sequences are
+/// passed through verbatim.
+fn percent_decode(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            output.push(char::from(hi << 4 | lo));
+            i += 3;
+            continue;
+        }
+        output.push(char::from(bytes[i]));
+        i += 1;
+    }
+    output
+}
+
+/// Convert an ASCII hex digit to its numeric value.
+const fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1700,5 +1780,139 @@ mod tests {
     fn with_scrollback_limit_overrides_default() {
         let handler = TerminalHandler::new(80, 24).with_scrollback_limit(200);
         assert_eq!(handler.buffer().scrollback_limit(), 200);
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 7 CWD tracking tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_osc7_uri_with_hostname() {
+        let result = super::parse_osc7_uri("file://myhost/home/user/projects");
+        assert_eq!(result, Some("/home/user/projects".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_empty_hostname() {
+        // file:///path — empty hostname (common on macOS)
+        let result = super::parse_osc7_uri("file:///home/user/projects");
+        assert_eq!(result, Some("/home/user/projects".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_localhost() {
+        let result = super::parse_osc7_uri("file://localhost/tmp");
+        assert_eq!(result, Some("/tmp".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_percent_encoded_space() {
+        let result = super::parse_osc7_uri("file:///home/user/my%20project");
+        assert_eq!(result, Some("/home/user/my project".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_multiple_percent_encodings() {
+        let result = super::parse_osc7_uri("file:///home/user/dir%20with%20spaces/sub%2Fdir");
+        assert_eq!(
+            result,
+            Some("/home/user/dir with spaces/sub/dir".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_osc7_uri_not_file_scheme() {
+        assert_eq!(super::parse_osc7_uri("http://example.com/path"), None);
+        assert_eq!(super::parse_osc7_uri("https://example.com/path"), None);
+        assert_eq!(super::parse_osc7_uri("ftp://host/path"), None);
+    }
+
+    #[test]
+    fn parse_osc7_uri_no_path_after_hostname() {
+        // "file://hostname" with no trailing slash — no path
+        assert_eq!(super::parse_osc7_uri("file://hostname"), None);
+    }
+
+    #[test]
+    fn parse_osc7_uri_empty_string() {
+        assert_eq!(super::parse_osc7_uri(""), None);
+    }
+
+    #[test]
+    fn parse_osc7_uri_just_file_scheme() {
+        assert_eq!(super::parse_osc7_uri("file://"), None);
+    }
+
+    #[test]
+    fn percent_decode_no_encoding() {
+        assert_eq!(super::percent_decode("/home/user"), "/home/user");
+    }
+
+    #[test]
+    fn percent_decode_malformed_sequence() {
+        // %ZZ is not valid hex — pass through verbatim
+        assert_eq!(super::percent_decode("/path%ZZfoo"), "/path%ZZfoo");
+    }
+
+    #[test]
+    fn percent_decode_truncated_at_end() {
+        // % at end of string with not enough chars
+        assert_eq!(super::percent_decode("/path%2"), "/path%2");
+        assert_eq!(super::percent_decode("/path%"), "/path%");
+    }
+
+    #[test]
+    fn handle_osc_remote_host_sets_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+    }
+
+    #[test]
+    fn handle_osc_remote_host_updates_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user/a".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user/a"));
+
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user/b".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user/b"));
+    }
+
+    #[test]
+    fn handle_osc_remote_host_invalid_uri_clears_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // First set a valid CWD
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert!(handler.current_working_directory().is_some());
+
+        // Now send an invalid URI — CWD should be cleared (set to None)
+        handler.handle_osc(&AnsiOscType::RemoteHost("not-a-file-uri".to_string()));
+        assert_eq!(handler.current_working_directory(), None);
+    }
+
+    #[test]
+    fn full_reset_clears_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert!(handler.current_working_directory().is_some());
+
+        handler.full_reset();
+        assert_eq!(handler.current_working_directory(), None);
+    }
+
+    #[test]
+    fn cwd_is_none_by_default() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.current_working_directory(), None);
     }
 }

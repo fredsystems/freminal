@@ -120,6 +120,12 @@ pub struct TerminalSnapshot {
     ///
     /// When `true` the GUI skips the render pass entirely for this frame.
     pub skip_draw: bool,
+
+    /// Current working directory reported by the shell via OSC 7, if any.
+    ///
+    /// The GUI can use this for tab titles, file-open dialogs, or spawning
+    /// new terminals in the same directory.
+    pub cwd: Option<String>,
 }
 
 impl TerminalSnapshot {
@@ -147,6 +153,7 @@ impl TerminalSnapshot {
             repeat_keys: true,
             cursor_key_app_mode: false,
             skip_draw: false,
+            cwd: None,
         }
     }
 }
