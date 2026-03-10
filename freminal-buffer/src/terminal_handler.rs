@@ -536,19 +536,23 @@ impl TerminalHandler {
     /// Return the complete GUI data set: visible and scrollback content as
     /// `(TerminalSections<Vec<TChar>>, TerminalSections<Vec<FormatTag>>)`.
     ///
+    /// `scroll_offset` is the number of rows scrolled back from the live
+    /// bottom (0 = live view).  The visible window is shifted upward by this
+    /// many rows so the user sees historical output.
+    ///
     /// This is the primary method the GUI layer should call to obtain all data
     /// needed to render the terminal.
     #[must_use]
     pub fn data_and_format_data_for_gui(
         &mut self,
+        scroll_offset: usize,
     ) -> (
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
-        // correct wiring happens in Task 7/8.
-        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags(0);
-        let (scrollback_chars, scrollback_tags) = self.buffer.scrollback_as_tchars_and_tags(0);
+        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags(scroll_offset);
+        let (scrollback_chars, scrollback_tags) =
+            self.buffer.scrollback_as_tchars_and_tags(scroll_offset);
         (
             TerminalSections {
                 scrollback: scrollback_chars,
@@ -1594,7 +1598,7 @@ mod tests {
         handler.handle_carriage_return();
         handler.handle_data(b"row two");
 
-        let (chars, tags) = handler.data_and_format_data_for_gui();
+        let (chars, tags) = handler.data_and_format_data_for_gui(0);
 
         // Nothing has scrolled off yet — scrollback must be empty.
         assert!(
@@ -1643,7 +1647,7 @@ mod tests {
             handler.handle_carriage_return();
         }
 
-        let (chars, tags) = handler.data_and_format_data_for_gui();
+        let (chars, tags) = handler.data_and_format_data_for_gui(0);
 
         // Some content must have scrolled off.
         assert!(

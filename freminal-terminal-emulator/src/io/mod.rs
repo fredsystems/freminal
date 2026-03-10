@@ -33,6 +33,12 @@ pub enum InputEvent {
     Resize(usize, usize, usize, usize),
     /// Window focus gained (`true`) or lost (`false`).
     FocusChange(bool),
+    /// Desired scroll offset (rows from the bottom, 0 = live view).
+    ///
+    /// Sent by the GUI when the user scrolls up/down on the primary screen.
+    /// The PTY thread stores this and uses it when building the next snapshot
+    /// so `visible_as_tchars_and_tags(offset)` renders the correct window.
+    ScrollOffset(usize),
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

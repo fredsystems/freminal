@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates seven major development tasks for Freminal. Each task has a dedicated
+This document orchestrates eight major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -32,6 +32,7 @@ and plan document maintenance rules.
 | 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
 | 6   | Test Gap Coverage            | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
 | 7   | Escape Sequence Coverage     | `PLAN_07_ESCAPE_SEQUENCES.md` | Not Started | None         |
+| 8   | Primary Screen Scrollback    | `PLAN_08_SCROLLBACK.md`       | Not Started | None         |
 
 ---
 
@@ -46,6 +47,8 @@ Task 2 (CLI Args + TOML Config) ──┬──► Task 3 (Settings Modal)
 Task 6 (Test Gap Coverage) ── independent, can run any time
 
 Task 7 (Escape Sequence Coverage) ── independent, can run any time
+
+Task 8 (Primary Screen Scrollback) ── independent, can run any time
 ```
 
 ### Dependency Details
@@ -71,6 +74,10 @@ early since it improves safety for all subsequent work.
 sequence correctness — critical for basic terminal compatibility (vttest, vim, tmux, etc.).
 Recommended to start early since it fixes bugs that affect daily use.
 
+**Task 8:** Independent. Wires the user's scroll offset from the GUI into the PTY thread so
+primary-screen scrollback works. The `Buffer` layer already supports offset-based rendering;
+this task is purely plumbing. Medium scope (7 subtasks).
+
 ---
 
 ## Recommended Execution Order
@@ -82,6 +89,7 @@ Run these four tasks in parallel since they have no dependencies on each other:
 - **Task 2** — CLI Args + TOML Config (foundation for Tasks 3 & 4)
 - **Task 6** — Test Gap Coverage (improves safety net for everything)
 - **Task 7** — Escape Sequence Coverage (fixes bugs, improves daily-use compatibility)
+- **Task 8** — Primary Screen Scrollback (wires scroll offset into snapshot pipeline)
 - **Task 1** — Glyph Atlas + Custom Painter (largest task, long lead time)
 
 ### Phase 2 — Dependents (After Phase 1 completes)
@@ -99,6 +107,7 @@ but only after Task 1 is complete.
 Phase 1:  ├── Task 2 (CLI/Config) ────────────┤
           ├── Task 6 (Test Gaps) ──────────────┤
           ├── Task 7 (Escape Sequences) ───────┤
+          ├── Task 8 (Scrollback) ─────────────┤
           ├── Task 1 (Glyph Atlas) ────────────────────────────────┤
           │                                    │                   │
 Phase 2:  │                                    ├── Task 3 (Modal) ─┤
@@ -169,6 +178,7 @@ Update this section as tasks complete:
 | 5    | —          | —          | Blocked on Task 1               |
 | 6    | —          | —          |                                 |
 | 7    | —          | —          | Audit complete, plan created    |
+| 8    | —          | —          | Plan created                    |
 
 ---
 
@@ -178,4 +188,5 @@ Update this section as tasks complete:
 - `Documents/PERFORMANCE_PLAN.md` — Completed performance refactor (Tasks 1-12)
 - `Documents/TODO.md` — Version roadmap
 - `Documents/PLAN_07_ESCAPE_SEQUENCES.md` — Escape sequence audit and implementation plan
+- `Documents/PLAN_08_SCROLLBACK.md` — Primary screen scrollback architecture and wiring
 - `config_example.toml` — Current config format
