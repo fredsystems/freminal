@@ -660,16 +660,105 @@ impl TerminalHandler {
     /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
     ///           `DCS 0 + r <hex-name> ST` for unknown ones.
     fn handle_xtgettcap(&self, hex_payload: &[u8]) {
-        // Placeholder — will be implemented in subtask 7.23.
-        tracing::debug!(
-            "XTGETTCAP query (not yet implemented): {}",
-            String::from_utf8_lossy(hex_payload)
-        );
-        // Respond with "not found" for all queries for now.
-        self.write_to_pty(&format!(
-            "\x1bP0+r{}\x1b\\",
-            String::from_utf8_lossy(hex_payload)
-        ));
+        let payload_str = String::from_utf8_lossy(hex_payload);
+
+        // Split on ';' to support multiple capability queries in a single DCS.
+        for hex_name in payload_str.split(';') {
+            if hex_name.is_empty() {
+                continue;
+            }
+
+            let Some(cap_name) = Self::hex_decode(hex_name) else {
+                tracing::debug!("XTGETTCAP: invalid hex encoding: {hex_name}");
+                self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
+                continue;
+            };
+
+            if let Some(value) = Self::lookup_termcap(&cap_name) {
+                let hex_value = Self::hex_encode(value);
+                self.write_to_pty(&format!("\x1bP1+r{hex_name}={hex_value}\x1b\\"));
+            } else {
+                tracing::debug!("XTGETTCAP: unknown capability: {cap_name}");
+                self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
+            }
+        }
+    }
+
+    /// Decode a hex-encoded ASCII string (e.g., "524742" → "RGB").
+    fn hex_decode(hex: &str) -> Option<String> {
+        let bytes = hex.as_bytes();
+        if !bytes.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut result = Vec::with_capacity(bytes.len() / 2);
+        let mut i = 0;
+        while i < bytes.len() {
+            let hi = Self::hex_nibble(bytes[i])?;
+            let lo = Self::hex_nibble(bytes[i + 1])?;
+            result.push((hi << 4) | lo);
+            i += 2;
+        }
+        String::from_utf8(result).ok()
+    }
+
+    /// Encode an ASCII string as hex (e.g., "1" → "31").
+    fn hex_encode(s: &str) -> String {
+        let mut result = String::with_capacity(s.len() * 2);
+        for b in s.bytes() {
+            result.push(Self::nibble_to_hex(b >> 4));
+            result.push(Self::nibble_to_hex(b & 0x0F));
+        }
+        result
+    }
+
+    /// Convert a single ASCII hex character to its numeric value.
+    const fn hex_nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    /// Convert a 4-bit nibble to an uppercase hex character.
+    const fn nibble_to_hex(n: u8) -> char {
+        match n {
+            0..=9 => (b'0' + n) as char,
+            _ => (b'A' + n - 10) as char,
+        }
+    }
+
+    /// Look up a termcap/terminfo capability by decoded name.
+    ///
+    /// Returns `Some(value_str)` for known capabilities, `None` for unknown ones.
+    /// The returned string is the raw value (not yet hex-encoded).
+    fn lookup_termcap(name: &str) -> Option<&'static str> {
+        match name {
+            // RGB — terminal supports direct-color (24-bit) via SGR 38/48;2;R;G;B
+            "RGB" => Some("8/8/8"),
+            // Tc — tmux extension: true color support
+            "Tc" => Some(""),
+            // setrgbf — SGR sequence to set RGB foreground
+            "setrgbf" => Some("\x1b[38;2;%p1%d;%p2%d;%p3%dm"),
+            // setrgbb — SGR sequence to set RGB background
+            "setrgbb" => Some("\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
+            // colors — number of colors supported
+            "colors" | "Co" => Some("256"),
+            // TN — terminal name
+            "TN" => Some("xterm-256color"),
+            // Ms — set selection (clipboard) via OSC 52
+            "Ms" => Some("\x1b]52;%p1%s;%p2%s\x1b\\"),
+            // Se — reset cursor to default style (DECSCUSR 0)
+            "Se" => Some("\x1b[2 q"),
+            // Ss — set cursor style (DECSCUSR)
+            "Ss" => Some("\x1b[%p1%d q"),
+            // Smulx — extended underline (SGR 4:N for curly, dotted, etc.)
+            "Smulx" => Some("\x1b[4:%p1%dm"),
+            // Setulc — set underline color
+            "Setulc" => Some("\x1b[58;2;%p1%d;%p2%d;%p3%dm"),
+            _ => None,
+        }
     }
 
     /// Handle an APC (Application Program Command) sequence.
@@ -2756,5 +2845,172 @@ mod tests {
         let dcs = b"P$qm\x1b\\";
         let inner = TerminalHandler::strip_dcs_envelope(dcs);
         assert_eq!(inner, b"$qm");
+    }
+
+    // ── XTGETTCAP tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn xtgettcap_hex_decode_rgb() {
+        // "RGB" = 0x52 0x47 0x42 → "524742"
+        let decoded = TerminalHandler::hex_decode("524742");
+        assert_eq!(decoded.as_deref(), Some("RGB"));
+    }
+
+    #[test]
+    fn xtgettcap_hex_decode_lowercase() {
+        // "RGB" in lowercase hex
+        let decoded = TerminalHandler::hex_decode("524742");
+        assert_eq!(decoded.as_deref(), Some("RGB"));
+
+        let decoded_lower = TerminalHandler::hex_decode("524742");
+        assert_eq!(decoded_lower.as_deref(), Some("RGB"));
+    }
+
+    #[test]
+    fn xtgettcap_hex_decode_odd_length_fails() {
+        // Odd-length hex string is invalid
+        assert!(TerminalHandler::hex_decode("52474").is_none());
+    }
+
+    #[test]
+    fn xtgettcap_hex_encode_roundtrip() {
+        let original = "RGB";
+        let encoded = TerminalHandler::hex_encode(original);
+        assert_eq!(encoded, "524742");
+        let decoded = TerminalHandler::hex_decode(&encoded);
+        assert_eq!(decoded.as_deref(), Some(original));
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_rgb() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "RGB" → hex "524742"
+        let dcs = build_dcs_payload(b"+q524742");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "8/8/8" → hex "382F382F38"
+        assert_eq!(response, "\x1bP1+r524742=382F382F38\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_colors() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "colors" → hex "636F6C6F7273"
+        let dcs = build_dcs_payload(b"+q636F6C6F7273");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "256" → hex "323536"
+        assert_eq!(response, "\x1bP1+r636F6C6F7273=323536\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_tn() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "TN" → hex "544E"
+        let dcs = build_dcs_payload(b"+q544E");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "xterm-256color" → hex
+        let expected_hex = TerminalHandler::hex_encode("xterm-256color");
+        assert_eq!(response, format!("\x1bP1+r544E={expected_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_unknown_capability() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "UNKN" → hex "554E4B4E"
+        let dcs = build_dcs_payload(b"+q554E4B4E");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP0+r554E4B4E\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_multiple_capabilities() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "RGB" and "TN" separated by ';'
+        // "RGB" = 524742, "TN" = 544E
+        let dcs = build_dcs_payload(b"+q524742;544E");
+        handler.handle_device_control_string(&dcs);
+
+        // Should get two separate responses
+        let response1 = recv_pty_response(&rx);
+        assert_eq!(response1, "\x1bP1+r524742=382F382F38\x1b\\");
+
+        let response2 = recv_pty_response(&rx);
+        let tn_hex = TerminalHandler::hex_encode("xterm-256color");
+        assert_eq!(response2, format!("\x1bP1+r544E={tn_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_tc() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "Tc" → hex "5463"
+        let dcs = build_dcs_payload(b"+q5463");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "Tc" has empty value, so hex-encoded value is ""
+        assert_eq!(response, "\x1bP1+r5463=\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_se() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "Se" → hex "5365"
+        let dcs = build_dcs_payload(b"+q5365");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "\x1b[2 q" → hex "1B5B322071"
+        let expected_hex = TerminalHandler::hex_encode("\x1b[2 q");
+        assert_eq!(response, format!("\x1bP1+r5365={expected_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_setrgbf() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query "setrgbf" → hex encode each byte
+        let hex_name = TerminalHandler::hex_encode("setrgbf");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[38;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
     }
 }
