@@ -169,16 +169,16 @@ new architecture.
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                           |
-| ---- | ---------- | ---------- | ------------------------------- |
-| 1    | —          | —          |                                 |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config |
-| 3    | —          | —          | Unblocked (Task 2 complete)     |
-| 4    | —          | —          | Unblocked (Task 2 complete)     |
-| 5    | —          | —          | Blocked on Task 1               |
-| 6    | —          | —          |                                 |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete        |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete         |
+| Task | Started    | Completed  | Notes                            |
+| ---- | ---------- | ---------- | -------------------------------- |
+| 1    | —          | —          |                                  |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config  |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal |
+| 4    | —          | —          | Unblocked (Task 2 complete)      |
+| 5    | —          | —          | Blocked on Task 1                |
+| 6    | —          | —          |                                  |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete         |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete          |
 
 ---
 
