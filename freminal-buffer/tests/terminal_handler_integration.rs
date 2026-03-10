@@ -1955,3 +1955,534 @@ fn test_cpl_with_explicit_count() {
         "CPL 4 should move cursor up 4 lines from row 10 to row 6"
     );
 }
+
+// ── SU / SD (Scroll Up / Scroll Down) integration tests ──────────────
+
+/// Helper: extract the text content from a row, trimming trailing spaces.
+fn row_text(row: &freminal_buffer::row::Row) -> String {
+    let s: String = row.get_characters().iter().map(|c| c.into_utf8()).collect();
+    s.trim_end().to_string()
+}
+
+/// Fill lines 0..n with "Line 0", "Line 1", etc, moving with newline+CR.
+fn fill_lines(handler: &mut TerminalHandler, n: usize) {
+    for i in 0..n {
+        handler.handle_data(&text_to_bytes(&format!("Line {i}")));
+        if i + 1 < n {
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+    }
+}
+
+#[test]
+fn test_su_default_count_no_scroll_region() {
+    // SU with default count (1) on whole screen.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    // Cursor should be on the last line (row 9) after filling 10 lines.
+    assert_eq!(handler.cursor_pos().y, 9);
+
+    // ScrollUp(1): top line scrolls off, blank line appears at bottom.
+    handler.handle_scroll_up(1);
+
+    let rows = handler.buffer().visible_rows(0);
+    // Row 0 should now hold what was "Line 1" (old row 1).
+    assert_eq!(row_text(&rows[0]), "Line 1", "first visible row after SU 1");
+    // Last visible row should be blank (newly inserted).
+    assert_eq!(
+        row_text(&rows[9]),
+        "",
+        "last visible row should be blank after SU 1"
+    );
+}
+
+#[test]
+fn test_su_explicit_count_no_scroll_region() {
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.handle_scroll_up(3);
+
+    let rows = handler.buffer().visible_rows(0);
+    // After scrolling up by 3, old rows 3..9 become visible rows 0..6.
+    assert_eq!(row_text(&rows[0]), "Line 3", "first visible row after SU 3");
+    assert_eq!(
+        row_text(&rows[6]),
+        "Line 9",
+        "row 6 should hold old Line 9 after SU 3"
+    );
+    // Rows 7, 8, 9 should be blank.
+    for (i, row) in rows.iter().enumerate().take(10).skip(7) {
+        assert_eq!(row_text(row), "", "row {i} should be blank after SU 3");
+    }
+}
+
+#[test]
+fn test_sd_default_count_no_scroll_region() {
+    // SD with default count (1) on whole screen.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.handle_scroll_down(1);
+
+    let rows = handler.buffer().visible_rows(0);
+    // Row 0 should now be blank (newly inserted at top).
+    assert_eq!(
+        row_text(&rows[0]),
+        "",
+        "first visible row should be blank after SD 1"
+    );
+    // Row 1 should hold what was Line 0.
+    assert_eq!(
+        row_text(&rows[1]),
+        "Line 0",
+        "row 1 should hold old Line 0 after SD 1"
+    );
+    // The old last line ("Line 9") should have scrolled off the bottom.
+    assert_eq!(
+        row_text(&rows[9]),
+        "Line 8",
+        "last visible row should hold old Line 8 after SD 1"
+    );
+}
+
+#[test]
+fn test_sd_explicit_count_no_scroll_region() {
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.handle_scroll_down(3);
+
+    let rows = handler.buffer().visible_rows(0);
+    // First 3 rows should be blank.
+    for (i, row) in rows.iter().enumerate().take(3) {
+        assert_eq!(row_text(row), "", "row {i} should be blank after SD 3");
+    }
+    // Row 3 should hold "Line 0".
+    assert_eq!(
+        row_text(&rows[3]),
+        "Line 0",
+        "row 3 should hold Line 0 after SD 3"
+    );
+    // Row 9 should hold "Line 6" (old lines 7, 8, 9 scrolled off bottom).
+    assert_eq!(
+        row_text(&rows[9]),
+        "Line 6",
+        "row 9 should hold Line 6 after SD 3"
+    );
+}
+
+#[test]
+fn test_su_with_scroll_region() {
+    // Set scroll region to rows 3..7 (1-based: 4..8), fill the screen,
+    // then SU 2 should only affect that region.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    // Set scroll region (1-based top=4, bottom=8 → 0-based 3..7)
+    handler.handle_set_scroll_region(4, 8);
+
+    handler.handle_scroll_up(2);
+
+    let rows = handler.buffer().visible_rows(0);
+    // Rows above the region (0..2) should be untouched.
+    assert_eq!(row_text(&rows[0]), "Line 0", "row above region untouched");
+    assert_eq!(row_text(&rows[1]), "Line 1", "row above region untouched");
+    assert_eq!(row_text(&rows[2]), "Line 2", "row above region untouched");
+
+    // Inside the region: old rows 5,6,7 shift up to rows 3,4,5; rows 6,7 become blank.
+    assert_eq!(
+        row_text(&rows[3]),
+        "Line 5",
+        "region row 0 after SU 2 within region"
+    );
+    assert_eq!(
+        row_text(&rows[4]),
+        "Line 6",
+        "region row 1 after SU 2 within region"
+    );
+    assert_eq!(
+        row_text(&rows[5]),
+        "Line 7",
+        "region row 2 after SU 2 within region"
+    );
+    // Bottom 2 rows of the region become blank.
+    assert_eq!(
+        row_text(&rows[6]),
+        "",
+        "region row 3 (blank) after SU 2 within region"
+    );
+    assert_eq!(
+        row_text(&rows[7]),
+        "",
+        "region row 4 (blank) after SU 2 within region"
+    );
+
+    // Rows below the region should be untouched.
+    assert_eq!(row_text(&rows[8]), "Line 8", "row below region untouched");
+    assert_eq!(row_text(&rows[9]), "Line 9", "row below region untouched");
+}
+
+#[test]
+fn test_sd_with_scroll_region() {
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    // Set scroll region (1-based top=4, bottom=8 → 0-based 3..7)
+    handler.handle_set_scroll_region(4, 8);
+
+    handler.handle_scroll_down(2);
+
+    let rows = handler.buffer().visible_rows(0);
+    // Rows above the region untouched.
+    assert_eq!(row_text(&rows[0]), "Line 0");
+    assert_eq!(row_text(&rows[1]), "Line 1");
+    assert_eq!(row_text(&rows[2]), "Line 2");
+
+    // Top 2 rows of the region become blank.
+    assert_eq!(
+        row_text(&rows[3]),
+        "",
+        "region top (blank) after SD 2 within region"
+    );
+    assert_eq!(
+        row_text(&rows[4]),
+        "",
+        "region top+1 (blank) after SD 2 within region"
+    );
+    // Old rows 3,4,5 shift down to rows 5,6,7.
+    assert_eq!(
+        row_text(&rows[5]),
+        "Line 3",
+        "region row shifted down after SD 2"
+    );
+    assert_eq!(
+        row_text(&rows[6]),
+        "Line 4",
+        "region row shifted down after SD 2"
+    );
+    assert_eq!(
+        row_text(&rows[7]),
+        "Line 5",
+        "region row shifted down after SD 2"
+    );
+
+    // Rows below the region untouched.
+    assert_eq!(row_text(&rows[8]), "Line 8");
+    assert_eq!(row_text(&rows[9]), "Line 9");
+}
+
+#[test]
+fn test_su_count_exceeds_region_size_clamped() {
+    // SU with count larger than region size should clear the entire region.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    // Region is 5 rows (1-based 4..8 → 0-based 3..7).
+    handler.handle_set_scroll_region(4, 8);
+
+    // Scroll up by 100 — should clamp to region size (5).
+    handler.handle_scroll_up(100);
+
+    let rows = handler.buffer().visible_rows(0);
+    // Rows above region untouched.
+    assert_eq!(row_text(&rows[0]), "Line 0");
+    assert_eq!(row_text(&rows[1]), "Line 1");
+    assert_eq!(row_text(&rows[2]), "Line 2");
+
+    // Entire region should be blank.
+    for (i, row) in rows.iter().enumerate().take(8).skip(3) {
+        assert_eq!(
+            row_text(row),
+            "",
+            "row {i} in region should be blank after SU(100)"
+        );
+    }
+
+    // Rows below region untouched.
+    assert_eq!(row_text(&rows[8]), "Line 8");
+    assert_eq!(row_text(&rows[9]), "Line 9");
+}
+
+#[test]
+fn test_sd_count_exceeds_region_size_clamped() {
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.handle_set_scroll_region(4, 8);
+
+    // Scroll down by 100 — should clamp to region size (5).
+    handler.handle_scroll_down(100);
+
+    let rows = handler.buffer().visible_rows(0);
+    // Rows above region untouched.
+    assert_eq!(row_text(&rows[0]), "Line 0");
+    assert_eq!(row_text(&rows[1]), "Line 1");
+    assert_eq!(row_text(&rows[2]), "Line 2");
+
+    // Entire region should be blank.
+    for (i, row) in rows.iter().enumerate().take(8).skip(3) {
+        assert_eq!(
+            row_text(row),
+            "",
+            "row {i} in region should be blank after SD(100)"
+        );
+    }
+
+    // Rows below region untouched.
+    assert_eq!(row_text(&rows[8]), "Line 8");
+    assert_eq!(row_text(&rows[9]), "Line 9");
+}
+
+#[test]
+fn test_su_via_process_outputs() {
+    // Verify that ScrollUp works through the process_outputs dispatch path.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.process_outputs(&[TerminalOutput::ScrollUp(2)]);
+
+    let rows = handler.buffer().visible_rows(0);
+    assert_eq!(
+        row_text(&rows[0]),
+        "Line 2",
+        "first row after SU(2) via process_outputs"
+    );
+    // Last 2 rows blank.
+    assert_eq!(row_text(&rows[8]), "", "row 8 blank after SU(2)");
+    assert_eq!(row_text(&rows[9]), "", "row 9 blank after SU(2)");
+}
+
+#[test]
+fn test_sd_via_process_outputs() {
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.process_outputs(&[TerminalOutput::ScrollDown(2)]);
+
+    let rows = handler.buffer().visible_rows(0);
+    // First 2 rows blank.
+    assert_eq!(row_text(&rows[0]), "", "row 0 blank after SD(2)");
+    assert_eq!(row_text(&rows[1]), "", "row 1 blank after SD(2)");
+    assert_eq!(
+        row_text(&rows[2]),
+        "Line 0",
+        "row 2 = old Line 0 after SD(2)"
+    );
+}
+
+#[test]
+fn test_su_cursor_position_unchanged() {
+    // SU should NOT move the cursor.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    // Move cursor to a specific position.
+    handler.handle_cursor_pos(Some(5), Some(5));
+    let before_x = handler.cursor_pos().x;
+    let before_y = handler.cursor_pos().y;
+
+    handler.handle_scroll_up(3);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        before_x,
+        "SU should not change cursor X"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        before_y,
+        "SU should not change cursor Y"
+    );
+}
+
+#[test]
+fn test_sd_cursor_position_unchanged() {
+    // SD should NOT move the cursor.
+    let mut handler = TerminalHandler::new(40, 10);
+    fill_lines(&mut handler, 10);
+
+    handler.handle_cursor_pos(Some(5), Some(5));
+    let before_x = handler.cursor_pos().x;
+    let before_y = handler.cursor_pos().y;
+
+    handler.handle_scroll_down(3);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        before_x,
+        "SD should not change cursor X"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        before_y,
+        "SD should not change cursor Y"
+    );
+}
+
+// ── DSR (Device Status Report) integration tests ─────────────────────
+
+#[test]
+fn test_dsr_ps5_device_status_report() {
+    // CSI 5 n should respond with CSI 0 n (device OK).
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::DeviceStatusReport]);
+
+    let msg = rx
+        .try_recv()
+        .expect("DeviceStatusReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[0n",
+        "DSR Ps=5 must respond with ESC[0n (device OK)"
+    );
+}
+
+#[test]
+fn test_dsr_ps6_cursor_position_report() {
+    // CSI 6 n should respond with cursor position report CSI row ; col R.
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Move cursor to col 9, row 4 (0-indexed) via 1-indexed SetCursorPos.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(10), // 1-indexed → col 9
+        y: Some(5),  // 1-indexed → row 4
+    }]);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    let msg = rx
+        .try_recv()
+        .expect("CursorReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[5;10R",
+        "DSR Ps=6 must respond with ESC[row;colR (1-indexed)"
+    );
+}
+
+#[test]
+fn test_dsr_ps6_cursor_at_origin() {
+    // CSI 6 n at origin should respond with ESC [ 1 ; 1 R.
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    let msg = rx
+        .try_recv()
+        .expect("CursorReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(response, "\x1b[1;1R", "Cursor at origin should report 1;1");
+}
+
+// ── RIS (Reset to Initial State, ESC c) integration tests ────────────
+
+#[test]
+fn test_ris_clears_screen_and_resets_cursor() {
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Fill the screen with content and move cursor.
+    fill_lines(&mut handler, 10);
+    assert!(handler.cursor_pos().x > 0 || handler.cursor_pos().y > 0);
+
+    // Full reset.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    // Cursor should be at home (0,0).
+    assert_eq!(handler.cursor_pos().x, 0, "RIS must reset cursor X to 0");
+    assert_eq!(handler.cursor_pos().y, 0, "RIS must reset cursor Y to 0");
+
+    // Visible area should have only 1 row (the initial blank row).
+    let rows = handler.buffer().visible_rows(0);
+    assert_eq!(rows.len(), 1, "RIS must clear all rows back to 1");
+    assert_eq!(row_text(&rows[0]), "", "RIS row should be blank");
+}
+
+#[test]
+fn test_ris_resets_scroll_region() {
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Set a non-default scroll region.
+    handler.handle_set_scroll_region(3, 8);
+    let (top, bottom) = handler.buffer().scroll_region();
+    assert_eq!(top, 2);
+    assert_eq!(bottom, 7);
+
+    // Full reset.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    // Scroll region should be full screen (0, height-1).
+    let (top, bottom) = handler.buffer().scroll_region();
+    assert_eq!(top, 0, "RIS must reset scroll region top to 0");
+    assert_eq!(bottom, 9, "RIS must reset scroll region bottom to height-1");
+}
+
+#[test]
+fn test_ris_resets_character_attributes() {
+    use freminal_common::buffer_states::format_tag::FormatTag;
+
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Apply bold SGR.
+    handler.process_outputs(&[TerminalOutput::Sgr(
+        freminal_common::sgr::SelectGraphicRendition::Bold,
+    )]);
+
+    // Verify format changed from default.
+    assert_ne!(
+        *handler.current_format(),
+        FormatTag::default(),
+        "format should not be default after SGR bold"
+    );
+
+    // Full reset.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    assert_eq!(
+        *handler.current_format(),
+        FormatTag::default(),
+        "RIS must reset character attributes to default"
+    );
+}
+
+#[test]
+fn test_ris_via_process_outputs_does_not_panic() {
+    // Smoke test: ensure RIS through process_outputs does not panic.
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set up various state.
+    fill_lines(&mut handler, 24);
+    handler.handle_set_scroll_region(5, 20);
+    handler.handle_enter_alternate();
+    handler.handle_data(&text_to_bytes("Alternate content"));
+
+    // Full reset — should return to primary, clean state.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    assert_eq!(handler.cursor_pos().x, 0);
+    assert_eq!(handler.cursor_pos().y, 0);
+}

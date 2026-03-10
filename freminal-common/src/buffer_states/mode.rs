@@ -8,8 +8,8 @@ use std::fmt;
 use crate::buffer_states::modes::{
     ReportMode, allow_column_mode_switch::AllowColumnModeSwitch, decarm::Decarm, decawm::Decawm,
     decckm::Decckm, deccolm::Deccolm, decom::Decom, decsclm::Decsclm, decscnm::Decscnm,
-    dectcem::Dectcem, grapheme::GraphemeClustering, lnm::Lnm, mouse::MouseTrack,
-    reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket,
+    dectcem::Dectcem, grapheme::GraphemeClustering, keypad::KeypadMode, lnm::Lnm,
+    mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates, theme::Theming, unknown::UnknownMode, xtcblink::XtCBlink,
     xtextscrn::XtExtscrn, xtmsewin::XtMseWin,
 };
@@ -45,6 +45,7 @@ pub struct TerminalModes {
     pub repeat_keys: Decarm,
     pub reverse_wrap_around: ReverseWrapAround,
     pub line_feed_mode: Lnm,
+    pub keypad_mode: KeypadMode,
 }
 
 #[derive(Eq, PartialEq, Debug, Default, Clone)]

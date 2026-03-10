@@ -75,6 +75,19 @@ impl TerminalHandler {
         self
     }
 
+    /// Full terminal reset (RIS — Reset to Initial State).
+    ///
+    /// Restores the handler and buffer to initial startup state.
+    /// Preserves the PTY write channel and terminal geometry/scrollback config.
+    pub fn full_reset(&mut self) {
+        self.buffer.full_reset();
+        self.current_format = FormatTag::default();
+        self.show_cursor = Dectcem::default();
+        self.cursor_visual_style = CursorVisualStyle::default();
+        self.character_replace = DecSpecialGraphics::default();
+        self.window_commands.clear();
+    }
+
     /// Get a reference to the underlying buffer
     #[must_use]
     pub const fn buffer(&self) -> &Buffer {
@@ -84,6 +97,12 @@ impl TerminalHandler {
     /// Get a mutable reference to the underlying buffer
     pub const fn buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffer
+    }
+
+    /// Get a reference to the current character format (SGR state).
+    #[must_use]
+    pub const fn current_format(&self) -> &FormatTag {
+        &self.current_format
     }
 
     /// Handle raw data bytes - convert to `TChar` and insert.
@@ -237,6 +256,18 @@ impl TerminalHandler {
         self.buffer.handle_nel();
     }
 
+    /// Handle SU — Scroll Up `n` lines within the scroll region.
+    /// Content moves up; blank lines appear at the bottom of the region.
+    pub fn handle_scroll_up(&mut self, n: usize) {
+        self.buffer.scroll_region_up_n(n);
+    }
+
+    /// Handle SD — Scroll Down `n` lines within the scroll region.
+    /// Content moves down; blank lines appear at the top of the region.
+    pub fn handle_scroll_down(&mut self, n: usize) {
+        self.buffer.scroll_region_down_n(n);
+    }
+
     /// Handle SGR (Select Graphic Rendition) — update `current_format` and propagate to buffer.
     pub fn handle_sgr(&mut self, sgr: &SelectGraphicRendition) {
         apply_sgr(&mut self.current_format, sgr);
@@ -386,6 +417,12 @@ impl TerminalHandler {
         let x = pos.x + 1;
         let y = pos.y + 1;
         self.write_to_pty(&format!("\x1b[{y};{x}R"));
+    }
+
+    /// Handle DSR — Device Status Report (Ps=5).
+    /// Responds with `ESC [ 0 n` (device OK).
+    pub fn handle_device_status_report(&mut self) {
+        self.write_to_pty("\x1b[0n");
     }
 
     /// Handle DA1 — Primary Device Attributes.
@@ -602,6 +639,12 @@ impl TerminalHandler {
             TerminalOutput::DeleteLines(n) => {
                 self.handle_delete_lines(*n);
             }
+            TerminalOutput::ScrollUp(n) => {
+                self.handle_scroll_up(*n);
+            }
+            TerminalOutput::ScrollDown(n) => {
+                self.handle_scroll_down(*n);
+            }
             TerminalOutput::Delete(n) => {
                 self.handle_delete_chars(*n);
             }
@@ -632,10 +675,10 @@ impl TerminalHandler {
                 self.buffer.advance_to_next_tab_stop();
             }
             TerminalOutput::ApplicationKeypadMode => {
-                tracing::warn!("ApplicationKeypadMode not yet implemented (ignored)");
+                tracing::debug!("ApplicationKeypadMode (DECPAM) — tracked in TerminalState");
             }
             TerminalOutput::NormalKeypadMode => {
-                tracing::warn!("NormalKeypadMode not yet implemented (ignored)");
+                tracing::debug!("NormalKeypadMode (DECPNM) — tracked in TerminalState");
             }
             TerminalOutput::Erase(n) => {
                 self.handle_erase_chars(*n);
@@ -660,9 +703,10 @@ impl TerminalHandler {
                 Mode::Dectem(Dectcem::Show) => self.show_cursor = Dectcem::Show,
                 Mode::Dectem(Dectcem::Hide) => self.show_cursor = Dectcem::Hide,
                 Mode::XtCBlink(blink) => self.apply_xtcblink(blink),
-                _other => {
-                    // All other modes: silently ignore.
-                    // Do NOT use todo!() — unknown modes must never panic.
+                other => {
+                    // Modes handled by TerminalState's mode-sync loop, or
+                    // modes not yet acted on.  Log for diagnostic visibility.
+                    tracing::debug!("Mode not handled by TerminalHandler: {other}");
                 }
             },
             TerminalOutput::OscResponse(osc) => {
@@ -670,6 +714,9 @@ impl TerminalHandler {
             }
             TerminalOutput::CursorReport => {
                 self.handle_cursor_report();
+            }
+            TerminalOutput::DeviceStatusReport => {
+                self.handle_device_status_report();
             }
             TerminalOutput::DecSpecialGraphics(dsg) => {
                 self.character_replace = dsg.clone();
@@ -752,7 +799,7 @@ impl TerminalHandler {
                 tracing::warn!("CursorToLowerLeftCorner not yet implemented (ignored)");
             }
             TerminalOutput::ResetDevice => {
-                tracing::warn!("ResetDevice not yet implemented (ignored)");
+                self.full_reset();
             }
             TerminalOutput::MemoryLock => {
                 tracing::warn!("MemoryLock not yet implemented (ignored)");

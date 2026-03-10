@@ -85,6 +85,10 @@ pub enum TerminalOutput {
     NormalKeypadMode,
     InsertLines(usize),
     DeleteLines(usize),
+    /// SU — Scroll Up Ps lines (content moves up, blank at bottom)
+    ScrollUp(usize),
+    /// SD — Scroll Down Ps lines (content moves down, blank at top)
+    ScrollDown(usize),
     Delete(usize),
     Erase(usize),
     Sgr(SelectGraphicRendition),
@@ -94,6 +98,7 @@ pub enum TerminalOutput {
     InsertSpaces(usize),
     OscResponse(AnsiOscType),
     CursorReport,
+    DeviceStatusReport,
     Invalid,
     Skipped,
     DecSpecialGraphics(DecSpecialGraphics),
@@ -184,6 +189,8 @@ impl std::fmt::Display for TerminalOutput {
             Self::Tab => write!(f, "Tab"),
             Self::InsertLines(n) => write!(f, "InsertLines({n})"),
             Self::DeleteLines(n) => write!(f, "DeleteLines({n})"),
+            Self::ScrollUp(n) => write!(f, "ScrollUp({n})"),
+            Self::ScrollDown(n) => write!(f, "ScrollDown({n})"),
             Self::Delete(n) => write!(f, "Delete({n})"),
             Self::Erase(n) => write!(f, "Erase({n})"),
             Self::Sgr(sgr) => write!(f, "Sgr({sgr:?})"),
@@ -198,6 +205,7 @@ impl std::fmt::Display for TerminalOutput {
             }
             Self::Invalid => write!(f, "Invalid"),
             Self::CursorReport => write!(f, "CursorReport"),
+            Self::DeviceStatusReport => write!(f, "DeviceStatusReport"),
             Self::Skipped => write!(f, "Skipped"),
             Self::ApplicationKeypadMode => write!(f, "ApplicationKeypadMode"),
             Self::NormalKeypadMode => write!(f, "NormalKeypadMode"),

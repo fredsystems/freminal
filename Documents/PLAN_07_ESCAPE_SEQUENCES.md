@@ -247,7 +247,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.7 — Wire DECCKM (?1) to TerminalModes
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch, lines 634-655), `freminal-common/src/buffer_states/mode.rs`, `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -275,7 +275,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.8 — Wire bracketed paste (?2004) to TerminalModes
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch), `freminal-common/src/buffer_states/mode.rs`, `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -300,7 +300,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.9 — Wire mouse tracking modes (?1000/?1002/?1003/?1006)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch), `freminal-common/src/buffer_states/mode.rs`, `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -327,7 +327,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.10 — Wire focus events (?1004) to TerminalModes
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch), `freminal-common/src/buffer_states/mode.rs`
 - **Details:**
@@ -348,7 +348,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.11 — Implement SU (CSI S) and SD (CSI T)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs` (dispatch table), `freminal-buffer/src/terminal_handler.rs`, `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -375,7 +375,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.12 — Fix DSR (CSI n) to check Ps value
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs`
 - **Details:**
@@ -397,7 +397,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.13 — Implement ESC c (RIS) fully
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs`, `freminal-buffer/src/terminal_handler.rs`, `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -426,7 +426,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.14 — Implement DECPAM (ESC =) and DECPNM (ESC >)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — High
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs`, `freminal-common/src/buffer_states/mode.rs`, `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -449,7 +449,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.15 — Wire ?5 (DECSCNM), ?6 (DECOM), ?3 (DECCOLM)
 
-- **Status:** Not Started
+- **Status:** Done (partially — DECSCNM/?5, DECARM/?8, ReverseWrapAround/?45, SynchronizedUpdates/?2026, and LNM/20 are wired; DECOM/?6 and DECCOLM/?3 deferred to functional implementation)
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch), `freminal-common/src/buffer_states/mode.rs`
 - **Details:**
@@ -476,7 +476,7 @@ These items fix issues that break vim, tmux, htop, and other common TUI applicat
 
 ### 7.16 — Add logging for unrecognized CSI and DEC modes
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs` (line 240), `freminal-buffer/src/terminal_handler.rs` (line 651)
 - **Details:**

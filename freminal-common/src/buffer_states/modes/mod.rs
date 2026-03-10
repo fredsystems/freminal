@@ -15,6 +15,7 @@ pub mod decsclm;
 pub mod decscnm;
 pub mod dectcem;
 pub mod grapheme;
+pub mod keypad;
 pub mod lnm;
 pub mod mouse;
 pub mod reverse_wrap_around;

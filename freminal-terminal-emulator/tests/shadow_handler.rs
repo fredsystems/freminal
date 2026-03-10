@@ -12,6 +12,11 @@
 //! `debug_assertions` are always active under `cargo test`, so the shadow
 //! handler code path is always exercised here.
 
+use freminal_common::buffer_states::modes::{
+    decarm::Decarm, decckm::Decckm, decscnm::Decscnm, keypad::KeypadMode, lnm::Lnm,
+    mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket,
+    sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+};
 use freminal_terminal_emulator::state::internal::TerminalState;
 
 fn make_state() -> TerminalState {
@@ -169,4 +174,321 @@ fn terminal_state_none_scrollback_limit_uses_default() {
         4000,
         "TerminalState::new with None should keep the default 4000"
     );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Mode wiring tests (subtasks 7.7–7.10, 7.15)
+//
+// Each test sends a DEC-set/reset escape sequence through
+// handle_incoming_data and verifies that TerminalState.modes is updated.
+// ══════════════════════════════════════════════════════════════════════
+
+// ── 7.7  DECCKM (?1) ────────────────────────────────────────────────
+
+#[test]
+fn mode_decckm_set_enables_application_cursor_keys() {
+    let mut state = make_state();
+    assert_eq!(
+        state.modes.cursor_key,
+        Decckm::Ansi,
+        "default should be Ansi"
+    );
+    state.handle_incoming_data(b"\x1b[?1h"); // DECSET ?1
+    assert_eq!(state.modes.cursor_key, Decckm::Application);
+}
+
+#[test]
+fn mode_decckm_reset_restores_ansi_cursor_keys() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1h"); // set
+    state.handle_incoming_data(b"\x1b[?1l"); // reset
+    assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+}
+
+// ── 7.8  Bracketed paste (?2004) ────────────────────────────────────
+
+#[test]
+fn mode_bracketed_paste_set_enables() {
+    let mut state = make_state();
+    assert_eq!(state.modes.bracketed_paste, RlBracket::Disabled);
+    state.handle_incoming_data(b"\x1b[?2004h"); // DECSET ?2004
+    assert_eq!(state.modes.bracketed_paste, RlBracket::Enabled);
+}
+
+#[test]
+fn mode_bracketed_paste_reset_disables() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?2004h");
+    state.handle_incoming_data(b"\x1b[?2004l");
+    assert_eq!(state.modes.bracketed_paste, RlBracket::Disabled);
+}
+
+// ── 7.9  Mouse tracking (?1000/?1002/?1003/?1006) ───────────────────
+
+#[test]
+fn mode_mouse_tracking_1000_set() {
+    let mut state = make_state();
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+    state.handle_incoming_data(b"\x1b[?1000h"); // X11 mouse
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+}
+
+#[test]
+fn mode_mouse_tracking_1000_reset() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1000h");
+    state.handle_incoming_data(b"\x1b[?1000l");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+}
+
+#[test]
+fn mode_mouse_tracking_1002_button_event() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1002h");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseBtn);
+}
+
+#[test]
+fn mode_mouse_tracking_1003_any_event() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1003h");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseAny);
+}
+
+#[test]
+fn mode_mouse_tracking_1006_sgr() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1006h");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseSgr);
+}
+
+#[test]
+fn mode_mouse_tracking_1006_reset() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1006h");
+    state.handle_incoming_data(b"\x1b[?1006l");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+}
+
+// ── 7.10  Focus events (?1004) ──────────────────────────────────────
+
+#[test]
+fn mode_focus_reporting_set() {
+    let mut state = make_state();
+    assert_eq!(state.modes.focus_reporting, XtMseWin::Disabled);
+    state.handle_incoming_data(b"\x1b[?1004h");
+    assert_eq!(state.modes.focus_reporting, XtMseWin::Enabled);
+}
+
+#[test]
+fn mode_focus_reporting_reset() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?1004h");
+    state.handle_incoming_data(b"\x1b[?1004l");
+    assert_eq!(state.modes.focus_reporting, XtMseWin::Disabled);
+}
+
+// ── 7.15  DECSCNM (?5) screen inversion ─────────────────────────────
+
+#[test]
+fn mode_decscnm_set_inverts_screen() {
+    let mut state = make_state();
+    assert_eq!(state.modes.invert_screen, Decscnm::NormalDisplay);
+    state.handle_incoming_data(b"\x1b[?5h");
+    assert_eq!(state.modes.invert_screen, Decscnm::ReverseDisplay);
+}
+
+#[test]
+fn mode_decscnm_reset_restores_normal() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?5h");
+    state.handle_incoming_data(b"\x1b[?5l");
+    assert_eq!(state.modes.invert_screen, Decscnm::NormalDisplay);
+}
+
+// ── 7.15  DECARM (?8) repeat keys ───────────────────────────────────
+
+#[test]
+fn mode_decarm_set_enables_repeat() {
+    let mut state = make_state();
+    // Default for Decarm is RepeatKey (set), so reset first
+    state.handle_incoming_data(b"\x1b[?8l"); // reset
+    assert_eq!(state.modes.repeat_keys, Decarm::NoRepeatKey);
+    state.handle_incoming_data(b"\x1b[?8h"); // set
+    assert_eq!(state.modes.repeat_keys, Decarm::RepeatKey);
+}
+
+#[test]
+fn mode_decarm_reset_disables_repeat() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?8l");
+    assert_eq!(state.modes.repeat_keys, Decarm::NoRepeatKey);
+}
+
+// ── Reverse wrap around (?45) ───────────────────────────────────────
+
+#[test]
+fn mode_reverse_wrap_around_set() {
+    let mut state = make_state();
+    assert_eq!(
+        state.modes.reverse_wrap_around,
+        ReverseWrapAround::WrapAround,
+        "default should be WrapAround"
+    );
+    // Reset first, then set to verify the toggle
+    state.handle_incoming_data(b"\x1b[?45l"); // reset to DontWrap
+    assert_eq!(state.modes.reverse_wrap_around, ReverseWrapAround::DontWrap);
+    state.handle_incoming_data(b"\x1b[?45h"); // set back to WrapAround
+    assert_eq!(
+        state.modes.reverse_wrap_around,
+        ReverseWrapAround::WrapAround
+    );
+}
+
+#[test]
+fn mode_reverse_wrap_around_reset() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?45h");
+    state.handle_incoming_data(b"\x1b[?45l");
+    assert_eq!(state.modes.reverse_wrap_around, ReverseWrapAround::DontWrap);
+}
+
+// ── Synchronized updates (?2026) ────────────────────────────────────
+
+#[test]
+fn mode_synchronized_updates_set() {
+    let mut state = make_state();
+    assert_eq!(state.modes.synchronized_updates, SynchronizedUpdates::Draw);
+    state.handle_incoming_data(b"\x1b[?2026h");
+    assert_eq!(
+        state.modes.synchronized_updates,
+        SynchronizedUpdates::DontDraw
+    );
+}
+
+#[test]
+fn mode_synchronized_updates_reset() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[?2026h");
+    state.handle_incoming_data(b"\x1b[?2026l");
+    assert_eq!(state.modes.synchronized_updates, SynchronizedUpdates::Draw);
+}
+
+// ── LNM (20) line feed mode ─────────────────────────────────────────
+
+#[test]
+fn mode_lnm_set_enables_newline_mode() {
+    let mut state = make_state();
+    assert_eq!(state.modes.line_feed_mode, Lnm::LineFeed);
+    state.handle_incoming_data(b"\x1b[20h");
+    assert_eq!(state.modes.line_feed_mode, Lnm::NewLine);
+}
+
+#[test]
+fn mode_lnm_reset_restores_linefeed_mode() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"\x1b[20h");
+    state.handle_incoming_data(b"\x1b[20l");
+    assert_eq!(state.modes.line_feed_mode, Lnm::LineFeed);
+}
+
+// ── Compound test: realistic session with multiple modes ────────────
+
+#[test]
+fn mode_wiring_realistic_session() {
+    // Simulate what a real application (e.g. vim/tmux) does on startup:
+    // enable bracketed paste, application cursor keys, mouse tracking,
+    // focus events, and synchronized updates.
+    let mut state = make_state();
+
+    // Application startup sequence
+    state.handle_incoming_data(b"\x1b[?1h"); // DECCKM application
+    state.handle_incoming_data(b"\x1b[?2004h"); // Bracketed paste on
+    state.handle_incoming_data(b"\x1b[?1000h"); // X11 mouse on
+    state.handle_incoming_data(b"\x1b[?1006h"); // SGR mouse encoding
+    state.handle_incoming_data(b"\x1b[?1004h"); // Focus events on
+    state.handle_incoming_data(b"\x1b[?2026h"); // Synchronized updates
+
+    assert_eq!(state.modes.cursor_key, Decckm::Application);
+    assert_eq!(state.modes.bracketed_paste, RlBracket::Enabled);
+    // Note: ?1006 overwrites ?1000 since both are MouseMode variants
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseSgr);
+    assert_eq!(state.modes.focus_reporting, XtMseWin::Enabled);
+    assert_eq!(
+        state.modes.synchronized_updates,
+        SynchronizedUpdates::DontDraw
+    );
+
+    // Application shutdown sequence — reset everything
+    state.handle_incoming_data(b"\x1b[?1l");
+    state.handle_incoming_data(b"\x1b[?2004l");
+    state.handle_incoming_data(b"\x1b[?1006l");
+    state.handle_incoming_data(b"\x1b[?1004l");
+    state.handle_incoming_data(b"\x1b[?2026l");
+
+    assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+    assert_eq!(state.modes.bracketed_paste, RlBracket::Disabled);
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+    assert_eq!(state.modes.focus_reporting, XtMseWin::Disabled);
+    assert_eq!(state.modes.synchronized_updates, SynchronizedUpdates::Draw);
+}
+
+// ── 7.14  DECPAM / DECPNM (keypad mode) ──────────────────────────────
+
+#[test]
+fn decpam_sets_application_keypad_mode() {
+    let mut state = make_state();
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+
+    // ESC = → DECPAM (Application Keypad Mode)
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+}
+
+#[test]
+fn decpnm_sets_numeric_keypad_mode() {
+    let mut state = make_state();
+
+    // First set application mode
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    // ESC > → DECPNM (Normal/Numeric Keypad Mode)
+    state.handle_incoming_data(b"\x1b>");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+}
+
+#[test]
+fn decpam_decpnm_toggle_round_trip() {
+    let mut state = make_state();
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+
+    // Toggle several times
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    state.handle_incoming_data(b"\x1b>");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    state.handle_incoming_data(b"\x1b="); // duplicate set — still application
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    state.handle_incoming_data(b"\x1b>");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+}
+
+#[test]
+fn ris_resets_keypad_mode_to_numeric() {
+    let mut state = make_state();
+
+    // Set application keypad mode
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    // RIS (ESC c) should reset everything including keypad mode
+    state.handle_incoming_data(b"\x1bc");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
 }

@@ -18,13 +18,16 @@ use super::csi_commands::{
     decscusr::ansi_parser_inner_csi_finished_set_position_q,
     decslpp::ansi_parser_inner_csi_finished_set_position_t,
     decstbm::ansi_parser_inner_csi_set_top_and_bottom_margins,
-    dl::ansi_parser_inner_csi_finished_dl, ech::ansi_parser_inner_csi_finished_set_position_x,
+    dl::ansi_parser_inner_csi_finished_dl, dsr::ansi_parser_inner_csi_finished_dsr,
+    ech::ansi_parser_inner_csi_finished_set_position_x,
     ed::ansi_parser_inner_csi_finished_set_position_j,
     el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
     il::ansi_parser_inner_csi_finished_set_position_l,
     report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
+    sd::ansi_parser_inner_csi_finished_sd,
     send_device_attributes::ansi_parser_inner_csi_finished_send_da,
-    sgr::ansi_parser_inner_csi_finished_sgr_ansi, vpa::ansi_parser_inner_csi_finished_vpa,
+    sgr::ansi_parser_inner_csi_finished_sgr_ansi, su::ansi_parser_inner_csi_finished_su,
+    vpa::ansi_parser_inner_csi_finished_vpa,
 };
 use crate::ansi_components::tracer::SequenceTracer;
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
@@ -194,6 +197,12 @@ impl AnsiCsiParser {
             AnsiCsiParserState::Finished(b'P') => {
                 ansi_parser_inner_csi_finished_set_position_p(&self.params, output)
             }
+            AnsiCsiParserState::Finished(b'S') => {
+                ansi_parser_inner_csi_finished_su(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'T') => {
+                ansi_parser_inner_csi_finished_sd(&self.params, output)
+            }
             AnsiCsiParserState::Finished(b'X') => {
                 ansi_parser_inner_csi_finished_set_position_x(&self.params, output)
             }
@@ -218,8 +227,7 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_ich(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'n') => {
-                output.push(TerminalOutput::CursorReport);
-                push_result
+                ansi_parser_inner_csi_finished_dsr(&self.params, output)
             }
             AnsiCsiParserState::Finished(b't') => {
                 ansi_parser_inner_csi_finished_set_position_t(&self.params, output)

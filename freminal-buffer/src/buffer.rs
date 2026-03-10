@@ -152,6 +152,34 @@ impl Buffer {
         self
     }
 
+    /// Full terminal reset (RIS — Reset to Initial State).
+    ///
+    /// Restores the buffer to its initial startup state:
+    /// - Clears all screen content and scrollback
+    /// - Resets cursor to home position (0,0)
+    /// - Resets all character attributes
+    /// - Resets scroll region to full screen
+    /// - Resets tab stops to default 8-column positions
+    /// - Exits alternate buffer if active
+    ///
+    /// Preserves `width`, `height`, and `scrollback_limit` (terminal geometry
+    /// and user configuration).
+    pub fn full_reset(&mut self) {
+        self.rows = vec![Row::new(self.width)];
+        self.row_cache = vec![None];
+        self.cursor = CursorState::default();
+        self.current_tag = FormatTag::default();
+        self.kind = BufferType::Primary;
+        self.saved_primary = None;
+        self.saved_cursor = None;
+        self.lnm_enabled = false;
+        self.wrap_enabled = true;
+        self.preserve_scrollback_anchor = false;
+        self.scroll_region_top = 0;
+        self.scroll_region_bottom = self.height.saturating_sub(1);
+        self.tab_stops = Self::default_tab_stops(self.width);
+    }
+
     /// The maximum number of off-screen rows retained above the visible area.
     #[must_use]
     pub const fn scrollback_limit(&self) -> usize {
@@ -1338,6 +1366,38 @@ impl Buffer {
     fn scroll_region_down_primary(&mut self) {
         let (t, b) = self.scroll_region_rows();
         if t < b {
+            self.scroll_slice_down(t, b);
+        }
+    }
+
+    /// SU — Scroll the scroll region UP by `n` lines.
+    /// Content moves up; blank lines appear at the bottom.
+    /// If no scroll region is set, operates on the whole screen.
+    pub fn scroll_region_up_n(&mut self, n: usize) {
+        let (t, b) = self.scroll_region_rows();
+        if t >= b {
+            return;
+        }
+        // Region indices are inclusive, so region has (b - t + 1) rows.
+        let region_size = b - t + 1;
+        let clamped = n.min(region_size);
+        for _ in 0..clamped {
+            self.scroll_slice_up(t, b);
+        }
+    }
+
+    /// SD — Scroll the scroll region DOWN by `n` lines.
+    /// Content moves down; blank lines appear at the top.
+    /// If no scroll region is set, operates on the whole screen.
+    pub fn scroll_region_down_n(&mut self, n: usize) {
+        let (t, b) = self.scroll_region_rows();
+        if t >= b {
+            return;
+        }
+        // Region indices are inclusive, so region has (b - t + 1) rows.
+        let region_size = b - t + 1;
+        let clamped = n.min(region_size);
+        for _ in 0..clamped {
             self.scroll_slice_down(t, b);
         }
     }

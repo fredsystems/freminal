@@ -58,4 +58,10 @@ pub enum ParserFailures {
     UnhandledCNLCommand(String),
     #[error("Invalid cursor previous line (CPL) sequence: {0}")]
     UnhandledCPLCommand(String),
+    #[error("Invalid scroll up (SU) sequence: {0}")]
+    UnhandledSUCommand(String),
+    #[error("Invalid scroll down (SD) sequence: {0}")]
+    UnhandledSDCommand(String),
+    #[error("Invalid device status report (DSR) sequence: {0}")]
+    UnhandledDSRCommand(String),
 }

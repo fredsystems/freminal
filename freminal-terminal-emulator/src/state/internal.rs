@@ -9,11 +9,13 @@ use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
         format_tag::FormatTag,
-        mode::TerminalModes,
+        mode::{Mode, TerminalModes},
         modes::{
-            decarm::Decarm, decckm::Decckm, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+            decarm::Decarm, decckm::Decckm, keypad::KeypadMode, sync_updates::SynchronizedUpdates,
+            xtmsewin::XtMseWin,
         },
         tchar::TChar,
+        terminal_output::TerminalOutput,
         window_manipulation::WindowManipulation,
     },
     cursor::CursorVisualStyle,
@@ -284,6 +286,73 @@ impl TerminalState {
         let parsed = self.parser.push(&incoming);
 
         self.handler.process_outputs(&parsed);
+
+        // ── Sync mode flags that the handler doesn't own ─────────────
+        //
+        // The handler processes buffer-level modes (auto-wrap, alt screen,
+        // cursor visibility, cursor blink, LNM).  Every other mode flag
+        // lives in `self.modes` and is read by the snapshot / GUI layer.
+        // We iterate the parsed output and update `self.modes` for each
+        // relevant Mode variant.  Query variants are intentionally skipped
+        // here; they will be handled when DECRPM (report mode) is
+        // implemented.
+        for output in &parsed {
+            match output {
+                TerminalOutput::Mode(mode) => match mode {
+                    // 7.7  — DECCKM (?1)
+                    Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
+                    // 7.8  — Bracketed paste (?2004)
+                    Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
+                    // 7.9  — Mouse tracking (?9/?1000/?1002/?1003/?1005/?1006/?1016)
+                    Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
+                    // 7.10 — Focus events (?1004)
+                    Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
+                    // 7.15 — DECSCNM (?5) screen inversion
+                    Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
+                    // 7.15 — DECARM (?8) repeat keys
+                    Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
+                    // Reverse wrap around (?45)
+                    Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
+                    // Synchronized updates (?2026)
+                    Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
+                    // LNM (20) — handler handles buffer-level, keep modes in sync
+                    Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
+                    // All other modes are either:
+                    // - Handled entirely by the handler (XtExtscrn, Decawm,
+                    //   Dectcem, XtCBlink)
+                    // - Parsed but not yet acted on (Decom, Deccolm, etc.)
+                    other => {
+                        debug!("Mode not tracked in TerminalState mode-sync: {other}");
+                    }
+                },
+                // 7.14 — DECPAM (ESC =) / DECPNM (ESC >)
+                TerminalOutput::ApplicationKeypadMode => {
+                    self.modes.keypad_mode = KeypadMode::Application;
+                }
+                TerminalOutput::NormalKeypadMode => {
+                    self.modes.keypad_mode = KeypadMode::Numeric;
+                }
+                _ => {}
+            }
+        }
+
+        // ── RIS (ESC c) — full terminal reset ──────────────────────────
+        //
+        // If the parsed output contains a ResetDevice, the handler has already
+        // reset all buffer-level state.  We also need to reset the state that
+        // lives in TerminalState: modes, parser, leftover data, and cursor
+        // visual style.  Theme and write_tx are preserved (user configuration).
+        if parsed
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::ResetDevice))
+        {
+            self.modes = TerminalModes::default();
+            self.parser = FreminalAnsiParser::new();
+            self.leftover_data = None;
+            self.cursor_visual_style = CursorVisualStyle::default();
+            self.window_commands.clear();
+        }
+
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation
         // can consume them.
@@ -306,7 +375,8 @@ impl TerminalState {
     /// Will return an error if the write fails
     pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
         let decckm = self.get_cursor_key_mode() == Decckm::Application;
-        match to_write.to_payload(decckm, decckm) {
+        let keypad_app = self.modes.keypad_mode == KeypadMode::Application;
+        match to_write.to_payload(decckm, keypad_app) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;
             }

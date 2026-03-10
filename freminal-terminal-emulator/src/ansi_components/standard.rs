@@ -184,13 +184,13 @@ impl StandardParser {
                 output.push(TerminalOutput::DeviceControlString(std::mem::take(
                     &mut self.sequence,
                 )));
+                return ParserOutcome::Finished;
             } else if self.apc {
                 output.push(TerminalOutput::ApplicationProgramCommand(std::mem::take(
                     &mut self.sequence,
                 )));
+                return ParserOutcome::Finished;
             }
-
-            return ParserOutcome::Finished;
         }
 
         match self.state {
