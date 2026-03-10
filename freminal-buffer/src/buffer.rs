@@ -884,6 +884,91 @@ impl Buffer {
         self.cursor.pos.x = next.map_or(max_col, |stop| stop.min(max_col));
     }
 
+    /// Set a tab stop at the current cursor column (HTS — ESC H).
+    pub fn set_tab_stop(&mut self) {
+        let col = self.cursor.pos.x;
+        if col < self.tab_stops.len() {
+            self.tab_stops[col] = true;
+        }
+    }
+
+    /// Clear the tab stop at the current cursor column (TBC Ps=0).
+    pub fn clear_tab_stop_at_cursor(&mut self) {
+        let col = self.cursor.pos.x;
+        if col < self.tab_stops.len() {
+            self.tab_stops[col] = false;
+        }
+    }
+
+    /// Clear all tab stops (TBC Ps=3).
+    pub fn clear_all_tab_stops(&mut self) {
+        self.tab_stops.iter_mut().for_each(|s| *s = false);
+    }
+
+    /// Move cursor backward to the Ps-th previous tab stop (CBT — CSI Z).
+    ///
+    /// If there is no previous tab stop, moves to column 0.
+    /// CBT never wraps to the previous line.
+    pub fn tab_backward(&mut self, count: usize) {
+        let mut col = self.cursor.pos.x;
+        for _ in 0..count {
+            // Search backward from current column
+            if col == 0 {
+                break;
+            }
+            let prev = self.tab_stops[..col].iter().rposition(|&is_stop| is_stop);
+            col = prev.unwrap_or(0);
+        }
+        self.cursor.pos.x = col;
+    }
+
+    /// Move cursor forward by `count` tab stops (CHT — CSI I).
+    ///
+    /// If there are fewer than `count` tab stops remaining, moves to the
+    /// rightmost column.  CHT never wraps to the next line.
+    pub fn tab_forward(&mut self, count: usize) {
+        for _ in 0..count {
+            self.advance_to_next_tab_stop();
+        }
+    }
+
+    /// Fill the entire visible screen with 'E' characters (DECALN — ESC # 8).
+    ///
+    /// Also resets the scroll region to full screen and moves the cursor
+    /// to the home position (0, 0).
+    pub fn screen_alignment_test(&mut self) {
+        use freminal_common::buffer_states::format_tag::FormatTag;
+        use freminal_common::buffer_states::tchar::TChar;
+
+        let visible_start = self.visible_window_start(0);
+        let visible_end = visible_start + self.height;
+
+        // Ensure we have enough rows
+        while self.rows.len() < visible_end {
+            self.rows.push(crate::row::Row::new(self.width));
+            self.row_cache.push(None);
+        }
+
+        let default_tag = FormatTag::default();
+        let e_chars: Vec<TChar> = vec![TChar::Ascii(b'E'); self.width];
+        for i in visible_start..visible_end.min(self.rows.len()) {
+            self.rows[i].clear();
+            self.rows[i].insert_text(0, &e_chars, &default_tag);
+            // Invalidate row cache
+            if i < self.row_cache.len() {
+                self.row_cache[i] = None;
+            }
+        }
+
+        // Reset scroll region to full screen
+        self.scroll_region_top = 0;
+        self.scroll_region_bottom = self.height.saturating_sub(1);
+
+        // Move cursor to home position
+        self.cursor.pos.x = 0;
+        self.cursor.pos.y = visible_start;
+    }
+
     pub fn handle_lf(&mut self) {
         match self.kind {
             BufferType::Primary => {

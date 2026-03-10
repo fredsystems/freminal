@@ -580,7 +580,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.20 — Implement synchronized output (?2026)
 
-- **Status:** Not Started
+- **Status:** Done (completed as part of subtask 7.15 in Priority 2)
 - **Priority:** 3 — Medium
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch), `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -602,7 +602,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.21 — Implement HTS (ESC H), TBC (CSI g), CHT (CSI I), CBT (CSI Z)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 3 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs`, `freminal-terminal-emulator/src/ansi_components/csi.rs`, `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -684,7 +684,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.24 — Fix CSI u (restore cursor) and implement CSI s (save cursor)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs` (dispatch table)
 - **Details:**
@@ -708,7 +708,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.25 — Implement REP (CSI b)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs`, `freminal-buffer/src/terminal_handler.rs`
 - **Details:**
@@ -731,7 +731,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.26 — Implement HPA (CSI \`)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi.rs`
 - **Details:**
@@ -770,7 +770,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.28 — Implement DECALN (ESC # 8)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs`, `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -816,7 +816,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.30 — Reduce OSC unknown logging severity
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs`
 - **Details:**

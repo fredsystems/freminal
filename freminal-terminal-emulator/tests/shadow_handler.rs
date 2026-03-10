@@ -492,3 +492,104 @@ fn ris_resets_keypad_mode_to_numeric() {
     state.handle_incoming_data(b"\x1bc");
     assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
 }
+
+// ── 7.21 — HTS (ESC H), TBC (CSI g), CHT (CSI I), CBT (CSI Z) ──────
+
+#[test]
+fn hts_does_not_panic() {
+    let mut state = make_state();
+    // ESC H — set tab stop at current column
+    state.handle_incoming_data(b"\x1bH");
+}
+
+#[test]
+fn tbc_clear_current_does_not_panic() {
+    let mut state = make_state();
+    // CSI 0 g — clear tab stop at cursor
+    state.handle_incoming_data(b"\x1b[0g");
+}
+
+#[test]
+fn tbc_clear_all_does_not_panic() {
+    let mut state = make_state();
+    // CSI 3 g — clear all tab stops
+    state.handle_incoming_data(b"\x1b[3g");
+}
+
+#[test]
+fn cht_forward_tabulation_does_not_panic() {
+    let mut state = make_state();
+    // CSI 2 I — advance 2 tab stops
+    state.handle_incoming_data(b"\x1b[2I");
+}
+
+#[test]
+fn cbt_backward_tabulation_does_not_panic() {
+    let mut state = make_state();
+    // Move to col 20 first, then CSI 2 Z — back 2 tab stops
+    state.handle_incoming_data(b"\x1b[1;21H");
+    state.handle_incoming_data(b"\x1b[2Z");
+}
+
+// ── 7.24 — CSI s / CSI u (Save / Restore Cursor) ────────────────────
+
+#[test]
+fn csi_s_u_save_restore_cursor_does_not_panic() {
+    let mut state = make_state();
+    // Move to row 5, col 10
+    state.handle_incoming_data(b"\x1b[5;10H");
+    // CSI s — save cursor
+    state.handle_incoming_data(b"\x1b[s");
+    // Move elsewhere
+    state.handle_incoming_data(b"\x1b[1;1H");
+    // CSI u — restore cursor
+    state.handle_incoming_data(b"\x1b[u");
+}
+
+// ── 7.25 — REP (CSI b) — Repeat Preceding Graphic Character ─────────
+
+#[test]
+fn rep_does_not_panic() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"A");
+    // CSI 5 b — repeat 'A' 5 times
+    state.handle_incoming_data(b"\x1b[5b");
+}
+
+#[test]
+fn rep_with_no_preceding_char_does_not_panic() {
+    let mut state = make_state();
+    // REP with no preceding graphic — should be a no-op
+    state.handle_incoming_data(b"\x1b[3b");
+}
+
+// ── 7.26 — HPA (CSI `) alias for CHA ────────────────────────────────
+
+#[test]
+fn hpa_backtick_does_not_panic() {
+    let mut state = make_state();
+    // CSI 10 ` — move to column 10 (backtick = 0x60)
+    state.handle_incoming_data(b"\x1b[10`");
+}
+
+// ── 7.28 — DECALN (ESC # 8) — Screen Alignment Test ─────────────────
+
+#[test]
+fn decaln_does_not_panic() {
+    let mut state = make_state();
+    // Write some content first
+    state.handle_incoming_data(b"Hello World\r\nSecond Line");
+    // ESC # 8 — DECALN
+    state.handle_incoming_data(b"\x1b#8");
+}
+
+// ── 7.30 — OSC Unknown silently consumed ─────────────────────────────
+
+#[test]
+fn osc_unknown_does_not_panic_or_log_error() {
+    let mut state = make_state();
+    // OSC 999 ; some data ST — unknown OSC, should be silently consumed
+    state.handle_incoming_data(b"\x1b]999;some unknown data\x07");
+    // Another unknown OSC
+    state.handle_incoming_data(b"\x1b]1234;test\x1b\\");
+}

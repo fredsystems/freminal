@@ -50,6 +50,8 @@ pub struct TerminalHandler {
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
+    /// Last graphic character written (for REP — CSI b).
+    last_graphic_char: Option<TChar>,
 }
 
 impl TerminalHandler {
@@ -64,6 +66,7 @@ impl TerminalHandler {
             character_replace: DecSpecialGraphics::default(),
             write_tx: None,
             window_commands: Vec::new(),
+            last_graphic_char: None,
         }
     }
 
@@ -86,6 +89,7 @@ impl TerminalHandler {
         self.cursor_visual_style = CursorVisualStyle::default();
         self.character_replace = DecSpecialGraphics::default();
         self.window_commands.clear();
+        self.last_graphic_char = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -115,7 +119,19 @@ impl TerminalHandler {
 
         let remapped: Cow<[u8]> = apply_dec_special(data, &self.character_replace);
         if let Ok(text) = TChar::from_vec(&remapped) {
+            // Track the last graphic character for REP (CSI b)
+            if let Some(last) = text.last() {
+                self.last_graphic_char = Some(last.clone());
+            }
             self.buffer.insert_text(&text);
+        }
+    }
+
+    /// Handle REP (CSI Ps b) — repeat the last graphic character Ps times.
+    fn handle_repeat_character(&mut self, count: usize) {
+        if let Some(ref ch) = self.last_graphic_char {
+            let repeated = vec![ch.clone(); count];
+            self.buffer.insert_text(&repeated);
         }
     }
 
@@ -674,6 +690,25 @@ impl TerminalHandler {
             TerminalOutput::Tab => {
                 self.buffer.advance_to_next_tab_stop();
             }
+            TerminalOutput::HorizontalTabSet => {
+                self.buffer.set_tab_stop();
+            }
+            TerminalOutput::TabClear(ps) => match ps {
+                0 => self.buffer.clear_tab_stop_at_cursor(),
+                3 => self.buffer.clear_all_tab_stops(),
+                _ => {
+                    tracing::debug!("TBC with unsupported Ps={ps} (ignored)");
+                }
+            },
+            TerminalOutput::CursorForwardTab(n) => {
+                self.buffer.tab_forward(*n);
+            }
+            TerminalOutput::CursorBackwardTab(n) => {
+                self.buffer.tab_backward(*n);
+            }
+            TerminalOutput::RepeatCharacter(n) => {
+                self.handle_repeat_character(*n);
+            }
             TerminalOutput::ApplicationKeypadMode => {
                 tracing::debug!("ApplicationKeypadMode (DECPAM) — tracked in TerminalState");
             }
@@ -758,7 +793,7 @@ impl TerminalHandler {
                 tracing::debug!("DoubleWidthLine not yet implemented (ignored)");
             }
             TerminalOutput::ScreenAlignmentTest => {
-                tracing::warn!("ScreenAlignmentTest not yet implemented (ignored)");
+                self.buffer.screen_alignment_test();
             }
             TerminalOutput::CharsetDefault
             | TerminalOutput::CharsetUTF8

@@ -380,6 +380,7 @@ impl StandardParser {
                         'M' => output.push(TerminalOutput::ReverseIndex),
                         'D' => output.push(TerminalOutput::Index),
                         'E' => output.push(TerminalOutput::NextLine),
+                        'H' => output.push(TerminalOutput::HorizontalTabSet),
                         _ => {
                             output.push(TerminalOutput::Invalid);
                             return ParserOutcome::Invalid(
@@ -401,13 +402,15 @@ impl StandardParser {
 
 #[must_use]
 pub const fn is_standard_intermediate_final(b: u8) -> bool {
-    // 7 8 = > F c l m n o | } ~ are final and we want to enter the finished state
+    // 7 8 = > F H c l m n o | } ~ are final and we want to enter the finished state
+    // H (0x48) is HTS — Horizontal Tab Set
 
     matches!(
         b,
         0x7 | 0x8
             | 0x3e
             | 0x46
+            | 0x48
             | 0x63
             | 0x6c
             | 0x6d

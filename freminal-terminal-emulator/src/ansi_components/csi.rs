@@ -7,9 +7,10 @@ use freminal_common::buffer_states::mode::{Mode, SetMode};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::csi_commands::{
+    cbt::ansi_parser_inner_csi_finished_cbt,
     cha::ansi_parser_inner_csi_finished_set_cursor_position_g,
-    cnl::ansi_parser_inner_csi_finished_cnl, cpl::ansi_parser_inner_csi_finished_cpl,
-    cub::ansi_parser_inner_csi_finished_move_cursor_left,
+    cht::ansi_parser_inner_csi_finished_cht, cnl::ansi_parser_inner_csi_finished_cnl,
+    cpl::ansi_parser_inner_csi_finished_cpl, cub::ansi_parser_inner_csi_finished_move_cursor_left,
     cud::ansi_parser_inner_csi_finished_move_down, cuf::ansi_parser_inner_csi_finished_move_right,
     cup::ansi_parser_inner_csi_finished_set_position_h,
     cuu::ansi_parser_inner_csi_finished_move_up,
@@ -22,12 +23,12 @@ use super::csi_commands::{
     ech::ansi_parser_inner_csi_finished_set_position_x,
     ed::ansi_parser_inner_csi_finished_set_position_j,
     el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
-    il::ansi_parser_inner_csi_finished_set_position_l,
+    il::ansi_parser_inner_csi_finished_set_position_l, rep::ansi_parser_inner_csi_finished_rep,
     report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
     sd::ansi_parser_inner_csi_finished_sd,
     send_device_attributes::ansi_parser_inner_csi_finished_send_da,
     sgr::ansi_parser_inner_csi_finished_sgr_ansi, su::ansi_parser_inner_csi_finished_su,
-    vpa::ansi_parser_inner_csi_finished_vpa,
+    tbc::ansi_parser_inner_csi_finished_tbc, vpa::ansi_parser_inner_csi_finished_vpa,
 };
 use crate::ansi_components::tracer::SequenceTracer;
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
@@ -179,7 +180,12 @@ impl AnsiCsiParser {
             AnsiCsiParserState::Finished(b'H' | b'f') => {
                 ansi_parser_inner_csi_finished_set_position_h(&self.params, output)
             }
-            AnsiCsiParserState::Finished(b'G') => {
+            AnsiCsiParserState::Finished(b'I') => {
+                // CHT — Cursor Forward Tabulation
+                ansi_parser_inner_csi_finished_cht(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'G' | b'`') => {
+                // CHA (CSI G) and HPA (CSI `) — cursor horizontal absolute
                 ansi_parser_inner_csi_finished_set_cursor_position_g(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'J') => {
@@ -205,6 +211,18 @@ impl AnsiCsiParser {
             }
             AnsiCsiParserState::Finished(b'X') => {
                 ansi_parser_inner_csi_finished_set_position_x(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'Z') => {
+                // CBT — Cursor Backward Tabulation
+                ansi_parser_inner_csi_finished_cbt(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'b') => {
+                // REP — Repeat preceding graphic character
+                ansi_parser_inner_csi_finished_rep(&self.params, output)
+            }
+            AnsiCsiParserState::Finished(b'g') => {
+                // TBC — Tab Clear
+                ansi_parser_inner_csi_finished_tbc(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'm') => {
                 ansi_parser_inner_csi_finished_sgr_ansi(&self.params, output)
@@ -250,9 +268,17 @@ impl AnsiCsiParser {
             AnsiCsiParserState::Finished(b'c') => {
                 ansi_parser_inner_csi_finished_send_da(&self.params, &self.intermediates, output)
             }
+            AnsiCsiParserState::Finished(b's') => {
+                // SCOSC — Save Cursor Position
+                output.push(TerminalOutput::SaveCursor);
+                push_result
+            }
             AnsiCsiParserState::Finished(b'u') => {
-                // https://sw.kovidgoyal.net/kitty/keyboard-protocol/
-                output.push(TerminalOutput::Skipped);
+                // SCORC — Restore Cursor Position
+                // Note: Kitty keyboard protocol also uses CSI u, but with
+                // different parameter patterns (CSI > flags u). Plain CSI u
+                // (no intermediates/params or numeric params) is SCORC.
+                output.push(TerminalOutput::RestoreCursor);
                 push_result
             }
             AnsiCsiParserState::Finished(_esc) => push_result,

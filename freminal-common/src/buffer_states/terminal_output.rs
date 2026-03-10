@@ -163,6 +163,16 @@ pub enum TerminalOutput {
     ReverseIndex,
     /// ESC E — NEL (Next Line): move cursor to col 0 of next line, scroll if at bottom
     NextLine,
+    /// ESC H — HTS (Horizontal Tab Set): set a tab stop at the current cursor column
+    HorizontalTabSet,
+    /// CSI Ps g — TBC (Tab Clear): Ps=0 clear at current column, Ps=3 clear all
+    TabClear(usize),
+    /// CSI Ps I — CHT (Cursor Forward Tabulation): advance cursor by Ps tab stops
+    CursorForwardTab(usize),
+    /// CSI Ps Z — CBT (Cursor Backward Tabulation): move cursor back by Ps tab stops
+    CursorBackwardTab(usize),
+    /// CSI Ps b — REP (Repeat): repeat the preceding graphic character Ps times
+    RepeatCharacter(usize),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -281,6 +291,11 @@ impl std::fmt::Display for TerminalOutput {
             Self::Index => write!(f, "Index"),
             Self::ReverseIndex => write!(f, "ReverseIndex"),
             Self::NextLine => write!(f, "NextLine"),
+            Self::HorizontalTabSet => write!(f, "HorizontalTabSet"),
+            Self::TabClear(n) => write!(f, "TabClear({n})"),
+            Self::CursorForwardTab(n) => write!(f, "CursorForwardTab({n})"),
+            Self::CursorBackwardTab(n) => write!(f, "CursorBackwardTab({n})"),
+            Self::RepeatCharacter(n) => write!(f, "RepeatCharacter({n})"),
         }
     }
 }

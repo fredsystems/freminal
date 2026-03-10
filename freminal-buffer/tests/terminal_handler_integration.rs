@@ -2486,3 +2486,280 @@ fn test_ris_via_process_outputs_does_not_panic() {
     assert_eq!(handler.cursor_pos().x, 0);
     assert_eq!(handler.cursor_pos().y, 0);
 }
+
+// ── 7.21 — HTS, TBC, CHT, CBT (Tab Stop Control) ────────────────────
+
+#[test]
+fn test_hts_sets_tab_stop_at_cursor() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move to column 5 and set a tab stop there
+    handler.handle_cursor_pos(Some(6), Some(1)); // 1-indexed → col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Move to column 0 and tab forward — should land on col 5
+    // (assuming default tab at 8 was cleared or col 5 comes first)
+    // Actually default tabs are at 8, 16, 24, ...
+    // Tab from col 0 should hit col 5 (custom stop) before col 8
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+}
+
+#[test]
+fn test_tbc_clears_tab_stop_at_cursor() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default tab stops are at every 8th column: 0, 8, 16, 24, ...
+    // Move to column 8 and clear the tab stop there
+    handler.handle_cursor_pos(Some(9), Some(1)); // col 8
+    handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+
+    // Tab from col 0 should now skip col 8 and land on col 16
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+}
+
+#[test]
+fn test_tbc_clear_all_tab_stops() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Clear ALL tab stops
+    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+
+    // Tab from col 0 should go to the last column (no stops to land on)
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+}
+
+#[test]
+fn test_cht_cursor_forward_tabulation() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default tabs at 8, 16, 24, ...
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+
+    // CHT 2 = advance 2 tab stops → col 16
+    handler.process_outputs(&[TerminalOutput::CursorForwardTab(2)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+}
+
+#[test]
+fn test_cht_default_one() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+
+    // CHT 1 = advance 1 tab stop → col 8
+    handler.process_outputs(&[TerminalOutput::CursorForwardTab(1)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+}
+
+#[test]
+fn test_cbt_cursor_backward_tabulation() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move to column 20
+    handler.handle_cursor_pos(Some(21), Some(1)); // col 20
+
+    // CBT 1 = back 1 tab stop → col 16
+    handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+}
+
+#[test]
+fn test_cbt_multiple_stops() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move to column 25
+    handler.handle_cursor_pos(Some(26), Some(1)); // col 25
+
+    // CBT 2 = back 2 tab stops
+    // Default tabs at 0, 8, 16, 24, 32, ...
+    // From col 25: 1st back → 24, 2nd back → 16
+    handler.process_outputs(&[TerminalOutput::CursorBackwardTab(2)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+}
+
+#[test]
+fn test_cbt_at_start_stays_at_zero() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+
+    // CBT when already at col 0 should stay at 0
+    handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+}
+
+// ── 7.24 — CSI s / CSI u (Save / Restore Cursor) ────────────────────
+
+#[test]
+fn test_save_restore_cursor_via_process_outputs() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move cursor to (10, 5)
+    handler.handle_cursor_pos(Some(11), Some(6)); // col 10, row 5
+    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+
+    // Save cursor
+    handler.process_outputs(&[TerminalOutput::SaveCursor]);
+
+    // Move cursor somewhere else
+    handler.handle_cursor_pos(Some(1), Some(1));
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+
+    // Restore cursor
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+}
+
+#[test]
+fn test_save_restore_cursor_direct() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_cursor_pos(Some(16), Some(8)); // col 15, row 7
+    handler.handle_save_cursor();
+
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_restore_cursor();
+
+    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 7);
+}
+
+// ── 7.25 — REP (CSI b) — Repeat Preceding Graphic Character ─────────
+
+#[test]
+fn test_rep_repeats_last_graphic_char() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Write 'A' then repeat it 4 more times
+    handler.handle_data(&text_to_bytes("A"));
+    handler.process_outputs(&[TerminalOutput::RepeatCharacter(4)]);
+
+    // Cursor should be at column 5 (1 original + 4 repeated)
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+
+    let rows = handler.buffer().visible_rows(0);
+    let text = row_text(&rows[0]);
+    assert_eq!(text, "AAAAA");
+}
+
+#[test]
+fn test_rep_with_no_preceding_char_is_noop() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // No data written yet — REP should be a no-op
+    handler.process_outputs(&[TerminalOutput::RepeatCharacter(5)]);
+
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+}
+
+#[test]
+fn test_rep_repeats_last_char_of_string() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_data(&text_to_bytes("XY"));
+    // Last graphic char is 'Y'
+    handler.process_outputs(&[TerminalOutput::RepeatCharacter(3)]);
+
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5); // 2 + 3
+    let rows = handler.buffer().visible_rows(0);
+    let text = row_text(&rows[0]);
+    assert_eq!(text, "XYYYY");
+}
+
+#[test]
+fn test_rep_default_count_one() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_data(&text_to_bytes("Z"));
+    handler.process_outputs(&[TerminalOutput::RepeatCharacter(1)]);
+
+    assert_eq!(handler.buffer().get_cursor().pos.x, 2);
+    let rows = handler.buffer().visible_rows(0);
+    let text = row_text(&rows[0]);
+    assert_eq!(text, "ZZ");
+}
+
+// ── 7.26 — HPA (CSI `) alias for CHA ────────────────────────────────
+
+#[test]
+fn test_hpa_via_process_outputs() {
+    // HPA and CHA both produce SetCursorPos with only x set
+    let mut handler = TerminalHandler::new(80, 24);
+
+    handler.handle_data(&text_to_bytes("Hello"));
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+
+    // CHA/HPA to column 3 (1-indexed)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(3),
+        y: None,
+    }]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 2); // 0-indexed
+}
+
+// ── 7.28 — DECALN (ESC # 8) — Screen Alignment Test ─────────────────
+
+#[test]
+fn test_screen_alignment_fills_with_e() {
+    let mut handler = TerminalHandler::new(10, 5);
+
+    // Write some content first
+    fill_lines(&mut handler, 5);
+
+    // Perform screen alignment test
+    handler.process_outputs(&[TerminalOutput::ScreenAlignmentTest]);
+
+    let rows = handler.buffer().visible_rows(0);
+    assert_eq!(rows.len(), 5);
+
+    for (i, row) in rows.iter().enumerate() {
+        let text = row_text(row);
+        assert_eq!(
+            text, "EEEEEEEEEE",
+            "row {i} should be filled with 'E' characters"
+        );
+    }
+}
+
+#[test]
+fn test_screen_alignment_homes_cursor() {
+    let mut handler = TerminalHandler::new(10, 5);
+
+    handler.handle_cursor_pos(Some(5), Some(3)); // somewhere away from home
+    handler.process_outputs(&[TerminalOutput::ScreenAlignmentTest]);
+
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+}
+
+#[test]
+fn test_screen_alignment_resets_scroll_region() {
+    let mut handler = TerminalHandler::new(10, 5);
+
+    // Set a custom scroll region
+    handler.handle_set_scroll_region(2, 4);
+    let (top, bottom) = handler.buffer().scroll_region();
+    assert_eq!(top, 1);
+    assert_eq!(bottom, 3);
+
+    // DECALN should reset it to full screen
+    handler.process_outputs(&[TerminalOutput::ScreenAlignmentTest]);
+
+    let (top, bottom) = handler.buffer().scroll_region();
+    assert_eq!(top, 0);
+    assert_eq!(bottom, 4);
+}
+
+// ── 7.30 — OSC Unknown no longer emits Invalid ──────────────────────
+// (This is a parser-level test, best tested by verifying the code path
+//  doesn't generate TerminalOutput::Invalid. We test via process_outputs
+//  that no crash occurs when handling well-known outputs.)

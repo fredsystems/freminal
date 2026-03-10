@@ -3,7 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+pub mod cbt;
 pub mod cha;
+pub mod cht;
 pub mod cnl;
 pub mod cpl;
 pub mod cub;
@@ -23,9 +25,11 @@ pub mod ed;
 pub mod el;
 pub mod ict;
 pub mod il;
+pub mod rep;
 pub mod report_xt_version;
 pub mod sd;
 pub mod send_device_attributes;
 pub mod sgr;
 pub mod su;
+pub mod tbc;
 pub mod vpa;

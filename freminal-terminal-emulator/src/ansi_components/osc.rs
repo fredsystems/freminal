@@ -202,12 +202,13 @@ impl AnsiOscParser {
                             output.push(TerminalOutput::OscResponse(AnsiOscType::ITerm2));
                         }
                         OscTarget::Unknown => {
-                            // `type_number` reused here → must keep the clone above
-                            output.push(TerminalOutput::Invalid);
-                            return ParserOutcome::Invalid(format!(
-                                "Unknown OSC Target: type_number={type_number:?}, recent='{}'",
+                            // Unknown OSC sequences are silently consumed (like
+                            // xterm/VTE).  Downgraded from error!/Invalid to debug!
+                            // so they don't spam logs during normal usage.
+                            tracing::debug!(
+                                "Unknown OSC Target (silently consumed): type_number={type_number:?}, recent='{}'",
                                 self.seq_trace.as_str()
-                            ));
+                            );
                         }
                     }
                 } else {

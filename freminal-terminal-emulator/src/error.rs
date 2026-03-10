@@ -64,4 +64,12 @@ pub enum ParserFailures {
     UnhandledSDCommand(String),
     #[error("Invalid device status report (DSR) sequence: {0}")]
     UnhandledDSRCommand(String),
+    #[error("Invalid tab clear (TBC) sequence: {0}")]
+    UnhandledTBCCommand(String),
+    #[error("Invalid cursor forward tabulation (CHT) sequence: {0}")]
+    UnhandledCHTCommand(String),
+    #[error("Invalid cursor backward tabulation (CBT) sequence: {0}")]
+    UnhandledCBTCommand(String),
+    #[error("Invalid repeat character (REP) sequence: {0}")]
+    UnhandledREPCommand(String),
 }
