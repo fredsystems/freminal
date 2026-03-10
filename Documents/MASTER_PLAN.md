@@ -31,7 +31,7 @@ and plan document maintenance rules.
 | 4   | Deployment Flake             | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
 | 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
 | 6   | Test Gap Coverage            | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
-| 7   | Escape Sequence Coverage     | `PLAN_07_ESCAPE_SEQUENCES.md` | Not Started | None         |
+| 7   | Escape Sequence Coverage     | `PLAN_07_ESCAPE_SEQUENCES.md` | Complete    | None         |
 | 8   | Primary Screen Scrollback    | `PLAN_08_SCROLLBACK.md`       | Complete    | None         |
 
 ---
@@ -177,7 +177,7 @@ Update this section as tasks complete:
 | 4    | —          | —          | Unblocked (Task 2 complete)     |
 | 5    | —          | —          | Blocked on Task 1               |
 | 6    | —          | —          |                                 |
-| 7    | —          | —          | Audit complete, plan created    |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete        |
 | 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete         |
 
 ---

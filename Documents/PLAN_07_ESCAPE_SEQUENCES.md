@@ -506,7 +506,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.17 — Implement OSC 52 (clipboard)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 3 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs`, `freminal-common/src/buffer_states/osc.rs`, `freminal/src/gui/` (clipboard integration)
 - **Details:**
@@ -533,7 +533,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.18 — Implement OSC 7 (CWD tracking)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 3 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs`, `freminal-common/src/buffer_states/osc.rs`, `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -555,7 +555,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.19 — Implement OSC 133 (shell integration / FTCS)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 3 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs`, `freminal-common/src/buffer_states/osc.rs`, `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -632,7 +632,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.22 — Implement DECRQSS (DCS $ q ... ST)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 3 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs` (DCS handling)
 - **Details:**
@@ -656,7 +656,7 @@ These items add modern terminal capabilities for feature parity with WezTerm/iTe
 
 ### 7.23 — Implement XTGETTCAP (DCS + q ... ST)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 3 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs` (DCS handling)
 - **Details:**
@@ -748,7 +748,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.27 — Implement OSC 4/104 (palette set/reset)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs`, color palette in buffer/renderer
 - **Details:**
