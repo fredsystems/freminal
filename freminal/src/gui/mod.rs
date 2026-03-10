@@ -393,6 +393,7 @@ fn handle_window_manipulation(
 }
 
 impl eframe::App for FreminalGui {
+    #[allow(clippy::too_many_lines)]
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         debug!("Starting new frame");
         let now = std::time::Instant::now();
@@ -499,6 +500,7 @@ impl eframe::App for FreminalGui {
                 &mut self.view_state,
                 &self.input_tx,
                 &self.pty_write_tx,
+                self.settings_modal.is_open,
             );
 
             ui.ctx()

@@ -1384,6 +1384,7 @@ impl FreminalTerminalWidget {
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
         _pty_write_tx: &Sender<PtyWrite>,
+        modal_is_open: bool,
     ) {
         let frame_response = egui::Frame::new().show(ui, |ui| {
             self.character_size = get_char_size(ui.ctx(), &self.terminal_fonts);
@@ -1397,25 +1398,30 @@ impl FreminalTerminalWidget {
             self.previous_font_size = Some(self.font_defs.size);
             self.max_line_width = max_line_width;
 
-            let repeat_characters = snap.repeat_keys;
-            let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
-                .input(|input_state| {
-                    write_input_to_terminal(
-                        input_state,
-                        snap,
-                        input_tx,
-                        view_state,
-                        self.character_size.0,
-                        self.character_size.1,
-                        self.previous_mouse_state.clone(),
-                        repeat_characters,
-                        self.previous_key,
-                        self.previous_scroll_amount,
-                    )
-                });
-            self.previous_mouse_state = new_mouse_pos;
-            self.previous_key = previous_key;
-            self.previous_scroll_amount = scroll_amount;
+            // When a modal dialog (e.g. the settings window) is open, do NOT
+            // forward keyboard/mouse events to the PTY — they belong to the
+            // modal's egui widgets instead.
+            if !modal_is_open {
+                let repeat_characters = snap.repeat_keys;
+                let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
+                    .input(|input_state| {
+                        write_input_to_terminal(
+                            input_state,
+                            snap,
+                            input_tx,
+                            view_state,
+                            self.character_size.0,
+                            self.character_size.1,
+                            self.previous_mouse_state.clone(),
+                            repeat_characters,
+                            self.previous_key,
+                            self.previous_scroll_amount,
+                        )
+                    });
+                self.previous_mouse_state = new_mouse_pos;
+                self.previous_key = previous_key;
+                self.previous_scroll_amount = scroll_amount;
+            }
 
             // Always render a fresh pass from the snapshot.  The PTY thread
             // publishes a new snapshot only when data has changed, so
