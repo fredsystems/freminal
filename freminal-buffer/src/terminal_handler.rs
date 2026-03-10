@@ -15,7 +15,7 @@ use freminal_common::{
         modes::dectcem::Dectcem,
         modes::lnm::Lnm,
         modes::xtcblink::XtCBlink,
-        modes::xtextscrn::XtExtscrn,
+        modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
         tchar::TChar,
         terminal_output::TerminalOutput,
@@ -722,10 +722,17 @@ impl TerminalHandler {
                 self.handle_sgr(sgr);
             }
             TerminalOutput::Mode(mode) => match mode {
-                Mode::XtExtscrn(XtExtscrn::Alternate) => self.handle_enter_alternate(),
-                Mode::XtExtscrn(XtExtscrn::Primary) => self.handle_leave_alternate(),
+                Mode::XtExtscrn(XtExtscrn::Alternate)
+                | Mode::AltScreen47(AltScreen47::Alternate) => self.handle_enter_alternate(),
+                Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary) => {
+                    self.handle_leave_alternate();
+                }
+                Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
+                Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
                 // Query variants: report mode — deferred to Step 3.5
                 Mode::XtExtscrn(XtExtscrn::Query)
+                | Mode::AltScreen47(AltScreen47::Query)
+                | Mode::SaveCursor1048(SaveCursor1048::Query)
                 | Mode::Decawm(Decawm::Query)
                 | Mode::LineFeedMode(Lnm::Query)
                 | Mode::Dectem(Dectcem::Query) => {

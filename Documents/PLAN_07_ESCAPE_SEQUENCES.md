@@ -791,7 +791,7 @@ These items improve completeness and edge-case handling.
 
 ### 7.29 — Wire ?47/?1047/?1048 (legacy alt screen variants)
 
-- **Status:** Not Started
+- **Status:** Done
 - **Priority:** 4 — Low
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (mode dispatch)
 - **Details:**

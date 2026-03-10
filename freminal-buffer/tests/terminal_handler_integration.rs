@@ -2763,3 +2763,167 @@ fn test_screen_alignment_resets_scroll_region() {
 // (This is a parser-level test, best tested by verifying the code path
 //  doesn't generate TerminalOutput::Invalid. We test via process_outputs
 //  that no crash occurs when handling well-known outputs.)
+
+// ── 7.29 — Legacy alternate screen ?47/?1047 and ?1048 ──────────────
+
+#[test]
+fn alt_screen_47_enter_clears_and_leave_restores() {
+    // ?47 should behave like ?1049 for buffer switching: enter alternate
+    // clears the screen, leave restores primary content.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::AltScreen47,
+        terminal_output::TerminalOutput,
+    };
+
+    let mut handler = TerminalHandler::new(20, 5);
+
+    // Write to primary.
+    handler.process_outputs(&[TerminalOutput::Data(b"primary text".to_vec())]);
+    let primary_rows = handler.buffer().visible_rows(0);
+    let primary_text = row_text(&primary_rows[0]);
+    assert_eq!(primary_text, "primary text");
+
+    // Enter alternate via ?47.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Alternate screen should be blank.
+    let alt_rows = handler.buffer().visible_rows(0);
+    let alt_text = row_text(&alt_rows[0]);
+    assert!(
+        alt_text.is_empty(),
+        "alternate screen via ?47 should be blank, got: {alt_text:?}"
+    );
+
+    // Write something in alternate.
+    handler.process_outputs(&[TerminalOutput::Data(b"alt stuff".to_vec())]);
+
+    // Leave alternate via ?47.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
+        &SetMode::DecRst,
+    )))]);
+
+    // Primary content must be restored.
+    let restored_rows = handler.buffer().visible_rows(0);
+    let restored_text = row_text(&restored_rows[0]);
+    assert_eq!(
+        restored_text, "primary text",
+        "leaving ?47 alt screen must restore primary content"
+    );
+}
+
+#[test]
+fn alt_screen_1047_enter_clears_and_leave_restores() {
+    // ?1047 is an alias for ?47 — same behavior.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::AltScreen47,
+    };
+
+    let mut handler = TerminalHandler::new(20, 5);
+    handler.handle_data(b"hello");
+
+    // Enter alternate — via terminal_mode_from_params, ?1047 maps to AltScreen47.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
+        &SetMode::DecSet,
+    )))]);
+
+    let alt_rows = handler.buffer().visible_rows(0);
+    let alt_text = row_text(&alt_rows[0]);
+    assert!(
+        alt_text.is_empty(),
+        "alternate screen via ?1047 should be blank"
+    );
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
+        &SetMode::DecRst,
+    )))]);
+
+    let restored = handler.buffer().visible_rows(0);
+    let text = row_text(&restored[0]);
+    assert_eq!(text, "hello", "leaving ?1047 must restore primary");
+}
+
+#[test]
+fn save_cursor_1048_saves_and_restores() {
+    // ?1048 set = save cursor, ?1048 reset = restore cursor.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::SaveCursor1048,
+    };
+
+    let mut handler = TerminalHandler::new(20, 10);
+
+    // Move cursor to (7, 4).
+    handler.handle_cursor_pos(Some(8), Some(5)); // 1-based
+    assert_eq!(handler.buffer().get_cursor().pos.x, 7);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+
+    // Save via ?1048 set.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
+        SaveCursor1048::new(&SetMode::DecSet),
+    ))]);
+
+    // Move cursor somewhere else.
+    handler.handle_cursor_pos(Some(1), Some(1));
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+
+    // Restore via ?1048 reset.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
+        SaveCursor1048::new(&SetMode::DecRst),
+    ))]);
+
+    assert_eq!(
+        handler.buffer().get_cursor().pos.x,
+        7,
+        "?1048 restore must bring cursor back to saved x"
+    );
+    assert_eq!(
+        handler.buffer().get_cursor().pos.y,
+        4,
+        "?1048 restore must bring cursor back to saved y"
+    );
+}
+
+#[test]
+fn mode_from_params_maps_47_and_1047_to_alt_screen_47() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::AltScreen47,
+    };
+
+    let mode_47 = Mode::terminal_mode_from_params(b"?47", &SetMode::DecSet);
+    assert_eq!(mode_47, Mode::AltScreen47(AltScreen47::Alternate));
+
+    let mode_1047 = Mode::terminal_mode_from_params(b"?1047", &SetMode::DecSet);
+    assert_eq!(mode_1047, Mode::AltScreen47(AltScreen47::Alternate));
+
+    let rst_47 = Mode::terminal_mode_from_params(b"?47", &SetMode::DecRst);
+    assert_eq!(rst_47, Mode::AltScreen47(AltScreen47::Primary));
+
+    let rst_1047 = Mode::terminal_mode_from_params(b"?1047", &SetMode::DecRst);
+    assert_eq!(rst_1047, Mode::AltScreen47(AltScreen47::Primary));
+
+    let query_47 = Mode::terminal_mode_from_params(b"?47", &SetMode::DecQuery);
+    assert_eq!(query_47, Mode::AltScreen47(AltScreen47::Query));
+}
+
+#[test]
+fn mode_from_params_maps_1048_to_save_cursor() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::SaveCursor1048,
+    };
+
+    let set = Mode::terminal_mode_from_params(b"?1048", &SetMode::DecSet);
+    assert_eq!(set, Mode::SaveCursor1048(SaveCursor1048::Save));
+
+    let rst = Mode::terminal_mode_from_params(b"?1048", &SetMode::DecRst);
+    assert_eq!(rst, Mode::SaveCursor1048(SaveCursor1048::Restore));
+
+    let query = Mode::terminal_mode_from_params(b"?1048", &SetMode::DecQuery);
+    assert_eq!(query, Mode::SaveCursor1048(SaveCursor1048::Query));
+}

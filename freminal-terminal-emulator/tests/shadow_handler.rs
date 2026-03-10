@@ -593,3 +593,47 @@ fn osc_unknown_does_not_panic_or_log_error() {
     // Another unknown OSC
     state.handle_incoming_data(b"\x1b]1234;test\x1b\\");
 }
+
+// ── 7.29 — Legacy alternate screen ?47/?1047/?1048 ──────────────────
+
+#[test]
+fn alt_screen_47_set_reset_does_not_panic() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"primary content");
+    // CSI ? 47 h — enter alternate screen (legacy)
+    state.handle_incoming_data(b"\x1b[?47h");
+    state.handle_incoming_data(b"alt content");
+    // CSI ? 47 l — leave alternate screen (legacy)
+    state.handle_incoming_data(b"\x1b[?47l");
+}
+
+#[test]
+fn alt_screen_1047_set_reset_does_not_panic() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"primary content");
+    // CSI ? 1047 h — enter alternate screen (legacy)
+    state.handle_incoming_data(b"\x1b[?1047h");
+    state.handle_incoming_data(b"alt content");
+    // CSI ? 1047 l — leave alternate screen (legacy)
+    state.handle_incoming_data(b"\x1b[?1047l");
+}
+
+#[test]
+fn save_cursor_1048_set_reset_does_not_panic() {
+    let mut state = make_state();
+    // Move cursor
+    state.handle_incoming_data(b"\x1b[5;10H");
+    // CSI ? 1048 h — save cursor
+    state.handle_incoming_data(b"\x1b[?1048h");
+    // Move elsewhere
+    state.handle_incoming_data(b"\x1b[1;1H");
+    // CSI ? 1048 l — restore cursor
+    state.handle_incoming_data(b"\x1b[?1048l");
+}
+
+#[test]
+fn alt_screen_47_query_does_not_panic() {
+    let mut state = make_state();
+    // CSI ? 47 $ p — DECRQM query
+    state.handle_incoming_data(b"\x1b[?47$p");
+}
