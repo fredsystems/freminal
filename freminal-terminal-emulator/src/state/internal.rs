@@ -165,11 +165,12 @@ impl TerminalState {
     #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn data_and_format_data_for_gui(
         &mut self,
+        scroll_offset: usize,
     ) -> (
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        self.handler.data_and_format_data_for_gui()
+        self.handler.data_and_format_data_for_gui(scroll_offset)
     }
 
     #[must_use]

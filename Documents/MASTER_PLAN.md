@@ -32,7 +32,7 @@ and plan document maintenance rules.
 | 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
 | 6   | Test Gap Coverage            | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
 | 7   | Escape Sequence Coverage     | `PLAN_07_ESCAPE_SEQUENCES.md` | Not Started | None         |
-| 8   | Primary Screen Scrollback    | `PLAN_08_SCROLLBACK.md`       | Not Started | None         |
+| 8   | Primary Screen Scrollback    | `PLAN_08_SCROLLBACK.md`       | Complete    | None         |
 
 ---
 
@@ -178,7 +178,7 @@ Update this section as tasks complete:
 | 5    | —          | —          | Blocked on Task 1               |
 | 6    | —          | —          |                                 |
 | 7    | —          | —          | Audit complete, plan created    |
-| 8    | —          | —          | Plan created                    |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete         |
 
 ---
 

@@ -233,7 +233,7 @@ fn bench_data_and_format_for_gui(c: &mut Criterion) {
 
     group.bench_function("flatten_80x24", |b| {
         b.iter(|| {
-            std::hint::black_box(state.handler.data_and_format_data_for_gui());
+            std::hint::black_box(state.handler.data_and_format_data_for_gui(0));
         });
     });
 

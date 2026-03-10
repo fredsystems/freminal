@@ -351,6 +351,14 @@ impl eframe::App for FreminalGui {
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
         let snap = self.arc_swap.load();
 
+        // Sync the GUI's scroll offset from the snapshot.  When new PTY output
+        // arrives the PTY thread resets its offset to 0, so the snapshot will
+        // carry scroll_offset = 0 even if the GUI previously sent a non-zero
+        // value.  Adopting the snapshot's value keeps ViewState in sync.
+        if self.view_state.scroll_offset != snap.scroll_offset {
+            self.view_state.scroll_offset = snap.scroll_offset;
+        }
+
         let panel_response = CentralPanel::default().show(ctx, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.
             let (char_w, char_h) =

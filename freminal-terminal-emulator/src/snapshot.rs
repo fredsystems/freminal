@@ -50,6 +50,18 @@ pub struct TerminalSnapshot {
     /// Wrapped in `Arc` for the same reason as `visible_chars`.
     pub visible_tags: Arc<Vec<FormatTag>>,
 
+    /// Current scroll offset (rows from the bottom, 0 = live view).
+    ///
+    /// The GUI reads this to stay in sync with the PTY thread's view.  When
+    /// the PTY thread auto-scrolls to bottom on new output, this will be 0
+    /// even if the GUI previously sent a non-zero offset.
+    pub scroll_offset: usize,
+
+    /// Maximum valid scroll offset (total scrollback rows above the visible
+    /// window).  Used by the GUI to compute the scrollbar thumb position and
+    /// size.  When `max_scroll_offset == 0` there is no scrollback history.
+    pub max_scroll_offset: usize,
+
     /// Height of the visible window in rows.
     pub height: usize,
 
@@ -119,6 +131,8 @@ impl TerminalSnapshot {
         Self {
             visible_chars: Arc::new(Vec::new()),
             visible_tags: Arc::new(Vec::new()),
+            scroll_offset: 0,
+            max_scroll_offset: 0,
             height: 0,
             cursor_pos: CursorPos { x: 0, y: 0 },
             show_cursor: false,

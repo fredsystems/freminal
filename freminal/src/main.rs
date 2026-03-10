@@ -211,6 +211,9 @@ fn main() {
                                 Ok(InputEvent::FocusChange(focused)) => {
                                     emulator.internal.send_focus_event(focused);
                                 }
+                                Ok(InputEvent::ScrollOffset(offset)) => {
+                                    emulator.set_gui_scroll_offset(offset);
+                                }
                                 Err(_) => {
                                     // GUI closed the sender — time to stop.
                                     info!("Input channel closed; consumer thread exiting");

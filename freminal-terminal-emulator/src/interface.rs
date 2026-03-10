@@ -261,6 +261,15 @@ pub struct TerminalEmulator {
     /// `previous_visible_snap` so stale content is never reused across a
     /// buffer switch.
     previous_was_alternate: bool,
+    /// Scroll offset requested by the GUI (rows from the bottom, 0 = live).
+    ///
+    /// Updated when an `InputEvent::ScrollOffset(n)` is received.  Reset to 0
+    /// when new PTY output arrives (auto-scroll to bottom).
+    gui_scroll_offset: usize,
+    /// The scroll offset used for the previous snapshot.  When this differs
+    /// from the current `gui_scroll_offset`, the visible window has moved and
+    /// the cached snapshot must be invalidated.
+    previous_scroll_offset: usize,
 }
 
 impl TerminalEmulator {
@@ -280,6 +289,8 @@ impl TerminalEmulator {
             write_tx,
             previous_visible_snap: None,
             previous_was_alternate: false,
+            gui_scroll_offset: 0,
+            previous_scroll_offset: 0,
         }
     }
 
@@ -316,6 +327,8 @@ impl TerminalEmulator {
             write_tx,
             previous_visible_snap: None,
             previous_was_alternate: false,
+            gui_scroll_offset: 0,
+            previous_scroll_offset: 0,
         };
         Ok((ret, pty_rx))
     }
@@ -348,8 +361,16 @@ impl TerminalEmulator {
     /// Process a chunk of raw PTY bytes.
     ///
     /// This wraps `TerminalState::handle_incoming_data` for the consumer thread.
+    /// When the user is scrolled back (`gui_scroll_offset > 0`), new output
+    /// auto-scrolls to the bottom by resetting the offset to 0.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         self.internal.handle_incoming_data(incoming);
+        // Auto-scroll to bottom on new output, matching standard terminal
+        // behavior.  The next snapshot will carry scroll_offset = 0 so the
+        // GUI's ViewState is synced automatically.
+        if self.gui_scroll_offset > 0 {
+            self.gui_scroll_offset = 0;
+        }
     }
 
     pub const fn get_win_size(&mut self) -> (usize, usize) {
@@ -412,6 +433,22 @@ impl TerminalEmulator {
         }
     }
 
+    /// Update the GUI-requested scroll offset.
+    ///
+    /// Called by the PTY consumer thread when it receives
+    /// `InputEvent::ScrollOffset(n)`.  The value is clamped to
+    /// `max_scroll_offset()` during the next `build_snapshot()` call.
+    pub const fn set_gui_scroll_offset(&mut self, offset: usize) {
+        self.gui_scroll_offset = offset;
+    }
+
+    /// Reset the scroll offset to 0 (live bottom).
+    ///
+    /// Called when new PTY data arrives while the user is scrolled back.
+    pub const fn reset_scroll_offset(&mut self) {
+        self.gui_scroll_offset = 0;
+    }
+
     /// Write to the terminal
     ///
     /// # Errors
@@ -435,7 +472,7 @@ impl TerminalEmulator {
     }
 
     pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
-        let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui();
+        let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui(0);
         if include_scrollback {
             chars
         } else {
@@ -452,7 +489,7 @@ impl TerminalEmulator {
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        self.internal.data_and_format_data_for_gui()
+        self.internal.data_and_format_data_for_gui(0)
     }
 
     pub fn cursor_pos(&mut self) -> CursorPos {
@@ -466,8 +503,7 @@ impl TerminalEmulator {
     /// Build a point-in-time snapshot of the terminal state.
     ///
     /// This is cheap to call: the visible content is flattened here on the
-    /// PTY thread so the GUI render path never has to do it.  The raw rows are
-    /// wrapped in an `Arc` so the GUI can inspect scrollback without a copy.
+    /// PTY thread so the GUI render path never has to do it.
     ///
     /// `content_changed` is `true` only when the visible flat content differs
     /// from the previous snapshot.  Cursor-only moves do not set it because
@@ -478,6 +514,16 @@ impl TerminalEmulator {
         let (term_width, term_height) = self.internal.handler.get_win_size();
         let is_alternate_screen = self.internal.handler.is_alternate_screen();
 
+        // On the alternate screen scrollback is meaningless — clamp to 0.
+        let (scroll_offset, max_scroll_offset) = if is_alternate_screen {
+            (0, 0)
+        } else {
+            // Clamp to the maximum scrollback offset so an out-of-range value
+            // (e.g. from a previous buffer state) doesn't panic.
+            let max = self.internal.handler.buffer().max_scroll_offset();
+            (self.gui_scroll_offset.min(max), max)
+        };
+
         // ── Invalidate the snap cache on primary ↔ alternate screen switch ───
         //
         // When the buffer type changes, the previous visible_snap belongs to
@@ -487,17 +533,24 @@ impl TerminalEmulator {
             self.previous_was_alternate = is_alternate_screen;
         }
 
-        // ── Determine whether any visible row changed since last snapshot ────
+        // ── Invalidate the snap cache when scroll offset changes ─────────
         //
-        // The PTY thread always operates at scroll_offset = 0.
-        let any_dirty = self.internal.handler.any_visible_dirty(0);
+        // The visible window moved — the cached flat content is from a
+        // different set of rows and must not be reused.
+        if scroll_offset != self.previous_scroll_offset {
+            self.previous_visible_snap = None;
+            self.previous_scroll_offset = scroll_offset;
+        }
+
+        // ── Determine whether any visible row changed since last snapshot ────
+        let any_dirty = self.internal.handler.any_visible_dirty(scroll_offset);
 
         // ── Produce (visible_chars, visible_tags, content_changed) ───────
         let (visible_chars, visible_tags, content_changed) = if any_dirty {
             // At least one visible row is dirty — re-flatten via the cache.
             // `data_and_format_data_for_gui` calls `visible_as_tchars_and_tags`
             // which updates the per-row cache and clears dirty flags in one pass.
-            let (chars, tags) = self.internal.data_and_format_data_for_gui();
+            let (chars, tags) = self.internal.data_and_format_data_for_gui(scroll_offset);
             let vc = Arc::new(chars.visible);
             let vt = Arc::new(tags.visible);
 
@@ -519,7 +572,7 @@ impl TerminalEmulator {
         } else {
             // First-ever snapshot and nothing is marked dirty yet (e.g. the
             // buffer was just created).  Flatten once to populate the cache.
-            let (chars, tags) = self.internal.data_and_format_data_for_gui();
+            let (chars, tags) = self.internal.data_and_format_data_for_gui(scroll_offset);
             let vc = Arc::new(chars.visible);
             let vt = Arc::new(tags.visible);
             self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
@@ -528,7 +581,9 @@ impl TerminalEmulator {
 
         // ── Remaining cheap reads ────────────────────────────────────────────
         let cursor_pos = self.internal.cursor_pos();
-        let show_cursor = self.internal.show_cursor();
+        // Hide the cursor when the user is scrolled back into history —
+        // the live cursor line is not visible on screen.
+        let show_cursor = self.internal.show_cursor() && scroll_offset == 0;
         let cursor_visual_style = self.internal.get_cursor_visual_style();
         let is_normal_display = self.internal.is_normal_display();
 
@@ -544,6 +599,8 @@ impl TerminalEmulator {
         TerminalSnapshot {
             visible_chars,
             visible_tags,
+            scroll_offset,
+            max_scroll_offset,
             height: term_height,
             cursor_pos,
             show_cursor,

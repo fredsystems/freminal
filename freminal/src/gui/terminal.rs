@@ -96,26 +96,25 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
 
 /// Handle mouse scroll when mouse tracking is off.
 ///
-/// On the **alternate screen** (less, vim, htop, …) scroll events are
+/// On the **alternate screen** (less, vim, htop, ...) scroll events are
 /// converted to `ArrowUp`/`ArrowDown` key presses sent to the PTY — this
 /// matches the behaviour of every major terminal emulator.
 ///
-/// On the **primary screen** scrollback is not yet wired (see Task 8 /
-/// `PLAN_08_SCROLLBACK.md`).  Scroll events are silently dropped until the
-/// PTY thread can receive scroll-offset updates from the GUI and produce
-/// snapshots at the correct offset.
+/// On the **primary screen** scroll events adjust the scroll offset and send
+/// it to the PTY thread via `InputEvent::ScrollOffset`.  The PTY thread
+/// clamps the value to `max_scroll_offset()` when building the next snapshot.
 fn handle_scroll_fallback(
     scroll_amount_to_do: f32,
     character_size_y: f32,
     snap: &TerminalSnapshot,
     input_tx: &Sender<InputEvent>,
-    _view_state: &mut ViewState,
+    view_state: &mut ViewState,
 ) {
     let lines = (scroll_amount_to_do / character_size_y).round();
+    let abs_lines = lines.abs();
 
     if snap.is_alternate_screen {
         // Convert scroll delta to arrow key presses.
-        let abs_lines = lines.abs();
         // Safety: abs_lines >= 0, and we clamp to 1 below.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let count = (abs_lines as usize).max(1);
@@ -127,9 +126,31 @@ fn handle_scroll_fallback(
         for _ in 0..count {
             send_terminal_input(&key, input_tx, snap.cursor_key_app_mode);
         }
+    } else {
+        // Primary screen: adjust scroll offset and send to PTY thread.
+        // Multiply by 3 so each wheel tick scrolls 3 lines — matching the
+        // default behavior of most terminal emulators (iTerm2, Alacritty,
+        // kitty, GNOME Terminal, etc.).
+        const SCROLL_MULTIPLIER: usize = 3;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = ((abs_lines as usize).max(1)) * SCROLL_MULTIPLIER;
+
+        let new_offset = if lines > 0.0 {
+            // Scroll up (into history) — increase offset.
+            // The PTY thread will clamp to max_scroll_offset().
+            view_state.scroll_offset.saturating_add(n)
+        } else {
+            // Scroll down (toward live bottom) — decrease offset.
+            view_state.scroll_offset.saturating_sub(n)
+        };
+
+        if new_offset != view_state.scroll_offset {
+            view_state.scroll_offset = new_offset;
+            if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
+                error!("Failed to send scroll offset to PTY consumer: {e}");
+            }
+        }
     }
-    // Primary screen scrollback: intentionally a no-op until Task 8 wires
-    // the scroll offset through InputEvent → PTY thread → snapshot.
 }
 
 /// Convert a `TerminalInput` value to raw bytes and send them to the PTY
@@ -591,6 +612,73 @@ fn encode_egui_mouse_pos_as_usize(pos: Pos2, character_size: (f32, f32)) -> (usi
         });
 
     (x, y)
+}
+
+/// Paint a thin scrollbar indicator on the right edge of the terminal viewport.
+///
+/// The scrollbar is only shown when the user is actively scrolled back
+/// (`scroll_offset > 0`).  It disappears at the live bottom.
+///
+/// The indicator is purely visual — it does not handle drag input.
+fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
+    const SCROLLBAR_WIDTH: f32 = 6.0;
+    const SCROLLBAR_MARGIN: f32 = 2.0;
+    const MIN_THUMB_HEIGHT: f32 = 12.0;
+
+    // Only show when scrolled back into history.
+    if scroll_offset == 0 || max_scroll_offset == 0 {
+        return;
+    }
+
+    let painter = ui.painter();
+
+    // ── Dimensions ───────────────────────────────────────────────────────
+    // Anchor to the full viewport rect, not the text content rect, so the
+    // scrollbar stays pinned to the right edge regardless of content width.
+    let viewport = ui.max_rect();
+    let track_top = viewport.top();
+    let track_bottom = viewport.bottom();
+    let track_height = track_bottom - track_top;
+    if track_height <= 0.0 {
+        return;
+    }
+
+    let track_right = viewport.right() - SCROLLBAR_MARGIN;
+    let track_left = track_right - SCROLLBAR_WIDTH;
+
+    // ── Thumb geometry ───────────────────────────────────────────────────
+    // The visible window covers `term_height` rows out of a total of
+    // `max_scroll_offset + term_height`.  We don't have `term_height` here
+    // but it cancels out: the thumb fraction in pixels equals
+    //   track_height / (max_scroll_offset + term_height)  * term_height
+    // which simplifies when we use the pixel track_height as the visible
+    // proxy (they are proportional).
+    //
+    // Precision loss is acceptable — these are pixel coordinates.
+    #[allow(clippy::cast_precision_loss)]
+    let max_f = max_scroll_offset as f32;
+    let total = max_f + track_height;
+    let thumb_fraction = (track_height / total).clamp(0.05, 1.0);
+    let thumb_height = (track_height * thumb_fraction)
+        .max(MIN_THUMB_HEIGHT)
+        .min(track_height);
+
+    // Position: scroll_offset 0 = bottom, max = top.
+    let scrollable_track = track_height - thumb_height;
+    #[allow(clippy::cast_precision_loss)]
+    let position_fraction = scroll_offset as f32 / max_f;
+    let thumb_top = track_top + scrollable_track * (1.0 - position_fraction);
+
+    let thumb_rect = Rect::from_min_max(
+        Pos2::new(track_left, thumb_top),
+        Pos2::new(track_right, thumb_top + thumb_height),
+    );
+
+    // ── Appearance ───────────────────────────────────────────────────────
+    let color = Color32::from_rgba_premultiplied(200, 200, 200, 180);
+    let rounding = SCROLLBAR_WIDTH / 2.0; // pill shape
+
+    painter.rect_filled(thumb_rect, rounding, color);
 }
 
 fn paint_cursor(
@@ -1372,6 +1460,8 @@ impl FreminalTerminalWidget {
                     &cursor_style,
                 );
             }
+
+            paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
 
             // URL hover detection is not yet ported to snapshots.
             // TODO(task-9): implement URL hover via snapshot data.
