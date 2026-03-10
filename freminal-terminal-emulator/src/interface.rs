@@ -13,14 +13,6 @@ use std::sync::Arc;
 /// with no `Vec` allocation.
 type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>)>;
 
-/// Cached `Arc<Vec<Row>>` stored between snapshots.
-///
-/// `TerminalSnapshot.rows` is included for future scrollback rendering but is
-/// not read by the GUI today.  Re-cloning the entire rows `Vec` on every call
-/// to `build_snapshot` dominates the clean-path cost.  We cache it here and
-/// only rebuild it when the dirty check says at least one visible row changed.
-type CachedRows = Option<Arc<Vec<freminal_buffer::row::Row>>>;
-
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
@@ -264,10 +256,6 @@ pub struct TerminalEmulator {
     /// `TerminalSnapshot`, so the clean path (no dirty rows) hands them
     /// directly into the snapshot with a refcount bump — no Vec allocation.
     previous_visible_snap: VisibleSnap,
-    /// Cached `Arc<Vec<Row>>` from the last snapshot.  Reused on the clean
-    /// path so we avoid cloning the whole rows `Vec` when no row changed.
-    /// Invalidated alongside `previous_visible_snap` on buffer-type switches.
-    cached_rows: CachedRows,
     /// Whether the previous snapshot was taken while in the alternate screen
     /// buffer.  Used to detect primary↔alternate transitions and invalidate
     /// `previous_visible_snap` so stale content is never reused across a
@@ -291,7 +279,6 @@ impl TerminalEmulator {
             _io: None,
             write_tx,
             previous_visible_snap: None,
-            cached_rows: None,
             previous_was_alternate: false,
         }
     }
@@ -328,7 +315,6 @@ impl TerminalEmulator {
             _io: Some(io),
             write_tx,
             previous_visible_snap: None,
-            cached_rows: None,
             previous_was_alternate: false,
         };
         Ok((ret, pty_rx))
@@ -490,7 +476,6 @@ impl TerminalEmulator {
     pub fn build_snapshot(&mut self) -> TerminalSnapshot {
         // ── Cheap immutable reads (no &mut borrow of handler needed) ────────
         let (term_width, term_height) = self.internal.handler.get_win_size();
-        let total_rows = self.internal.handler.buffer().get_rows().len();
         let is_alternate_screen = self.internal.handler.is_alternate_screen();
 
         // ── Invalidate the snap cache on primary ↔ alternate screen switch ───
@@ -499,7 +484,6 @@ impl TerminalEmulator {
         // the other buffer and must never be reused for the new one.
         if is_alternate_screen != self.previous_was_alternate {
             self.previous_visible_snap = None;
-            self.cached_rows = None;
             self.previous_was_alternate = is_alternate_screen;
         }
 
@@ -508,8 +492,8 @@ impl TerminalEmulator {
         // The PTY thread always operates at scroll_offset = 0.
         let any_dirty = self.internal.handler.any_visible_dirty(0);
 
-        // ── Produce (visible_chars, visible_tags, content_changed, rows) ───────
-        let (visible_chars, visible_tags, content_changed, snap_rows) = if any_dirty {
+        // ── Produce (visible_chars, visible_tags, content_changed) ───────
+        let (visible_chars, visible_tags, content_changed) = if any_dirty {
             // At least one visible row is dirty — re-flatten via the cache.
             // `data_and_format_data_for_gui` calls `visible_as_tchars_and_tags`
             // which updates the per-row cache and clears dirty flags in one pass.
@@ -526,29 +510,20 @@ impl TerminalEmulator {
                 .as_ref()
                 .is_none_or(|(prev_chars, _)| prev_chars.as_ref() != vc.as_ref());
 
-            // Rebuild the rows Arc — rows changed so we need a fresh clone.
-            let new_rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
-            self.cached_rows = Some(Arc::clone(&new_rows));
             self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
-            (vc, vt, changed, new_rows)
+            (vc, vt, changed)
         } else if let Some((prev_chars, prev_tags)) = &self.previous_visible_snap {
             // No visible row is dirty — reuse cached Arcs.
             // This is a refcount bump only: no Vec allocation, no memcpy.
-            let rows = self.cached_rows.as_ref().map_or_else(
-                || Arc::new(self.internal.handler.buffer().get_rows().clone()),
-                Arc::clone,
-            );
-            (Arc::clone(prev_chars), Arc::clone(prev_tags), false, rows)
+            (Arc::clone(prev_chars), Arc::clone(prev_tags), false)
         } else {
             // First-ever snapshot and nothing is marked dirty yet (e.g. the
             // buffer was just created).  Flatten once to populate the cache.
             let (chars, tags) = self.internal.data_and_format_data_for_gui();
             let vc = Arc::new(chars.visible);
             let vt = Arc::new(tags.visible);
-            let new_rows = Arc::new(self.internal.handler.buffer().get_rows().clone());
-            self.cached_rows = Some(Arc::clone(&new_rows));
             self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
-            (vc, vt, true, new_rows)
+            (vc, vt, true)
         };
 
         // ── Remaining cheap reads ────────────────────────────────────────────
@@ -569,8 +544,6 @@ impl TerminalEmulator {
         TerminalSnapshot {
             visible_chars,
             visible_tags,
-            rows: snap_rows,
-            total_rows,
             height: term_height,
             cursor_pos,
             show_cursor,

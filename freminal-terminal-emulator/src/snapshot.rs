@@ -13,7 +13,6 @@
 
 use std::sync::Arc;
 
-use freminal_buffer::row::Row;
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -50,17 +49,6 @@ pub struct TerminalSnapshot {
     ///
     /// Wrapped in `Arc` for the same reason as `visible_chars`.
     pub visible_tags: Arc<Vec<FormatTag>>,
-
-    /// Raw rows wrapped in an `Arc` so the GUI can perform its own
-    /// `scroll_offset`-based slicing without copying all row data.
-    ///
-    /// This is only needed once scrollback rendering is active.  Until then
-    /// the value is an empty `Arc<Vec<Row>>`.
-    pub rows: Arc<Vec<Row>>,
-
-    /// Total number of rows (scrollback + visible) so the GUI can compute the
-    /// maximum scroll offset without inspecting `rows` directly in most cases.
-    pub total_rows: usize,
 
     /// Height of the visible window in rows.
     pub height: usize,
@@ -131,8 +119,6 @@ impl TerminalSnapshot {
         Self {
             visible_chars: Arc::new(Vec::new()),
             visible_tags: Arc::new(Vec::new()),
-            rows: Arc::new(Vec::new()),
-            total_rows: 0,
             height: 0,
             cursor_pos: CursorPos { x: 0, y: 0 },
             show_cursor: false,

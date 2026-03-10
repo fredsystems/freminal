@@ -100,14 +100,16 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
 /// converted to `ArrowUp`/`ArrowDown` key presses sent to the PTY — this
 /// matches the behaviour of every major terminal emulator.
 ///
-/// On the **primary screen** the `ViewState::scroll_offset` is adjusted so the
-/// user can browse scrollback history.
+/// On the **primary screen** scrollback is not yet wired (see Task 8 /
+/// `PLAN_08_SCROLLBACK.md`).  Scroll events are silently dropped until the
+/// PTY thread can receive scroll-offset updates from the GUI and produce
+/// snapshots at the correct offset.
 fn handle_scroll_fallback(
     scroll_amount_to_do: f32,
     character_size_y: f32,
     snap: &TerminalSnapshot,
     input_tx: &Sender<InputEvent>,
-    view_state: &mut ViewState,
+    _view_state: &mut ViewState,
 ) {
     let lines = (scroll_amount_to_do / character_size_y).round();
 
@@ -125,20 +127,9 @@ fn handle_scroll_fallback(
         for _ in 0..count {
             send_terminal_input(&key, input_tx, snap.cursor_key_app_mode);
         }
-    } else {
-        // Adjust scrollback offset on the primary screen.
-        let max_offset = snap.total_rows.saturating_sub(snap.height);
-        let abs_lines = lines.abs();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let n = (abs_lines as usize).max(1);
-        if lines > 0.0 {
-            // Scroll up (into history)
-            view_state.scroll_offset = view_state.scroll_offset.saturating_add(n).min(max_offset);
-        } else {
-            // Scroll down (toward live bottom)
-            view_state.scroll_offset = view_state.scroll_offset.saturating_sub(n);
-        }
     }
+    // Primary screen scrollback: intentionally a no-op until Task 8 wires
+    // the scroll offset through InputEvent → PTY thread → snapshot.
 }
 
 /// Convert a `TerminalInput` value to raw bytes and send them to the PTY
