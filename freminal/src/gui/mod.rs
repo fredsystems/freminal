@@ -17,12 +17,14 @@ use freminal_common::config::Config;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+use settings::{SettingsAction, SettingsModal};
 use terminal::FreminalTerminalWidget;
 use view_state::ViewState;
 
 pub mod colors;
 pub mod fonts;
 pub mod mouse;
+pub mod settings;
 pub mod terminal;
 pub mod view_state;
 
@@ -50,7 +52,10 @@ struct FreminalGui {
     terminal_widget: FreminalTerminalWidget,
     view_state: ViewState,
     window_title_stack: Vec<String>,
-    _config: Config,
+    config: Config,
+
+    /// Settings modal state (open/close, draft config, tabs).
+    settings_modal: SettingsModal,
 
     /// Channel sender used to deliver input events (key, resize, focus) to the
     /// PTY consumer thread.
@@ -68,6 +73,7 @@ impl FreminalGui {
         cc: &eframe::CreationContext<'_>,
         arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
         config: Config,
+        config_path: Option<std::path::PathBuf>,
         input_tx: Sender<InputEvent>,
         pty_write_tx: Sender<PtyWrite>,
         window_cmd_rx: Receiver<WindowCommand>,
@@ -79,11 +85,41 @@ impl FreminalGui {
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
             view_state: ViewState::new(),
             window_title_stack: Vec::new(),
-            _config: config,
+            config,
+            settings_modal: SettingsModal::new(config_path),
             input_tx,
             pty_write_tx,
             window_cmd_rx,
         }
+    }
+
+    /// Show the top menu bar.
+    ///
+    /// Contains a "Terminal" menu with Settings and Quit entries.
+    fn show_menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("Terminal", |ui| {
+                if ui.button("Settings...").clicked() {
+                    self.settings_modal.open(&self.config);
+                    ui.close();
+                }
+
+                ui.separator();
+
+                #[cfg(debug_assertions)]
+                {
+                    ui.checkbox(
+                        self.terminal_widget.debug_renderer_enabled(),
+                        "Debug render",
+                    );
+                    ui.separator();
+                }
+
+                if ui.button("Quit").clicked() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                }
+            });
+        });
     }
 }
 
@@ -372,7 +408,12 @@ impl eframe::App for FreminalGui {
             self.view_state.scroll_offset = snap.scroll_offset;
         }
 
-        let panel_response = CentralPanel::default().show(ctx, |ui| {
+        // Menu bar at the top of the window.
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            self.show_menu_bar(ui);
+        });
+
+        let _panel_response = CentralPanel::default().show(ctx, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.
             let (char_w, char_h) =
                 get_char_size(ui.ctx(), &self.terminal_widget.get_terminal_fonts());
@@ -464,9 +505,14 @@ impl eframe::App for FreminalGui {
                 .request_repaint_after(std::time::Duration::from_millis(16));
         });
 
-        panel_response.response.context_menu(|ui| {
-            self.terminal_widget.show_options(ui);
-        });
+        // Show the settings modal (if open) above everything else.
+        let settings_action = self.settings_modal.show(ctx);
+        if settings_action == SettingsAction::Applied {
+            let new_cfg = self.settings_modal.applied_config().clone();
+            self.terminal_widget
+                .apply_config_changes(ctx, &self.config, &new_cfg);
+            self.config = new_cfg;
+        }
 
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {
@@ -486,6 +532,7 @@ impl eframe::App for FreminalGui {
 pub fn run(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     config: Config,
+    config_path: Option<std::path::PathBuf>,
     input_tx: Sender<InputEvent>,
     pty_write_tx: Sender<PtyWrite>,
     window_cmd_rx: Receiver<WindowCommand>,
@@ -500,6 +547,7 @@ pub fn run(
                 cc,
                 arc_swap,
                 config,
+                config_path,
                 input_tx,
                 pty_write_tx,
                 window_cmd_rx,

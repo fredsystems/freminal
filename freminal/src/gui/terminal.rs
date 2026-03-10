@@ -30,9 +30,8 @@ use freminal_terminal_emulator::{
 };
 
 use eframe::egui::{
-    self, Color32, Context, CursorIcon, DragValue, Event, InputState, Key, Modifiers,
-    PointerButton, Pos2, Rect, Stroke, TextFormat, TextStyle, Ui, scroll_area::ScrollBarVisibility,
-    text::LayoutJob,
+    self, Color32, Context, CursorIcon, Event, InputState, Key, Modifiers, PointerButton, Pos2,
+    Rect, Stroke, TextFormat, TextStyle, Ui, scroll_area::ScrollBarVisibility, text::LayoutJob,
 };
 
 use super::{
@@ -1483,12 +1482,42 @@ impl FreminalTerminalWidget {
             .render(ui, frame_response.response.rect, Color32::RED);
     }
 
-    pub fn show_options(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Font size:");
-            ui.add(DragValue::new(&mut self.get_font_size()).range(1.0..=100.0));
-        });
-        #[cfg(debug_assertions)]
-        ui.checkbox(&mut self.debug_renderer.enable, "Debug render");
+    /// Apply config changes that can be hot-reloaded at runtime.
+    ///
+    /// Called when the user clicks "Apply" in the settings modal. Compares the
+    /// old and new configs and updates font/cursor/theme state as needed.
+    pub fn apply_config_changes(
+        &mut self,
+        ctx: &egui::Context,
+        old_config: &Config,
+        new_config: &Config,
+    ) {
+        // Font changes: update font definitions and terminal font.
+        let font_changed = old_config.font.family != new_config.font.family
+            || (old_config.font.size - new_config.font.size).abs() > f32::EPSILON;
+
+        if font_changed {
+            let new_font_config = FontConfig {
+                size: new_config.font.size,
+                user_font: new_config.font.family.clone(),
+                ..FontConfig::default()
+            };
+            setup_font_files(ctx, &new_font_config);
+            self.font_defs = new_font_config;
+            self.terminal_fonts = TerminalFont::new(new_config.font.size);
+            self.previous_font_size = None; // force re-layout
+        }
+
+        // Cursor and theme changes are reflected through the config and will
+        // take effect on the next render cycle.  No additional widget state
+        // needs updating here — cursor shape/blink come from the snapshot
+        // (set by the PTY thread from initial config) or from the config
+        // directly once wired.
+    }
+
+    /// Provides mutable access to the debug renderer enable flag.
+    #[cfg(debug_assertions)]
+    pub const fn debug_renderer_enabled(&mut self) -> &mut bool {
+        &mut self.debug_renderer.enable
     }
 }

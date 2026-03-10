@@ -254,7 +254,14 @@ fn main() {
                 }
             });
 
-            gui::run(arc_swap_gui, cfg, input_tx, pty_write_tx, window_cmd_rx)
+            gui::run(
+                arc_swap_gui,
+                cfg,
+                args.config,
+                input_tx,
+                pty_write_tx,
+                window_cmd_rx,
+            )
         }
         Err(e) => {
             error!("Failed to create terminal emulator: {}", e);
