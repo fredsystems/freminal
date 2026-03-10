@@ -94,6 +94,53 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     }
 }
 
+/// Handle mouse scroll when mouse tracking is off.
+///
+/// On the **alternate screen** (less, vim, htop, …) scroll events are
+/// converted to `ArrowUp`/`ArrowDown` key presses sent to the PTY — this
+/// matches the behaviour of every major terminal emulator.
+///
+/// On the **primary screen** the `ViewState::scroll_offset` is adjusted so the
+/// user can browse scrollback history.
+fn handle_scroll_fallback(
+    scroll_amount_to_do: f32,
+    character_size_y: f32,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
+    view_state: &mut ViewState,
+) {
+    let lines = (scroll_amount_to_do / character_size_y).round();
+
+    if snap.is_alternate_screen {
+        // Convert scroll delta to arrow key presses.
+        let abs_lines = lines.abs();
+        // Safety: abs_lines >= 0, and we clamp to 1 below.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let count = (abs_lines as usize).max(1);
+        let key = if lines > 0.0 {
+            TerminalInput::ArrowUp
+        } else {
+            TerminalInput::ArrowDown
+        };
+        for _ in 0..count {
+            send_terminal_input(&key, input_tx, snap.cursor_key_app_mode);
+        }
+    } else {
+        // Adjust scrollback offset on the primary screen.
+        let max_offset = snap.total_rows.saturating_sub(snap.height);
+        let abs_lines = lines.abs();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = (abs_lines as usize).max(1);
+        if lines > 0.0 {
+            // Scroll up (into history)
+            view_state.scroll_offset = view_state.scroll_offset.saturating_add(n).min(max_offset);
+        } else {
+            // Scroll down (toward live bottom)
+            view_state.scroll_offset = view_state.scroll_offset.saturating_sub(n);
+        }
+    }
+}
+
 /// Convert a `TerminalInput` value to raw bytes and send them to the PTY
 /// consumer thread via `InputEvent::Key`.
 ///
@@ -483,15 +530,25 @@ fn write_input_to_terminal(
                     if let Some(response) = response {
                         response
                     } else {
-                        // Scroll is view-state-local; update scroll_offset directly.
-                        // TODO(task-4-wiring): wire scroll_offset changes back to
-                        // visible_rows properly once Task 9 lands.
-                        let _ = scroll_amount_to_do;
+                        // Mouse tracking is off — handle scroll ourselves.
+                        handle_scroll_fallback(
+                            scroll_amount_to_do,
+                            character_size_y,
+                            snap,
+                            input_tx,
+                            view_state,
+                        );
                         continue;
                     }
                 } else {
-                    // No mouse position tracked; update scroll_offset directly.
-                    let _ = scroll_amount_to_do;
+                    // No mouse position tracked — same fallback as above.
+                    handle_scroll_fallback(
+                        scroll_amount_to_do,
+                        character_size_y,
+                        snap,
+                        input_tx,
+                        view_state,
+                    );
                     continue;
                 }
             }
