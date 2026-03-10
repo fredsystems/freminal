@@ -37,6 +37,13 @@ pub fn internal_color_to_egui(color: TerminalColor, make_faint: bool) -> Color32
         TerminalColor::BrightWhite => Color32::from_hex("#bac2de").unwrap_or_default(), // 15
 
         TerminalColor::Custom(r, g, b) => Color32::from_rgb(r, g, b),
+
+        // PaletteIndex should have been resolved by the handler before reaching
+        // the GUI.  If it somehow arrives here, fall back to the default palette.
+        TerminalColor::PaletteIndex(_idx) => {
+            let resolved = color.resolve_palette_default();
+            return internal_color_to_egui(resolved, make_faint);
+        }
     };
 
     if make_faint {

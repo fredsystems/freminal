@@ -58,6 +58,8 @@ pub enum OscTarget {
     // https://iterm2.com/documentation-escape-codes.html
     Ftcs,
     Clipboard,
+    PaletteColor,
+    ResetPaletteColor,
     RemoteHost,
     Url,
     ResetCursorColor,
@@ -99,12 +101,14 @@ impl From<&AnsiOscToken> for OscTarget {
         match value {
             AnsiOscToken::OscValue(0 | 2) => Self::TitleBar,
             AnsiOscToken::OscValue(1) => Self::IconName,
+            AnsiOscToken::OscValue(4) => Self::PaletteColor,
             AnsiOscToken::OscValue(7) => Self::RemoteHost,
             AnsiOscToken::OscValue(8) => Self::Url,
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
-            AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
             AnsiOscToken::OscValue(52) => Self::Clipboard,
+            AnsiOscToken::OscValue(104) => Self::ResetPaletteColor,
+            AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
             AnsiOscToken::OscValue(133) => Self::Ftcs,
             AnsiOscToken::OscValue(1337) => Self::ITerm2,
             _ => Self::Unknown,
@@ -173,6 +177,12 @@ pub enum AnsiOscType {
     SetClipboard(String, String),
     /// OSC 52 clipboard query: selection name.
     QueryClipboard(String),
+    /// OSC 4 set palette color: index, r, g, b.
+    SetPaletteColor(u8, u8, u8, u8),
+    /// OSC 4 query palette color at index.
+    QueryPaletteColor(u8),
+    /// OSC 104 reset palette color at index, or all if `None`.
+    ResetPaletteColor(Option<u8>),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -193,6 +203,11 @@ impl std::fmt::Display for AnsiOscType {
             Self::ITerm2 => write!(f, "ITerm2"),
             Self::SetClipboard(sel, content) => write!(f, "SetClipboard({sel:?}, {content:?})"),
             Self::QueryClipboard(sel) => write!(f, "QueryClipboard({sel:?})"),
+            Self::SetPaletteColor(idx, r, g, b) => {
+                write!(f, "SetPaletteColor({idx}, {r}, {g}, {b})")
+            }
+            Self::QueryPaletteColor(idx) => write!(f, "QueryPaletteColor({idx})"),
+            Self::ResetPaletteColor(idx) => write!(f, "ResetPaletteColor({idx:?})"),
         }
     }
 }

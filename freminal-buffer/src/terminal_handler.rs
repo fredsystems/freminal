@@ -24,6 +24,7 @@ use freminal_common::{
         url::Url,
         window_manipulation::WindowManipulation,
     },
+    colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
     pty_write::PtyWrite,
     sgr::SelectGraphicRendition,
@@ -61,6 +62,8 @@ pub struct TerminalHandler {
     ftcs_state: FtcsState,
     /// Exit code from the most recent `OSC 133 ; D [; exitcode]` marker.
     last_exit_code: Option<i32>,
+    /// Mutable 256-color palette with optional per-index overrides.
+    palette: ColorPalette,
 }
 
 impl TerminalHandler {
@@ -79,6 +82,7 @@ impl TerminalHandler {
             current_working_directory: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
+            palette: ColorPalette::default(),
         }
     }
 
@@ -105,6 +109,7 @@ impl TerminalHandler {
         self.current_working_directory = None;
         self.ftcs_state = FtcsState::default();
         self.last_exit_code = None;
+        self.palette.reset_all();
     }
 
     /// Get a reference to the underlying buffer
@@ -116,6 +121,12 @@ impl TerminalHandler {
     /// Get a mutable reference to the underlying buffer
     pub const fn buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffer
+    }
+
+    /// Get a reference to the 256-color palette.
+    #[must_use]
+    pub const fn palette(&self) -> &ColorPalette {
+        &self.palette
     }
 
     /// Get a reference to the current character format (SGR state).
@@ -301,7 +312,20 @@ impl TerminalHandler {
 
     /// Handle SGR (Select Graphic Rendition) — update `current_format` and propagate to buffer.
     pub fn handle_sgr(&mut self, sgr: &SelectGraphicRendition) {
-        apply_sgr(&mut self.current_format, sgr);
+        // Resolve PaletteIndex colors against the mutable palette before applying.
+        let resolved = match sgr {
+            SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(idx)) => {
+                SelectGraphicRendition::Foreground(self.palette.lookup(usize::from(*idx)))
+            }
+            SelectGraphicRendition::Background(TerminalColor::PaletteIndex(idx)) => {
+                SelectGraphicRendition::Background(self.palette.lookup(usize::from(*idx)))
+            }
+            SelectGraphicRendition::UnderlineColor(TerminalColor::PaletteIndex(idx)) => {
+                SelectGraphicRendition::UnderlineColor(self.palette.lookup(usize::from(*idx)))
+            }
+            _ => *sgr,
+        };
+        apply_sgr(&mut self.current_format, &resolved);
         self.buffer.set_format(self.current_format.clone());
     }
 
@@ -558,6 +582,29 @@ impl TerminalHandler {
             AnsiOscType::QueryClipboard(sel) => {
                 self.window_commands
                     .push(WindowManipulation::QueryClipboard(sel.clone()));
+            }
+
+            // Palette manipulation: OSC 4 (set/query) and OSC 104 (reset)
+            AnsiOscType::SetPaletteColor(idx, r, g, b) => {
+                self.palette.set(*idx, *r, *g, *b);
+            }
+            AnsiOscType::QueryPaletteColor(idx) => {
+                let (r, g, b) = self.palette.get_rgb(*idx);
+                // Respond with 4-digit hex per channel (xterm convention):
+                // OSC 4 ; index ; rgb:RRRR/GGGG/BBBB ST
+                let response = format!(
+                    "\x1b]4;{idx};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                    u16::from(r) * 257,
+                    u16::from(g) * 257,
+                    u16::from(b) * 257,
+                );
+                self.write_to_pty(&response);
+            }
+            AnsiOscType::ResetPaletteColor(Some(idx)) => {
+                self.palette.reset(*idx);
+            }
+            AnsiOscType::ResetPaletteColor(None) => {
+                self.palette.reset_all();
             }
 
             // NoOp, non-Query color variants, cursor-color reset — nothing to do.
@@ -2127,5 +2174,185 @@ mod tests {
         // After take, window_commands should be empty
         let cmds2 = handler.take_window_commands();
         assert!(cmds2.is_empty());
+    }
+
+    // ── Palette (OSC 4 / OSC 104) tests ─────────────────────────────────
+
+    #[test]
+    fn palette_default_is_empty_overrides() {
+        let handler = TerminalHandler::new(80, 24);
+        // By default the palette has no overrides — all lookups hit defaults.
+        assert_eq!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default()
+        );
+    }
+
+    #[test]
+    fn handle_osc_set_palette_color() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xAA, 0xBB, 0xCC));
+
+        let (r, g, b) = handler.palette().get_rgb(42);
+        assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
+    }
+
+    #[test]
+    fn handle_osc_query_palette_color_sends_response() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set index 10 to a known value first.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(10, 0xFF, 0x80, 0x00));
+
+        // Query it.
+        handler.handle_osc(&AnsiOscType::QueryPaletteColor(10));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response from query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("response should be valid UTF-8");
+        };
+        // 0xFF * 257 = 0xFFFF (65535), 0x80 * 257 = 0x8080 (32896), 0x00 * 257 = 0x0000
+        assert_eq!(response, "\x1b]4;10;rgb:ffff/8080/0000\x1b\\");
+    }
+
+    #[test]
+    fn handle_osc_query_palette_default_index() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query index 0 (Black in Catppuccin Mocha) without setting an override.
+        handler.handle_osc(&AnsiOscType::QueryPaletteColor(0));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response from query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("response should be valid UTF-8");
+        };
+        // Index 0 default is (69, 71, 90) -> 69*257=17733=0x4545, 71*257=18247=0x4747,
+        // 90*257=23130=0x5a5a
+        assert_eq!(response, "\x1b]4;0;rgb:4545/4747/5a5a\x1b\\");
+    }
+
+    #[test]
+    fn handle_osc_reset_palette_single_index() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Set index 5 to a custom value.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(5, 0x11, 0x22, 0x33));
+        assert_eq!(handler.palette().get_rgb(5), (0x11, 0x22, 0x33));
+
+        // Reset just index 5.
+        handler.handle_osc(&AnsiOscType::ResetPaletteColor(Some(5)));
+
+        // Should revert to the default for index 5.
+        let default_rgb = freminal_common::colors::default_index_to_rgb(5);
+        assert_eq!(handler.palette().get_rgb(5), default_rgb);
+    }
+
+    #[test]
+    fn handle_osc_reset_palette_all() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Set a few indices.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(0, 0xFF, 0x00, 0x00));
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(100, 0x00, 0xFF, 0x00));
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(255, 0x00, 0x00, 0xFF));
+
+        // Reset all.
+        handler.handle_osc(&AnsiOscType::ResetPaletteColor(None));
+
+        // All should revert to defaults.
+        assert_eq!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default()
+        );
+    }
+
+    #[test]
+    fn handle_sgr_palette_index_resolves_against_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Set index 42 to a custom colour.
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xDE, 0xAD, 0x00));
+
+        // Apply SGR foreground with PaletteIndex(42).
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(42),
+        ));
+
+        // The resolved colour should be Custom(0xDE, 0xAD, 0x00), not PaletteIndex(42).
+        let fmt = handler.current_format();
+        assert_eq!(
+            fmt.colors.color,
+            TerminalColor::Custom(0xDE, 0xAD, 0x00),
+            "PaletteIndex should be resolved to Custom via palette lookup"
+        );
+    }
+
+    #[test]
+    fn handle_sgr_palette_index_background_and_underline() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(200, 0xAA, 0xBB, 0xCC));
+
+        // Background
+        handler.handle_sgr(&SelectGraphicRendition::Background(
+            TerminalColor::PaletteIndex(200),
+        ));
+        assert_eq!(
+            handler.current_format().colors.background_color,
+            TerminalColor::Custom(0xAA, 0xBB, 0xCC),
+        );
+
+        // Underline colour
+        handler.handle_sgr(&SelectGraphicRendition::UnderlineColor(
+            TerminalColor::PaletteIndex(200),
+        ));
+        assert_eq!(
+            handler.current_format().colors.underline_color,
+            TerminalColor::Custom(0xAA, 0xBB, 0xCC),
+        );
+    }
+
+    #[test]
+    fn handle_sgr_palette_index_uses_default_when_no_override() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // PaletteIndex(1) with no override → should resolve to the default for index 1.
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(1),
+        ));
+
+        let expected = handler.palette().lookup(1);
+        assert_eq!(
+            handler.current_format().colors.color,
+            expected,
+            "PaletteIndex without override should resolve to default colour"
+        );
+    }
+
+    #[test]
+    fn full_reset_clears_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xFF, 0x00, 0xFF));
+        assert_ne!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default()
+        );
+
+        handler.full_reset();
+
+        assert_eq!(
+            handler.palette(),
+            &freminal_common::colors::ColorPalette::default(),
+            "full_reset must clear all palette overrides"
+        );
     }
 }

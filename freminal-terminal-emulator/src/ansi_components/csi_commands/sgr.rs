@@ -9,7 +9,7 @@ use crate::ansi::split_params_into_semicolon_delimited_usize;
 use crate::ansi::{ParserOutcome, split_params_into_colon_delimited_usize};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
-use freminal_common::colors::{TerminalColor, lookup_256_color_by_index};
+use freminal_common::colors::TerminalColor;
 use freminal_common::sgr::SelectGraphicRendition;
 
 #[inline]
@@ -135,15 +135,21 @@ pub fn handle_custom_color(
         5 => {
             let lookup = param_iter.next().flatten().unwrap_or(0);
 
+            // Clamp to 0–255 and emit a PaletteIndex.  The handler
+            // resolves it against the mutable ColorPalette.
+            #[allow(clippy::cast_possible_truncation)]
+            let idx = (lookup & 0xFF) as u8;
+            let color = TerminalColor::PaletteIndex(idx);
+
             match custom_color_control_code {
                 38 => output.push(TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
-                    lookup_256_color_by_index(lookup),
+                    color,
                 ))),
                 48 => output.push(TerminalOutput::Sgr(SelectGraphicRendition::Background(
-                    lookup_256_color_by_index(lookup),
+                    color,
                 ))),
                 58 => output.push(TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
-                    lookup_256_color_by_index(lookup),
+                    color,
                 ))),
                 _ => output.push(TerminalOutput::Invalid),
             }

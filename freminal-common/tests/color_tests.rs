@@ -3,7 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::colors::{TerminalColor, cube_component, lookup_256_color_by_index};
+use freminal_common::colors::{
+    ColorPalette, TerminalColor, cube_component, default_index_to_rgb, lookup_256_color_by_index,
+};
 use proptest::{prop_assert, prop_assert_eq, proptest};
 use std::fmt::Write;
 use std::str::FromStr;
@@ -201,9 +203,166 @@ fn manual_display_write_covers_all_paths() {
     assert_eq!(buf, "rgb(200, 150, 100)");
     buf.clear();
 
+    // PaletteIndex display path
+    write!(&mut buf, "{}", TerminalColor::PaletteIndex(42)).unwrap();
+    assert_eq!(buf, "palette(42)");
+    buf.clear();
+
     // Default variant again
     write!(&mut buf, "{}", TerminalColor::Default).unwrap();
     assert_eq!(buf, "default");
+}
+
+// ------------------------------------------------------------------
+// ColorPalette tests
+// ------------------------------------------------------------------
+
+#[test]
+fn palette_default_is_all_none_overrides() {
+    let palette = ColorPalette::default();
+    // Default palette should produce standard colors for all indices.
+    assert_eq!(palette.lookup(0), TerminalColor::Black);
+    assert_eq!(palette.lookup(1), TerminalColor::Red);
+    assert_eq!(palette.lookup(15), TerminalColor::BrightWhite);
+    // Color cube index
+    let c = palette.lookup(196);
+    assert!(matches!(c, TerminalColor::Custom(..)));
+}
+
+#[test]
+fn palette_set_overrides_default() {
+    let mut palette = ColorPalette::default();
+    // Override index 0 (normally Black) with a custom color
+    palette.set(0, 0x12, 0x34, 0x56);
+    assert_eq!(palette.lookup(0), TerminalColor::Custom(0x12, 0x34, 0x56));
+    // Other indices are unaffected
+    assert_eq!(palette.lookup(1), TerminalColor::Red);
+}
+
+#[test]
+fn palette_reset_restores_default() {
+    let mut palette = ColorPalette::default();
+    palette.set(5, 0xAA, 0xBB, 0xCC);
+    assert_eq!(palette.lookup(5), TerminalColor::Custom(0xAA, 0xBB, 0xCC));
+    palette.reset(5);
+    assert_eq!(palette.lookup(5), TerminalColor::Magenta);
+}
+
+#[test]
+fn palette_reset_all_clears_all_overrides() {
+    let mut palette = ColorPalette::default();
+    palette.set(0, 1, 2, 3);
+    palette.set(100, 4, 5, 6);
+    palette.set(255, 7, 8, 9);
+    palette.reset_all();
+    assert_eq!(palette.lookup(0), TerminalColor::Black);
+    assert_eq!(palette.lookup(100), lookup_256_color_by_index(100));
+    assert_eq!(palette.lookup(255), lookup_256_color_by_index(255));
+}
+
+#[test]
+fn palette_get_rgb_returns_override_when_set() {
+    let mut palette = ColorPalette::default();
+    palette.set(42, 0xFF, 0x00, 0x80);
+    assert_eq!(palette.get_rgb(42), (0xFF, 0x00, 0x80));
+}
+
+#[test]
+fn palette_get_rgb_returns_default_when_not_set() {
+    let palette = ColorPalette::default();
+    // Index 0 should return the Catppuccin Mocha Black RGB
+    assert_eq!(palette.get_rgb(0), (0x45, 0x47, 0x5a));
+}
+
+#[test]
+fn palette_equality() {
+    let p1 = ColorPalette::default();
+    let p2 = ColorPalette::default();
+    assert_eq!(p1, p2);
+
+    let mut p3 = ColorPalette::default();
+    p3.set(10, 1, 2, 3);
+    assert_ne!(p1, p3);
+}
+
+// ------------------------------------------------------------------
+// PaletteIndex variant tests
+// ------------------------------------------------------------------
+
+#[test]
+fn palette_index_display() {
+    assert_eq!(TerminalColor::PaletteIndex(0).to_string(), "palette(0)");
+    assert_eq!(TerminalColor::PaletteIndex(255).to_string(), "palette(255)");
+}
+
+#[test]
+fn palette_index_resolve_default() {
+    // PaletteIndex(1) should resolve to Red (the default for index 1)
+    assert_eq!(
+        TerminalColor::PaletteIndex(1).resolve_palette_default(),
+        TerminalColor::Red
+    );
+    // PaletteIndex for a color-cube index should resolve to Custom(...)
+    let resolved = TerminalColor::PaletteIndex(196).resolve_palette_default();
+    assert!(matches!(resolved, TerminalColor::Custom(..)));
+}
+
+#[test]
+fn palette_index_resolve_non_palette_is_identity() {
+    assert_eq!(
+        TerminalColor::Red.resolve_palette_default(),
+        TerminalColor::Red
+    );
+    assert_eq!(
+        TerminalColor::Custom(1, 2, 3).resolve_palette_default(),
+        TerminalColor::Custom(1, 2, 3)
+    );
+}
+
+#[test]
+fn palette_index_default_to_regular_identity() {
+    // PaletteIndex is not a "default" variant, so default_to_regular returns self
+    assert_eq!(
+        TerminalColor::PaletteIndex(5).default_to_regular(),
+        TerminalColor::PaletteIndex(5)
+    );
+}
+
+// ------------------------------------------------------------------
+// default_index_to_rgb tests
+// ------------------------------------------------------------------
+
+#[test]
+fn default_index_to_rgb_named_colors() {
+    // Catppuccin Mocha Black
+    assert_eq!(default_index_to_rgb(0), (0x45, 0x47, 0x5a));
+    // Catppuccin Mocha Red
+    assert_eq!(default_index_to_rgb(1), (0xf3, 0x8b, 0xa8));
+    // Catppuccin Mocha BrightWhite
+    assert_eq!(default_index_to_rgb(15), (0xba, 0xc2, 0xde));
+}
+
+#[test]
+fn default_index_to_rgb_greyscale_ramp() {
+    // Index 232 is the start of the greyscale ramp
+    let (r, g, b) = default_index_to_rgb(232);
+    assert_eq!(r, g);
+    assert_eq!(g, b);
+
+    // Index 255 is the end of the greyscale ramp
+    let (r2, g2, b2) = default_index_to_rgb(255);
+    assert_eq!(r2, g2);
+    assert_eq!(g2, b2);
+    assert!(r2 > r); // brighter
+}
+
+#[test]
+fn default_index_to_rgb_color_cube() {
+    // Index 16 is rgb(0,0,0) in the color cube
+    assert_eq!(default_index_to_rgb(16), (0, 0, 0));
+    // Index 196 is a red in the color cube
+    let (r, _g, _b) = default_index_to_rgb(196);
+    assert!(r > 0);
 }
 
 //
