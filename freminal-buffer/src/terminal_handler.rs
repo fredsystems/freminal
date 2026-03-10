@@ -548,6 +548,18 @@ impl TerminalHandler {
                 tracing::debug!("OSC iTerm2 (ignored)");
             }
 
+            // Clipboard: forward to GUI via window_commands
+            AnsiOscType::SetClipboard(sel, content) => {
+                self.window_commands.push(WindowManipulation::SetClipboard(
+                    sel.clone(),
+                    content.clone(),
+                ));
+            }
+            AnsiOscType::QueryClipboard(sel) => {
+                self.window_commands
+                    .push(WindowManipulation::QueryClipboard(sel.clone()));
+            }
+
             // NoOp, non-Query color variants, cursor-color reset — nothing to do.
             AnsiOscType::NoOp
             | AnsiOscType::ResetCursorColor
@@ -2055,5 +2067,65 @@ mod tests {
         handler.full_reset();
         assert_eq!(handler.ftcs_state(), FtcsState::None);
         assert_eq!(handler.last_exit_code(), None);
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 52 clipboard tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handle_osc_set_clipboard_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetClipboard(
+            "c".to_string(),
+            "hello world".to_string(),
+        ));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(
+            matches!(&cmds[0], WindowManipulation::SetClipboard(sel, content) if sel == "c" && content == "hello world")
+        );
+    }
+
+    #[test]
+    fn handle_osc_query_clipboard_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::QueryClipboard("c".to_string()));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            WindowManipulation::QueryClipboard(sel) if sel == "c"
+        ));
+    }
+
+    #[test]
+    fn handle_osc_set_clipboard_primary_selection() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetClipboard(
+            "p".to_string(),
+            "primary text".to_string(),
+        ));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(
+            matches!(&cmds[0], WindowManipulation::SetClipboard(sel, content) if sel == "p" && content == "primary text")
+        );
+    }
+
+    #[test]
+    fn handle_osc_clipboard_commands_are_drained_by_take() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetClipboard(
+            "c".to_string(),
+            "first".to_string(),
+        ));
+        handler.handle_osc(&AnsiOscType::QueryClipboard("s".to_string()));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 2);
+
+        // After take, window_commands should be empty
+        let cmds2 = handler.take_window_commands();
+        assert!(cmds2.is_empty());
     }
 }

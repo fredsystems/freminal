@@ -22,6 +22,7 @@
 // #![warn(missing_docs)]
 
 pub mod args;
+pub mod base64;
 pub mod buffer_states;
 pub mod colors;
 pub mod config;

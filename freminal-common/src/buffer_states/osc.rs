@@ -57,6 +57,7 @@ pub enum OscTarget {
     Foreground,
     // https://iterm2.com/documentation-escape-codes.html
     Ftcs,
+    Clipboard,
     RemoteHost,
     Url,
     ResetCursorColor,
@@ -103,6 +104,7 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
             AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
+            AnsiOscToken::OscValue(52) => Self::Clipboard,
             AnsiOscToken::OscValue(133) => Self::Ftcs,
             AnsiOscToken::OscValue(1337) => Self::ITerm2,
             _ => Self::Unknown,
@@ -167,6 +169,10 @@ pub enum AnsiOscType {
     RemoteHost(String),
     ResetCursorColor,
     ITerm2,
+    /// OSC 52 clipboard set: selection name + decoded (plaintext) content.
+    SetClipboard(String, String),
+    /// OSC 52 clipboard query: selection name.
+    QueryClipboard(String),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -185,6 +191,8 @@ impl std::fmt::Display for AnsiOscType {
             Self::RemoteHost(value) => write!(f, "RemoteHost ({value:?})"),
             Self::ResetCursorColor => write!(f, "ResetCursorColor"),
             Self::ITerm2 => write!(f, "ITerm2"),
+            Self::SetClipboard(sel, content) => write!(f, "SetClipboard({sel:?}, {content:?})"),
+            Self::QueryClipboard(sel) => write!(f, "QueryClipboard({sel:?})"),
         }
     }
 }

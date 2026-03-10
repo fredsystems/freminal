@@ -35,6 +35,11 @@ pub enum WindowManipulation {
     SetTitleBarText(String),
     SaveWindowTitleToStack,
     RestoreWindowTitleFromStack,
+    /// OSC 52 clipboard set: selection name + decoded content.
+    SetClipboard(String, String),
+    /// OSC 52 clipboard query: selection name.  The GUI should read the
+    /// clipboard and respond with `OSC 52 ; <sel> ; <base64> ST`.
+    QueryClipboard(String),
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {

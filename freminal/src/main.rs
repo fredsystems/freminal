@@ -239,7 +239,8 @@ fn main() {
                             | WindowManipulation::ReportTerminalSizeInCharacters
                             | WindowManipulation::ReportRootWindowSizeInCharacters
                             | WindowManipulation::ReportIconLabel
-                            | WindowManipulation::ReportTitle => WindowCommand::Report(cmd),
+                            | WindowManipulation::ReportTitle
+                            | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
                             _ => WindowCommand::Viewport(cmd),
                         };
                         if let Err(e) = window_cmd_tx.send(wc) {
