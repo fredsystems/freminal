@@ -128,8 +128,12 @@ fn handle_scroll_fallback(
         }
     } else {
         // Primary screen: adjust scroll offset and send to PTY thread.
+        // Multiply by 3 so each wheel tick scrolls 3 lines — matching the
+        // default behavior of most terminal emulators (iTerm2, Alacritty,
+        // kitty, GNOME Terminal, etc.).
+        const SCROLL_MULTIPLIER: usize = 3;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let n = (abs_lines as usize).max(1);
+        let n = ((abs_lines as usize).max(1)) * SCROLL_MULTIPLIER;
 
         let new_offset = if lines > 0.0 {
             // Scroll up (into history) — increase offset.

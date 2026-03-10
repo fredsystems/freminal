@@ -1,5 +1,10 @@
 # PLAN_08 — Primary Screen Scrollback
 
+## Status: COMPLETE
+
+All 7 subtasks implemented on branch `task-08/scrollback-impl`.
+Commit: `117fdf2` — awaiting merge approval.
+
 ## Overview
 
 Wire the user's scroll offset from the GUI thread into the PTY thread so that
@@ -92,7 +97,7 @@ in `TerminalSnapshot`) and updates `ViewState` accordingly.
 
 ## Subtasks
 
-### 8.1 — Add `InputEvent::ScrollOffset` variant
+### 8.1 — Add `InputEvent::ScrollOffset` variant ✅
 
 **File:** `freminal-terminal-emulator/src/io/mod.rs`
 
@@ -108,7 +113,7 @@ thread.
 
 ---
 
-### 8.2 — Store scroll offset in `TerminalEmulator`
+### 8.2 — Store scroll offset in `TerminalEmulator` ✅
 
 **File:** `freminal-terminal-emulator/src/interface.rs`
 
@@ -123,7 +128,7 @@ field.
 
 ---
 
-### 8.3 — Thread scroll offset through `build_snapshot()`
+### 8.3 — Thread scroll offset through `build_snapshot()` ✅
 
 **Files:**
 
@@ -146,7 +151,7 @@ window matches the rendered window.
 
 ---
 
-### 8.4 — Add `scroll_offset` to `TerminalSnapshot`
+### 8.4 — Add `scroll_offset` to `TerminalSnapshot` ✅
 
 **File:** `freminal-terminal-emulator/src/snapshot.rs`
 
@@ -162,7 +167,7 @@ detection, etc.).
 
 ---
 
-### 8.5 — Send scroll events from GUI to PTY thread
+### 8.5 — Send scroll events from GUI to PTY thread ✅
 
 **File:** `freminal/src/gui/terminal.rs` — `handle_scroll_fallback()` and
 callers
@@ -190,7 +195,7 @@ Option (b) is preferred (keeps buffer knowledge out of the GUI).
 
 ---
 
-### 8.6 — Auto-scroll to bottom on new output
+### 8.6 — Auto-scroll to bottom on new output ✅
 
 **Files:**
 
@@ -209,7 +214,7 @@ and the GUI reads `snap.scroll_offset` to sync `ViewState`.
 
 ---
 
-### 8.7 — Scroll position indicator (stretch goal)
+### 8.7 — Scroll position indicator (stretch goal) ✅
 
 **File:** `freminal/src/gui/terminal.rs`
 
