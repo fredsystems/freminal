@@ -467,12 +467,209 @@ impl TerminalHandler {
 
     /// Handle a DCS (Device Control String) sequence.
     ///
-    /// Most DCS sequences sent by applications like nvim are informational queries.
-    /// Unknown or unsupported sequences are silently logged and ignored — they must
-    /// never panic.
-    pub fn handle_device_control_string(&self, dcs: &[u8]) {
-        // Log at debug level so we can see what nvim and others send without noise.
-        tracing::debug!("DCS received (ignored): {}", String::from_utf8_lossy(dcs));
+    /// The raw `dcs` payload includes the leading `P` byte and the trailing `ESC \`
+    /// string terminator.  We strip those to get the inner content, then dispatch on
+    /// known DCS sub-commands:
+    ///
+    /// - **DECRQSS** (`$ q <Pt> ST`): Request Selection or Setting.
+    /// - **XTGETTCAP** (`+ q <hex> ST`): xterm termcap/terminfo query.
+    ///
+    /// Unknown or unsupported DCS sub-commands are logged at debug level and ignored.
+    pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
+        // Strip leading 'P' and trailing ESC '\' to get inner content.
+        let inner = Self::strip_dcs_envelope(dcs);
+
+        if let Some(pt) = inner.strip_prefix(b"$q") {
+            self.handle_decrqss(pt);
+        } else if let Some(hex_payload) = inner.strip_prefix(b"+q") {
+            self.handle_xtgettcap(hex_payload);
+        } else {
+            tracing::debug!(
+                "DCS sub-command not recognized (ignored): {}",
+                String::from_utf8_lossy(dcs)
+            );
+        }
+    }
+
+    /// Strip the DCS envelope: leading `P` byte and trailing `ESC \` (if present).
+    fn strip_dcs_envelope(dcs: &[u8]) -> &[u8] {
+        let start = usize::from(dcs.first() == Some(&b'P'));
+        let end = if dcs.len() >= 2 && dcs[dcs.len() - 2] == 0x1b && dcs[dcs.len() - 1] == b'\\' {
+            dcs.len() - 2
+        } else {
+            dcs.len()
+        };
+        if start <= end { &dcs[start..end] } else { &[] }
+    }
+
+    /// Handle DECRQSS — Request Selection or Setting.
+    ///
+    /// `pt` is the setting identifier after stripping the `$q` prefix:
+    /// - `m`     → current SGR attributes
+    /// - `r`     → current scroll region (DECSTBM)
+    /// - `SP q`  → current cursor style (DECSCUSR)  (note: space + q)
+    ///
+    /// Response format: `DCS Ps $ r Pt ST`
+    /// - `Ps = 1` for valid request, `Ps = 0` for invalid.
+    fn handle_decrqss(&self, pt: &[u8]) {
+        match pt {
+            b"m" => {
+                let sgr = self.build_sgr_response();
+                self.write_to_pty(&format!("\x1bP1$r{sgr}m\x1b\\"));
+            }
+            b"r" => {
+                let (top, bottom) = self.buffer.scroll_region();
+                // Respond with 1-based row numbers.
+                let top_1 = top + 1;
+                let bottom_1 = bottom + 1;
+                self.write_to_pty(&format!("\x1bP1$r{top_1};{bottom_1}r\x1b\\"));
+            }
+            // SP q = space (0x20) followed by 'q' (0x71)
+            b" q" => {
+                let style_num = match self.cursor_visual_style() {
+                    CursorVisualStyle::BlockCursorBlink => 1,
+                    CursorVisualStyle::BlockCursorSteady => 2,
+                    CursorVisualStyle::UnderlineCursorBlink => 3,
+                    CursorVisualStyle::UnderlineCursorSteady => 4,
+                    CursorVisualStyle::VerticalLineCursorBlink => 5,
+                    CursorVisualStyle::VerticalLineCursorSteady => 6,
+                };
+                self.write_to_pty(&format!("\x1bP1$r{style_num} q\x1b\\"));
+            }
+            _ => {
+                // Invalid / unrecognized query → DCS 0 $ r ST
+                self.write_to_pty("\x1bP0$r\x1b\\");
+                tracing::debug!(
+                    "DECRQSS: unrecognized setting query: {}",
+                    String::from_utf8_lossy(pt)
+                );
+            }
+        }
+    }
+
+    /// Build the SGR parameter string for the current format state.
+    ///
+    /// Returns a string like `0;1;4;38;2;255;0;0` representing the active SGR
+    /// attributes.  The leading `0` (reset) is always included; individual
+    /// attributes are appended only when they differ from the default.
+    fn build_sgr_response(&self) -> String {
+        let fmt = self.current_format();
+        let mut parts: Vec<String> = vec!["0".to_string()];
+
+        // Font weight
+        if fmt.font_weight == FontWeight::Bold {
+            parts.push("1".to_string());
+        }
+
+        // Font decorations
+        for dec in &fmt.font_decorations {
+            match dec {
+                FontDecorations::Faint => parts.push("2".to_string()),
+                FontDecorations::Italic => parts.push("3".to_string()),
+                FontDecorations::Underline => parts.push("4".to_string()),
+                FontDecorations::Strikethrough => parts.push("9".to_string()),
+            }
+        }
+
+        // Reverse video
+        if fmt.colors.reverse_video == ReverseVideo::On {
+            parts.push("7".to_string());
+        }
+
+        // Foreground color
+        Self::append_color_sgr(&mut parts, fmt.colors.color, true);
+
+        // Background color
+        Self::append_color_sgr(&mut parts, fmt.colors.background_color, false);
+
+        // Underline color (SGR 58)
+        if fmt.colors.underline_color != TerminalColor::DefaultUnderlineColor {
+            Self::append_underline_color_sgr(&mut parts, fmt.colors.underline_color);
+        }
+
+        parts.join(";")
+    }
+
+    /// Append SGR parameters for a foreground (`is_fg = true`) or background color.
+    fn append_color_sgr(parts: &mut Vec<String>, color: TerminalColor, is_fg: bool) {
+        let (base, idx_code, rgb_code) = if is_fg { (30, 38, 38) } else { (40, 48, 48) };
+
+        match color {
+            TerminalColor::Black => parts.push(format!("{base}")),
+            TerminalColor::Red => parts.push(format!("{}", base + 1)),
+            TerminalColor::Green => parts.push(format!("{}", base + 2)),
+            TerminalColor::Yellow => parts.push(format!("{}", base + 3)),
+            TerminalColor::Blue => parts.push(format!("{}", base + 4)),
+            TerminalColor::Magenta => parts.push(format!("{}", base + 5)),
+            TerminalColor::Cyan => parts.push(format!("{}", base + 6)),
+            TerminalColor::White => parts.push(format!("{}", base + 7)),
+            TerminalColor::BrightBlack => parts.push(format!("{}", base + 60)),
+            TerminalColor::BrightRed => parts.push(format!("{}", base + 61)),
+            TerminalColor::BrightGreen => parts.push(format!("{}", base + 62)),
+            TerminalColor::BrightYellow => parts.push(format!("{}", base + 63)),
+            TerminalColor::BrightBlue => parts.push(format!("{}", base + 64)),
+            TerminalColor::BrightMagenta => parts.push(format!("{}", base + 65)),
+            TerminalColor::BrightCyan => parts.push(format!("{}", base + 66)),
+            TerminalColor::BrightWhite => parts.push(format!("{}", base + 67)),
+            TerminalColor::PaletteIndex(idx) => {
+                parts.push(format!("{idx_code};5;{idx}"));
+            }
+            TerminalColor::Custom(r, g, b) => {
+                parts.push(format!("{rgb_code};2;{r};{g};{b}"));
+            }
+            // Default, DefaultBackground, DefaultUnderlineColor, DefaultCursorColor — no SGR needed
+            _ => {}
+        }
+    }
+
+    /// Append SGR 58 (underline color) parameters.
+    fn append_underline_color_sgr(parts: &mut Vec<String>, color: TerminalColor) {
+        match color {
+            TerminalColor::PaletteIndex(idx) => {
+                parts.push(format!("58;5;{idx}"));
+            }
+            TerminalColor::Custom(r, g, b) => {
+                parts.push(format!("58;2;{r};{g};{b}"));
+            }
+            // Named colors as underline color: encode as palette index 0-15
+            TerminalColor::Black => parts.push("58;5;0".to_string()),
+            TerminalColor::Red => parts.push("58;5;1".to_string()),
+            TerminalColor::Green => parts.push("58;5;2".to_string()),
+            TerminalColor::Yellow => parts.push("58;5;3".to_string()),
+            TerminalColor::Blue => parts.push("58;5;4".to_string()),
+            TerminalColor::Magenta => parts.push("58;5;5".to_string()),
+            TerminalColor::Cyan => parts.push("58;5;6".to_string()),
+            TerminalColor::White => parts.push("58;5;7".to_string()),
+            TerminalColor::BrightBlack => parts.push("58;5;8".to_string()),
+            TerminalColor::BrightRed => parts.push("58;5;9".to_string()),
+            TerminalColor::BrightGreen => parts.push("58;5;10".to_string()),
+            TerminalColor::BrightYellow => parts.push("58;5;11".to_string()),
+            TerminalColor::BrightBlue => parts.push("58;5;12".to_string()),
+            TerminalColor::BrightMagenta => parts.push("58;5;13".to_string()),
+            TerminalColor::BrightCyan => parts.push("58;5;14".to_string()),
+            TerminalColor::BrightWhite => parts.push("58;5;15".to_string()),
+            _ => {}
+        }
+    }
+
+    /// Handle XTGETTCAP — xterm termcap/terminfo capability query.
+    ///
+    /// `hex_payload` is the hex-encoded capability name(s) after stripping the `+q`
+    /// prefix.  Multiple capability names may be separated by `;` in the hex payload.
+    ///
+    /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
+    ///           `DCS 0 + r <hex-name> ST` for unknown ones.
+    fn handle_xtgettcap(&self, hex_payload: &[u8]) {
+        // Placeholder — will be implemented in subtask 7.23.
+        tracing::debug!(
+            "XTGETTCAP query (not yet implemented): {}",
+            String::from_utf8_lossy(hex_payload)
+        );
+        // Respond with "not found" for all queries for now.
+        self.write_to_pty(&format!(
+            "\x1bP0+r{}\x1b\\",
+            String::from_utf8_lossy(hex_payload)
+        ));
     }
 
     /// Handle an APC (Application Program Command) sequence.
@@ -2354,5 +2551,210 @@ mod tests {
             &freminal_common::colors::ColorPalette::default(),
             "full_reset must clear all palette overrides"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // DECRQSS tests (DCS $ q ... ST)
+    // ------------------------------------------------------------------
+
+    /// Helper: build a raw DCS payload as the standard parser would produce.
+    /// Format: `P` + content + `ESC \`
+    fn build_dcs_payload(content: &[u8]) -> Vec<u8> {
+        let mut v = vec![b'P'];
+        v.extend_from_slice(content);
+        v.extend_from_slice(b"\x1b\\");
+        v
+    }
+
+    /// Helper: receive the PTY write-back response from a DECRQSS query.
+    fn recv_pty_response(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response from DCS query");
+        };
+        let Ok(s) = String::from_utf8(bytes) else {
+            panic!("DCS response should be valid UTF-8");
+        };
+        s
+    }
+
+    #[test]
+    fn decrqss_sgr_default_attributes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default state: just "0" (reset)
+        assert_eq!(response, "\x1bP1$r0m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_bold_and_italic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Apply bold + italic
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Bold));
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Italic));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;1;3m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_with_fg_color() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+            TerminalColor::Red,
+        )));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;31m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_with_truecolor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+            TerminalColor::Custom(255, 128, 0),
+        )));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;38;2;255;128;0m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_sgr_reverse_video() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::ReverseVideo));
+
+        let dcs = build_dcs_payload(b"$qm");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r0;7m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decstbm_default_scroll_region() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"$qr");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default scroll region: full screen [0, 23] → 1-based [1, 24]
+        assert_eq!(response, "\x1bP1$r1;24r\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decstbm_custom_scroll_region() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set scroll region to 1-based rows 5-20
+        handler.handle_set_scroll_region(5, 20);
+
+        let dcs = build_dcs_payload(b"$qr");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r5;20r\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscusr_default_cursor_style() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Note: space + q = DECSCUSR query
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default is BlockCursorSteady = 2
+        assert_eq!(response, "\x1bP1$r2 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscusr_after_style_change() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.process_output(&TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::UnderlineCursorBlink,
+        ));
+
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r3 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_invalid_query() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"$qZ");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Invalid query → DCS 0 $ r ST
+        assert_eq!(response, "\x1bP0$r\x1b\\");
+    }
+
+    #[test]
+    fn dcs_unknown_subcommand_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // No write_tx set — should not panic even on unknown DCS
+        let dcs = build_dcs_payload(b"!zsome_data");
+        handler.handle_device_control_string(&dcs);
+        // Success = no panic
+    }
+
+    #[test]
+    fn strip_dcs_envelope_handles_minimal_payload() {
+        // Just "P" + ESC '\' — inner content is empty
+        let dcs = b"P\x1b\\";
+        let inner = TerminalHandler::strip_dcs_envelope(dcs);
+        assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn strip_dcs_envelope_preserves_content() {
+        let dcs = b"P$qm\x1b\\";
+        let inner = TerminalHandler::strip_dcs_envelope(dcs);
+        assert_eq!(inner, b"$qm");
     }
 }
