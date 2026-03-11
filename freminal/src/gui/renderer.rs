@@ -19,7 +19,7 @@ use freminal_common::buffer_states::fonts::FontDecorations;
 use freminal_common::cursor::CursorVisualStyle;
 
 use super::atlas::{GlyphAtlas, GlyphKey};
-use super::colors::{CURSOR_F, internal_color_to_gl};
+use super::colors::{CURSOR_F, SELECTION_BG_F, internal_color_to_gl};
 use super::font_manager::FontManager;
 use super::shaping::{ShapedGlyph, ShapedLine};
 
@@ -348,6 +348,7 @@ impl TerminalRenderer {
             cursor_blink_on,
             cursor_pos,
             cursor_visual_style,
+            None,
         );
         let fg_verts =
             build_foreground_verts(shaped_lines, atlas, font_manager, cell_height, ascent);
@@ -900,6 +901,7 @@ fn extract_atlas_rect(pixels: &[u8], atlas_size: u32, rect: &super::atlas::Dirty
 ///
 /// Generates:
 /// - One merged quad per horizontal run of same-background cells.
+/// - Selection highlight quads for the current text selection (if any).
 /// - Cursor quad (block / underline / bar) at `cursor_pos` when visible.
 /// - Underline / strikethrough quads for runs that carry those decorations.
 ///
@@ -918,6 +920,7 @@ pub fn build_background_verts(
     cursor_blink_on: bool,
     cursor_pos: CursorPos,
     cursor_visual_style: &CursorVisualStyle,
+    selection: Option<(usize, usize, usize, usize)>,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -1039,6 +1042,54 @@ pub fn build_background_verts(
                 let st_bot = st_top + stroke_size.max(1.0);
                 push_quad(&mut verts, x0, st_top, x1, st_bot, fg_color);
             }
+        }
+    }
+
+    // --- Selection highlight quads ---
+    // `selection` is `Some((start_col, start_row, end_col, end_row))` with
+    // start <= end in reading order.
+    if let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection {
+        #[allow(clippy::cast_precision_loss)]
+        let cw = cell_width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let ch = cell_height as f32;
+
+        for (row, line) in shaped_lines
+            .iter()
+            .enumerate()
+            .take(sel_end_row + 1)
+            .skip(sel_start_row)
+        {
+            // Determine the column range for this row.
+            let col_begin = if row == sel_start_row {
+                sel_start_col
+            } else {
+                0
+            };
+            let col_end = if row == sel_end_row {
+                sel_end_col
+            } else {
+                // Highlight to the end of the row.  Use the last run's end
+                // column, or fall back to the total run width.
+                line.runs
+                    .last()
+                    .map_or(0, |r| r.col_start + run_col_count(r))
+                    .saturating_sub(1)
+            };
+
+            if col_end < col_begin {
+                continue;
+            }
+
+            #[allow(clippy::cast_precision_loss)]
+            let x0 = col_begin as f32 * cw;
+            #[allow(clippy::cast_precision_loss)]
+            let x1 = (col_end + 1) as f32 * cw;
+            #[allow(clippy::cast_precision_loss)]
+            let y0 = row as f32 * ch;
+            let y1 = y0 + ch;
+
+            push_quad(&mut verts, x0, y0, x1, y1, SELECTION_BG_F);
         }
     }
 
@@ -1450,6 +1501,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(verts.len(), 0, "default background should produce no quads");
     }
@@ -1471,6 +1523,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // One quad = VERTS_PER_QUAD * BG_VERTEX_FLOATS floats.
         assert_eq!(
@@ -1535,6 +1588,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // Two adjacent same-color runs → one merged quad.
         assert_eq!(
@@ -1601,6 +1655,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1625,6 +1680,7 @@ mod tests {
             true,
             CursorPos { x: 1, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1647,6 +1703,7 @@ mod tests {
             false, // blink_on = false
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1669,6 +1726,7 @@ mod tests {
             false, // blink_on = false — irrelevant for steady cursor
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1691,6 +1749,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // One underline quad.
         assert_eq!(
@@ -1719,6 +1778,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1746,6 +1806,7 @@ mod tests {
             true,
             CursorPos { x: 2, y: 1 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // The cursor quad is the last 36 floats (6 verts × 6 floats).
         assert!(verts.len() >= VERTS_PER_QUAD * BG_VERTEX_FLOATS);
@@ -1984,6 +2045,7 @@ mod tests {
             true, // cursor visible
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
 
         // Record where the cursor quad starts (it is appended at the end).

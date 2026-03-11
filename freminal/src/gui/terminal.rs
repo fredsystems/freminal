@@ -9,7 +9,7 @@ use crate::gui::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
         handle_pointer_scroll,
     },
-    view_state::ViewState,
+    view_state::{CellCoord, ViewState},
 };
 
 use crossbeam_channel::Sender;
@@ -192,6 +192,7 @@ fn write_input_to_terminal(
     repeat_characters: bool,
     previous_key: Option<Key>,
     scroll_amount: f32,
+    ui_ctx: &Context,
 ) -> (bool, Option<PreviousMouseState>, Option<Key>, f32) {
     if input.raw.events.is_empty() {
         return (false, last_reported_mouse_pos, previous_key, scroll_amount);
@@ -256,7 +257,17 @@ fn write_input_to_terminal(
             // Same logic for Cut: Ctrl+X → \x18, Ctrl+Shift+X → no-op (can't cut from terminal).
             Event::Copy => {
                 if input.modifiers.shift {
-                    // TODO(Phase 3): copy selection text to clipboard here
+                    // Ctrl+Shift+C: copy selection text to clipboard.
+                    if view_state.selection.has_selection() {
+                        let text = extract_selected_text(
+                            &snap.visible_chars,
+                            snap.term_width,
+                            &view_state.selection,
+                        );
+                        if !text.is_empty() {
+                            ui_ctx.copy_text(text);
+                        }
+                    }
                     continue;
                 }
                 [TerminalInput::Ctrl(b'c')].as_ref().into()
@@ -489,6 +500,12 @@ fn write_input_to_terminal(
                 if let Some(res) = res {
                     res
                 } else {
+                    // Mouse tracking is off — update text selection if a drag
+                    // is in progress.
+                    if view_state.selection.is_selecting {
+                        view_state.selection.end = Some(CellCoord { col: x, row: y });
+                        state_changed = true;
+                    }
                     continue;
                 }
             }
@@ -520,6 +537,32 @@ fn write_input_to_terminal(
                 if let Some(response) = response {
                     response
                 } else {
+                    // Mouse tracking is off — handle text selection.
+                    if *button == PointerButton::Primary {
+                        if *pressed {
+                            // Start a new selection at this cell.
+                            let coord = CellCoord { col: x, row: y };
+                            view_state.selection.anchor = Some(coord);
+                            view_state.selection.end = Some(coord);
+                            view_state.selection.is_selecting = true;
+                        } else if view_state.selection.is_selecting {
+                            // Mouse released — finalize the selection.
+                            view_state.selection.end = Some(CellCoord { col: x, row: y });
+                            view_state.selection.is_selecting = false;
+
+                            // Copy selected text to clipboard.
+                            if view_state.selection.has_selection() {
+                                let text = extract_selected_text(
+                                    &snap.visible_chars,
+                                    snap.term_width,
+                                    &view_state.selection,
+                                );
+                                if !text.is_empty() {
+                                    ui_ctx.copy_text(text);
+                                }
+                            }
+                        }
+                    }
                     continue;
                 }
             }
@@ -650,7 +693,71 @@ fn encode_egui_mouse_pos_as_usize(
     (x, y)
 }
 
-/// Paint a thin scrollbar indicator on the right edge of the terminal viewport.
+/// Extract the text covered by the current selection from `visible_chars`.
+///
+/// `visible_chars` is a flat `Vec<TChar>` where rows are separated by
+/// `TChar::NewLine`.  `term_width` is the terminal width in columns.
+///
+/// The selection is defined by the normalised `(start, end)` `CellCoord`s from
+/// `SelectionState`.  For multi-line selections, trailing whitespace on each
+/// line is trimmed and a newline is inserted between rows.
+fn extract_selected_text(
+    visible_chars: &[TChar],
+    term_width: usize,
+    selection: &super::view_state::SelectionState,
+) -> String {
+    use std::fmt::Write as _;
+
+    let Some((start, end)) = selection.normalised() else {
+        return String::new();
+    };
+
+    // Build a row-index → flat-offset map.  Each row starts after the previous
+    // row's `term_width` characters + 1 NewLine separator.
+    // Row N starts at flat offset N * (term_width + 1).
+    let row_stride = term_width + 1; // chars-per-row + NewLine
+
+    let mut result = String::new();
+
+    for row in start.row..=end.row {
+        let row_flat_start = row * row_stride;
+
+        // Column range for this row within the selection.
+        let col_begin = if row == start.row { start.col } else { 0 };
+        let col_end = if row == end.row {
+            end.col
+        } else {
+            term_width.saturating_sub(1)
+        };
+
+        // Collect characters for this row's selected range.
+        let mut row_text = String::new();
+        for col in col_begin..=col_end {
+            let idx = row_flat_start + col;
+            if idx >= visible_chars.len() {
+                break;
+            }
+            match &visible_chars[idx] {
+                TChar::NewLine => break,
+                tc => {
+                    write!(&mut row_text, "{tc}").unwrap_or_default();
+                }
+            }
+        }
+
+        // Trim trailing whitespace on each line (standard terminal behavior —
+        // empty cells at the end of a line are spaces, not meaningful content).
+        let trimmed = row_text.trim_end();
+        result.push_str(trimmed);
+
+        // Add newline between rows (but not after the last row).
+        if row < end.row {
+            result.push('\n');
+        }
+    }
+
+    result
+}
 ///
 /// The scrollbar is only shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
@@ -772,6 +879,9 @@ pub struct FreminalTerminalWidget {
     /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
     /// where a later snapshot overwrites `content_changed` before the GUI wakes.
     last_rendered_visible: Option<Arc<Vec<TChar>>>,
+    /// The normalised selection from the last full vertex rebuild, used to
+    /// detect selection changes that require a full rebuild.
+    previous_selection: Option<(CellCoord, CellCoord)>,
 }
 
 impl FreminalTerminalWidget {
@@ -802,6 +912,7 @@ impl FreminalTerminalWidget {
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_show_cursor: false,
             last_rendered_visible: None,
+            previous_selection: None,
         }
     }
 
@@ -845,6 +956,7 @@ impl FreminalTerminalWidget {
         // modal's egui widgets instead.
         if !modal_is_open {
             let repeat_characters = snap.repeat_keys;
+            let ctx = ui.ctx().clone();
             let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
                 .input(|input_state| {
                     write_input_to_terminal(
@@ -859,6 +971,7 @@ impl FreminalTerminalWidget {
                         repeat_characters,
                         self.previous_key,
                         self.previous_scroll_amount,
+                        &ctx,
                     )
                 });
             self.previous_mouse_state = new_mouse_pos;
@@ -891,17 +1004,35 @@ impl FreminalTerminalWidget {
                     .as_ref()
                     .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars));
 
+            // Clear the selection when actual terminal text content changes so
+            // stale highlights don't linger over shifted text.  We use
+            // `snap.content_changed` here (NOT the `Arc::ptr_eq`-augmented
+            // `content_changed`) because the PTY thread may re-flatten and
+            // allocate a new Arc for cursor-blink dirty rows even when the
+            // visible text is byte-identical.  Using the broader check would
+            // clear the selection within ~500 ms of mouse release (on every
+            // cursor blink), making copy impossible.
+            if snap.content_changed && !view_state.selection.is_selecting {
+                view_state.selection.clear();
+            }
+
+            // Check whether the selection has changed since the last frame.
+            let current_selection = view_state.selection.normalised();
+            let selection_changed = current_selection != self.previous_selection;
+
             // Determine whether we can take the cursor-only fast path.
             //
-            // Cursor-only: content has not changed, but the cursor blink state
-            // or position has changed since the last frame.  We only need to
-            // patch the cursor quad in the background VBO — no re-shaping and
-            // no full vertex rebuild required.
+            // Cursor-only: content has not changed, the selection has not
+            // changed, but the cursor blink state or position has changed
+            // since the last frame.  We only need to patch the cursor quad
+            // in the background VBO — no re-shaping and no full vertex
+            // rebuild required.
             let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
                 || snap.cursor_pos != self.previous_cursor_pos
                 || snap.show_cursor != self.previous_show_cursor;
 
             let cursor_only = !content_changed
+                && !selection_changed
                 && cursor_state_changed
                 && !self
                     .render_state
@@ -942,6 +1073,7 @@ impl FreminalTerminalWidget {
                     rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
                 }
             } else if content_changed
+                || selection_changed
                 || self
                     .render_state
                     .lock()
@@ -969,6 +1101,7 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
+                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
                 );
 
                 // Record where the cursor quad starts in the background VBO.
@@ -1001,10 +1134,11 @@ impl FreminalTerminalWidget {
                 // Remember which `visible_chars` allocation we rendered, so
                 // the next frame can detect changes via `Arc::ptr_eq`.
                 self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+                self.previous_selection = current_selection;
             }
             // If neither path applies (content unchanged, cursor unchanged,
-            // buffers not empty) we simply re-draw the existing VBO data — no
-            // CPU work at all.
+            // selection unchanged, buffers not empty) we simply re-draw the
+            // existing VBO data — no CPU work at all.
         }
 
         // Update per-frame cursor state for the next frame's comparison.
