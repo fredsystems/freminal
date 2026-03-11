@@ -1199,6 +1199,7 @@ impl TerminalHandler {
                 Mode::UnknownQuery(params) => {
                     // Unknown mode — respond with Ps=0 (not recognized)
                     let digits: String = params.iter().map(|&x| x as char).collect();
+                    tracing::debug!("DECRQM: unknown mode ?{digits}, responding not recognized");
                     self.write_to_pty(&format!("\x1b[?{digits};0$y"));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
@@ -1236,19 +1237,19 @@ impl TerminalHandler {
                 self.handle_request_device_attributes();
             }
             TerminalOutput::EightBitControl => {
-                tracing::warn!("EightBitControl not yet implemented (ignored)");
+                tracing::debug!("EightBitControl not yet implemented (ignored)");
             }
             TerminalOutput::SevenBitControl => {
-                tracing::warn!("SevenBitControl not yet implemented (ignored)");
+                tracing::debug!("SevenBitControl not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelOne => {
-                tracing::warn!("AnsiConformanceLevelOne not yet implemented (ignored)");
+                tracing::debug!("AnsiConformanceLevelOne not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelTwo => {
-                tracing::warn!("AnsiConformanceLevelTwo not yet implemented (ignored)");
+                tracing::debug!("AnsiConformanceLevelTwo not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelThree => {
-                tracing::warn!("AnsiConformanceLevelThree not yet implemented (ignored)");
+                tracing::debug!("AnsiConformanceLevelThree not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightTop => {
                 tracing::debug!("DoubleLineHeightTop not yet implemented (ignored)");
@@ -1301,16 +1302,16 @@ impl TerminalHandler {
                 self.handle_restore_cursor();
             }
             TerminalOutput::CursorToLowerLeftCorner => {
-                tracing::warn!("CursorToLowerLeftCorner not yet implemented (ignored)");
+                tracing::debug!("CursorToLowerLeftCorner not yet implemented (ignored)");
             }
             TerminalOutput::ResetDevice => {
                 self.full_reset();
             }
             TerminalOutput::MemoryLock => {
-                tracing::warn!("MemoryLock not yet implemented (ignored)");
+                tracing::debug!("MemoryLock not yet implemented (ignored)");
             }
             TerminalOutput::MemoryUnlock => {
-                tracing::warn!("MemoryUnlock not yet implemented (ignored)");
+                tracing::debug!("MemoryUnlock not yet implemented (ignored)");
             }
             TerminalOutput::DeviceControlString(dcs) => {
                 self.handle_device_control_string(dcs);
