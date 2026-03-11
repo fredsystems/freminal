@@ -192,10 +192,21 @@ fn write_input_to_terminal(
     repeat_characters: bool,
     previous_key: Option<Key>,
     scroll_amount: f32,
-    ui_ctx: &Context,
-) -> (bool, Option<PreviousMouseState>, Option<Key>, f32) {
+) -> (
+    bool,
+    Option<PreviousMouseState>,
+    Option<Key>,
+    f32,
+    Option<String>,
+) {
     if input.raw.events.is_empty() {
-        return (false, last_reported_mouse_pos, previous_key, scroll_amount);
+        return (
+            false,
+            last_reported_mouse_pos,
+            previous_key,
+            scroll_amount,
+            None,
+        );
     }
 
     let mut previous_key = previous_key;
@@ -203,6 +214,7 @@ fn write_input_to_terminal(
     let mut last_reported_mouse_pos = last_reported_mouse_pos;
     let mut left_mouse_button_pressed = false;
     let mut scroll_amount = scroll_amount;
+    let mut clipboard_text: Option<String> = None;
 
     // When the user is scrolled back into history, suppress mouse forwarding
     // to the PTY — the visible content is historical, not the live terminal
@@ -258,6 +270,9 @@ fn write_input_to_terminal(
             Event::Copy => {
                 if input.modifiers.shift {
                     // Ctrl+Shift+C: copy selection text to clipboard.
+                    // The actual copy_text() call is deferred until after the
+                    // ui.input() closure returns, because copy_text() needs a
+                    // write lock on the Context and we are inside a read lock.
                     if view_state.selection.has_selection() {
                         let text = extract_selected_text(
                             &snap.visible_chars,
@@ -265,7 +280,7 @@ fn write_input_to_terminal(
                             &view_state.selection,
                         );
                         if !text.is_empty() {
-                            ui_ctx.copy_text(text);
+                            clipboard_text = Some(text);
                         }
                     }
                     continue;
@@ -550,7 +565,8 @@ fn write_input_to_terminal(
                             view_state.selection.end = Some(CellCoord { col: x, row: y });
                             view_state.selection.is_selecting = false;
 
-                            // Copy selected text to clipboard.
+                            // Copy selected text to clipboard (deferred
+                            // until after ui.input() returns — see above).
                             if view_state.selection.has_selection() {
                                 let text = extract_selected_text(
                                     &snap.visible_chars,
@@ -558,7 +574,7 @@ fn write_input_to_terminal(
                                     &view_state.selection,
                                 );
                                 if !text.is_empty() {
-                                    ui_ctx.copy_text(text);
+                                    clipboard_text = Some(text);
                                 }
                             }
                         }
@@ -654,6 +670,7 @@ fn write_input_to_terminal(
         last_reported_mouse_pos,
         previous_key,
         scroll_amount,
+        clipboard_text,
     )
 }
 
@@ -957,26 +974,38 @@ impl FreminalTerminalWidget {
         if !modal_is_open {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
-            let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
-                .input(|input_state| {
-                    write_input_to_terminal(
-                        input_state,
-                        snap,
-                        input_tx,
-                        view_state,
-                        cell_w_f,
-                        row_h_f,
-                        terminal_origin,
-                        self.previous_mouse_state.clone(),
-                        repeat_characters,
-                        self.previous_key,
-                        self.previous_scroll_amount,
-                        &ctx,
-                    )
-                });
+            let (
+                _left_mouse_button_pressed,
+                new_mouse_pos,
+                previous_key,
+                scroll_amount,
+                clipboard_text,
+            ) = ui.input(|input_state| {
+                write_input_to_terminal(
+                    input_state,
+                    snap,
+                    input_tx,
+                    view_state,
+                    cell_w_f,
+                    row_h_f,
+                    terminal_origin,
+                    self.previous_mouse_state.clone(),
+                    repeat_characters,
+                    self.previous_key,
+                    self.previous_scroll_amount,
+                )
+            });
             self.previous_mouse_state = new_mouse_pos;
             self.previous_key = previous_key;
             self.previous_scroll_amount = scroll_amount;
+
+            // Perform the clipboard copy OUTSIDE the ui.input() closure.
+            // copy_text() calls ctx.output_mut() which needs a write lock on
+            // the Context, but ui.input() holds a read lock — calling
+            // copy_text() inside the closure would deadlock.
+            if let Some(text) = clipboard_text {
+                ctx.copy_text(text);
+            }
         }
 
         // Blink state must be computed here — cannot call `ui.input` inside
