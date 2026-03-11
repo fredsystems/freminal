@@ -23,7 +23,7 @@ use freminal_common::{
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
 
-use std::time::Instant;
+use std::{fmt::Write as _, time::Instant};
 
 use crate::{
     ansi::FreminalAnsiParser,
@@ -34,6 +34,29 @@ use crate::{
 use freminal_buffer::terminal_handler::TerminalHandler as NewHandler;
 
 use super::data::TerminalSections;
+
+/// Format the first `max_bytes` of `data` as a hex string for trace logging.
+///
+/// Returns a `String` like `"48 65 6c 6c 6f"`. If `data` is longer than
+/// `max_bytes`, the output is truncated and `"..."` is appended.
+fn hex_preview(data: &[u8], max_bytes: usize) -> String {
+    let truncated = data.len() > max_bytes;
+    let slice = if truncated { &data[..max_bytes] } else { data };
+
+    // Each byte is "XX " (3 chars) — pre-allocate.
+    let mut out = String::with_capacity(slice.len() * 3 + if truncated { 3 } else { 0 });
+    for (i, b) in slice.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        // write! to a String is infallible; ignore the result.
+        let _: std::fmt::Result = write!(out, "{b:02x}");
+    }
+    if truncated {
+        out.push_str("...");
+    }
+    out
+}
 
 #[derive(Debug, Default)]
 pub enum Theme {
@@ -212,6 +235,11 @@ impl TerminalState {
     #[allow(clippy::too_many_lines)]
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         debug!("Handling Incoming Data");
+        trace!(
+            bytes = incoming.len(),
+            hex = %hex_preview(incoming, 512),
+            "PTY data received"
+        );
         let now = Instant::now();
 
         // Reassemble with any leftover bytes from a split UTF-8 sequence.
@@ -286,6 +314,10 @@ impl TerminalState {
         }
 
         let parsed = self.parser.push(&incoming);
+
+        for output in &parsed {
+            trace!(%output, "parsed terminal output");
+        }
 
         self.handler.process_outputs(&parsed);
 
