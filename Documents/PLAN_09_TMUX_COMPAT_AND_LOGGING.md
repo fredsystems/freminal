@@ -1,6 +1,6 @@
 # PLAN_09 — tmux Compatibility and Persistent Logging
 
-## Status: In Progress
+## Status: Complete
 
 ## Overview
 
