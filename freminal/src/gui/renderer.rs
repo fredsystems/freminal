@@ -1156,15 +1156,29 @@ pub fn build_foreground_verts(
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
+        let row_f = row_idx as f32;
         #[allow(clippy::cast_precision_loss)]
-        let baseline_y = (row_idx as f32).mul_add(cell_height as f32, ascent);
+        let cell_h_f = cell_height as f32;
+        let baseline_y = row_f.mul_add(cell_h_f, ascent);
+
+        // Cell vertical extent for this row (used to clip oversized glyphs).
+        let cell_top = row_f * cell_h_f;
+        let cell_bottom = cell_top + cell_h_f;
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
             let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint);
 
             for glyph in &run.glyphs {
-                emit_glyph_quad(&mut verts, glyph, atlas, font_manager, baseline_y, fg_color);
+                emit_glyph_quad(
+                    &mut verts,
+                    glyph,
+                    atlas,
+                    font_manager,
+                    baseline_y,
+                    fg_color,
+                    [cell_top, cell_bottom],
+                );
             }
         }
     }
@@ -1175,7 +1189,10 @@ pub fn build_foreground_verts(
 /// Emit a textured quad for a single shaped glyph.
 ///
 /// Looks up (or rasterises) the atlas entry for the glyph, then pushes 6
-/// vertices (`VERTS_PER_QUAD`) into `verts`.
+/// vertices (`VERTS_PER_QUAD`) into `verts`.  Glyphs that extend beyond the
+/// cell's vertical extent (`cell_y_range[0]`..`cell_y_range[1]`) are clipped,
+/// and their UV coordinates are adjusted proportionally so the visible portion
+/// of the atlas texture is correct.
 fn emit_glyph_quad(
     verts: &mut Vec<f32>,
     glyph: &ShapedGlyph,
@@ -1183,6 +1200,7 @@ fn emit_glyph_quad(
     font_manager: &FontManager,
     baseline_y: f32,
     fg_color: [f32; 4],
+    cell_y_range: [f32; 2],
 ) {
     // Determine pixel size from the atlas key.
     // We use the font manager's cell height as the size_px for rasterisation.
@@ -1209,10 +1227,39 @@ fn emit_glyph_quad(
 
     // Pixel position: cell-grid x + bearing, baseline_y - bearing_y.
     let x0 = glyph.x_px + f32::from(entry.bearing_x);
-    let y0 = baseline_y - f32::from(entry.bearing_y);
+    let raw_y0 = baseline_y - f32::from(entry.bearing_y);
     let x1 = x0 + f32::from(entry.width);
     #[allow(clippy::cast_precision_loss)]
-    let y1 = y0 + f32::from(entry.height);
+    let raw_y1 = raw_y0 + f32::from(entry.height);
+
+    // --- Cell-boundary clipping ---
+    //
+    // Oversized glyphs (e.g. powerline symbols in Nerd Fonts) may extend
+    // above or below the cell.  Clamp the quad to the cell's vertical
+    // extent and adjust the UV coordinates proportionally so only the
+    // visible portion of the atlas texture is sampled.
+    let cell_top = cell_y_range[0];
+    let cell_bottom = cell_y_range[1];
+    let glyph_h = raw_y1 - raw_y0;
+    let (y0, v0_adj) = if raw_y0 < cell_top {
+        // Glyph extends above the cell — clip the top.
+        let frac = (cell_top - raw_y0) / glyph_h;
+        (cell_top, frac.mul_add(v1 - v0, v0))
+    } else {
+        (raw_y0, v0)
+    };
+    let (y1, v1_adj) = if raw_y1 > cell_bottom {
+        // Glyph extends below the cell — clip the bottom.
+        let frac = (raw_y1 - cell_bottom) / glyph_h;
+        (cell_bottom, frac.mul_add(-(v1 - v0), v1))
+    } else {
+        (raw_y1, v1)
+    };
+
+    // After clipping the quad may have been fully culled.
+    if y0 >= y1 {
+        return;
+    }
 
     let is_color_f: f32 = if glyph.is_color { 1.0 } else { 0.0 };
 
@@ -1222,7 +1269,7 @@ fn emit_glyph_quad(
         x0,
         y0,
         u0,
-        v0,
+        v0_adj,
         fg_color[0],
         fg_color[1],
         fg_color[2],
@@ -1231,7 +1278,7 @@ fn emit_glyph_quad(
         x1,
         y0,
         u1,
-        v0,
+        v0_adj,
         fg_color[0],
         fg_color[1],
         fg_color[2],
@@ -1240,7 +1287,7 @@ fn emit_glyph_quad(
         x0,
         y1,
         u0,
-        v1,
+        v1_adj,
         fg_color[0],
         fg_color[1],
         fg_color[2],
@@ -1250,7 +1297,7 @@ fn emit_glyph_quad(
         x1,
         y0,
         u1,
-        v0,
+        v0_adj,
         fg_color[0],
         fg_color[1],
         fg_color[2],
@@ -1259,7 +1306,7 @@ fn emit_glyph_quad(
         x1,
         y1,
         u1,
-        v1,
+        v1_adj,
         fg_color[0],
         fg_color[1],
         fg_color[2],
@@ -1268,7 +1315,7 @@ fn emit_glyph_quad(
         x0,
         y1,
         u0,
-        v1,
+        v1_adj,
         fg_color[0],
         fg_color[1],
         fg_color[2],
