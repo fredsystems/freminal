@@ -259,9 +259,48 @@ impl SettingsModal {
     }
 
     fn show_logging_tab(&mut self, ui: &mut Ui) {
-        ui.checkbox(&mut self.draft.logging.write_to_file, "Write logs to file");
+        ui.label("File logging is always enabled.");
+        ui.add_space(4.0);
+
+        // Show the log directory path (read-only).
+        let log_dir_display = config::log_dir().map_or_else(
+            || "(unable to determine log directory)".to_string(),
+            |p| p.display().to_string(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Log directory:");
+            ui.monospace(&log_dir_display);
+        });
         ui.add_space(8.0);
-        ui.colored_label(egui::Color32::GRAY, "Changes take effect on next launch.");
+
+        // Log level dropdown.
+        ui.label("File Log Level:");
+        let current_level = self
+            .draft
+            .logging
+            .level
+            .clone()
+            .unwrap_or_else(|| "debug".to_string());
+        let mut selected = current_level;
+        ComboBox::from_id_salt("log_level")
+            .selected_text(selected.as_str())
+            .show_ui(ui, |ui| {
+                for level in &["trace", "debug", "info", "warn", "error"] {
+                    ui.selectable_value(&mut selected, (*level).to_string(), *level);
+                }
+            });
+        // Persist choice into the draft config.
+        self.draft.logging.level = if selected == "debug" {
+            None // default — omit from TOML
+        } else {
+            Some(selected)
+        };
+
+        ui.add_space(8.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Log level changes take effect on next launch.",
+        );
     }
 
     // -------------------------------------------------------------------------
