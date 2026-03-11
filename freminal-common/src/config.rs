@@ -437,3 +437,51 @@ fn create_dir_if_missing(path: &Path) {
         let _ = fs::create_dir_all(path);
     }
 }
+
+/// Returns the platform-canonical log directory for Freminal.
+///
+/// | Platform  | Path                            |
+/// |-----------|---------------------------------|
+/// | Linux/BSD | `$XDG_STATE_HOME/freminal/`     |
+/// | macOS     | `~/Library/Logs/Freminal/`      |
+/// | Windows   | `%LOCALAPPDATA%\Freminal\logs\` |
+///
+/// The directory is created if it does not already exist.
+/// Returns `None` only if the platform's base directories cannot be determined
+/// (e.g. no home directory).
+#[allow(unreachable_code)]
+#[must_use]
+pub fn log_dir() -> Option<PathBuf> {
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.home_dir().join("Library/Logs/Freminal");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_local_dir().join("Freminal").join("logs");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // Linux / BSD / everything else Unix-y — use XDG state dir.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        // `state_dir()` returns `$XDG_STATE_HOME` (typically `~/.local/state`).
+        let p = base.state_dir()?.join("freminal");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    None
+}

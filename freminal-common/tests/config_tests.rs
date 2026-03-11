@@ -678,3 +678,49 @@ fn save_config_preserves_none_shell_path() {
     let loaded = load_config(Some(&path)).expect("reload should succeed");
     assert!(loaded.shell.path.is_none());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  log_dir()
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn log_dir_returns_some_on_current_platform() {
+    let dir = freminal_common::config::log_dir();
+    assert!(
+        dir.is_some(),
+        "log_dir() should return Some on this platform"
+    );
+}
+
+#[test]
+fn log_dir_ends_with_expected_directory_name() {
+    let dir = freminal_common::config::log_dir().expect("log_dir() returned None");
+    let dir_name = dir
+        .file_name()
+        .expect("log dir should have a final component")
+        .to_string_lossy();
+
+    // Linux/BSD: "freminal", macOS: "Freminal", Windows: "logs" (parent is "Freminal")
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    assert_eq!(dir_name, "freminal");
+
+    #[cfg(target_os = "macos")]
+    assert_eq!(dir_name, "Freminal");
+
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(dir_name, "logs");
+        let parent_name = dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert_eq!(parent_name, "Freminal");
+    }
+}
