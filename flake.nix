@@ -22,13 +22,57 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
+
+          runtimeLibs = [
+            pkgs.libxkbcommon
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.wayland
+            pkgs.libGL
+          ];
+
+          runtimeLibPath = pkgs.lib.makeLibraryPath runtimeLibs;
+
+          desktopItem = pkgs.makeDesktopItem {
+            name = "freminal";
+            desktopName = "Freminal";
+            comment = "Terminal emulator";
+            exec = "freminal";
+            terminal = false;
+            categories = [
+              "System"
+              "TerminalEmulator"
+            ];
+            startupNotify = true;
+            # icon = "freminal"; # add this once you install an icon
+          };
         in
         {
-          freminal = pkgs.stdenv.mkDerivation {
+          freminal = pkgs.rustPlatform.buildRustPackage {
             pname = "freminal";
             version = "0.1.0";
+            src = pkgs.lib.cleanSource ./.;
 
-            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.makeWrapper
+              pkgs.copyDesktopItems
+            ];
+
+            buildInputs = runtimeLibs;
+
+            desktopItems = [ desktopItem ];
+
+            postInstall = ''
+              wrapProgram $out/bin/freminal \
+                --prefix LD_LIBRARY_PATH : ${runtimeLibPath}
+
+              # optional, once you have icons in the repo:
+              # install -Dm644 assets/freminal.png \
+              #   $out/share/icons/hicolor/256x256/apps/freminal.png
+            '';
           };
         }
       );
