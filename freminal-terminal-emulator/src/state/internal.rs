@@ -429,6 +429,9 @@ impl TerminalState {
             TerminalInputPayload::Many(to_write) => {
                 self.write_tx.send(PtyWrite::Write(to_write.to_vec()))?;
             }
+            TerminalInputPayload::Owned(bytes) => {
+                self.write_tx.send(PtyWrite::Write(bytes))?;
+            }
         }
 
         Ok(())
@@ -441,9 +444,9 @@ impl TerminalState {
 
         if in_alternate {
             let key = if scroll < 0.0 {
-                TerminalInput::ArrowDown
+                TerminalInput::ArrowDown(crate::interface::KeyModifiers::NONE)
             } else {
-                TerminalInput::ArrowUp
+                TerminalInput::ArrowUp(crate::interface::KeyModifiers::NONE)
             };
             match self.write(&key) {
                 Ok(()) => (),

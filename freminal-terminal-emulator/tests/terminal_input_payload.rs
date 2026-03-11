@@ -15,7 +15,7 @@
 //!  4. `FunctionKey(n)` for F1–F12 produces the xterm/VT escape sequences that
 //!     most terminal applications (including nano) expect.
 
-use freminal_terminal_emulator::interface::{TerminalInput, TerminalInputPayload};
+use freminal_terminal_emulator::interface::{KeyModifiers, TerminalInput, TerminalInputPayload};
 
 /// Convenience: call `to_payload` with both mode flags `false` (normal cursor mode,
 /// normal keypad mode) and unwrap the result as a `Vec<u8>`.
@@ -23,6 +23,7 @@ fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(false, false) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
+        TerminalInputPayload::Owned(bs) => bs,
     }
 }
 
@@ -176,7 +177,7 @@ fn ctrl_digit_8_is_0x7f() {
 #[test]
 fn f1_sends_ss3_p() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(1)),
+        payload_bytes(&TerminalInput::FunctionKey(1, KeyModifiers::NONE)),
         b"\x1bOP".to_vec()
     );
 }
@@ -184,7 +185,7 @@ fn f1_sends_ss3_p() {
 #[test]
 fn f2_sends_ss3_q() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(2)),
+        payload_bytes(&TerminalInput::FunctionKey(2, KeyModifiers::NONE)),
         b"\x1bOQ".to_vec()
     );
 }
@@ -192,7 +193,7 @@ fn f2_sends_ss3_q() {
 #[test]
 fn f3_sends_ss3_r() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(3)),
+        payload_bytes(&TerminalInput::FunctionKey(3, KeyModifiers::NONE)),
         b"\x1bOR".to_vec()
     );
 }
@@ -200,7 +201,7 @@ fn f3_sends_ss3_r() {
 #[test]
 fn f4_sends_ss3_s() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(4)),
+        payload_bytes(&TerminalInput::FunctionKey(4, KeyModifiers::NONE)),
         b"\x1bOS".to_vec()
     );
 }
@@ -208,7 +209,7 @@ fn f4_sends_ss3_s() {
 #[test]
 fn f5_sends_csi_15_tilde() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(5)),
+        payload_bytes(&TerminalInput::FunctionKey(5, KeyModifiers::NONE)),
         b"\x1b[15~".to_vec()
     );
 }
@@ -217,7 +218,7 @@ fn f5_sends_csi_15_tilde() {
 fn f6_sends_csi_17_tilde() {
     // Note: F6 maps to 17~ (not 16~); the VT sequence table skips 16
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(6)),
+        payload_bytes(&TerminalInput::FunctionKey(6, KeyModifiers::NONE)),
         b"\x1b[17~".to_vec()
     );
 }
@@ -225,7 +226,7 @@ fn f6_sends_csi_17_tilde() {
 #[test]
 fn f7_sends_csi_18_tilde() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(7)),
+        payload_bytes(&TerminalInput::FunctionKey(7, KeyModifiers::NONE)),
         b"\x1b[18~".to_vec()
     );
 }
@@ -233,7 +234,7 @@ fn f7_sends_csi_18_tilde() {
 #[test]
 fn f8_sends_csi_19_tilde() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(8)),
+        payload_bytes(&TerminalInput::FunctionKey(8, KeyModifiers::NONE)),
         b"\x1b[19~".to_vec()
     );
 }
@@ -241,7 +242,7 @@ fn f8_sends_csi_19_tilde() {
 #[test]
 fn f9_sends_csi_20_tilde() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(9)),
+        payload_bytes(&TerminalInput::FunctionKey(9, KeyModifiers::NONE)),
         b"\x1b[20~".to_vec()
     );
 }
@@ -249,7 +250,7 @@ fn f9_sends_csi_20_tilde() {
 #[test]
 fn f10_sends_csi_21_tilde() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(10)),
+        payload_bytes(&TerminalInput::FunctionKey(10, KeyModifiers::NONE)),
         b"\x1b[21~".to_vec()
     );
 }
@@ -258,7 +259,7 @@ fn f10_sends_csi_21_tilde() {
 fn f11_sends_csi_23_tilde() {
     // Note: F11 maps to 23~ (not 22~); the VT sequence table skips 22
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(11)),
+        payload_bytes(&TerminalInput::FunctionKey(11, KeyModifiers::NONE)),
         b"\x1b[23~".to_vec()
     );
 }
@@ -266,7 +267,7 @@ fn f11_sends_csi_23_tilde() {
 #[test]
 fn f12_sends_csi_24_tilde() {
     assert_eq!(
-        payload_bytes(&TerminalInput::FunctionKey(12)),
+        payload_bytes(&TerminalInput::FunctionKey(12, KeyModifiers::NONE)),
         b"\x1b[24~".to_vec()
     );
 }
@@ -274,7 +275,7 @@ fn f12_sends_csi_24_tilde() {
 /// An out-of-range function key should return an empty byte slice, not panic.
 #[test]
 fn function_key_out_of_range_does_not_panic() {
-    let got = payload_bytes(&TerminalInput::FunctionKey(99));
+    let got = payload_bytes(&TerminalInput::FunctionKey(99, KeyModifiers::NONE));
     assert!(
         got.is_empty(),
         "out-of-range FunctionKey should return empty payload, got {got:?}"
@@ -334,4 +335,202 @@ fn ctrl_c_and_ctrl_x_are_different() {
     let c = payload_bytes(&TerminalInput::Ctrl(b'c'));
     let x = payload_bytes(&TerminalInput::Ctrl(b'x'));
     assert_ne!(c, x, "Ctrl+C (0x03) and Ctrl+X (0x18) must differ");
+}
+
+// ---------------------------------------------------------------------------
+// Modified key sequences (xterm-style CSI 1;Nm <final>)
+// ---------------------------------------------------------------------------
+
+/// Convenience: call `to_payload` with DECCKM mode on and unwrap.
+fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
+    match input.to_payload(true, false) {
+        TerminalInputPayload::Single(b) => vec![b],
+        TerminalInputPayload::Many(bs) => bs.to_vec(),
+        TerminalInputPayload::Owned(bs) => bs,
+    }
+}
+
+/// Shift+ArrowUp → ESC[1;2A
+#[test]
+fn shift_arrow_up_sends_csi_1_2_a() {
+    let mods = KeyModifiers {
+        shift: true,
+        ctrl: false,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::ArrowUp(mods));
+    assert_eq!(got, b"\x1b[1;2A".to_vec());
+}
+
+/// Ctrl+ArrowLeft → ESC[1;5D
+#[test]
+fn ctrl_arrow_left_sends_csi_1_5_d() {
+    let mods = KeyModifiers {
+        shift: false,
+        ctrl: true,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::ArrowLeft(mods));
+    assert_eq!(got, b"\x1b[1;5D".to_vec());
+}
+
+/// Alt+Home → ESC[1;3H
+#[test]
+fn alt_home_sends_csi_1_3_h() {
+    let mods = KeyModifiers {
+        shift: false,
+        ctrl: false,
+        alt: true,
+    };
+    let got = payload_bytes(&TerminalInput::Home(mods));
+    assert_eq!(got, b"\x1b[1;3H".to_vec());
+}
+
+/// Ctrl+Shift+F5 → ESC[15;6~
+#[test]
+fn ctrl_shift_f5_sends_csi_15_6_tilde() {
+    let mods = KeyModifiers {
+        shift: true,
+        ctrl: true,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::FunctionKey(5, mods));
+    assert_eq!(got, b"\x1b[15;6~".to_vec());
+}
+
+/// Shift+Delete → ESC[3;2~
+#[test]
+fn shift_delete_sends_csi_3_2_tilde() {
+    let mods = KeyModifiers {
+        shift: true,
+        ctrl: false,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::Delete(mods));
+    assert_eq!(got, b"\x1b[3;2~".to_vec());
+}
+
+/// ArrowUp with no modifiers (normal mode) → ESC[A (unchanged from before)
+#[test]
+fn unmodified_arrow_up_normal_mode() {
+    let got = payload_bytes(&TerminalInput::ArrowUp(KeyModifiers::NONE));
+    assert_eq!(got, b"\x1b[A".to_vec());
+}
+
+/// ArrowUp with no modifiers in DECCKM mode → ESC O A (SS3 form)
+#[test]
+fn unmodified_arrow_up_decckm_mode() {
+    let got = payload_bytes_decckm(&TerminalInput::ArrowUp(KeyModifiers::NONE));
+    assert_eq!(got, b"\x1bOA".to_vec());
+}
+
+/// ArrowUp with modifiers in DECCKM mode → CSI form, NOT SS3.
+/// Modified keys always use CSI even when DECCKM is active.
+#[test]
+fn modified_arrow_up_decckm_uses_csi_not_ss3() {
+    let mods = KeyModifiers {
+        shift: true,
+        ctrl: false,
+        alt: false,
+    };
+    let got = payload_bytes_decckm(&TerminalInput::ArrowUp(mods));
+    assert_eq!(
+        got,
+        b"\x1b[1;2A".to_vec(),
+        "Modified keys must use CSI form even in DECCKM mode"
+    );
+    assert!(
+        !got.starts_with(b"\x1bO"),
+        "Modified keys must NOT use SS3 form"
+    );
+}
+
+/// Ctrl+Alt+Shift+ArrowRight → ESC[1;8C (all three modifiers: 1+1+2+4=8)
+#[test]
+fn all_modifiers_arrow_right() {
+    let mods = KeyModifiers {
+        shift: true,
+        ctrl: true,
+        alt: true,
+    };
+    let got = payload_bytes(&TerminalInput::ArrowRight(mods));
+    assert_eq!(got, b"\x1b[1;8C".to_vec());
+}
+
+/// Shift+F1 → ESC[1;2P (F1–F4 with modifiers use CSI final form, not SS3)
+#[test]
+fn shift_f1_sends_csi_1_2_p() {
+    let mods = KeyModifiers {
+        shift: true,
+        ctrl: false,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::FunctionKey(1, mods));
+    assert_eq!(got, b"\x1b[1;2P".to_vec());
+}
+
+/// Ctrl+Insert → ESC[2;5~
+#[test]
+fn ctrl_insert_sends_csi_2_5_tilde() {
+    let mods = KeyModifiers {
+        shift: false,
+        ctrl: true,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::Insert(mods));
+    assert_eq!(got, b"\x1b[2;5~".to_vec());
+}
+
+/// Alt+PageDown → ESC[6;3~
+#[test]
+fn alt_page_down_sends_csi_6_3_tilde() {
+    let mods = KeyModifiers {
+        shift: false,
+        ctrl: false,
+        alt: true,
+    };
+    let got = payload_bytes(&TerminalInput::PageDown(mods));
+    assert_eq!(got, b"\x1b[6;3~".to_vec());
+}
+
+/// Ctrl+End → ESC[1;5F
+#[test]
+fn ctrl_end_sends_csi_1_5_f() {
+    let mods = KeyModifiers {
+        shift: false,
+        ctrl: true,
+        alt: false,
+    };
+    let got = payload_bytes(&TerminalInput::End(mods));
+    assert_eq!(got, b"\x1b[1;5F".to_vec());
+}
+
+/// KeyModifiers::NONE has modifier_param() == None.
+#[test]
+fn key_modifiers_none_has_no_param() {
+    assert!(KeyModifiers::NONE.is_empty());
+    assert_eq!(KeyModifiers::NONE.modifier_param(), None);
+}
+
+/// Verify all eight modifier combinations produce correct param values.
+#[test]
+fn key_modifiers_all_combinations() {
+    // Shift=2, Alt=3, Shift+Alt=4, Ctrl=5, Ctrl+Shift=6, Ctrl+Alt=7, Ctrl+Alt+Shift=8
+    let cases: &[(bool, bool, bool, u8)] = &[
+        (true, false, false, 2), // Shift
+        (false, false, true, 3), // Alt
+        (true, false, true, 4),  // Shift+Alt
+        (false, true, false, 5), // Ctrl
+        (true, true, false, 6),  // Ctrl+Shift
+        (false, true, true, 7),  // Ctrl+Alt
+        (true, true, true, 8),   // Ctrl+Alt+Shift
+    ];
+    for &(shift, ctrl, alt, expected) in cases {
+        let mods = KeyModifiers { shift, ctrl, alt };
+        assert_eq!(
+            mods.modifier_param(),
+            Some(expected),
+            "shift={shift}, ctrl={ctrl}, alt={alt} should produce param {expected}"
+        );
+    }
 }

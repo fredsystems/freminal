@@ -19,7 +19,7 @@ use freminal_common::{
     pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
-    interface::{TerminalInput, TerminalInputPayload, collect_text},
+    interface::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
     io::InputEvent,
     snapshot::TerminalSnapshot,
 };
@@ -119,9 +119,9 @@ fn handle_scroll_fallback(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let count = (abs_lines as usize).max(1);
         let key = if lines > 0.0 {
-            TerminalInput::ArrowUp
+            TerminalInput::ArrowUp(KeyModifiers::NONE)
         } else {
-            TerminalInput::ArrowDown
+            TerminalInput::ArrowDown(KeyModifiers::NONE)
         };
         for _ in 0..count {
             send_terminal_input(&key, input_tx, snap.cursor_key_app_mode);
@@ -166,6 +166,7 @@ fn send_terminal_input(
     let bytes = match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
+        TerminalInputPayload::Owned(bs) => bs,
     };
     if bytes.is_empty() {
         return;
@@ -321,52 +322,52 @@ fn write_input_to_terminal(
                 key: Key::ArrowUp,
                 pressed: true,
                 ..
-            } => [TerminalInput::ArrowUp].as_ref().into(),
+            } => vec![TerminalInput::ArrowUp(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::ArrowDown,
                 pressed: true,
                 ..
-            } => [TerminalInput::ArrowDown].as_ref().into(),
+            } => vec![TerminalInput::ArrowDown(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::ArrowLeft,
                 pressed: true,
                 ..
-            } => [TerminalInput::ArrowLeft].as_ref().into(),
+            } => vec![TerminalInput::ArrowLeft(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::ArrowRight,
                 pressed: true,
                 ..
-            } => [TerminalInput::ArrowRight].as_ref().into(),
+            } => vec![TerminalInput::ArrowRight(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::Home,
                 pressed: true,
                 ..
-            } => [TerminalInput::Home].as_ref().into(),
+            } => vec![TerminalInput::Home(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::End,
                 pressed: true,
                 ..
-            } => [TerminalInput::End].as_ref().into(),
+            } => vec![TerminalInput::End(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::Delete,
                 pressed: true,
                 ..
-            } => [TerminalInput::Delete].as_ref().into(),
+            } => vec![TerminalInput::Delete(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::Insert,
                 pressed: true,
                 ..
-            } => [TerminalInput::Insert].as_ref().into(),
+            } => vec![TerminalInput::Insert(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::PageUp,
                 pressed: true,
                 ..
-            } => [TerminalInput::PageUp].as_ref().into(),
+            } => vec![TerminalInput::PageUp(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::PageDown,
                 pressed: true,
                 ..
-            } => [TerminalInput::PageDown].as_ref().into(),
+            } => vec![TerminalInput::PageDown(KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::Tab,
                 pressed: true,
@@ -377,62 +378,62 @@ fn write_input_to_terminal(
                 key: Key::F1,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(1)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(1, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F2,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(2)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(2, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F3,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(3)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(3, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F4,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(4)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(4, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F5,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(5)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(5, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F6,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(6)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(6, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F7,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(7)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(7, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F8,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(8)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(8, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F9,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(9)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(9, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F10,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(10)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(10, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F11,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(11)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(11, KeyModifiers::NONE)].into(),
             Event::Key {
                 key: Key::F12,
                 pressed: true,
                 ..
-            } => [TerminalInput::FunctionKey(12)].as_ref().into(),
+            } => vec![TerminalInput::FunctionKey(12, KeyModifiers::NONE)].into(),
 
             // log any Event::Key that we don't handle
             // Event::Key { key, pressed: true, .. } => {
