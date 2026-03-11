@@ -29,7 +29,7 @@ use crossbeam_channel::unbounded;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -178,6 +178,12 @@ fn main() {
             // Channel for PTY-consumer thread → GUI (window manipulation commands).
             let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
 
+            // Shared egui context handle so the PTY consumer thread can request
+            // repaints after publishing new snapshots.  The GUI sets it during
+            // `FreminalGui::new()`; the PTY thread reads it after each store.
+            let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
+            let egui_ctx_pty = Arc::clone(&egui_ctx);
+
             // The TerminalEmulator is fully owned by the PTY consumer thread.
             // No FairMutex. No shared lock.
             std::thread::spawn(move || {
@@ -251,6 +257,14 @@ fn main() {
                     // Publish a fresh snapshot for the GUI to load lock-free.
                     let snap = emulator.build_snapshot();
                     arc_swap.store(Arc::new(snap));
+
+                    // Notify egui that new content is available so it wakes up
+                    // and renders the updated snapshot.  Cap the rate at ~120 fps
+                    // to avoid flooding egui during heavy PTY output (e.g. `cat`
+                    // of a large file).
+                    if let Some(ctx) = egui_ctx_pty.get() {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(8));
+                    }
                 }
             });
 
@@ -261,6 +275,7 @@ fn main() {
                 input_tx,
                 pty_write_tx,
                 window_cmd_rx,
+                egui_ctx,
             )
         }
         Err(e) => {

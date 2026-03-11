@@ -23,23 +23,23 @@ and plan document maintenance rules.
 
 ## Task Summary
 
-| #   | Task                         | Plan Document                 | Status      | Dependencies |
-| --- | ---------------------------- | ----------------------------- | ----------- | ------------ |
-| 1   | Glyph Atlas + Custom Painter | `PLAN_01_GLYPH_ATLAS.md`      | Not Started | None         |
-| 2   | CLI Args + TOML Config       | `PLAN_02_CLI_CONFIG.md`       | Complete    | None         |
-| 3   | Settings Modal               | `PLAN_03_SETTINGS_MODAL.md`   | Not Started | Task 2       |
-| 4   | Deployment Flake             | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
-| 5   | Font Ligatures               | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
-| 6   | Test Gap Coverage            | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
-| 7   | Escape Sequence Coverage     | `PLAN_07_ESCAPE_SEQUENCES.md` | Complete    | None         |
-| 8   | Primary Screen Scrollback    | `PLAN_08_SCROLLBACK.md`       | Complete    | None         |
+| #   | Task                      | Plan Document                 | Status      | Dependencies |
+| --- | ------------------------- | ----------------------------- | ----------- | ------------ |
+| 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`      | Complete    | None         |
+| 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`       | Complete    | None         |
+| 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`   | Complete    | Task 2       |
+| 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
+| 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
+| 6   | Test Gap Coverage         | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
+| 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md` | Complete    | None         |
+| 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`       | Complete    | None         |
 
 ---
 
 ## Dependency Graph
 
 ```text
-Task 1 (Glyph Atlas + Shaping Infra) ──► Task 5 (Font Ligatures)
+Task 1 (Custom Terminal Renderer) ──► Task 5 (Font Ligatures)
 
 Task 2 (CLI Args + TOML Config) ──┬──► Task 3 (Settings Modal)
                                    └──► Task 4 (Deployment Flake)
@@ -53,10 +53,12 @@ Task 8 (Primary Screen Scrollback) ── independent, can run any time
 
 ### Dependency Details
 
-**Task 1 → Task 5:** Task 1 introduces the rustybuzz text shaping infrastructure (font parsing,
-shaping pipeline, glyph-to-texture flow). Task 5 builds on this by enabling OpenType ligature
-features in the shaping calls. Task 5 cannot begin until Task 1's shaping infrastructure is
-complete and merged.
+**Task 1 → Task 5:** Task 1 replaces the entire terminal rendering pipeline with a custom OpenGL
+renderer (glow shaders via egui PaintCallback), introduces rustybuzz for text shaping, swash for
+glyph rasterisation (including color emoji), and builds a glyph atlas with font fallback chain.
+Task 5 builds on this by enabling OpenType ligature features (`liga`, `calt`, `dlig`) in the
+rustybuzz shaping calls. Task 5 cannot begin until Task 1's shaping and rendering infrastructure
+is complete and merged.
 
 **Task 2 → Task 3:** Task 3 (Settings Modal) needs a complete, well-structured config system to
 display and modify. Task 2 extends the config with all CLI flags surfaced as TOML options and adds
@@ -90,7 +92,7 @@ Run these four tasks in parallel since they have no dependencies on each other:
 - **Task 6** — Test Gap Coverage (improves safety net for everything)
 - **Task 7** — Escape Sequence Coverage (fixes bugs, improves daily-use compatibility)
 - **Task 8** — Primary Screen Scrollback (wires scroll offset into snapshot pipeline)
-- **Task 1** — Glyph Atlas + Custom Painter (largest task, long lead time)
+- **Task 1** — Custom Terminal Renderer (largest task, long lead time)
 
 ### Phase 2 — Dependents (After Phase 1 completes)
 
@@ -108,7 +110,7 @@ Phase 1:  ├── Task 2 (CLI/Config) ────────────┤
           ├── Task 6 (Test Gaps) ──────────────┤
           ├── Task 7 (Escape Sequences) ───────┤
           ├── Task 8 (Scrollback) ─────────────┤
-          ├── Task 1 (Glyph Atlas) ────────────────────────────────┤
+          ├── Task 1 (Custom Renderer) ─────────────────────────────┤
           │                                    │                   │
 Phase 2:  │                                    ├── Task 3 (Modal) ─┤
           │                                    ├── Task 4 (Flake) ─┤
@@ -149,12 +151,16 @@ Any config schema changes after Task 2 is complete must be propagated to Tasks 3
 
 Tasks 1 and 5 both modify the rendering pipeline:
 
-- Task 1 replaces the entire rendering approach (char-by-char → glyph atlas + custom painter)
-- Task 5 adds ligature support to the shaping layer introduced by Task 1
+- Task 1 replaces the entire rendering approach with a custom OpenGL renderer: glow shaders via
+  egui `PaintCallback`, rustybuzz text shaping, swash glyph rasterisation (including color emoji),
+  a glyph atlas texture, and integer-pixel cell grid with no egui layout involvement. egui
+  continues to handle chrome (menu bar, settings modal) only.
+- Task 5 adds ligature support to the rustybuzz shaping layer introduced by Task 1
 
-After Task 1, the rendering pipeline will look fundamentally different. Any rendering-related
-work in other tasks (e.g., font size changes from the Settings Modal) must account for the
-new architecture.
+After Task 1, the rendering pipeline will be fundamentally different — egui is not involved in
+terminal text rendering at all. Any rendering-related work in other tasks (e.g., font size changes
+from the Settings Modal) must account for the new architecture: font metrics come from swash (not
+egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn by custom shaders.
 
 ### Benchmark Baselines
 
@@ -171,11 +177,11 @@ Update this section as tasks complete:
 
 | Task | Started    | Completed  | Notes                            |
 | ---- | ---------- | ---------- | -------------------------------- |
-| 1    | —          | —          |                                  |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas |
 | 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config  |
 | 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal |
 | 4    | —          | —          | Unblocked (Task 2 complete)      |
-| 5    | —          | —          | Blocked on Task 1                |
+| 5    | —          | —          | Unblocked (Task 1 complete)      |
 | 6    | —          | —          |                                  |
 | 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete         |
 | 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete          |
