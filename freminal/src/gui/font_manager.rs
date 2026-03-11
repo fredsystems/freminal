@@ -255,7 +255,7 @@ pub struct FontManager {
     /// Authoritative cell height in integer pixels.
     cell_height: u32,
 
-    /// Scaled ascent in pixels (for glyph baseline positioning).
+    /// Baseline offset in pixels (ascent + top padding for headroom).
     ascent: f32,
 
     /// Scaled descent in pixels (for glyph baseline positioning).
@@ -368,7 +368,11 @@ impl FontManager {
         (self.cell_width, self.cell_height)
     }
 
-    /// Scaled font ascent in pixels (distance from baseline to top).
+    /// Baseline offset in pixels (ascent + top padding).
+    ///
+    /// The renderer uses this as the Y distance from the top of each cell row
+    /// to the text baseline.  Includes a small top pad so glyphs are not flush
+    /// against the top edge of the cell.
     #[must_use]
     pub const fn ascent(&self) -> f32 {
         self.ascent
@@ -831,8 +835,13 @@ fn find_system_face_for_char(font_db: &Database, c: char) -> Option<LoadedFace> 
 
 /// Compute cell metrics from the regular face at the given font size.
 ///
-/// Returns `(cell_width, cell_height, ascent, descent, underline_offset,
+/// Returns `(cell_width, cell_height, baseline_offset, descent, underline_offset,
 /// strikeout_offset, stroke_size)`.
+///
+/// `baseline_offset` is `ascent + top_pad` where `top_pad` distributes half
+/// the font's leading above the ascent line (minimum 1 px).  The renderer uses
+/// this value directly as the Y offset from the top of each cell row to the
+/// text baseline, so the padding is automatically applied.
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_pt: f32,
@@ -843,15 +852,49 @@ fn compute_cell_metrics(
 
     let metrics = font_ref.metrics(&[]).scale(font_size_pt);
 
-    // cell_width = ceil(max_advance) — as per plan
-    // Use max_width from global metrics as the advance width.
-    // For a monospace font, max_width == average_width == the advance of every glyph.
+    // Determine cell width from the advance width of a representative ASCII
+    // glyph ('0').  For a true monospace font every glyph has the same advance,
+    // but Nerd Font variants include wide icon/symbol glyphs that inflate
+    // `metrics.max_width` far beyond the regular character advance.  Measuring
+    // a concrete glyph gives us the correct monospace cell width.
+    let glyph_id = font_ref.charmap().map('0');
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cell_width = metrics.max_width.ceil() as u32;
+    let cell_width = if glyph_id != 0 {
+        let gm = font_ref.glyph_metrics(&[]).scale(font_size_pt);
+        let advance = gm.advance_width(glyph_id);
+        if advance > 0.0 {
+            advance.ceil() as u32
+        } else {
+            // Fallback: average_width > max_width
+            let aw = metrics.average_width.ceil() as u32;
+            if aw > 0 {
+                aw
+            } else {
+                metrics.max_width.ceil() as u32
+            }
+        }
+    } else {
+        // '0' not in font — use average_width as a reasonable default.
+        let aw = metrics.average_width.ceil() as u32;
+        if aw > 0 {
+            aw
+        } else {
+            metrics.max_width.ceil() as u32
+        }
+    };
 
-    // cell_height = ceil(ascent + |descent| + leading) — descent is negative in many fonts
+    // cell_height = ceil(ascent + |descent| + leading) — the raw typographic
+    // line height.  We do NOT inflate it; instead we redistribute the leading
+    // so that half sits above the ascent line as top padding.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let cell_height = (metrics.ascent + metrics.descent.abs() + metrics.leading).ceil() as u32;
+
+    // baseline_offset = ascent + top_pad.  The renderer places the text
+    // baseline at `row * cell_height + baseline_offset`, so adding top_pad
+    // pushes glyphs down and creates headroom above.  Half the leading goes
+    // above (min 1 px for fonts like MesloLGS where leading == 0).
+    let top_pad = (metrics.leading * 0.5).max(1.0);
+    let baseline_offset = metrics.ascent + top_pad;
 
     // Ensure non-zero dimensions.
     let cell_width = cell_width.max(1);
@@ -860,7 +903,7 @@ fn compute_cell_metrics(
     (
         cell_width,
         cell_height,
-        metrics.ascent,
+        baseline_offset,
         metrics.descent.abs(),
         metrics.underline_offset,
         metrics.strikeout_offset,

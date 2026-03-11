@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::gui::colors::internal_color_to_egui;
 use anyhow::Result;
@@ -561,6 +561,7 @@ pub fn run(
     input_tx: Sender<InputEvent>,
     pty_write_tx: Sender<PtyWrite>,
     window_cmd_rx: Receiver<WindowCommand>,
+    egui_ctx_lock: Arc<OnceLock<egui::Context>>,
 ) -> Result<()> {
     let native_options = eframe::NativeOptions::default();
 
@@ -568,6 +569,10 @@ pub fn run(
         "Freminal",
         native_options,
         Box::new(move |cc| {
+            // Publish the egui::Context so the PTY consumer thread can
+            // request repaints after storing new snapshots.
+            let _already_set = egui_ctx_lock.set(cc.egui_ctx.clone());
+
             Ok(Box::new(FreminalGui::new(
                 cc,
                 arc_swap,
