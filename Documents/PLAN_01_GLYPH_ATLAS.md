@@ -445,7 +445,7 @@ UI elements. Only the terminal rendering path is replaced.
 
 ### 1.3 — Text shaping pipeline
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/shaping.rs`
 - **Details:**
   - **Run segmentation:** Walk `visible_chars` + `visible_tags` from the snapshot. Split into
@@ -483,7 +483,7 @@ UI elements. Only the terminal rendering path is replaced.
 
 ### 1.4 — Glyph atlas with color emoji
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/atlas.rs`
 - **Details:**
   - **Atlas texture:** Single RGBA texture, initial size 1024×1024 pixels. Grows by doubling
@@ -586,7 +586,7 @@ vec4(tint_color.rgb, tint_color.a * texture(atlas, uv).a); }` — color emoji pa
 
 ### 1.6 — Compile-time color constants
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/colors.rs`
 - **Details:**
   - Replace all `Color32::from_hex("...")` calls with `const` color values
