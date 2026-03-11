@@ -44,6 +44,20 @@ use eframe::egui_glow::CallbackFn;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
+/// Convert egui [`Modifiers`] to the terminal-emulator's [`KeyModifiers`].
+///
+/// This is used for special keys (arrows, function keys, Home/End, etc.)
+/// where the xterm modifier encoding (`ESC[1;Nm…`) applies. It must NOT
+/// be used for regular ASCII keys where Ctrl already produces a C0 control
+/// code — that path is handled by `control_key()` / `TerminalInput::Ctrl`.
+const fn egui_mods_to_key_modifiers(m: Modifiers) -> KeyModifiers {
+    KeyModifiers {
+        shift: m.shift,
+        ctrl: m.ctrl || m.command,
+        alt: m.alt,
+    }
+}
+
 fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
         let name = key.name();
@@ -321,53 +335,87 @@ fn write_input_to_terminal(
             Event::Key {
                 key: Key::ArrowUp,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::ArrowUp(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::ArrowUp(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::ArrowDown,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::ArrowDown(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::ArrowDown(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::ArrowLeft,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::ArrowLeft(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::ArrowLeft(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::ArrowRight,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::ArrowRight(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::ArrowRight(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::Home,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::Home(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::Home(egui_mods_to_key_modifiers(*modifiers))].into(),
             Event::Key {
                 key: Key::End,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::End(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::End(egui_mods_to_key_modifiers(*modifiers))].into(),
             Event::Key {
                 key: Key::Delete,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::Delete(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::Delete(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::Insert,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::Insert(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::Insert(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::PageUp,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::PageUp(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::PageUp(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::PageDown,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::PageDown(KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::PageDown(egui_mods_to_key_modifiers(
+                *modifiers,
+            ))]
+            .into(),
             Event::Key {
                 key: Key::Tab,
                 pressed: true,
@@ -377,63 +425,123 @@ fn write_input_to_terminal(
             Event::Key {
                 key: Key::F1,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(1, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                1,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F2,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(2, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                2,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F3,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(3, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                3,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F4,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(4, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                4,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F5,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(5, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                5,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F6,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(6, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                6,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F7,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(7, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                7,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F8,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(8, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                8,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F9,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(9, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                9,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F10,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(10, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                10,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F11,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(11, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                11,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
             Event::Key {
                 key: Key::F12,
                 pressed: true,
+                modifiers,
                 ..
-            } => vec![TerminalInput::FunctionKey(12, KeyModifiers::NONE)].into(),
+            } => vec![TerminalInput::FunctionKey(
+                12,
+                egui_mods_to_key_modifiers(*modifiers),
+            )]
+            .into(),
 
             // log any Event::Key that we don't handle
             // Event::Key { key, pressed: true, .. } => {
