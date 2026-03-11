@@ -247,10 +247,26 @@ fn write_input_to_terminal(
             // Event::Key { key: Key::C/X, ctrl: true }.  We must handle both synthetic events
             // here so that terminal apps (e.g. nano ^C interrupt, ^X exit) receive the correct
             // C0 control bytes.
-            // FIXME: Technically not correct if we were on a mac, but also we are using linux
-            // syscalls so we'd have to solve that before this is a problem
-            Event::Copy => [TerminalInput::Ctrl(b'c')].as_ref().into(),
-            Event::Cut => [TerminalInput::Ctrl(b'x')].as_ref().into(),
+            //
+            // Ctrl+Shift+C is the standard "copy selection" shortcut in terminal emulators.
+            // egui-winit also converts it to Event::Copy (the shift is an extra modifier),
+            // so we check input.modifiers.shift to distinguish:
+            //   - Ctrl+C       (no shift) → send \x03 (SIGINT)
+            //   - Ctrl+Shift+C (shift)    → copy selection to clipboard (Phase 3)
+            // Same logic for Cut: Ctrl+X → \x18, Ctrl+Shift+X → no-op (can't cut from terminal).
+            Event::Copy => {
+                if input.modifiers.shift {
+                    // TODO(Phase 3): copy selection text to clipboard here
+                    continue;
+                }
+                [TerminalInput::Ctrl(b'c')].as_ref().into()
+            }
+            Event::Cut => {
+                if input.modifiers.shift {
+                    continue;
+                }
+                [TerminalInput::Ctrl(b'x')].as_ref().into()
+            }
             Event::Key {
                 key: Key::J,
                 pressed: true,
