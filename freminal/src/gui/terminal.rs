@@ -14,7 +14,9 @@ use crate::gui::{
 
 use crossbeam_channel::Sender;
 use freminal_common::{
-    buffer_states::modes::rl_bracket::RlBracket, config::Config, pty_write::PtyWrite,
+    buffer_states::{modes::rl_bracket::RlBracket, tchar::TChar},
+    config::Config,
+    pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
     interface::{TerminalInput, TerminalInputPayload, collect_text},
@@ -723,6 +725,11 @@ pub struct FreminalTerminalWidget {
     previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
     /// Whether the cursor was shown in the most recently rendered frame.
     previous_show_cursor: bool,
+    /// The `visible_chars` arc from the last full vertex rebuild.
+    ///
+    /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
+    /// where a later snapshot overwrites `content_changed` before the GUI wakes.
+    last_rendered_visible: Option<Arc<Vec<TChar>>>,
 }
 
 impl FreminalTerminalWidget {
@@ -752,6 +759,7 @@ impl FreminalTerminalWidget {
             previous_cursor_blink_on: true,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_show_cursor: false,
+            last_rendered_visible: None,
         }
     }
 
@@ -823,6 +831,17 @@ impl FreminalTerminalWidget {
         };
 
         if !snap.skip_draw {
+            // Detect content changes via `Arc::ptr_eq` — this is immune to the
+            // race where the PTY thread overwrites a "changed" snapshot with a
+            // "clean" one before the GUI wakes up.  If the `visible_chars` arc
+            // is a different allocation from the one we last rendered, the
+            // content has changed regardless of the `content_changed` flag.
+            let content_changed = snap.content_changed
+                || self
+                    .last_rendered_visible
+                    .as_ref()
+                    .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars));
+
             // Determine whether we can take the cursor-only fast path.
             //
             // Cursor-only: content has not changed, but the cursor blink state
@@ -833,7 +852,7 @@ impl FreminalTerminalWidget {
                 || snap.cursor_pos != self.previous_cursor_pos
                 || snap.show_cursor != self.previous_show_cursor;
 
-            let cursor_only = !snap.content_changed
+            let cursor_only = !content_changed
                 && cursor_state_changed
                 && !self
                     .render_state
@@ -873,7 +892,7 @@ impl FreminalTerminalWidget {
                 {
                     rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
                 }
-            } else if snap.content_changed
+            } else if content_changed
                 || self
                     .render_state
                     .lock()
@@ -928,6 +947,11 @@ impl FreminalTerminalWidget {
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;
                 rs.cursor_vert_float_offset = cursor_vert_float_offset;
+                drop(rs);
+
+                // Remember which `visible_chars` allocation we rendered, so
+                // the next frame can detect changes via `Arc::ptr_eq`.
+                self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // buffers not empty) we simply re-draw the existing VBO data — no

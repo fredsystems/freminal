@@ -833,19 +833,47 @@ fn find_system_face_for_char(font_db: &Database, c: char) -> Option<LoadedFace> 
     None
 }
 
+/// Read `usWinAscent` (u16 at byte offset 74) and `usWinDescent` (u16 at byte
+/// offset 76) from a raw OS/2 table.  Returns `None` if the table is too short.
+fn read_os2_win_metrics(os2_data: &[u8]) -> Option<(u16, u16)> {
+    // usWinAscent is at offset 74, usWinDescent at offset 76.
+    // Each is a big-endian u16; the table must be at least 78 bytes.
+    if os2_data.len() < 78 {
+        return None;
+    }
+    let win_ascent = u16::from_be_bytes([os2_data[74], os2_data[75]]);
+    let win_descent = u16::from_be_bytes([os2_data[76], os2_data[77]]);
+    Some((win_ascent, win_descent))
+}
+
 /// Compute cell metrics from the regular face at the given font size.
 ///
 /// Returns `(cell_width, cell_height, baseline_offset, descent, underline_offset,
 /// strikeout_offset, stroke_size)`.
 ///
-/// `baseline_offset` is `ascent + top_pad` where `top_pad` distributes half
-/// the font's leading above the ascent line (minimum 1 px).  The renderer uses
-/// this value directly as the Y offset from the top of each cell row to the
-/// text baseline, so the padding is automatically applied.
+/// `baseline_offset` is the Y distance from the top of each cell row to the text
+/// baseline.  The renderer uses this value directly.
+///
+/// Cell height is the maximum of two metric sets:
+///
+/// 1. **Typographic height** — `ascent + |descent| + leading` from the font's
+///    primary metrics (either `sTypoAscender`/`sTypoDescender` when the
+///    `USE_TYPO_METRICS` flag is set, or `hhea.ascender`/`hhea.descender`
+///    otherwise).  This is what swash's `Metrics.ascent`/`.descent` reflect.
+///
+/// 2. **Win height** — `usWinAscent + usWinDescent` from the OS/2 table.  Nerd
+///    Font / Powerline glyphs are designed to fill this region, which is
+///    typically larger than the typographic height.
+///
+/// When the win height is larger, the extra vertical space is distributed evenly
+/// above and below the typographic region so that standard Latin glyphs remain
+/// vertically centred within the cell.
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_pt: f32,
 ) -> (u32, u32, f32, f32, f32, f32, f32) {
+    use swash::{TableProvider, tag_from_bytes};
+
     let font_ref = face
         .as_font_ref()
         .unwrap_or_else(|| unreachable!("primary regular face data is corrupt"));
@@ -883,17 +911,47 @@ fn compute_cell_metrics(
         }
     };
 
-    // cell_height = ceil(ascent + |descent| + leading) — the raw typographic
-    // line height.  We do NOT inflate it; instead we redistribute the leading
-    // so that half sits above the ascent line as top padding.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cell_height = (metrics.ascent + metrics.descent.abs() + metrics.leading).ceil() as u32;
+    // --- Determine cell height from the tallest metric set ---
+    //
+    // Typographic height (what swash gives us in `metrics`).
+    let typo_height = metrics.ascent + metrics.descent.abs() + metrics.leading;
 
-    // baseline_offset = ascent + top_pad.  The renderer places the text
-    // baseline at `row * cell_height + baseline_offset`, so adding top_pad
-    // pushes glyphs down and creates headroom above.  Half the leading goes
-    // above (min 1 px for fonts like MesloLGS where leading == 0).
-    let top_pad = (metrics.leading * 0.5).max(1.0);
+    // Win height from the OS/2 table (font design units → pixels).
+    let unscaled = font_ref.metrics(&[]);
+    let upem_f = if unscaled.units_per_em != 0 {
+        f32::from(unscaled.units_per_em)
+    } else {
+        1.0
+    };
+    let scale_fdu = font_size_pt / upem_f;
+
+    let os2_tag = tag_from_bytes(b"OS/2");
+    let win_height = font_ref
+        .table_by_tag(os2_tag)
+        .and_then(read_os2_win_metrics)
+        .map_or(0.0, |(wa, wd)| {
+            f32::from(wa).mul_add(scale_fdu, f32::from(wd) * scale_fdu)
+        });
+
+    let effective_height = typo_height.max(win_height);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cell_height = effective_height.ceil() as u32;
+
+    // --- Baseline offset ---
+    //
+    // When the win height is larger than the typographic height the extra
+    // vertical space is split evenly above and below so Latin glyphs stay
+    // centred.  `extra_top` absorbs the top half of that extra space.
+    let extra_top = if win_height > typo_height {
+        (win_height - typo_height) * 0.5
+    } else {
+        0.0
+    };
+
+    // A minimum 1 px top pad ensures glyphs are never flush against the cell
+    // edge (important for fonts like MesloLGS where leading == 0).
+    let top_pad = metrics.leading.mul_add(0.5, extra_top).max(1.0);
     let baseline_offset = metrics.ascent + top_pad;
 
     // Ensure non-zero dimensions.
@@ -951,6 +1009,51 @@ mod tests {
             fm.cell_height >= 10 && fm.cell_height <= 30,
             "cell_height {} out of expected range for 12pt MesloLGS",
             fm.cell_height
+        );
+    }
+
+    // --- Test 2b: Cell height accounts for OS/2 win metrics (powerline) ---
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn cell_height_includes_win_metrics() {
+        use swash::{FontRef, TableProvider, tag_from_bytes};
+
+        // Load the bundled MesloLGS font and compute the win-metric height
+        // at the default font size.  The cell height from `FontManager` must
+        // be at least as tall as this value.
+        let font_ref = FontRef::from_index(MESLO_REGULAR, 0);
+        assert!(font_ref.is_some(), "bundled MesloLGS must parse");
+        let font_ref = font_ref.unwrap();
+
+        let config = Config::default();
+        let font_size_pt = config.font.size;
+
+        let unscaled = font_ref.metrics(&[]);
+        let upem_f = if unscaled.units_per_em != 0 {
+            f32::from(unscaled.units_per_em)
+        } else {
+            1.0
+        };
+        let scale_fdu = font_size_pt / upem_f;
+
+        let os2_tag = tag_from_bytes(b"OS/2");
+        let os2_data = font_ref.table_by_tag(os2_tag);
+        assert!(os2_data.is_some(), "MesloLGS must have an OS/2 table");
+        let os2_data = os2_data.unwrap();
+        let win_metrics = read_os2_win_metrics(os2_data);
+        assert!(win_metrics.is_some(), "OS/2 table must have win metrics");
+        let (wa, wd) = win_metrics.unwrap();
+        assert!(wa > 0 || wd > 0, "MesloLGS must have non-zero win metrics");
+
+        let win_height_px = f32::from(wa).mul_add(scale_fdu, f32::from(wd) * scale_fdu);
+
+        let fm = default_manager();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_h_f = fm.cell_height as f32;
+        assert!(
+            cell_h_f >= win_height_px.floor(),
+            "cell_height ({cell_h_f}) must be >= win_height ({win_height_px})"
         );
     }
 
