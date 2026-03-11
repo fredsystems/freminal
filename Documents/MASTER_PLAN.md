@@ -25,7 +25,7 @@ and plan document maintenance rules.
 
 | #   | Task                      | Plan Document                 | Status      | Dependencies |
 | --- | ------------------------- | ----------------------------- | ----------- | ------------ |
-| 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`      | Not Started | None         |
+| 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`      | Complete    | None         |
 | 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`       | Complete    | None         |
 | 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`   | Complete    | Task 2       |
 | 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
@@ -177,11 +177,11 @@ Update this section as tasks complete:
 
 | Task | Started    | Completed  | Notes                            |
 | ---- | ---------- | ---------- | -------------------------------- |
-| 1    | —          | —          |                                  |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas |
 | 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config  |
 | 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal |
 | 4    | —          | —          | Unblocked (Task 2 complete)      |
-| 5    | —          | —          | Blocked on Task 1                |
+| 5    | —          | —          | Unblocked (Task 1 complete)      |
 | 6    | —          | —          |                                  |
 | 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete         |
 | 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete          |
