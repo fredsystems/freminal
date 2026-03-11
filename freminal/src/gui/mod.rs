@@ -21,10 +21,14 @@ use settings::{SettingsAction, SettingsModal};
 use terminal::FreminalTerminalWidget;
 use view_state::ViewState;
 
+pub mod atlas;
 pub mod colors;
+pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
+pub mod renderer;
 pub mod settings;
+pub mod shaping;
 pub mod terminal;
 pub mod view_state;
 

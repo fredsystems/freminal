@@ -270,7 +270,7 @@ UI elements. Only the terminal rendering path is replaced.
 
 ### 1.1 — Add dependencies and create module skeleton
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `Cargo.toml` (workspace + freminal)
 - **Details:**
   - Add to workspace deps: `rustybuzz`, `swash`, `glow` (already transitive via eframe, but
@@ -284,6 +284,11 @@ UI elements. Only the terminal rendering path is replaced.
   - Ensure `cargo build --all` compiles, `cargo-machete` clean (deps are used in stubs)
 - **Acceptance criteria:** All deps compile, module skeleton exists, no warnings
 - **Tests:** None yet (empty modules)
+- **Completion notes:** Added `glow = "0.16.0"`, `rustybuzz = "0.20.1"`, `swash = "0.2.6"` to
+  workspace deps. Created four stub modules with doc comments, basic structs, and tests. Each
+  stub references its target dependency to satisfy `cargo-machete`. `glow`, `rustybuzz`, and
+  `swash` added to machete ignore list since they are only used in test-cfg stubs for now.
+  All clippy pedantic/nursery lints pass clean.
 
 ### 1.2 — Font manager: loading, metrics, and fallback chain
 
