@@ -315,19 +315,6 @@ fn write_input_to_terminal(
                 ..
             } => [TerminalInput::LineFeed].as_ref().into(),
             Event::Key {
-                key,
-                pressed: true,
-                modifiers: Modifiers { ctrl: true, .. },
-                ..
-            } => {
-                if let Some(inputs) = control_key(*key) {
-                    inputs
-                } else {
-                    error!("Unexpected ctrl key: {}", key.name());
-                    continue;
-                }
-            }
-            Event::Key {
                 key: Key::Backspace,
                 pressed: true,
                 ..
@@ -543,6 +530,21 @@ fn write_input_to_terminal(
             )]
             .into(),
 
+            // Wildcard Ctrl+<letter> arm — must be AFTER all specific key arms
+            // (arrows, navigation, F-keys, etc.) so those aren't swallowed.
+            Event::Key {
+                key,
+                pressed: true,
+                modifiers: Modifiers { ctrl: true, .. },
+                ..
+            } => {
+                if let Some(inputs) = control_key(*key) {
+                    inputs
+                } else {
+                    error!("Unexpected ctrl key: {}", key.name());
+                    continue;
+                }
+            }
             // log any Event::Key that we don't handle
             // Event::Key { key, pressed: true, .. } => {
             //     warn!("Unhandled key event: {:?}", key);
