@@ -15,6 +15,63 @@ use eframe::egui;
 
 use super::mouse::PreviousMouseState;
 
+/// A terminal cell coordinate (column, row), both 0-indexed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellCoord {
+    pub col: usize,
+    pub row: usize,
+}
+
+/// Tracks an in-progress or completed text selection.
+///
+/// Selection is defined by an *anchor* (where the mouse was pressed) and an
+/// *end* (where the mouse currently is or was released).  The anchor stays
+/// fixed; the end moves with the pointer.
+///
+/// The selection is "active" when a drag is in progress (`is_selecting`), and
+/// "present" when anchor != end (i.e. something is highlighted).
+#[derive(Debug, Clone, Default)]
+pub struct SelectionState {
+    /// The cell where the mouse button was pressed (fixed during drag).
+    pub anchor: Option<CellCoord>,
+    /// The cell where the pointer currently is (updated during drag).
+    pub end: Option<CellCoord>,
+    /// `true` while the primary button is held down and dragging.
+    pub is_selecting: bool,
+}
+
+impl SelectionState {
+    /// Returns the normalised selection range as `(start, end)` where `start`
+    /// is always before or equal to `end` in reading order.
+    ///
+    /// Returns `None` if there is no selection.
+    #[must_use]
+    pub fn normalised(&self) -> Option<(CellCoord, CellCoord)> {
+        let (a, e) = (self.anchor?, self.end?);
+        if a.row < e.row || (a.row == e.row && a.col <= e.col) {
+            Some((a, e))
+        } else {
+            Some((e, a))
+        }
+    }
+
+    /// Clear the selection entirely.
+    pub const fn clear(&mut self) {
+        self.anchor = None;
+        self.end = None;
+        self.is_selecting = false;
+    }
+
+    /// Returns `true` if there is a visible selection (anchor and end differ).
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        match (self.anchor, self.end) {
+            (Some(a), Some(e)) => a != e,
+            _ => false,
+        }
+    }
+}
+
 /// GUI-local view state for the terminal widget.
 ///
 /// Everything here belongs to the render thread only.  The PTY thread never
@@ -71,6 +128,12 @@ pub struct ViewState {
     ///
     /// Moved here from the `write_input_to_terminal` call-chain (Task 5/9).
     pub previous_mouse_state: Option<PreviousMouseState>,
+
+    /// Current text selection state (anchor, end, `is_selecting`).
+    ///
+    /// Populated when the user clicks and drags with the primary mouse button
+    /// while mouse tracking is off (no mouse-aware TUI application running).
+    pub selection: SelectionState,
 }
 
 impl ViewState {

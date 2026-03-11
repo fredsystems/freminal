@@ -19,7 +19,7 @@ use freminal_common::buffer_states::fonts::FontDecorations;
 use freminal_common::cursor::CursorVisualStyle;
 
 use super::atlas::{GlyphAtlas, GlyphKey};
-use super::colors::{CURSOR_F, internal_color_to_gl};
+use super::colors::{CURSOR_F, SELECTION_BG_F, SELECTION_FG_F, internal_color_to_gl};
 use super::font_manager::FontManager;
 use super::shaping::{ShapedGlyph, ShapedLine};
 
@@ -348,9 +348,10 @@ impl TerminalRenderer {
             cursor_blink_on,
             cursor_pos,
             cursor_visual_style,
+            None,
         );
         let fg_verts =
-            build_foreground_verts(shaped_lines, atlas, font_manager, cell_height, ascent);
+            build_foreground_verts(shaped_lines, atlas, font_manager, cell_height, ascent, None);
 
         // 3. Upload vertex data using orphan-then-write.
         let buf_idx = self.vbo_index;
@@ -900,6 +901,7 @@ fn extract_atlas_rect(pixels: &[u8], atlas_size: u32, rect: &super::atlas::Dirty
 ///
 /// Generates:
 /// - One merged quad per horizontal run of same-background cells.
+/// - Selection highlight quads for the current text selection (if any).
 /// - Cursor quad (block / underline / bar) at `cursor_pos` when visible.
 /// - Underline / strikethrough quads for runs that carry those decorations.
 ///
@@ -918,6 +920,7 @@ pub fn build_background_verts(
     cursor_blink_on: bool,
     cursor_pos: CursorPos,
     cursor_visual_style: &CursorVisualStyle,
+    selection: Option<(usize, usize, usize, usize)>,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -1042,6 +1045,54 @@ pub fn build_background_verts(
         }
     }
 
+    // --- Selection highlight quads ---
+    // `selection` is `Some((start_col, start_row, end_col, end_row))` with
+    // start <= end in reading order.
+    if let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection {
+        #[allow(clippy::cast_precision_loss)]
+        let cw = cell_width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let ch = cell_height as f32;
+
+        for (row, line) in shaped_lines
+            .iter()
+            .enumerate()
+            .take(sel_end_row + 1)
+            .skip(sel_start_row)
+        {
+            // Determine the column range for this row.
+            let col_begin = if row == sel_start_row {
+                sel_start_col
+            } else {
+                0
+            };
+            let col_end = if row == sel_end_row {
+                sel_end_col
+            } else {
+                // Highlight to the end of the row.  Use the last run's end
+                // column, or fall back to the total run width.
+                line.runs
+                    .last()
+                    .map_or(0, |r| r.col_start + run_col_count(r))
+                    .saturating_sub(1)
+            };
+
+            if col_end < col_begin {
+                continue;
+            }
+
+            #[allow(clippy::cast_precision_loss)]
+            let x0 = col_begin as f32 * cw;
+            #[allow(clippy::cast_precision_loss)]
+            let x1 = (col_end + 1) as f32 * cw;
+            #[allow(clippy::cast_precision_loss)]
+            let y0 = row as f32 * ch;
+            let y1 = y0 + ch;
+
+            push_quad(&mut verts, x0, y0, x1, y1, SELECTION_BG_F);
+        }
+    }
+
     // --- Cursor quad ---
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
         #[allow(clippy::cast_precision_loss)]
@@ -1143,6 +1194,10 @@ pub fn build_cursor_verts_only(
 /// For each shaped glyph: looks up the atlas entry (rasterising on miss) and
 /// emits a textured quad at the cell-grid position adjusted by the bearing offsets.
 ///
+/// `selection` is `Some((start_col, start_row, end_col, end_row))` in normalised
+/// reading order.  Glyphs that fall within the selection use `SELECTION_FG_F`
+/// instead of their normal foreground color.
+///
 /// Returns a flat `Vec<f32>` with `FG_VERTEX_FLOATS` floats per vertex.
 #[must_use]
 pub fn build_foreground_verts(
@@ -1151,6 +1206,7 @@ pub fn build_foreground_verts(
     font_manager: &FontManager,
     cell_height: u32,
     ascent: f32,
+    selection: Option<(usize, usize, usize, usize)>,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -1167,9 +1223,18 @@ pub fn build_foreground_verts(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
-            let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint);
+            let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint);
+
+            // Track the current column as we iterate glyphs within the run.
+            let mut col = run.col_start;
 
             for glyph in &run.glyphs {
+                let fg_color = if is_cell_selected(row_idx, col, selection) {
+                    SELECTION_FG_F
+                } else {
+                    normal_fg
+                };
+
                 emit_glyph_quad(
                     &mut verts,
                     glyph,
@@ -1179,6 +1244,8 @@ pub fn build_foreground_verts(
                     fg_color,
                     [cell_top, cell_bottom],
                 );
+
+                col += glyph.cell_width;
             }
         }
     }
@@ -1351,6 +1418,36 @@ fn run_col_count(run: &super::shaping::ShapedRun) -> usize {
     run.glyphs.iter().map(|g| g.cell_width).sum()
 }
 
+/// Check whether a cell at `(row, col)` falls within the normalised selection
+/// `(start_col, start_row, end_col, end_row)`.
+const fn is_cell_selected(
+    row: usize,
+    col: usize,
+    selection: Option<(usize, usize, usize, usize)>,
+) -> bool {
+    let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection else {
+        return false;
+    };
+
+    if row < sel_start_row || row > sel_end_row {
+        return false;
+    }
+
+    if sel_start_row == sel_end_row {
+        // Single-row selection.
+        return col >= sel_start_col && col <= sel_end_col;
+    }
+
+    if row == sel_start_row {
+        col >= sel_start_col
+    } else if row == sel_end_row {
+        col <= sel_end_col
+    } else {
+        // Middle rows are fully selected.
+        true
+    }
+}
+
 /// Compare two GL `[f32; 4]` colors for equality.
 ///
 /// Uses `total_cmp` so that the comparison is bitwise-exact (no NaN issues)
@@ -1450,6 +1547,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(verts.len(), 0, "default background should produce no quads");
     }
@@ -1471,6 +1569,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // One quad = VERTS_PER_QUAD * BG_VERTEX_FLOATS floats.
         assert_eq!(
@@ -1535,6 +1634,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // Two adjacent same-color runs → one merged quad.
         assert_eq!(
@@ -1601,6 +1701,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1625,6 +1726,7 @@ mod tests {
             true,
             CursorPos { x: 1, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1647,6 +1749,7 @@ mod tests {
             false, // blink_on = false
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1669,6 +1772,7 @@ mod tests {
             false, // blink_on = false — irrelevant for steady cursor
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1691,6 +1795,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // One underline quad.
         assert_eq!(
@@ -1719,6 +1824,7 @@ mod tests {
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -1746,6 +1852,7 @@ mod tests {
             true,
             CursorPos { x: 2, y: 1 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
         // The cursor quad is the last 36 floats (6 verts × 6 floats).
         assert!(verts.len() >= VERTS_PER_QUAD * BG_VERTEX_FLOATS);
@@ -1774,6 +1881,7 @@ mod tests {
             &FontManager::new(&Config::default()),
             16,
             13.0,
+            None,
         );
         assert_eq!(verts.len(), 0);
     }
@@ -1796,7 +1904,7 @@ mod tests {
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
         let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
 
-        let verts = build_foreground_verts(&lines, &mut atlas, &fm, cell_h, ascent);
+        let verts = build_foreground_verts(&lines, &mut atlas, &fm, cell_h, ascent, None);
 
         // Three ASCII glyphs each produce one quad = VERTS_PER_QUAD * FG_VERTEX_FLOATS.
         // Some glyphs may be spaces (zero-size) — so at minimum some quads must exist.
@@ -1984,6 +2092,7 @@ mod tests {
             true, // cursor visible
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            None,
         );
 
         // Record where the cursor quad starts (it is appended at the end).

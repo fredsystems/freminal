@@ -14,8 +14,10 @@ use freminal_common::colors::TerminalColor;
 pub const TEXT: Color32 = Color32::from_rgb(0xcd, 0xd6, 0xf4);
 // Background
 pub const BASE: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x2e);
-// Selection background (referenced in theme comments)
-pub const SELECTION_BG: Color32 = Color32::from_rgb(0x35, 0x37, 0x48);
+// Selection background (bright grey for clear visibility)
+pub const SELECTION_BG: Color32 = Color32::from_rgb(0xa0, 0xa4, 0xb8);
+// Selection foreground (black text over the bright selection background)
+pub const SELECTION_FG: Color32 = Color32::from_rgb(0x11, 0x11, 0x1b);
 // Cursor color
 pub const CURSOR: Color32 = Color32::from_rgb(0xf5, 0xe0, 0xdc);
 // Cursor text
@@ -63,6 +65,7 @@ pub const fn color32_to_f32(color: Color32) -> [f32; 4] {
 pub const TEXT_F: [f32; 4] = color32_to_f32(TEXT);
 pub const BASE_F: [f32; 4] = color32_to_f32(BASE);
 pub const SELECTION_BG_F: [f32; 4] = color32_to_f32(SELECTION_BG);
+pub const SELECTION_FG_F: [f32; 4] = color32_to_f32(SELECTION_FG);
 pub const CURSOR_F: [f32; 4] = color32_to_f32(CURSOR);
 pub const CURSOR_TEXT_F: [f32; 4] = color32_to_f32(CURSOR_TEXT);
 

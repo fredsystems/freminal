@@ -9,12 +9,12 @@ use crate::gui::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
         handle_pointer_scroll,
     },
-    view_state::ViewState,
+    view_state::{CellCoord, ViewState},
 };
 
 use crossbeam_channel::Sender;
 use freminal_common::{
-    buffer_states::{modes::rl_bracket::RlBracket, tchar::TChar},
+    buffer_states::{modes::mouse::MouseTrack, modes::rl_bracket::RlBracket, tchar::TChar},
     config::Config,
     pty_write::PtyWrite,
 };
@@ -187,13 +187,26 @@ fn write_input_to_terminal(
     view_state: &mut ViewState,
     character_size_x: f32,
     character_size_y: f32,
+    terminal_origin: Pos2,
     last_reported_mouse_pos: Option<PreviousMouseState>,
     repeat_characters: bool,
     previous_key: Option<Key>,
     scroll_amount: f32,
-) -> (bool, Option<PreviousMouseState>, Option<Key>, f32) {
+) -> (
+    bool,
+    Option<PreviousMouseState>,
+    Option<Key>,
+    f32,
+    Option<String>,
+) {
     if input.raw.events.is_empty() {
-        return (false, last_reported_mouse_pos, previous_key, scroll_amount);
+        return (
+            false,
+            last_reported_mouse_pos,
+            previous_key,
+            scroll_amount,
+            None,
+        );
     }
 
     let mut previous_key = previous_key;
@@ -201,6 +214,17 @@ fn write_input_to_terminal(
     let mut last_reported_mouse_pos = last_reported_mouse_pos;
     let mut left_mouse_button_pressed = false;
     let mut scroll_amount = scroll_amount;
+    let mut clipboard_text: Option<String> = None;
+
+    // When the user is scrolled back into history, suppress mouse forwarding
+    // to the PTY — the visible content is historical, not the live terminal
+    // output the PTY application expects mouse coordinates to refer to.
+    // Standard terminal emulator behavior (xterm, kitty, WezTerm, etc.).
+    let effective_mouse_tracking = if view_state.scroll_offset > 0 {
+        &MouseTrack::NoTracking
+    } else {
+        &snap.mouse_tracking
+    };
 
     for event in &input.raw.events {
         debug!("event: {:?}", event);
@@ -236,10 +260,39 @@ fn write_input_to_terminal(
             // Event::Key { key: Key::C/X, ctrl: true }.  We must handle both synthetic events
             // here so that terminal apps (e.g. nano ^C interrupt, ^X exit) receive the correct
             // C0 control bytes.
-            // FIXME: Technically not correct if we were on a mac, but also we are using linux
-            // syscalls so we'd have to solve that before this is a problem
-            Event::Copy => [TerminalInput::Ctrl(b'c')].as_ref().into(),
-            Event::Cut => [TerminalInput::Ctrl(b'x')].as_ref().into(),
+            //
+            // Ctrl+Shift+C is the standard "copy selection" shortcut in terminal emulators.
+            // egui-winit also converts it to Event::Copy (the shift is an extra modifier),
+            // so we check input.modifiers.shift to distinguish:
+            //   - Ctrl+C       (no shift) → send \x03 (SIGINT)
+            //   - Ctrl+Shift+C (shift)    → copy selection to clipboard (Phase 3)
+            // Same logic for Cut: Ctrl+X → \x18, Ctrl+Shift+X → no-op (can't cut from terminal).
+            Event::Copy => {
+                if input.modifiers.shift {
+                    // Ctrl+Shift+C: copy selection text to clipboard.
+                    // The actual copy_text() call is deferred until after the
+                    // ui.input() closure returns, because copy_text() needs a
+                    // write lock on the Context and we are inside a read lock.
+                    if view_state.selection.has_selection() {
+                        let text = extract_selected_text(
+                            &snap.visible_chars,
+                            snap.term_width,
+                            &view_state.selection,
+                        );
+                        if !text.is_empty() {
+                            clipboard_text = Some(text);
+                        }
+                    }
+                    continue;
+                }
+                [TerminalInput::Ctrl(b'c')].as_ref().into()
+            }
+            Event::Cut => {
+                if input.modifiers.shift {
+                    continue;
+                }
+                [TerminalInput::Ctrl(b'x')].as_ref().into()
+            }
             Event::Key {
                 key: Key::J,
                 pressed: true,
@@ -430,8 +483,11 @@ fn write_input_to_terminal(
             }
             Event::PointerMoved(pos) => {
                 view_state.mouse_position = Some(*pos);
-                let (x, y) =
-                    encode_egui_mouse_pos_as_usize(*pos, (character_size_x, character_size_y));
+                let (x, y) = encode_egui_mouse_pos_as_usize(
+                    *pos,
+                    (character_size_x, character_size_y),
+                    terminal_origin,
+                );
 
                 let position = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let (previous, current) =
@@ -452,13 +508,19 @@ fn write_input_to_terminal(
                         )
                     };
 
-                let res = handle_pointer_moved(&previous, &current, &snap.mouse_tracking);
+                let res = handle_pointer_moved(&current, &previous, effective_mouse_tracking);
 
                 last_reported_mouse_pos = Some(current);
 
                 if let Some(res) = res {
                     res
                 } else {
+                    // Mouse tracking is off — update text selection if a drag
+                    // is in progress.
+                    if view_state.selection.is_selecting {
+                        view_state.selection.end = Some(CellCoord { col: x, row: y });
+                        state_changed = true;
+                    }
                     continue;
                 }
             }
@@ -470,13 +532,16 @@ fn write_input_to_terminal(
             } => {
                 state_changed = true;
 
-                let (x, y) =
-                    encode_egui_mouse_pos_as_usize(*pos, (character_size_x, character_size_y));
+                let (x, y) = encode_egui_mouse_pos_as_usize(
+                    *pos,
+                    (character_size_x, character_size_y),
+                    terminal_origin,
+                );
                 let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
                 let response =
-                    handle_pointer_button(*button, &new_mouse_position, &snap.mouse_tracking);
+                    handle_pointer_button(*button, &new_mouse_position, effective_mouse_tracking);
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
@@ -487,6 +552,20 @@ fn write_input_to_terminal(
                 if let Some(response) = response {
                     response
                 } else {
+                    // Mouse tracking is off — handle text selection.
+                    if *button == PointerButton::Primary {
+                        if *pressed {
+                            // Start a new selection at this cell.
+                            let coord = CellCoord { col: x, row: y };
+                            view_state.selection.anchor = Some(coord);
+                            view_state.selection.end = Some(coord);
+                            view_state.selection.is_selecting = true;
+                        } else if view_state.selection.is_selecting {
+                            // Mouse released — finalize the selection.
+                            view_state.selection.end = Some(CellCoord { col: x, row: y });
+                            view_state.selection.is_selecting = false;
+                        }
+                    }
                     continue;
                 }
             }
@@ -530,7 +609,7 @@ fn write_input_to_terminal(
                     let response = handle_pointer_scroll(
                         egui::Vec2::new(0.0, scroll_amount_to_do / character_size_y),
                         last_mouse_position,
-                        &snap.mouse_tracking,
+                        effective_mouse_tracking,
                     );
 
                     if let Some(response) = response {
@@ -578,29 +657,39 @@ fn write_input_to_terminal(
         last_reported_mouse_pos,
         previous_key,
         scroll_amount,
+        clipboard_text,
     )
 }
 
-fn encode_egui_mouse_pos_as_usize(pos: Pos2, character_size: (f32, f32)) -> (usize, usize) {
-    let x = ((pos.x / character_size.0).floor())
+fn encode_egui_mouse_pos_as_usize(
+    pos: Pos2,
+    character_size: (f32, f32),
+    origin: Pos2,
+) -> (usize, usize) {
+    // Subtract the terminal area origin so that coordinates are relative to
+    // the top-left of the terminal grid, not the top-left of the window.
+    let rel_x = (pos.x - origin.x).max(0.0);
+    let rel_y = (pos.y - origin.y).max(0.0);
+
+    let x = ((rel_x / character_size.0).floor())
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
-            if pos.x > 0.0 {
-                debug!("Mouse x ({}) out of range, clamping to 255", pos.x);
+            if rel_x > 0.0 {
+                debug!("Mouse x ({}) out of range, clamping to 255", rel_x);
                 255
             } else {
-                debug!("Mouse x ({}) out of range, clamping to 0", pos.x);
+                debug!("Mouse x ({}) out of range, clamping to 0", rel_x);
                 0
             }
         });
-    let y = ((pos.y / character_size.1).floor())
+    let y = ((rel_y / character_size.1).floor())
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
-            if pos.y > 0.0 {
-                debug!("Mouse y ({}) out of range, clamping to 255", pos.y);
+            if rel_y > 0.0 {
+                debug!("Mouse y ({}) out of range, clamping to 255", rel_y);
                 255
             } else {
-                debug!("Mouse y ({}) out of range, clamping to 0", pos.y);
+                debug!("Mouse y ({}) out of range, clamping to 0", rel_y);
                 0
             }
         });
@@ -608,7 +697,100 @@ fn encode_egui_mouse_pos_as_usize(pos: Pos2, character_size: (f32, f32)) -> (usi
     (x, y)
 }
 
-/// Paint a thin scrollbar indicator on the right edge of the terminal viewport.
+/// Extract the text covered by the current selection from `visible_chars`.
+///
+/// `visible_chars` is a flat `Vec<TChar>` where rows are separated by
+/// `TChar::NewLine`.  `term_width` is the terminal width in columns.
+///
+/// The selection is defined by the normalised `(start, end)` `CellCoord`s from
+/// `SelectionState`.  For multi-line selections, trailing whitespace on each
+/// line is trimmed and a newline is inserted between rows.
+fn extract_selected_text(
+    visible_chars: &[TChar],
+    _term_width: usize,
+    selection: &super::view_state::SelectionState,
+) -> String {
+    use std::fmt::Write as _;
+
+    let Some((start, end)) = selection.normalised() else {
+        return String::new();
+    };
+
+    // Split the flat visible_chars on NewLine boundaries to get per-row slices.
+    // Each row in the flattened buffer has a *variable* number of TChars
+    // (empty rows have 0, rows with wide chars have fewer than term_width, etc.),
+    // so a fixed-stride approach does not work.
+    let lines = split_visible_into_lines(visible_chars);
+
+    let mut result = String::new();
+
+    for row in start.row..=end.row {
+        let line = if row < lines.len() {
+            lines[row]
+        } else {
+            &[] // row beyond available data — treat as empty
+        };
+
+        // Column range for this row within the selection.
+        let col_begin = if row == start.row { start.col } else { 0 };
+        let col_end = if row == end.row {
+            end.col
+        } else {
+            // Select to end of line content (not a fixed width).
+            line.len().saturating_sub(1)
+        };
+
+        // Collect characters for this row's selected range.
+        let mut row_text = String::new();
+        for col in col_begin..=col_end {
+            if col >= line.len() {
+                break;
+            }
+            match &line[col] {
+                TChar::NewLine => break,
+                tc => {
+                    write!(&mut row_text, "{tc}").unwrap_or_default();
+                }
+            }
+        }
+
+        // Trim trailing whitespace on each line (standard terminal behavior —
+        // empty cells at the end of a line are spaces, not meaningful content).
+        let trimmed = row_text.trim_end();
+        result.push_str(trimmed);
+
+        // Add newline between rows (but not after the last row).
+        if row < end.row {
+            result.push('\n');
+        }
+    }
+
+    result
+}
+
+/// Split a flat `TChar` slice into per-line segments at `TChar::NewLine` boundaries.
+///
+/// The `NewLine` characters themselves are NOT included in the returned slices.
+/// This mirrors `shaping::split_into_lines` but is kept local to avoid a
+/// cross-module dependency for a trivial helper.
+fn split_visible_into_lines(chars: &[TChar]) -> Vec<&[TChar]> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+
+    for (i, ch) in chars.iter().enumerate() {
+        if matches!(ch, TChar::NewLine) {
+            lines.push(&chars[start..i]);
+            start = i + 1;
+        }
+    }
+
+    // Trailing content after the last NewLine (or the entire array if no NewLine).
+    if start <= chars.len() {
+        lines.push(&chars[start..]);
+    }
+
+    lines
+}
 ///
 /// The scrollbar is only shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
@@ -730,6 +912,9 @@ pub struct FreminalTerminalWidget {
     /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
     /// where a later snapshot overwrites `content_changed` before the GUI wakes.
     last_rendered_visible: Option<Arc<Vec<TChar>>>,
+    /// The normalised selection from the last full vertex rebuild, used to
+    /// detect selection changes that require a full rebuild.
+    previous_selection: Option<(CellCoord, CellCoord)>,
 }
 
 impl FreminalTerminalWidget {
@@ -760,6 +945,7 @@ impl FreminalTerminalWidget {
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_show_cursor: false,
             last_rendered_visible: None,
+            previous_selection: None,
         }
     }
 
@@ -792,29 +978,53 @@ impl FreminalTerminalWidget {
         let available = ui.available_size();
         ui.set_min_size(available);
 
+        // Compute the terminal area origin BEFORE processing input events.
+        // Pointer events from `input.raw.events` are in window coordinates,
+        // so `encode_egui_mouse_pos_as_usize` must subtract this origin to
+        // get terminal-grid-relative coordinates.
+        let terminal_origin = ui.available_rect_before_wrap().min;
+
         // When a modal dialog (e.g. the settings window) is open, do NOT
         // forward keyboard/mouse events to the PTY — they belong to the
         // modal's egui widgets instead.
         if !modal_is_open {
             let repeat_characters = snap.repeat_keys;
-            let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
-                .input(|input_state| {
-                    write_input_to_terminal(
-                        input_state,
-                        snap,
-                        input_tx,
-                        view_state,
-                        cell_w_f,
-                        row_h_f,
-                        self.previous_mouse_state.clone(),
-                        repeat_characters,
-                        self.previous_key,
-                        self.previous_scroll_amount,
-                    )
-                });
+            let ctx = ui.ctx().clone();
+            let (
+                _left_mouse_button_pressed,
+                new_mouse_pos,
+                previous_key,
+                scroll_amount,
+                clipboard_text,
+            ) = ui.input(|input_state| {
+                write_input_to_terminal(
+                    input_state,
+                    snap,
+                    input_tx,
+                    view_state,
+                    cell_w_f,
+                    row_h_f,
+                    terminal_origin,
+                    self.previous_mouse_state.clone(),
+                    repeat_characters,
+                    self.previous_key,
+                    self.previous_scroll_amount,
+                )
+            });
             self.previous_mouse_state = new_mouse_pos;
             self.previous_key = previous_key;
             self.previous_scroll_amount = scroll_amount;
+
+            // Perform the clipboard copy OUTSIDE the ui.input() closure.
+            // copy_text() calls ctx.output_mut() which needs a write lock on
+            // the Context, but ui.input() holds a read lock — calling
+            // copy_text() inside the closure would deadlock.
+            if let Some(text) = clipboard_text {
+                ctx.copy_text(text);
+                // Clear the selection highlight now that the text has been
+                // copied to the clipboard.
+                view_state.selection.clear();
+            }
         }
 
         // Blink state must be computed here — cannot call `ui.input` inside
@@ -842,17 +1052,35 @@ impl FreminalTerminalWidget {
                     .as_ref()
                     .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars));
 
+            // Clear the selection when actual terminal text content changes so
+            // stale highlights don't linger over shifted text.  We use
+            // `snap.content_changed` here (NOT the `Arc::ptr_eq`-augmented
+            // `content_changed`) because the PTY thread may re-flatten and
+            // allocate a new Arc for cursor-blink dirty rows even when the
+            // visible text is byte-identical.  Using the broader check would
+            // clear the selection within ~500 ms of mouse release (on every
+            // cursor blink), making copy impossible.
+            if snap.content_changed && !view_state.selection.is_selecting {
+                view_state.selection.clear();
+            }
+
+            // Check whether the selection has changed since the last frame.
+            let current_selection = view_state.selection.normalised();
+            let selection_changed = current_selection != self.previous_selection;
+
             // Determine whether we can take the cursor-only fast path.
             //
-            // Cursor-only: content has not changed, but the cursor blink state
-            // or position has changed since the last frame.  We only need to
-            // patch the cursor quad in the background VBO — no re-shaping and
-            // no full vertex rebuild required.
+            // Cursor-only: content has not changed, the selection has not
+            // changed, but the cursor blink state or position has changed
+            // since the last frame.  We only need to patch the cursor quad
+            // in the background VBO — no re-shaping and no full vertex
+            // rebuild required.
             let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
                 || snap.cursor_pos != self.previous_cursor_pos
                 || snap.show_cursor != self.previous_show_cursor;
 
             let cursor_only = !content_changed
+                && !selection_changed
                 && cursor_state_changed
                 && !self
                     .render_state
@@ -893,6 +1121,7 @@ impl FreminalTerminalWidget {
                     rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
                 }
             } else if content_changed
+                || selection_changed
                 || self
                     .render_state
                     .lock()
@@ -920,6 +1149,7 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
+                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
                 );
 
                 // Record where the cursor quad starts in the background VBO.
@@ -943,6 +1173,7 @@ impl FreminalTerminalWidget {
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
+                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
                 );
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;
@@ -952,10 +1183,11 @@ impl FreminalTerminalWidget {
                 // Remember which `visible_chars` allocation we rendered, so
                 // the next frame can detect changes via `Arc::ptr_eq`.
                 self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+                self.previous_selection = current_selection;
             }
             // If neither path applies (content unchanged, cursor unchanged,
-            // buffers not empty) we simply re-draw the existing VBO data — no
-            // CPU work at all.
+            // selection unchanged, buffers not empty) we simply re-draw the
+            // existing VBO data — no CPU work at all.
         }
 
         // Update per-frame cursor state for the next frame's comparison.

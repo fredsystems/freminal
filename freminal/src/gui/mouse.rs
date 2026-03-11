@@ -96,7 +96,8 @@ impl FreminalMousePosition {
 
 impl PartialEq for FreminalMousePosition {
     fn eq(&self, other: &Self) -> bool {
-        self.y_as_character_row == other.y_as_character_row
+        self.x_as_character_column == other.x_as_character_column
+            && self.y_as_character_row == other.y_as_character_row
     }
 }
 
@@ -304,8 +305,10 @@ fn encode_x11_mouse_wheel(
     }
     cb += encode_modifiers_for_x11(modifiers);
 
-    let x = pos.x_as_character_column + padding;
-    let y = pos.y_as_character_row + padding;
+    // Both X11 and SGR protocols use 1-based coordinates.
+    // X11 additionally adds 32 as a "padding" offset to make the byte printable.
+    let x = pos.x_as_character_column + 1 + padding;
+    let y = pos.y_as_character_row + 1 + padding;
     let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
 
     if encoding == &MouseEncoding::X11 {
@@ -344,8 +347,10 @@ fn encode_x11_mouse_button(
     cb += encode_mouse_for_x11(&MouseEvent::Button(button), internal_pressed);
     cb += encode_modifiers_for_x11(modifiers);
 
-    let x = pos.x_as_character_column + padding;
-    let y = pos.y_as_character_row + padding;
+    // Both X11 and SGR protocols use 1-based coordinates.
+    // X11 additionally adds 32 as a "padding" offset to make the byte printable.
+    let x = pos.x_as_character_column + 1 + padding;
+    let y = pos.y_as_character_row + 1 + padding;
     let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
     if encoding == &MouseEncoding::X11 {
         raw_ascii_bytes_to_terminal_input(&[b'\x1b', b'[', b'M', cb, x, y])
