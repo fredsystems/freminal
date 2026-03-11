@@ -11,7 +11,8 @@ use freminal_common::{
         format_tag::FormatTag,
         ftcs::{FtcsMarker, FtcsState},
         line_draw::DecSpecialGraphics,
-        mode::Mode,
+        mode::{Mode, SetMode},
+        modes::ReportMode,
         modes::decawm::Decawm,
         modes::dectcem::Dectcem,
         modes::lnm::Lnm,
@@ -397,7 +398,7 @@ impl TerminalHandler {
                     ref other => other.clone(),
                 };
             }
-            // Query: deferred to Step 3.5
+            // Query is handled at the Mode dispatch level, not here.
             XtCBlink::Query => {}
         }
     }
@@ -1134,14 +1135,71 @@ impl TerminalHandler {
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
                 Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
-                // Query variants: report mode — deferred to Step 3.5
-                Mode::XtExtscrn(XtExtscrn::Query)
-                | Mode::AltScreen47(AltScreen47::Query)
-                | Mode::SaveCursor1048(SaveCursor1048::Query)
-                | Mode::Decawm(Decawm::Query)
-                | Mode::LineFeedMode(Lnm::Query)
-                | Mode::Dectem(Dectcem::Query) => {
-                    // TODO: Step 3.5 — report mode via outbound write channel
+                // Query variants: report current mode state via DECRPM response
+                Mode::Dectem(Dectcem::Query) => {
+                    let current = &self.show_cursor;
+                    self.write_to_pty(&current.report(None));
+                }
+                Mode::Decawm(Decawm::Query) => {
+                    let mode = if self.buffer.is_wrap_enabled() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Decawm::AutoWrap.report(Some(mode)));
+                }
+                Mode::LineFeedMode(Lnm::Query) => {
+                    let mode = if self.buffer.is_lnm_enabled() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Lnm::NewLine.report(Some(mode)));
+                }
+                Mode::XtExtscrn(XtExtscrn::Query) => {
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&XtExtscrn::Alternate.report(Some(mode)));
+                }
+                Mode::AltScreen47(AltScreen47::Query) => {
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&AltScreen47::Alternate.report(Some(mode)));
+                }
+                Mode::SaveCursor1048(SaveCursor1048::Query) => {
+                    // SaveCursor1048 tracks whether save/restore was invoked.
+                    // Report based on alternate screen state as a proxy.
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&SaveCursor1048::Save.report(Some(mode)));
+                }
+                Mode::XtCBlink(XtCBlink::Query) => {
+                    let is_blinking = matches!(
+                        self.cursor_visual_style,
+                        CursorVisualStyle::BlockCursorBlink
+                            | CursorVisualStyle::UnderlineCursorBlink
+                            | CursorVisualStyle::VerticalLineCursorBlink
+                    );
+                    let mode = if is_blinking {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&XtCBlink::Blinking.report(Some(mode)));
+                }
+                Mode::UnknownQuery(params) => {
+                    // Unknown mode — respond with Ps=0 (not recognized)
+                    let digits: String = params.iter().map(|&x| x as char).collect();
+                    self.write_to_pty(&format!("\x1b[?{digits};0$y"));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
                 Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(false),

@@ -11,7 +11,8 @@ use freminal_common::{
         format_tag::FormatTag,
         mode::{Mode, TerminalModes},
         modes::{
-            decarm::Decarm, decckm::Decckm, keypad::KeypadMode, sync_updates::SynchronizedUpdates,
+            ReportMode, decarm::Decarm, decckm::Decckm, keypad::KeypadMode,
+            reverse_wrap_around::ReverseWrapAround, sync_updates::SynchronizedUpdates,
             xtmsewin::XtMseWin,
         },
         tchar::TChar,
@@ -294,12 +295,56 @@ impl TerminalState {
         // cursor visibility, cursor blink, LNM).  Every other mode flag
         // lives in `self.modes` and is read by the snapshot / GUI layer.
         // We iterate the parsed output and update `self.modes` for each
-        // relevant Mode variant.  Query variants are intentionally skipped
-        // here; they will be handled when DECRPM (report mode) is
-        // implemented.
+        // relevant Mode variant.  Query variants are intercepted here:
+        // the current state is looked up and a DECRPM response is sent.
         for output in &parsed {
             match output {
                 TerminalOutput::Mode(mode) => match mode {
+                    // ── Query variants — respond with DECRPM ──────────
+                    //
+                    // We compute the response string first (immutable borrow
+                    // of self.modes), then send it (shared borrow of
+                    // self.write_tx).  This avoids a simultaneous &mut self
+                    // + &self.modes borrow conflict.
+                    Mode::Decckm(Decckm::Query) => {
+                        let resp = self.modes.cursor_key.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::BracketedPaste(
+                        freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
+                    ) => {
+                        let resp = self.modes.bracketed_paste.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::MouseMode(
+                        freminal_common::buffer_states::modes::mouse::MouseTrack::Query(_),
+                    ) => {
+                        let resp = self.modes.mouse_tracking.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::XtMseWin(XtMseWin::Query) => {
+                        let resp = self.modes.focus_reporting.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::Decscnm(
+                        freminal_common::buffer_states::modes::decscnm::Decscnm::Query,
+                    ) => {
+                        let resp = self.modes.invert_screen.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::Decarm(Decarm::Query) => {
+                        let resp = self.modes.repeat_keys.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
+                        let resp = self.modes.reverse_wrap_around.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
+                        let resp = self.modes.synchronized_updates.report(None);
+                        self.send_decrpm(&resp);
+                    }
+                    // ── Set/Reset variants — sync into self.modes ─────
                     // 7.7  — DECCKM (?1)
                     Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
                     // 7.8  — Bracketed paste (?2004)
@@ -320,7 +365,7 @@ impl TerminalState {
                     Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
                     // All other modes are either:
                     // - Handled entirely by the handler (XtExtscrn, Decawm,
-                    //   Dectcem, XtCBlink)
+                    //   Dectcem, XtCBlink, UnknownQuery)
                     // - Parsed but not yet acted on (Decom, Deccolm, etc.)
                     other => {
                         debug!("Mode not tracked in TerminalState mode-sync: {other}");
@@ -559,6 +604,19 @@ impl TerminalState {
                     error!("Failed to write mode report: {e}");
                 }
             }
+        }
+    }
+
+    /// Send a DECRPM response string directly to the PTY.
+    ///
+    /// This bypasses the `TerminalInput` encoding path — the response is an
+    /// escape sequence that must be sent verbatim.
+    fn send_decrpm(&self, response: &str) {
+        if let Err(e) = self
+            .write_tx
+            .send(PtyWrite::Write(response.as_bytes().to_vec()))
+        {
+            error!("Failed to send DECRPM response: {e}");
         }
     }
 }
