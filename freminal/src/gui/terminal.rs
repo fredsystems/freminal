@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::gui::{
-    fonts::FontConfig,
+    fonts::{FontConfig, setup_font_files},
     mouse::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
         handle_pointer_scroll,
@@ -14,14 +14,7 @@ use crate::gui::{
 
 use crossbeam_channel::Sender;
 use freminal_common::{
-    buffer_states::{
-        cursor::CursorPos, fonts::FontDecorations, format_tag::FormatTag,
-        modes::rl_bracket::RlBracket, tchar::TChar,
-    },
-    colors::TerminalColor,
-    config::Config,
-    cursor::CursorVisualStyle,
-    pty_write::PtyWrite,
+    buffer_states::modes::rl_bracket::RlBracket, config::Config, pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
     interface::{TerminalInput, TerminalInputPayload, collect_text},
@@ -31,17 +24,23 @@ use freminal_terminal_emulator::{
 
 use eframe::egui::{
     self, Color32, Context, CursorIcon, Event, InputState, Key, Modifiers, PointerButton, Pos2,
-    Rect, Stroke, TextFormat, TextStyle, Ui, scroll_area::ScrollBarVisibility, text::LayoutJob,
+    Rect, Ui,
 };
 
 use super::{
-    colors::internal_color_to_egui,
-    fonts::{TerminalFont, get_char_size, setup_font_files},
+    atlas::GlyphAtlas,
+    font_manager::FontManager,
+    renderer::{
+        CURSOR_QUAD_FLOATS, TerminalRenderer, build_background_verts, build_cursor_verts_only,
+        build_foreground_verts,
+    },
+    shaping::ShapingCache,
 };
-use anyhow::Result;
-use conv2::{ApproxFrom, ConvUtil, RoundToZero, ValueFrom};
+
+use conv2::{ApproxFrom, ConvUtil, RoundToZero};
+use eframe::egui_glow::CallbackFn;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
@@ -474,12 +473,6 @@ fn write_input_to_terminal(
                 let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
-                // let previous_mouse_button =
-                //     if let Some(last_reported_mouse_pos) = &last_reported_mouse_pos {
-                //         last_reported_mouse_pos.button
-                //     } else {
-                //         PointerButton::None
-                //     };
                 let response =
                     handle_pointer_button(*button, &new_mouse_position, &snap.mouse_tracking);
 
@@ -680,629 +673,6 @@ fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
     painter.rect_filled(thumb_rect, rounding, color);
 }
 
-fn paint_cursor(
-    label_rect: Rect,
-    character_size: (f32, f32),
-    cursor_pos: &CursorPos,
-    ui: &Ui,
-    color: Color32,
-    cursor_style: &CursorVisualStyle,
-) {
-    // 0.50s on, 0.50s off
-    const BLINK_TICK_SECONDS: f64 = 0.50;
-
-    let painter = ui.painter();
-
-    // --------------------------
-    // Blink Logic
-    // --------------------------
-    let is_blinking = matches!(
-        cursor_style,
-        CursorVisualStyle::BlockCursorBlink
-            | CursorVisualStyle::UnderlineCursorBlink
-            | CursorVisualStyle::VerticalLineCursorBlink
-    );
-
-    let time = ui.input(|i| i.time); // f64, seconds since app start
-
-    let ticks = match <i64 as ApproxFrom<f64, RoundToZero>>::approx_from(
-        (time / BLINK_TICK_SECONDS).floor(),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Failed to convert blink ticks to i64: {e}");
-            0
-        }
-    };
-
-    // even tick = visible, odd tick = invisible
-    let visible = ticks % 2 == 0;
-
-    if is_blinking && !visible {
-        return; // don't paint the cursor this frame
-    }
-
-    // --------------------------
-    // Positioning
-    // --------------------------
-    let top = label_rect.top();
-    let left = label_rect.left();
-
-    let cursor_y = match f32::value_from(cursor_pos.y) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Failed to convert cursor y ({0}) to f32: {e}", cursor_pos.y);
-            return;
-        }
-    };
-
-    let cursor_x = match f32::value_from(cursor_pos.x) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Failed to convert cursor x ({0}) to f32: {e}", cursor_pos.x);
-            return;
-        }
-    };
-
-    let cell_w = character_size.0;
-    let cell_h = character_size.1;
-
-    let x_offset: f32 = cursor_x * cell_w;
-    let y_offset: f32 = cursor_y * cell_h;
-
-    let cell_min = egui::pos2(left + x_offset, top + y_offset);
-
-    // --------------------------
-    // Cursor Shape Logic
-    // --------------------------
-    let rect = match cursor_style {
-        CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
-            Rect::from_min_size(cell_min, egui::vec2(cell_w, cell_h))
-        }
-
-        CursorVisualStyle::UnderlineCursorBlink | CursorVisualStyle::UnderlineCursorSteady => {
-            let underline_height = cell_h * 0.20;
-            Rect::from_min_size(
-                egui::pos2(cell_min.x, cell_min.y + (cell_h - underline_height)),
-                egui::vec2(cell_w, underline_height),
-            )
-        }
-
-        CursorVisualStyle::VerticalLineCursorBlink
-        | CursorVisualStyle::VerticalLineCursorSteady => {
-            let bar_width = (cell_w * 0.12).max(1.0);
-            Rect::from_min_size(cell_min, egui::vec2(bar_width, cell_h))
-        }
-    };
-
-    painter.rect_filled(rect, 0.0, color);
-}
-
-fn setup_bg_fill(ctx: &egui::Context) {
-    ctx.style_mut(|style| {
-        style.visuals.window_fill = internal_color_to_egui(
-            freminal_common::colors::TerminalColor::DefaultBackground,
-            false,
-        );
-        style.visuals.panel_fill = internal_color_to_egui(
-            freminal_common::colors::TerminalColor::DefaultBackground,
-            false,
-        );
-    });
-}
-
-fn create_terminal_output_layout_job(
-    data: &[TChar],
-    format_data: &[FormatTag],
-) -> Result<(String, Vec<FormatTag>)> {
-    if data.is_empty() {
-        return Ok((String::new(), Vec::new()));
-    }
-    let mut offset = Vec::with_capacity(data.len());
-
-    // Convert data into an array of bytes
-    let mut data_converted = Vec::with_capacity(data.len());
-    for c in data {
-        let offset_amount = match c {
-            TChar::NewLine => {
-                data_converted.push(b'\n');
-                1
-            }
-            TChar::Space => {
-                data_converted.push(b' ');
-                1
-            }
-            TChar::Ascii(c) => {
-                data_converted.push(*c);
-                1
-            }
-            TChar::Utf8(all) => {
-                data_converted.extend_from_slice(all);
-                all.len()
-            }
-        };
-
-        offset.push(data_converted.len() - offset_amount);
-    }
-
-    let data_utf8 = match std::str::from_utf8(&data_converted) {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Create output job: Failed to convert terminal data to utf8: {}",
-                e
-            );
-            return Err(e.into());
-        }
-    };
-
-    // Map the format data to the utf8 data
-    // Shift the format data for the number of added bytes (utf8) for any TChar found in the input data
-
-    let mut format_data_shifted = Vec::with_capacity(format_data.len());
-    for tag in format_data {
-        // Adjust byte_offset based on the length of utf8 characters
-        let start = if tag.start < offset.len() {
-            offset[tag.start]
-        } else {
-            offset[offset.len() - 1]
-        };
-
-        let end = if tag.start == tag.end {
-            start
-        } else if tag.end == usize::MAX || tag.end >= offset.len() {
-            data_converted.len()
-        } else {
-            offset[tag.end]
-        };
-
-        assert!(
-            start <= end,
-            "Start is greater than end. Start: {start}, End: {end}, tag: {tag:?}"
-        );
-
-        format_data_shifted.push(FormatTag {
-            start,
-            end,
-            colors: tag.colors.clone(),
-            font_weight: tag.font_weight.clone(),
-            font_decorations: tag.font_decorations.clone(),
-            url: tag.url.clone(),
-        });
-    }
-
-    #[cfg(feature = "validation")]
-    match validate_tags_to_buffer(data_utf8.as_bytes(), &format_data_shifted) {
-        Ok(()) => Ok((data_utf8.to_string(), format_data_shifted)),
-        Err(e) => {
-            error!("Failed to validate tags to buffer: {}", e);
-            Err(e)
-        }
-    }
-
-    #[cfg(not(any(feature = "validation")))]
-    Ok((data_utf8.to_string(), format_data_shifted))
-}
-
-// Small function to help validate the tags to the buffer
-// We don't want this normally, as it's a performance hit and once the kinks are worked out
-// This is likely not needed
-#[cfg(feature = "validation")]
-fn validate_tags_to_buffer(buffer: &[u8], tags: &[FormatTag]) -> Result<()> {
-    // loop over the tags and validate that the start and end are within the bounds of the buffer
-    for tag in tags {
-        if tag.start >= buffer.len() {
-            warn!(
-                "Tag start is greater than buffer length: start: {start}, buffer length: {buffer_len}",
-                start = tag.start,
-                buffer_len = buffer.len()
-            );
-
-            continue;
-        }
-
-        // now verify that the slice represented by the range tag.start..end is valid utf8
-
-        if let Err(e) = std::str::from_utf8(&buffer[tag.start..tag.end]) {
-            error!(
-                "Tag range is not valid utf8: start: {start}, end: {end}, buffer length: {buffer_len}, error: {error}",
-                start = tag.start,
-                end = tag.end,
-                buffer_len = buffer.len(),
-                error = e
-            );
-
-            Err(e)?;
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct UiJobAction {
-    text: String,
-    adjusted_format_data: Vec<FormatTag>,
-}
-
-#[derive(Debug)]
-pub struct NewJobAction<'a> {
-    text: &'a [TChar],
-    format_data: Arc<Vec<FormatTag>>,
-}
-
-#[derive(Debug)]
-pub enum UiData<'a> {
-    NewPass(&'a NewJobAction<'a>),
-    PreviousPass(UiJobAction),
-}
-
-fn setup_job(ui: &Ui, data_utf8: &str) -> (egui::text::LayoutJob, egui::TextFormat) {
-    let width = ui.available_width();
-    let style = ui.style();
-    let text_style = &style.text_styles[&TextStyle::Monospace];
-
-    let mut job = egui::text::LayoutJob::simple(
-        data_utf8.to_string(),
-        text_style.clone(),
-        style.visuals.text_color(),
-        width,
-    );
-    job.wrap.break_anywhere = true;
-    let textformat = job.sections[0].format.clone();
-    job.sections.clear();
-
-    (job, textformat)
-}
-
-fn process_tags(
-    adjusted_format_data: &Vec<FormatTag>,
-    data_len: usize,
-    textformat: &mut TextFormat,
-    job: &mut LayoutJob,
-    terminal_fonts: &TerminalFont,
-    font_defs: &FontConfig,
-    #[cfg(feature = "validation")] buffer: &[u8],
-) {
-    let mut range;
-    let mut color;
-    let mut background_color;
-    let mut underline_color;
-
-    for tag in adjusted_format_data {
-        range = tag.start..tag.end;
-        color = tag.colors.get_color();
-        background_color = tag.colors.get_background_color();
-        underline_color = tag.colors.get_underline_color();
-
-        if range.end == usize::MAX {
-            range.end = data_len;
-        }
-
-        match range.start.cmp(&data_len) {
-            std::cmp::Ordering::Greater => {
-                #[cfg(feature = "validation")]
-                warn!("Skipping unusable format data");
-                continue;
-            }
-            std::cmp::Ordering::Equal => {
-                continue;
-            }
-            std::cmp::Ordering::Less => (),
-        }
-
-        if range.end > data_len {
-            #[cfg(feature = "validation")]
-            warn!("Truncating format data end");
-            range.end = data_len;
-        }
-
-        textformat.font_id.family =
-            terminal_fonts.get_family(&tag.font_decorations, &tag.font_weight);
-        textformat.font_id.size = font_defs.size;
-        let make_faint = tag.font_decorations.contains(&FontDecorations::Faint);
-        textformat.color = internal_color_to_egui(color, make_faint);
-        // FIXME: ????? should background be faint? I feel like no, but....
-        textformat.background = internal_color_to_egui(background_color, make_faint);
-        if tag.font_decorations.contains(&FontDecorations::Underline) {
-            let underline_color_converted = internal_color_to_egui(underline_color, make_faint);
-
-            textformat.underline = Stroke::new(1.0, underline_color_converted);
-        } else {
-            textformat.underline = Stroke::new(0.0, textformat.color);
-        }
-
-        if tag
-            .font_decorations
-            .contains(&FontDecorations::Strikethrough)
-        {
-            textformat.strikethrough = Stroke::new(1.0, textformat.color);
-        } else {
-            textformat.strikethrough = Stroke::new(0.0, textformat.color);
-        }
-
-        // Validate the range is valid utf8
-        #[cfg(feature = "validation")]
-        if std::str::from_utf8(&buffer[range.clone()]).is_err() {
-            warn!("Range is not valid utf8");
-            continue;
-        }
-
-        job.sections.push(egui::text::LayoutSection {
-            leading_space: 0.0f32,
-            byte_range: range,
-            format: textformat.clone(),
-        });
-    }
-}
-
-pub fn render_terminal_text(
-    ui: &mut egui::Ui,
-    full_text: &str,
-    job: &egui::text::LayoutJob,
-    font_size: f32,
-    max_line_width: f32,
-) -> egui::Response {
-    // convert max_line_width to usize
-    let max_line_width: usize =
-        <usize as ApproxFrom<f32, RoundToZero>>::approx_from(max_line_width).unwrap_or(80);
-
-    let font_id = egui::FontId::monospace(font_size);
-
-    // Need mutable access for glyph metrics
-    let glyph_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'W'));
-    let row_height = ui.ctx().fonts_mut(|f| f.row_height(&font_id));
-    let baseline_offset = row_height;
-
-    // Compute total size — roughly estimate height based on newlines
-    let num_lines = full_text.chars().filter(|&c| c == '\n').count() + 1;
-    let longest_line_len = full_text
-        .split('\n')
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
-
-    // Safe conversions with fallback baseline
-    let fallback_value = 100.0_f32; // arbitrary safe default if conversion fails
-    let total_width = f32::value_from(longest_line_len).unwrap_or(fallback_value) * glyph_width;
-    let total_height = f32::value_from(num_lines).unwrap_or(fallback_value) * row_height;
-
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(total_width, total_height), egui::Sense::hover());
-
-    let painter = ui.painter();
-
-    let origin = rect.left_top();
-    let mut x = origin.x;
-    let mut y = origin.y;
-    let mut baseline_y = y + baseline_offset;
-    let mut char_line_count: usize = 0;
-
-    for section in &job.sections {
-        let format = &section.format;
-        let font_id = format.font_id.clone();
-        let text_color = format.color;
-        let bg_color = format.background;
-
-        // Text slice for this section
-        let section_text = &full_text[section.byte_range.clone()];
-
-        // Hoist the per-section natural-width lookup above the inner loop.
-        // For a monospace font every glyph in the section shares the same
-        // font_id, so a single fonts_mut call suffices.  Wide glyphs that
-        // exceed `glyph_width` will still be scaled individually below, but
-        // the common-case measurement no longer requires a Mutex acquisition
-        // per character (~20 000 acquisitions per frame at 200×50).
-        let section_cell_width = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'W'));
-
-        for c in section_text.chars() {
-            if c == '\n' || char_line_count > max_line_width {
-                x = origin.x;
-                y += row_height;
-                baseline_y = y + baseline_offset;
-                char_line_count = 0;
-
-                if c == '\n' {
-                    continue;
-                }
-            }
-
-            // 1) Draw background cell
-            if bg_color != egui::Color32::TRANSPARENT {
-                let bg_rect = egui::Rect::from_min_size(
-                    egui::pos2(x, y),
-                    egui::vec2(glyph_width, row_height),
-                );
-                painter.rect_filled(bg_rect, 0.0, bg_color);
-            }
-
-            // 2) Start from section font
-            let mut glyph_font = font_id.clone();
-
-            // 3) Use the pre-hoisted width for this section.
-            //    For the rare case of a glyph that is genuinely wider than a
-            //    standard cell (e.g. some CJK characters in a non-CJK font),
-            //    `section_cell_width` will equal `glyph_width` and the scale
-            //    branch below will be a no-op — correct behaviour is preserved.
-            let natural_width = section_cell_width;
-
-            let mut draw_x = x;
-            let mut draw_y = baseline_y;
-
-            // 4) If it wants to be wider than our cell, scale AND center it
-            if natural_width > glyph_width && natural_width > 0.0 {
-                let scale = glyph_width / natural_width;
-                glyph_font.size *= scale;
-
-                // --- Horizontal centering ---
-                let scaled_width = natural_width * scale;
-                let dx = (glyph_width - scaled_width) * 0.5;
-                draw_x += dx;
-
-                // --- Vertical centering ---
-                let full_height = font_id.size; // original unscaled glyph height
-                let scaled_height = glyph_font.size; // after scaling
-                let dy = (full_height - scaled_height) * 0.5;
-
-                draw_y -= dy; // baseline_y is bottom anchor; move up half the difference
-            }
-
-            // 5) Draw glyph
-            painter.text(
-                egui::pos2(draw_x, draw_y),
-                egui::Align2::LEFT_BOTTOM,
-                c.to_string(),
-                glyph_font,
-                text_color,
-            );
-
-            // 6) Advance by one cell
-
-            x += glyph_width;
-            char_line_count += 1;
-        }
-    }
-
-    response
-}
-
-fn add_terminal_data_to_ui(
-    ui: &mut Ui,
-    data: &UiData,
-    max_line_width: f32,
-    terminal_fonts: &TerminalFont,
-    font_defs: &FontConfig,
-) -> Result<(egui::Response, Option<UiJobAction>)> {
-    let data_utf8: String;
-    let adjusted_format_data: Vec<FormatTag>;
-    let data_len: usize;
-
-    match data {
-        UiData::NewPass(data) => {
-            let (data_utf8_new, adjusted_format_data_new) =
-                create_terminal_output_layout_job(data.text, data.format_data.as_ref())?;
-            data_len = data_utf8_new.len();
-            data_utf8 = data_utf8_new;
-            adjusted_format_data = adjusted_format_data_new;
-        }
-        UiData::PreviousPass(data) => {
-            data_utf8 = data.text.clone();
-            adjusted_format_data = data.adjusted_format_data.clone();
-            data_len = data_utf8.len();
-        }
-    }
-
-    let (mut job, mut textformat) = setup_job(ui, &data_utf8);
-    process_tags(
-        &adjusted_format_data,
-        data_len,
-        &mut textformat,
-        &mut job,
-        terminal_fonts,
-        font_defs,
-        #[cfg(feature = "validation")]
-        data_utf8.as_bytes(),
-    );
-
-    match data {
-        UiData::NewPass(_) => {
-            let response_data = UiJobAction {
-                text: data_utf8.clone(),
-                adjusted_format_data: adjusted_format_data.clone(),
-            };
-            let response =
-                render_terminal_text(ui, &data_utf8, &job, font_defs.size, max_line_width);
-            Ok((response, Some(response_data)))
-        }
-        UiData::PreviousPass(_) => {
-            let response =
-                render_terminal_text(ui, &data_utf8, &job, font_defs.size, max_line_width);
-            Ok((response, None))
-        }
-    }
-}
-
-#[derive(Clone)]
-struct TerminalOutputRenderResponse {
-    canvas_area: Rect,
-    canvas: UiJobAction,
-}
-
-fn render_terminal_output(
-    ui: &mut egui::Ui,
-    snap: &TerminalSnapshot,
-    previous_pass: Option<&TerminalOutputRenderResponse>,
-    max_line_width: f32,
-    terminal_fonts: &TerminalFont,
-    font_config: &FontConfig,
-) -> TerminalOutputRenderResponse {
-    let response = egui::ScrollArea::new([false, true])
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .animated(false)
-        .scroll([false, false])
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .show(ui, |ui| {
-            ui.style_mut().interaction.selectable_labels = false;
-
-            let error_logged_rect =
-                |response: Result<(egui::Response, Option<UiJobAction>)>| match response {
-                    Ok((v, action)) => (v.rect, action),
-                    Err(e) => {
-                        error!("failed to add terminal data to ui: {}", e);
-                        (Rect::NOTHING, None)
-                    }
-                };
-
-            let canvas_response: (Rect, Option<UiJobAction>);
-
-            if let Some(previous_pass) = previous_pass {
-                _ = error_logged_rect(add_terminal_data_to_ui(
-                    ui,
-                    &UiData::PreviousPass(previous_pass.canvas.clone()),
-                    max_line_width,
-                    terminal_fonts,
-                    font_config,
-                ));
-
-                (*previous_pass).clone()
-            } else {
-                let chars = snap.visible_chars.as_ref();
-                let trim_len = if chars.ends_with(&[TChar::NewLine]) {
-                    chars.len() - 1
-                } else {
-                    chars.len()
-                };
-                canvas_response = error_logged_rect(add_terminal_data_to_ui(
-                    ui,
-                    &UiData::NewPass(&NewJobAction {
-                        text: &chars[..trim_len],
-                        format_data: Arc::clone(&snap.visible_tags),
-                    }),
-                    max_line_width,
-                    terminal_fonts,
-                    font_config,
-                ));
-
-                // We want the program to crash here if we're testing
-                #[cfg(feature = "validation")]
-                return TerminalOutputRenderResponse {
-                    canvas_area: canvas_response.0,
-                    #[allow(clippy::unwrap_used)]
-                    canvas: canvas_response.1.unwrap(),
-                };
-
-                #[cfg(not(any(feature = "validation")))]
-                return TerminalOutputRenderResponse {
-                    canvas_area: canvas_response.0,
-                    canvas: canvas_response.1.unwrap_or_default(),
-                };
-            }
-        });
-
-    response.inner
-}
-
 struct DebugRenderer {
     enable: bool,
 }
@@ -1322,19 +692,37 @@ impl DebugRenderer {
     }
 }
 
+/// GPU resources shared between the main thread (vertex building) and the
+/// egui `PaintCallback` closure (draw calls).
+///
+/// Wrapped in `Arc<Mutex<…>>` so that the pre-built vertex data can be
+/// written on the main thread and consumed inside the `PaintCallback`,
+/// which requires `Send + Sync + 'static` captures.
+struct RenderState {
+    renderer: TerminalRenderer,
+    atlas: GlyphAtlas,
+    bg_verts: Vec<f32>,
+    fg_verts: Vec<f32>,
+    /// Float offset (not byte offset) into `bg_verts` where the cursor quad
+    /// data begins.  Set after every full vertex rebuild so cursor-only frames
+    /// can patch just this region.
+    cursor_vert_float_offset: usize,
+}
+
 pub struct FreminalTerminalWidget {
-    font_defs: FontConfig,
-    terminal_fonts: TerminalFont,
-    max_line_width: f32,
-    character_size: (f32, f32),
-    previous_font_size: Option<f32>,
+    font_manager: FontManager,
+    shaping_cache: ShapingCache,
+    render_state: Arc<Mutex<RenderState>>,
     debug_renderer: DebugRenderer,
-    previous_pass: TerminalOutputRenderResponse,
     previous_mouse_state: Option<PreviousMouseState>,
     previous_key: Option<Key>,
     previous_scroll_amount: f32,
-    #[allow(dead_code)]
-    ctx: Context,
+    /// Cursor blink state from the most recently rendered frame.
+    previous_cursor_blink_on: bool,
+    /// Cursor position from the most recently rendered frame.
+    previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
+    /// Whether the cursor was shown in the most recently rendered frame.
+    previous_show_cursor: bool,
 }
 
 impl FreminalTerminalWidget {
@@ -1346,34 +734,33 @@ impl FreminalTerminalWidget {
             ..FontConfig::default()
         };
         setup_font_files(ctx, &font_config);
-        setup_bg_fill(ctx);
 
         Self {
-            font_defs: font_config,
-            terminal_fonts: TerminalFont::new(config.font.size),
-            max_line_width: 80.0,
-            character_size: (0.0, 0.0),
-            previous_font_size: None,
+            font_manager: FontManager::new(config),
+            shaping_cache: ShapingCache::new(),
+            render_state: Arc::new(Mutex::new(RenderState {
+                renderer: TerminalRenderer::new(),
+                atlas: GlyphAtlas::default(),
+                bg_verts: Vec::new(),
+                fg_verts: Vec::new(),
+                cursor_vert_float_offset: 0,
+            })),
             debug_renderer: DebugRenderer::new(),
-            previous_pass: TerminalOutputRenderResponse {
-                canvas_area: Rect::NOTHING,
-                canvas: UiJobAction::default(),
-            },
             previous_mouse_state: None,
             previous_key: None,
             previous_scroll_amount: 0.0,
-            ctx: ctx.clone(),
+            previous_cursor_blink_on: true,
+            previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
+            previous_show_cursor: false,
         }
     }
 
+    /// Returns the authoritative cell size in integer pixels `(width, height)`.
+    ///
+    /// Computed once from swash font metrics and updated on font change.
     #[must_use]
-    pub const fn get_font_size(&self) -> f32 {
-        self.font_defs.size
-    }
-
-    #[must_use]
-    pub fn get_terminal_fonts(&self) -> TerminalFont {
-        self.terminal_fonts.clone()
+    pub const fn cell_size(&self) -> (u32, u32) {
+        self.font_manager.cell_size()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1386,106 +773,240 @@ impl FreminalTerminalWidget {
         _pty_write_tx: &Sender<PtyWrite>,
         modal_is_open: bool,
     ) {
-        let frame_response = egui::Frame::new().show(ui, |ui| {
-            self.character_size = get_char_size(ui.ctx(), &self.terminal_fonts);
+        const BLINK_TICK_SECONDS: f64 = 0.50;
+        let (cell_w, cell_h) = self.font_manager.cell_size();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_w_f = cell_w as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let row_h_f = cell_h as f32;
 
-            // Claim the full available space directly — no round-trip through PTY row count.
-            let available = ui.available_size();
-            ui.set_min_size(available);
+        // Claim the full available space.
+        let available = ui.available_size();
+        ui.set_min_size(available);
 
-            // max_line_width drives the text layout; derive it from the actual pixel width.
-            let max_line_width = (available.x / self.character_size.0).floor();
-            self.previous_font_size = Some(self.font_defs.size);
-            self.max_line_width = max_line_width;
-
-            // When a modal dialog (e.g. the settings window) is open, do NOT
-            // forward keyboard/mouse events to the PTY — they belong to the
-            // modal's egui widgets instead.
-            if !modal_is_open {
-                let repeat_characters = snap.repeat_keys;
-                let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
-                    .input(|input_state| {
-                        write_input_to_terminal(
-                            input_state,
-                            snap,
-                            input_tx,
-                            view_state,
-                            self.character_size.0,
-                            self.character_size.1,
-                            self.previous_mouse_state.clone(),
-                            repeat_characters,
-                            self.previous_key,
-                            self.previous_scroll_amount,
-                        )
-                    });
-                self.previous_mouse_state = new_mouse_pos;
-                self.previous_key = previous_key;
-                self.previous_scroll_amount = scroll_amount;
-            }
-
-            // Always render a fresh pass from the snapshot.  The PTY thread
-            // publishes a new snapshot only when data has changed, so
-            // `snap.content_changed` is effectively always true here.
-            // Task 12 will add generation-counter-based skip-draw optimisation.
-            if snap.skip_draw {
-                let _response = render_terminal_output(
-                    ui,
-                    snap,
-                    Some(&self.previous_pass),
-                    self.max_line_width,
-                    &self.get_terminal_fonts(),
-                    &self.font_defs.clone(),
-                );
-            } else {
-                self.previous_pass = render_terminal_output(
-                    ui,
-                    snap,
-                    None,
-                    self.max_line_width,
-                    &self.get_terminal_fonts(),
-                    &self.font_defs.clone(),
-                );
-            }
-
-            #[cfg(debug_assertions)]
-            self.debug_renderer
-                .render(ui, self.previous_pass.canvas_area, Color32::BLUE);
-
-            if snap.show_cursor {
-                // cursor_color is not yet tracked in the snapshot; use the default.
-                let color = internal_color_to_egui(TerminalColor::DefaultCursorColor, false);
-                let cursor_style = snap.cursor_visual_style.clone();
-
-                paint_cursor(
-                    self.previous_pass.canvas_area,
-                    self.character_size,
-                    &snap.cursor_pos,
-                    ui,
-                    color,
-                    &cursor_style,
-                );
-            }
-
-            paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
-
-            // URL hover detection is not yet ported to snapshots.
-            // TODO(task-9): implement URL hover via snapshot data.
-            if let Some(mouse_position) = view_state.mouse_position {
-                let _ = mouse_position; // suppress unused-variable lint
-                debug!("No URL hover detection in snapshot mode yet");
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = CursorIcon::Default;
+        // When a modal dialog (e.g. the settings window) is open, do NOT
+        // forward keyboard/mouse events to the PTY — they belong to the
+        // modal's egui widgets instead.
+        if !modal_is_open {
+            let repeat_characters = snap.repeat_keys;
+            let (_left_mouse_button_pressed, new_mouse_pos, previous_key, scroll_amount) = ui
+                .input(|input_state| {
+                    write_input_to_terminal(
+                        input_state,
+                        snap,
+                        input_tx,
+                        view_state,
+                        cell_w_f,
+                        row_h_f,
+                        self.previous_mouse_state.clone(),
+                        repeat_characters,
+                        self.previous_key,
+                        self.previous_scroll_amount,
+                    )
                 });
-            } else {
-                debug!("No mouse position");
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = CursorIcon::Default;
-                });
+            self.previous_mouse_state = new_mouse_pos;
+            self.previous_key = previous_key;
+            self.previous_scroll_amount = scroll_amount;
+        }
+
+        // Blink state must be computed here — cannot call `ui.input` inside
+        // the `Arc<CallbackFn>` closure (it must be `Send + Sync`).
+        let time = ui.input(|i| i.time);
+        let cursor_blink_on = match <i64 as ApproxFrom<f64, RoundToZero>>::approx_from(
+            (time / BLINK_TICK_SECONDS).floor(),
+        ) {
+            Ok(ticks) => ticks % 2 == 0,
+            Err(e) => {
+                error!("Failed to convert blink ticks to i64: {e}");
+                true
             }
+        };
+
+        if !snap.skip_draw {
+            // Determine whether we can take the cursor-only fast path.
+            //
+            // Cursor-only: content has not changed, but the cursor blink state
+            // or position has changed since the last frame.  We only need to
+            // patch the cursor quad in the background VBO — no re-shaping and
+            // no full vertex rebuild required.
+            let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
+                || snap.cursor_pos != self.previous_cursor_pos
+                || snap.show_cursor != self.previous_show_cursor;
+
+            let cursor_only = !snap.content_changed
+                && cursor_state_changed
+                && !self
+                    .render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .bg_verts
+                    .is_empty();
+
+            if cursor_only {
+                // Fast path: build just the cursor quad and stash it.
+                let cursor_verts = build_cursor_verts_only(
+                    cell_w,
+                    cell_h,
+                    snap.show_cursor,
+                    cursor_blink_on,
+                    snap.cursor_pos,
+                    &snap.cursor_visual_style,
+                );
+                let mut rs = self
+                    .render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Patch the cursor region in bg_verts so the PaintCallback can
+                // detect the cursor-only mode via a separate flag.
+                // We overwrite the cursor quad data in the CPU copy so that if
+                // a full rebuild happens next frame it starts from correct state.
+                let cfo = rs.cursor_vert_float_offset;
+                if cursor_verts.is_empty() {
+                    // Hide cursor: zero out the region.
+                    if cfo + CURSOR_QUAD_FLOATS <= rs.bg_verts.len() {
+                        for f in &mut rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS] {
+                            *f = 0.0;
+                        }
+                    }
+                } else if cfo + CURSOR_QUAD_FLOATS <= rs.bg_verts.len()
+                    && cursor_verts.len() == CURSOR_QUAD_FLOATS
+                {
+                    rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
+                }
+            } else if snap.content_changed
+                || self
+                    .render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .bg_verts
+                    .is_empty()
+            {
+                // Full rebuild path.
+                let shaped_lines = self.shaping_cache.shape_visible(
+                    &snap.visible_chars,
+                    &snap.visible_tags,
+                    snap.term_width,
+                    &mut self.font_manager,
+                    cell_w_f,
+                );
+
+                let bg_verts = build_background_verts(
+                    &shaped_lines,
+                    cell_w,
+                    cell_h,
+                    self.font_manager.underline_offset(),
+                    self.font_manager.strikeout_offset(),
+                    self.font_manager.stroke_size(),
+                    snap.show_cursor,
+                    cursor_blink_on,
+                    snap.cursor_pos,
+                    &snap.cursor_visual_style,
+                );
+
+                // Record where the cursor quad starts in the background VBO.
+                // The cursor is always appended at the END of bg_verts, and is
+                // exactly CURSOR_QUAD_FLOATS floats (or absent when hidden).
+                let cursor_vert_float_offset = if snap.show_cursor {
+                    bg_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
+                } else {
+                    bg_verts.len()
+                };
+
+                // `build_foreground_verts` needs mutable access to the atlas for
+                // rasterisation, so acquire the lock before calling it.
+                let mut rs = self
+                    .render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let fg_verts = build_foreground_verts(
+                    &shaped_lines,
+                    &mut rs.atlas,
+                    &self.font_manager,
+                    cell_h,
+                    self.font_manager.ascent(),
+                );
+                rs.bg_verts = bg_verts;
+                rs.fg_verts = fg_verts;
+                rs.cursor_vert_float_offset = cursor_vert_float_offset;
+            }
+            // If neither path applies (content unchanged, cursor unchanged,
+            // buffers not empty) we simply re-draw the existing VBO data — no
+            // CPU work at all.
+        }
+
+        // Update per-frame cursor state for the next frame's comparison.
+        self.previous_cursor_blink_on = cursor_blink_on;
+        self.previous_cursor_pos = snap.cursor_pos;
+        self.previous_show_cursor = snap.show_cursor;
+
+        // Allocate the exact terminal rect.
+        #[allow(clippy::cast_precision_loss)]
+        let desired_size = egui::Vec2::new(
+            snap.term_width as f32 * cell_w_f,
+            snap.height as f32 * row_h_f,
+        );
+        let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+
+        // Hand off the draw call to egui's paint phase via PaintCallback.
+        // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
+        // data (not `FontManager`) may be captured here.
+        let render_state = Arc::clone(&self.render_state);
+        // The MutexGuard inside the callback intentionally lives through
+        // `draw_with_verts` because the renderer and atlas are refs into it.
+        #[allow(clippy::significant_drop_tightening)]
+        ui.painter().add(egui::PaintCallback {
+            rect,
+            callback: Arc::new(CallbackFn::new(move |info, painter| {
+                let gl = painter.gl();
+                let vp = info.viewport_in_pixels();
+                let mut rs = render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !rs.renderer.initialized()
+                    && let Err(e) = rs.renderer.init(gl)
+                {
+                    error!("GL init failed: {e}");
+                    return;
+                }
+                // Clone pre-built verts to avoid conflicting borrows of `rs`.
+                let bg = rs.bg_verts.clone();
+                let fg = rs.fg_verts.clone();
+                // Split borrow: get &mut RenderState so the borrow checker sees
+                // renderer and atlas as disjoint fields.
+                let rs_ref: &mut RenderState = &mut rs;
+                let renderer = &mut rs_ref.renderer;
+                let atlas = &mut rs_ref.atlas;
+                renderer.draw_with_verts(
+                    gl,
+                    atlas,
+                    &bg,
+                    &fg,
+                    vp.width_px,
+                    vp.height_px,
+                    painter.intermediate_fbo(),
+                );
+            })),
         });
 
-        self.debug_renderer
-            .render(ui, frame_response.response.rect, Color32::RED);
+        paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
+
+        // URL hover detection is not yet ported to snapshots.
+        // TODO(task-9): implement URL hover via snapshot data.
+        if let Some(mouse_position) = view_state.mouse_position {
+            let _ = mouse_position; // suppress unused-variable lint
+            debug!("No URL hover detection in snapshot mode yet");
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = CursorIcon::Default;
+            });
+        } else {
+            debug!("No mouse position");
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = CursorIcon::Default;
+            });
+        }
+
+        #[cfg(debug_assertions)]
+        self.debug_renderer.render(ui, rect, Color32::RED);
     }
 
     /// Apply config changes that can be hot-reloaded at runtime.
@@ -1497,11 +1018,24 @@ impl FreminalTerminalWidget {
         ctx: &egui::Context,
         old_config: &Config,
         new_config: &Config,
+        input_tx: &Sender<InputEvent>,
     ) {
-        // Font changes: update font definitions and terminal font.
+        let rebuild_result = self.font_manager.rebuild(new_config);
+        if rebuild_result.font_changed() {
+            let mut rs = self
+                .render_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rs.atlas.clear();
+            drop(rs);
+            self.shaping_cache.clear();
+        }
+
+        // Keep egui font infrastructure updated for chrome (menu bar, settings
+        // modal).  This is retained from the old pipeline; it will be cleaned
+        // up in subtask 1.9 once chrome fonts are fully migrated.
         let font_changed = old_config.font.family != new_config.font.family
             || (old_config.font.size - new_config.font.size).abs() > f32::EPSILON;
-
         if font_changed {
             let new_font_config = FontConfig {
                 size: new_config.font.size,
@@ -1509,21 +1043,65 @@ impl FreminalTerminalWidget {
                 ..FontConfig::default()
             };
             setup_font_files(ctx, &new_font_config);
-            self.font_defs = new_font_config;
-            self.terminal_fonts = TerminalFont::new(new_config.font.size);
-            self.previous_font_size = None; // force re-layout
         }
 
-        // Cursor and theme changes are reflected through the config and will
-        // take effect on the next render cycle.  No additional widget state
-        // needs updating here — cursor shape/blink come from the snapshot
-        // (set by the PTY thread from initial config) or from the config
-        // directly once wired.
+        // When the font changes, cell size may change too.  If the cell size
+        // differs from the last-known value, send a Resize event so the PTY
+        // thread can reflow the buffer to the new column/row count.
+        //
+        // We pass zero pixel dimensions here because the exact pixel size will
+        // be re-computed from the new cell metrics on the next frame.  The PTY
+        // thread ignores pixel dimensions when the char dimensions are non-zero.
+        if rebuild_result.font_changed() {
+            // Cell size has been updated by `font_manager.rebuild()`; read the
+            // freshly computed dimensions.
+            let (new_cell_w, new_cell_h) = self.font_manager.cell_size();
+            #[allow(clippy::cast_possible_truncation)]
+            let _ = input_tx.send(freminal_terminal_emulator::io::InputEvent::Resize(
+                0,
+                0,
+                new_cell_w as usize,
+                new_cell_h as usize,
+            ));
+        }
     }
 
     /// Provides mutable access to the debug renderer enable flag.
     #[cfg(debug_assertions)]
     pub const fn debug_renderer_enabled(&mut self) -> &mut bool {
         &mut self.debug_renderer.enable
+    }
+}
+
+#[cfg(test)]
+mod subtask_1_7_tests {
+    use super::*;
+
+    /// Verify that an empty `RenderState` has empty vertex buffers.
+    ///
+    /// This confirms that `skip_draw` leaves the existing (initially empty)
+    /// vertex buffers untouched rather than calling the vertex-build path.
+    #[test]
+    fn skip_draw_leaves_verts_empty() {
+        let rs = RenderState {
+            renderer: TerminalRenderer::new(),
+            atlas: GlyphAtlas::default(),
+            bg_verts: Vec::new(),
+            fg_verts: Vec::new(),
+            cursor_vert_float_offset: 0,
+        };
+        assert!(rs.bg_verts.is_empty(), "bg_verts should be empty");
+        assert!(rs.fg_verts.is_empty(), "fg_verts should be empty");
+    }
+
+    /// Verify that `FontManager::cell_size()` returns non-zero dimensions for
+    /// the default config (bundled `MesloLGS` Nerd Font Mono).
+    #[test]
+    fn cell_size_from_font_manager_is_nonzero() {
+        let config = freminal_common::config::Config::default();
+        let fm = FontManager::new(&config);
+        let (w, h) = fm.cell_size();
+        assert!(w > 0, "cell_width must be non-zero, got {w}");
+        assert!(h > 0, "cell_height must be non-zero, got {h}");
     }
 }

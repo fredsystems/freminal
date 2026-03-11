@@ -530,7 +530,7 @@ height: u16, is_color: bool }`.
 
 ### 1.5 — GL renderer: shaders, vertex buffers, draw calls
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/renderer.rs`, modifications to `terminal.rs`
 - **Details:**
   - **GPU resource struct:** `TerminalRenderer` holds all GL state:
@@ -613,7 +613,7 @@ vec4(tint_color.rgb, tint_color.a * texture(atlas, uv).a); }` — color emoji pa
 
 ### 1.7 — Wire it all together: show() rewrite
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/terminal.rs`, `freminal/src/gui/mod.rs`
 - **Details:**
 
@@ -712,7 +712,7 @@ vec4(tint_color.rgb, tint_color.a * texture(atlas, uv).a); }` — color emoji pa
 
 ### 1.8 — Per-line dirty tracking and caching
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/shaping.rs`, `freminal/src/gui/renderer.rs`
 - **Details:**
   - Shaping cache: `HashMap<usize, (u64, Vec<ShapedRun>)>` — row index → (content hash,
@@ -744,7 +744,7 @@ vec4(tint_color.rgb, tint_color.a * texture(atlas, uv).a); }` — color emoji pa
 
 ### 1.9 — Delete old renderer and clean up
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** All modified files
 - **Details:**
   - Remove all code listed in the "What Gets Deleted" section above

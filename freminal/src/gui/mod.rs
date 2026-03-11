@@ -11,7 +11,6 @@ use arc_swap::ArcSwap;
 use conv2::ConvUtil;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
-use fonts::get_char_size;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
 use freminal_common::pty_write::PtyWrite;
@@ -420,18 +419,16 @@ impl eframe::App for FreminalGui {
 
         let _panel_response = CentralPanel::default().show(ctx, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.
-            let (char_w, char_h) =
-                get_char_size(ui.ctx(), &self.terminal_widget.get_terminal_fonts());
-
-            let font_width = char_w.round().approx_as::<usize>().unwrap_or_else(|e| {
-                error!("Failed to convert font width to usize: {e}. Using 12 as default");
-                12
-            });
-
-            let font_height = char_h.round().approx_as::<usize>().unwrap_or_else(|e| {
-                error!("Failed to convert font height to usize: {e}. Using 12 as default");
-                12
-            });
+            // `cell_size()` returns integer pixel dimensions from swash font metrics.
+            let (cell_w_u, cell_height_u) = self.terminal_widget.cell_size();
+            #[allow(clippy::cast_possible_truncation)]
+            let font_width = cell_w_u as usize;
+            #[allow(clippy::cast_possible_truncation)]
+            let font_height = cell_height_u as usize;
+            #[allow(clippy::cast_precision_loss)]
+            let char_w = cell_w_u as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let char_h = cell_height_u as f32;
 
             let available = ui.available_size();
             let width_chars = (available.x / char_w)
@@ -507,8 +504,30 @@ impl eframe::App for FreminalGui {
                 self.settings_modal.is_open,
             );
 
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(16));
+            // Only schedule a wakeup when there is work to do:
+            //  - new content arrived (`content_changed`)
+            //  - cursor is blinking (needs toggling every ~500 ms)
+            //  - first frame (buffers still empty — need at least one full draw)
+            //
+            // A steady cursor with no new content does not need a periodic
+            // repaint; egui will wake on the next user input event instead.
+            let cursor_is_blinking = matches!(
+                snap.cursor_visual_style,
+                freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
+                    | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
+                    | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
+            );
+            if snap.content_changed || cursor_is_blinking {
+                // Use a 16 ms deadline (~60 fps) for content changes; use the
+                // blink half-period (~500 ms) when only the cursor needs to
+                // toggle.  Pick the shorter of the two when both apply.
+                let delay = if snap.content_changed {
+                    std::time::Duration::from_millis(16)
+                } else {
+                    std::time::Duration::from_millis(500)
+                };
+                ui.ctx().request_repaint_after(delay);
+            }
         });
 
         // Show the settings modal (if open) above everything else.
@@ -516,7 +535,7 @@ impl eframe::App for FreminalGui {
         if settings_action == SettingsAction::Applied {
             let new_cfg = self.settings_modal.applied_config().clone();
             self.terminal_widget
-                .apply_config_changes(ctx, &self.config, &new_cfg);
+                .apply_config_changes(ctx, &self.config, &new_cfg, &self.input_tx);
             self.config = new_cfg;
         }
 

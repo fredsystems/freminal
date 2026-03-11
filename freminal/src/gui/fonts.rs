@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId};
-use freminal_common::buffer_states::fonts::{FontDecorations, FontWeight};
+use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 
 // -------------------------------------------------------------------------------------------------
 //  Freminal Terminal – Unified Font Loader
@@ -369,58 +368,4 @@ mod system_fallback {
 
         tracing::info!("Added safe fallback fonts");
     }
-}
-
-// -------------------------------------------------------------------------------------------------
-// TerminalFont wrapper (unchanged)
-// -------------------------------------------------------------------------------------------------
-#[derive(Clone, Debug)]
-pub struct TerminalFont {
-    regular: FontFamily,
-    bold: FontFamily,
-    italic: FontFamily,
-    bold_italic: FontFamily,
-    pub size: f32,
-}
-
-impl TerminalFont {
-    #[must_use]
-    pub fn new(size: f32) -> Self {
-        Self {
-            regular: FontFamily::Name(PRIMARY_REGULAR.into()),
-            bold: FontFamily::Name(PRIMARY_BOLD.into()),
-            italic: FontFamily::Name(PRIMARY_ITALIC.into()),
-            bold_italic: FontFamily::Name(PRIMARY_BOLD_ITALIC.into()),
-            size,
-        }
-    }
-
-    #[must_use]
-    pub fn get_family(&self, decs: &[FontDecorations], weight: &FontWeight) -> FontFamily {
-        let italic = decs.contains(&FontDecorations::Italic);
-
-        match (weight, italic) {
-            (FontWeight::Bold, false) => self.bold.clone(),
-            (FontWeight::Normal, false) => self.regular.clone(),
-            (FontWeight::Normal, true) => self.italic.clone(),
-            (FontWeight::Bold, true) => self.bold_italic.clone(),
-        }
-    }
-}
-
-// -------------------------------------------------------------------------------------------------
-// Char size helper
-// -------------------------------------------------------------------------------------------------
-
-#[must_use]
-pub fn get_char_size(ctx: &egui::Context, font: &TerminalFont) -> (f32, f32) {
-    let id = FontId {
-        size: font.size,
-        family: font.regular.clone(),
-    };
-
-    let width = ctx.fonts_mut(|f| f.glyph_width(&id, ' '));
-    let height = ctx.fonts_mut(|f| f.row_height(&id));
-
-    (width, height)
 }
