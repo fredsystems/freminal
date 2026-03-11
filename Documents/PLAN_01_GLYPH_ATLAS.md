@@ -292,7 +292,7 @@ UI elements. Only the terminal rendering path is replaced.
 
 ### 1.2 — Font manager: loading, metrics, and fallback chain
 
-- **Status:** Not Started
+- **Status:** Complete (2026-03-10)
 - **Scope:** `freminal/src/gui/font_manager.rs`
 - **Details:**
 
