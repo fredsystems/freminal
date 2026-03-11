@@ -483,17 +483,18 @@ fn cli_shell_none_preserves_toml_shell() {
 }
 
 #[test]
-fn cli_write_logs_overrides_toml_logging() {
+fn cli_write_logs_override_is_ignored_deprecated() {
     let toml = r#"
         version = 1
         [logging]
         write_to_file = false
     "#;
     let mut cfg = load_from_toml(toml).expect("should parse");
-    assert!(!cfg.write_logs_to_file());
+    assert!(!cfg.logging.write_to_file);
 
+    // apply_cli_overrides intentionally ignores write_logs_to_file (deprecated)
     cfg.apply_cli_overrides(None, Some(true));
-    assert!(cfg.write_logs_to_file());
+    assert!(!cfg.logging.write_to_file);
 }
 
 #[test]
@@ -504,14 +505,14 @@ fn cli_write_logs_none_preserves_toml_logging() {
         write_to_file = true
     "#;
     let mut cfg = load_from_toml(toml).expect("should parse");
-    assert!(cfg.write_logs_to_file());
+    assert!(cfg.logging.write_to_file);
 
     cfg.apply_cli_overrides(None, None);
-    assert!(cfg.write_logs_to_file());
+    assert!(cfg.logging.write_to_file);
 }
 
 #[test]
-fn cli_overrides_both_shell_and_logging() {
+fn cli_overrides_shell_but_not_logging() {
     let toml = r#"
         version = 1
         [shell]
@@ -523,18 +524,19 @@ fn cli_overrides_both_shell_and_logging() {
 
     cfg.apply_cli_overrides(Some("/usr/local/bin/fish"), Some(true));
     assert_eq!(cfg.shell_path(), Some("/usr/local/bin/fish"));
-    assert!(cfg.write_logs_to_file());
+    // write_logs_to_file is deprecated and ignored by apply_cli_overrides
+    assert!(!cfg.logging.write_to_file);
 }
 
 #[test]
 fn default_config_with_no_cli_overrides() {
     let mut cfg = Config::default();
     assert!(cfg.shell_path().is_none());
-    assert!(!cfg.write_logs_to_file());
+    assert!(!cfg.logging.write_to_file);
 
     cfg.apply_cli_overrides(None, None);
     assert!(cfg.shell_path().is_none());
-    assert!(!cfg.write_logs_to_file());
+    assert!(!cfg.logging.write_to_file);
 }
 
 #[test]
@@ -547,17 +549,49 @@ fn cli_shell_overrides_when_toml_has_no_shell() {
 }
 
 #[test]
-fn cli_write_logs_false_overrides_toml_true() {
+fn cli_write_logs_false_is_ignored_deprecated() {
     let toml = r#"
         version = 1
         [logging]
         write_to_file = true
     "#;
     let mut cfg = load_from_toml(toml).expect("should parse");
-    assert!(cfg.write_logs_to_file());
+    assert!(cfg.logging.write_to_file);
 
+    // apply_cli_overrides intentionally ignores write_logs_to_file (deprecated)
     cfg.apply_cli_overrides(None, Some(false));
-    assert!(!cfg.write_logs_to_file());
+    assert!(cfg.logging.write_to_file);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  file_log_level()
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn file_log_level_defaults_to_debug() {
+    let cfg = Config::default();
+    assert_eq!(cfg.file_log_level(), "debug");
+}
+
+#[test]
+fn file_log_level_reads_from_toml() {
+    let toml = r#"
+        version = 1
+        [logging]
+        level = "trace"
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse");
+    assert_eq!(cfg.file_log_level(), "trace");
+}
+
+#[test]
+fn file_log_level_absent_in_toml_defaults_to_debug() {
+    let toml = r#"
+        version = 1
+        [logging]
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse");
+    assert_eq!(cfg.file_log_level(), "debug");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

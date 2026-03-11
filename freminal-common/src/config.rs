@@ -122,8 +122,16 @@ pub struct ShellConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
-    /// Whether to write logs to a file. Equivalent to `--write-logs-to-file`.
+    /// **Deprecated.** File logging is now always on. This field is retained for
+    /// backwards-compatible deserialisation but is ignored at runtime.
+    #[serde(default)]
     pub write_to_file: bool,
+
+    /// Log level for the file appender. Accepts standard tracing level strings:
+    /// `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
+    /// Default: `"debug"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
 }
 
 /// ---------------------------------------------------------------------------------------------
@@ -189,22 +197,21 @@ impl Config {
     ///
     /// Only `Some` values override; `None` means the CLI flag was not specified
     /// and the TOML value (or default) is kept.
-    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, write_logs_to_file: Option<bool>) {
+    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, _write_logs_to_file: Option<bool>) {
         if let Some(shell_path) = shell {
             self.shell.path = Some(shell_path.to_owned());
         }
-        if let Some(write) = write_logs_to_file {
-            self.logging.write_to_file = write;
-        }
+        // `write_logs_to_file` is intentionally ignored — file logging is always on.
+        // The CLI flag is retained only for backwards compatibility (deprecation notice
+        // is printed by the caller).
     }
 
-    /// Returns the effective `write_logs_to_file` value.
+    /// Returns the effective file log level as a string.
     ///
-    /// This is a convenience accessor so callers don't need to reach into
-    /// `logging.write_to_file` directly.
+    /// Falls back to `"debug"` when the config does not specify a level.
     #[must_use]
-    pub const fn write_logs_to_file(&self) -> bool {
-        self.logging.write_to_file
+    pub fn file_log_level(&self) -> &str {
+        self.logging.level.as_deref().unwrap_or("debug")
     }
 
     /// Returns the effective shell path, if configured.

@@ -33,7 +33,7 @@ use std::sync::{Arc, OnceLock};
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
-    EnvFilter,
+    EnvFilter, Layer,
     filter::Directive,
     fmt::{self, layer},
     layer::SubscriberExt,
@@ -42,7 +42,7 @@ use tracing_subscriber::{
 
 pub mod gui;
 
-use freminal_common::{args::Args, config::load_config};
+use freminal_common::{args::Args, config, config::load_config};
 
 use clap::Parser;
 
@@ -55,9 +55,6 @@ fn main() {
     let args = Args::parse();
 
     // ── 1. Load config and apply CLI overrides ──────────────────────────
-    // Config must be loaded before logging setup so that the merged
-    // `write_logs_to_file` value (CLI > TOML > default) can control
-    // whether log files are created.
     let mut cfg = match load_config(args.config.as_deref()) {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -68,88 +65,114 @@ fn main() {
 
     cfg.apply_cli_overrides(args.shell.as_deref(), args.write_logs_to_file);
 
-    // ── 2. Set up logging ───────────────────────────────────────────────
-    let env_filter = if args.show_all_debug {
-        EnvFilter::builder()
-            .with_default_directive(Level::INFO.into())
-            .from_env_lossy()
-    } else {
-        let winit_directive: Directive = match "winit=off".parse() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to parse directive: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let wgpu_directive: Directive = match "wgpu=off".parse() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to parse directive: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let eframe_directive: Directive = match "eframe=off".parse() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to parse directive: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let egui_directive: Directive = match "egui=off".parse() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to parse directive: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        EnvFilter::builder()
-            .with_default_directive(Level::INFO.into())
-            .from_env_lossy()
-            .add_directive(winit_directive)
-            .add_directive(wgpu_directive)
-            .add_directive(eframe_directive)
-            .add_directive(egui_directive)
-    };
-
-    let subscriber = tracing_subscriber::registry().with(env_filter);
-
-    if cfg.write_logs_to_file() {
-        let std_out_layer = layer()
-            .with_line_number(true)
-            .with_span_events(fmt::format::FmtSpan::ACTIVE)
-            .compact();
-
-        let file_appender = match RollingFileAppender::builder()
-            .rotation(Rotation::HOURLY)
-            .max_log_files(2)
-            .filename_prefix("freminal")
-            .filename_suffix("log")
-            .build("./")
-        {
-            Ok(appender) => appender,
-            Err(e) => {
-                eprintln!("Failed to create file appender: {e}");
-                return;
-            }
-        };
-        subscriber
-            .with(layer().with_ansi(false).with_writer(file_appender))
-            .with(std_out_layer)
-            .init();
-    } else {
-        let std_out_layer = layer()
-            .with_line_number(true)
-            .with_span_events(fmt::format::FmtSpan::ACTIVE)
-            .compact();
-
-        subscriber.with(std_out_layer).init();
+    // Print deprecation notice if --write-logs-to-file was used.
+    if args.write_logs_to_file.is_some() {
+        eprintln!(
+            "WARNING: --write-logs-to-file is deprecated and ignored. \
+             File logging is now always on. Logs are written to the \
+             platform log directory."
+        );
     }
 
+    // ── 2. Set up logging ───────────────────────────────────────────────
+    //
+    // Two layers:
+    //   - Stdout layer: INFO by default (or RUST_LOG override)
+    //   - File layer:   config-specified level (default DEBUG), always on
+    //
+    // Both layers share framework silencers (winit, wgpu, eframe, egui = off)
+    // unless --show-all-debug is set.
+
+    // Stdout filter: INFO default, RUST_LOG override, framework silencers.
+    let stdout_filter = if args.show_all_debug {
+        EnvFilter::builder()
+            .with_default_directive(Level::INFO.into())
+            .from_env_lossy()
+    } else {
+        let mut filter = EnvFilter::builder()
+            .with_default_directive(Level::INFO.into())
+            .from_env_lossy();
+        for spec in &["winit=off", "wgpu=off", "eframe=off", "egui=off"] {
+            match spec.parse::<Directive>() {
+                Ok(d) => filter = filter.add_directive(d),
+                Err(e) => {
+                    eprintln!("Failed to parse directive {spec}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        filter
+    };
+
+    // File filter: config level (default DEBUG), framework silencers.
+    let file_log_level = cfg.file_log_level();
+    let file_default_directive: Directive = file_log_level.parse().unwrap_or_else(|_| {
+        eprintln!(
+            "WARNING: invalid log level \"{file_log_level}\" in config; falling back to debug"
+        );
+        Level::DEBUG.into()
+    });
+
+    let file_filter = if args.show_all_debug {
+        EnvFilter::builder()
+            .with_default_directive(file_default_directive)
+            .from_env_lossy()
+    } else {
+        let mut filter = EnvFilter::builder()
+            .with_default_directive(file_default_directive)
+            .from_env_lossy();
+        for spec in &["winit=off", "wgpu=off", "eframe=off", "egui=off"] {
+            match spec.parse::<Directive>() {
+                Ok(d) => filter = filter.add_directive(d),
+                Err(e) => {
+                    eprintln!("Failed to parse directive {spec}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        filter
+    };
+
+    let std_out_layer = layer()
+        .with_line_number(true)
+        .with_span_events(fmt::format::FmtSpan::ACTIVE)
+        .compact()
+        .with_filter(stdout_filter);
+
+    // Always-on file appender targeting the platform log directory.
+    let log_dir_path = config::log_dir();
+    let file_layer = log_dir_path.as_ref().and_then(|dir| {
+        match RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .max_log_files(7)
+            .filename_prefix("freminal")
+            .filename_suffix("log")
+            .build(dir)
+        {
+            Ok(appender) => Some(
+                layer()
+                    .with_ansi(false)
+                    .with_writer(appender)
+                    .with_filter(file_filter),
+            ),
+            Err(e) => {
+                eprintln!("Failed to create file appender: {e}");
+                None
+            }
+        }
+    });
+
+    // `Option<Layer>` implements `Layer` (None = no-op), so both branches
+    // produce the same subscriber type.
+    tracing_subscriber::registry()
+        .with(file_layer)
+        .with(std_out_layer)
+        .init();
+
     info!("Starting freminal");
+    if let Some(ref dir) = log_dir_path {
+        info!("Log directory: {}", dir.display());
+    }
     debug!("Loaded config: {:#?}", cfg);
 
     // Propagate the merged shell path back into args so that
