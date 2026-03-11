@@ -564,19 +564,6 @@ fn write_input_to_terminal(
                             // Mouse released — finalize the selection.
                             view_state.selection.end = Some(CellCoord { col: x, row: y });
                             view_state.selection.is_selecting = false;
-
-                            // Copy selected text to clipboard (deferred
-                            // until after ui.input() returns — see above).
-                            if view_state.selection.has_selection() {
-                                let text = extract_selected_text(
-                                    &snap.visible_chars,
-                                    snap.term_width,
-                                    &view_state.selection,
-                                );
-                                if !text.is_empty() {
-                                    clipboard_text = Some(text);
-                                }
-                            }
                         }
                     }
                     continue;
@@ -720,7 +707,7 @@ fn encode_egui_mouse_pos_as_usize(
 /// line is trimmed and a newline is inserted between rows.
 fn extract_selected_text(
     visible_chars: &[TChar],
-    term_width: usize,
+    _term_width: usize,
     selection: &super::view_state::SelectionState,
 ) -> String {
     use std::fmt::Write as _;
@@ -729,32 +716,37 @@ fn extract_selected_text(
         return String::new();
     };
 
-    // Build a row-index → flat-offset map.  Each row starts after the previous
-    // row's `term_width` characters + 1 NewLine separator.
-    // Row N starts at flat offset N * (term_width + 1).
-    let row_stride = term_width + 1; // chars-per-row + NewLine
+    // Split the flat visible_chars on NewLine boundaries to get per-row slices.
+    // Each row in the flattened buffer has a *variable* number of TChars
+    // (empty rows have 0, rows with wide chars have fewer than term_width, etc.),
+    // so a fixed-stride approach does not work.
+    let lines = split_visible_into_lines(visible_chars);
 
     let mut result = String::new();
 
     for row in start.row..=end.row {
-        let row_flat_start = row * row_stride;
+        let line = if row < lines.len() {
+            lines[row]
+        } else {
+            &[] // row beyond available data — treat as empty
+        };
 
         // Column range for this row within the selection.
         let col_begin = if row == start.row { start.col } else { 0 };
         let col_end = if row == end.row {
             end.col
         } else {
-            term_width.saturating_sub(1)
+            // Select to end of line content (not a fixed width).
+            line.len().saturating_sub(1)
         };
 
         // Collect characters for this row's selected range.
         let mut row_text = String::new();
         for col in col_begin..=col_end {
-            let idx = row_flat_start + col;
-            if idx >= visible_chars.len() {
+            if col >= line.len() {
                 break;
             }
-            match &visible_chars[idx] {
+            match &line[col] {
                 TChar::NewLine => break,
                 tc => {
                     write!(&mut row_text, "{tc}").unwrap_or_default();
@@ -774,6 +766,30 @@ fn extract_selected_text(
     }
 
     result
+}
+
+/// Split a flat `TChar` slice into per-line segments at `TChar::NewLine` boundaries.
+///
+/// The `NewLine` characters themselves are NOT included in the returned slices.
+/// This mirrors `shaping::split_into_lines` but is kept local to avoid a
+/// cross-module dependency for a trivial helper.
+fn split_visible_into_lines(chars: &[TChar]) -> Vec<&[TChar]> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+
+    for (i, ch) in chars.iter().enumerate() {
+        if matches!(ch, TChar::NewLine) {
+            lines.push(&chars[start..i]);
+            start = i + 1;
+        }
+    }
+
+    // Trailing content after the last NewLine (or the entire array if no NewLine).
+    if start <= chars.len() {
+        lines.push(&chars[start..]);
+    }
+
+    lines
 }
 ///
 /// The scrollbar is only shown when the user is actively scrolled back
@@ -1005,6 +1021,9 @@ impl FreminalTerminalWidget {
             // copy_text() inside the closure would deadlock.
             if let Some(text) = clipboard_text {
                 ctx.copy_text(text);
+                // Clear the selection highlight now that the text has been
+                // copied to the clipboard.
+                view_state.selection.clear();
             }
         }
 
@@ -1154,6 +1173,7 @@ impl FreminalTerminalWidget {
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
+                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
                 );
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;

@@ -19,7 +19,7 @@ use freminal_common::buffer_states::fonts::FontDecorations;
 use freminal_common::cursor::CursorVisualStyle;
 
 use super::atlas::{GlyphAtlas, GlyphKey};
-use super::colors::{CURSOR_F, SELECTION_BG_F, internal_color_to_gl};
+use super::colors::{CURSOR_F, SELECTION_BG_F, SELECTION_FG_F, internal_color_to_gl};
 use super::font_manager::FontManager;
 use super::shaping::{ShapedGlyph, ShapedLine};
 
@@ -351,7 +351,7 @@ impl TerminalRenderer {
             None,
         );
         let fg_verts =
-            build_foreground_verts(shaped_lines, atlas, font_manager, cell_height, ascent);
+            build_foreground_verts(shaped_lines, atlas, font_manager, cell_height, ascent, None);
 
         // 3. Upload vertex data using orphan-then-write.
         let buf_idx = self.vbo_index;
@@ -1194,6 +1194,10 @@ pub fn build_cursor_verts_only(
 /// For each shaped glyph: looks up the atlas entry (rasterising on miss) and
 /// emits a textured quad at the cell-grid position adjusted by the bearing offsets.
 ///
+/// `selection` is `Some((start_col, start_row, end_col, end_row))` in normalised
+/// reading order.  Glyphs that fall within the selection use `SELECTION_FG_F`
+/// instead of their normal foreground color.
+///
 /// Returns a flat `Vec<f32>` with `FG_VERTEX_FLOATS` floats per vertex.
 #[must_use]
 pub fn build_foreground_verts(
@@ -1202,6 +1206,7 @@ pub fn build_foreground_verts(
     font_manager: &FontManager,
     cell_height: u32,
     ascent: f32,
+    selection: Option<(usize, usize, usize, usize)>,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -1218,9 +1223,18 @@ pub fn build_foreground_verts(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
-            let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint);
+            let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint);
+
+            // Track the current column as we iterate glyphs within the run.
+            let mut col = run.col_start;
 
             for glyph in &run.glyphs {
+                let fg_color = if is_cell_selected(row_idx, col, selection) {
+                    SELECTION_FG_F
+                } else {
+                    normal_fg
+                };
+
                 emit_glyph_quad(
                     &mut verts,
                     glyph,
@@ -1230,6 +1244,8 @@ pub fn build_foreground_verts(
                     fg_color,
                     [cell_top, cell_bottom],
                 );
+
+                col += glyph.cell_width;
             }
         }
     }
@@ -1400,6 +1416,36 @@ fn push_quad(verts: &mut Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f
 /// Return the total column count covered by a `ShapedRun`.
 fn run_col_count(run: &super::shaping::ShapedRun) -> usize {
     run.glyphs.iter().map(|g| g.cell_width).sum()
+}
+
+/// Check whether a cell at `(row, col)` falls within the normalised selection
+/// `(start_col, start_row, end_col, end_row)`.
+const fn is_cell_selected(
+    row: usize,
+    col: usize,
+    selection: Option<(usize, usize, usize, usize)>,
+) -> bool {
+    let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection else {
+        return false;
+    };
+
+    if row < sel_start_row || row > sel_end_row {
+        return false;
+    }
+
+    if sel_start_row == sel_end_row {
+        // Single-row selection.
+        return col >= sel_start_col && col <= sel_end_col;
+    }
+
+    if row == sel_start_row {
+        col >= sel_start_col
+    } else if row == sel_end_row {
+        col <= sel_end_col
+    } else {
+        // Middle rows are fully selected.
+        true
+    }
 }
 
 /// Compare two GL `[f32; 4]` colors for equality.
@@ -1835,6 +1881,7 @@ mod tests {
             &FontManager::new(&Config::default()),
             16,
             13.0,
+            None,
         );
         assert_eq!(verts.len(), 0);
     }
@@ -1857,7 +1904,7 @@ mod tests {
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
         let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
 
-        let verts = build_foreground_verts(&lines, &mut atlas, &fm, cell_h, ascent);
+        let verts = build_foreground_verts(&lines, &mut atlas, &fm, cell_h, ascent, None);
 
         // Three ASCII glyphs each produce one quad = VERTS_PER_QUAD * FG_VERTEX_FLOATS.
         // Some glyphs may be spaces (zero-size) — so at minimum some quads must exist.
