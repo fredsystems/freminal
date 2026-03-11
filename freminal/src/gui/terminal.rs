@@ -14,7 +14,7 @@ use crate::gui::{
 
 use crossbeam_channel::Sender;
 use freminal_common::{
-    buffer_states::{modes::rl_bracket::RlBracket, tchar::TChar},
+    buffer_states::{modes::mouse::MouseTrack, modes::rl_bracket::RlBracket, tchar::TChar},
     config::Config,
     pty_write::PtyWrite,
 };
@@ -187,6 +187,7 @@ fn write_input_to_terminal(
     view_state: &mut ViewState,
     character_size_x: f32,
     character_size_y: f32,
+    terminal_origin: Pos2,
     last_reported_mouse_pos: Option<PreviousMouseState>,
     repeat_characters: bool,
     previous_key: Option<Key>,
@@ -201,6 +202,16 @@ fn write_input_to_terminal(
     let mut last_reported_mouse_pos = last_reported_mouse_pos;
     let mut left_mouse_button_pressed = false;
     let mut scroll_amount = scroll_amount;
+
+    // When the user is scrolled back into history, suppress mouse forwarding
+    // to the PTY — the visible content is historical, not the live terminal
+    // output the PTY application expects mouse coordinates to refer to.
+    // Standard terminal emulator behavior (xterm, kitty, WezTerm, etc.).
+    let effective_mouse_tracking = if view_state.scroll_offset > 0 {
+        &MouseTrack::NoTracking
+    } else {
+        &snap.mouse_tracking
+    };
 
     for event in &input.raw.events {
         debug!("event: {:?}", event);
@@ -430,8 +441,11 @@ fn write_input_to_terminal(
             }
             Event::PointerMoved(pos) => {
                 view_state.mouse_position = Some(*pos);
-                let (x, y) =
-                    encode_egui_mouse_pos_as_usize(*pos, (character_size_x, character_size_y));
+                let (x, y) = encode_egui_mouse_pos_as_usize(
+                    *pos,
+                    (character_size_x, character_size_y),
+                    terminal_origin,
+                );
 
                 let position = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let (previous, current) =
@@ -452,7 +466,7 @@ fn write_input_to_terminal(
                         )
                     };
 
-                let res = handle_pointer_moved(&previous, &current, &snap.mouse_tracking);
+                let res = handle_pointer_moved(&current, &previous, effective_mouse_tracking);
 
                 last_reported_mouse_pos = Some(current);
 
@@ -470,13 +484,16 @@ fn write_input_to_terminal(
             } => {
                 state_changed = true;
 
-                let (x, y) =
-                    encode_egui_mouse_pos_as_usize(*pos, (character_size_x, character_size_y));
+                let (x, y) = encode_egui_mouse_pos_as_usize(
+                    *pos,
+                    (character_size_x, character_size_y),
+                    terminal_origin,
+                );
                 let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
                 let response =
-                    handle_pointer_button(*button, &new_mouse_position, &snap.mouse_tracking);
+                    handle_pointer_button(*button, &new_mouse_position, effective_mouse_tracking);
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
@@ -530,7 +547,7 @@ fn write_input_to_terminal(
                     let response = handle_pointer_scroll(
                         egui::Vec2::new(0.0, scroll_amount_to_do / character_size_y),
                         last_mouse_position,
-                        &snap.mouse_tracking,
+                        effective_mouse_tracking,
                     );
 
                     if let Some(response) = response {
@@ -581,26 +598,35 @@ fn write_input_to_terminal(
     )
 }
 
-fn encode_egui_mouse_pos_as_usize(pos: Pos2, character_size: (f32, f32)) -> (usize, usize) {
-    let x = ((pos.x / character_size.0).floor())
+fn encode_egui_mouse_pos_as_usize(
+    pos: Pos2,
+    character_size: (f32, f32),
+    origin: Pos2,
+) -> (usize, usize) {
+    // Subtract the terminal area origin so that coordinates are relative to
+    // the top-left of the terminal grid, not the top-left of the window.
+    let rel_x = (pos.x - origin.x).max(0.0);
+    let rel_y = (pos.y - origin.y).max(0.0);
+
+    let x = ((rel_x / character_size.0).floor())
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
-            if pos.x > 0.0 {
-                debug!("Mouse x ({}) out of range, clamping to 255", pos.x);
+            if rel_x > 0.0 {
+                debug!("Mouse x ({}) out of range, clamping to 255", rel_x);
                 255
             } else {
-                debug!("Mouse x ({}) out of range, clamping to 0", pos.x);
+                debug!("Mouse x ({}) out of range, clamping to 0", rel_x);
                 0
             }
         });
-    let y = ((pos.y / character_size.1).floor())
+    let y = ((rel_y / character_size.1).floor())
         .approx_as::<usize>()
         .unwrap_or_else(|_| {
-            if pos.y > 0.0 {
-                debug!("Mouse y ({}) out of range, clamping to 255", pos.y);
+            if rel_y > 0.0 {
+                debug!("Mouse y ({}) out of range, clamping to 255", rel_y);
                 255
             } else {
-                debug!("Mouse y ({}) out of range, clamping to 0", pos.y);
+                debug!("Mouse y ({}) out of range, clamping to 0", rel_y);
                 0
             }
         });
@@ -792,6 +818,12 @@ impl FreminalTerminalWidget {
         let available = ui.available_size();
         ui.set_min_size(available);
 
+        // Compute the terminal area origin BEFORE processing input events.
+        // Pointer events from `input.raw.events` are in window coordinates,
+        // so `encode_egui_mouse_pos_as_usize` must subtract this origin to
+        // get terminal-grid-relative coordinates.
+        let terminal_origin = ui.available_rect_before_wrap().min;
+
         // When a modal dialog (e.g. the settings window) is open, do NOT
         // forward keyboard/mouse events to the PTY — they belong to the
         // modal's egui widgets instead.
@@ -806,6 +838,7 @@ impl FreminalTerminalWidget {
                         view_state,
                         cell_w_f,
                         row_h_f,
+                        terminal_origin,
                         self.previous_mouse_state.clone(),
                         repeat_characters,
                         self.previous_key,
