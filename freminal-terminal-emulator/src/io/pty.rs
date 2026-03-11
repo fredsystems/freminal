@@ -17,6 +17,51 @@ use sys_locale::get_locale;
 use tempfile::TempDir;
 use thiserror::Error;
 
+/// Disable ECHO on the PTY master fd so that terminal-emulator responses
+/// (DA, DA2, DCS version strings, CPR, etc.) are not echoed back by the
+/// line discipline.  Without this, the shell's cooked-mode echo causes
+/// response bytes to appear as visible text on the terminal.
+///
+/// This is a no-op on non-Unix platforms (`portable_pty`'s `as_raw_fd()`
+/// returns `None` on Windows).
+#[cfg(unix)]
+fn disable_echo_on_master(master: &dyn portable_pty::MasterPty) {
+    use nix::sys::termios;
+    use std::os::fd::BorrowedFd;
+
+    let Some(raw_fd) = master.as_raw_fd() else {
+        warn!("Could not get raw fd from PTY master; ECHO may not be disabled");
+        return;
+    };
+
+    // SAFETY: `as_raw_fd()` returns a valid, open fd owned by the master.
+    // We borrow it briefly for the tcgetattr/tcsetattr calls; the master
+    // keeps ownership and will close the fd when it is dropped.
+    // SAFETY: see comment above — `raw_fd` is valid and owned by `master`.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+
+    let mut termios_state = match termios::tcgetattr(borrowed) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("tcgetattr failed on PTY master: {e}");
+            return;
+        }
+    };
+
+    // Disable ECHO and ICANON so the line discipline does not echo
+    // response bytes back.  Shells (bash, zsh) and TUI programs (tmux,
+    // vim) will set their own preferred termios flags immediately on
+    // startup — this just ensures the window between openpty() and the
+    // first tcsetattr by the child is safe.
+    termios_state
+        .local_flags
+        .remove(termios::LocalFlags::ECHO | termios::LocalFlags::ICANON);
+
+    if let Err(e) = termios::tcsetattr(borrowed, termios::SetArg::TCSANOW, &termios_state) {
+        warn!("tcsetattr failed on PTY master: {e}");
+    }
+}
+
 pub struct FreminalPtyInputOutput {
     _termcaps: TempDir,
 }
@@ -61,6 +106,12 @@ pub fn run_terminal(
             std::process::exit(1);
         }
     };
+
+    // Disable ECHO on the master fd before spawning the child process.
+    // This prevents the line discipline from echoing terminal-emulator
+    // response sequences (DA, DA2, DCS, CPR) back as visible text.
+    #[cfg(unix)]
+    disable_echo_on_master(pair.master.as_ref());
 
     let mut cmd = shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new);
 

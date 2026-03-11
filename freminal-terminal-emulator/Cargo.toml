@@ -18,6 +18,7 @@ arc-swap.workspace = true
 crossbeam-channel.workspace = true
 freminal-buffer = { path = "../freminal-buffer" }
 freminal-common = { path = "../freminal-common" }
+nix.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 portable-pty.workspace = true
