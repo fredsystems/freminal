@@ -968,25 +968,6 @@ fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
     painter.rect_filled(thumb_rect, rounding, color);
 }
 
-struct DebugRenderer {
-    enable: bool,
-}
-
-impl DebugRenderer {
-    const fn new() -> Self {
-        Self { enable: false }
-    }
-
-    fn render(&self, ui: &Ui, rect: Rect, color: Color32) {
-        if !self.enable {
-            return;
-        }
-
-        let color = color.gamma_multiply(0.25);
-        ui.painter().rect_filled(rect, 0.0, color);
-    }
-}
-
 /// GPU resources shared between the main thread (vertex building) and the
 /// egui `PaintCallback` closure (draw calls).
 ///
@@ -1008,7 +989,6 @@ pub struct FreminalTerminalWidget {
     font_manager: FontManager,
     shaping_cache: ShapingCache,
     render_state: Arc<Mutex<RenderState>>,
-    debug_renderer: DebugRenderer,
     previous_mouse_state: Option<PreviousMouseState>,
     previous_key: Option<Key>,
     previous_scroll_amount: f32,
@@ -1048,7 +1028,6 @@ impl FreminalTerminalWidget {
                 fg_verts: Vec::new(),
                 cursor_vert_float_offset: 0,
             })),
-            debug_renderer: DebugRenderer::new(),
             previous_mouse_state: None,
             previous_key: None,
             previous_scroll_amount: 0.0,
@@ -1371,9 +1350,6 @@ impl FreminalTerminalWidget {
                 output.cursor_icon = CursorIcon::Default;
             });
         }
-
-        #[cfg(debug_assertions)]
-        self.debug_renderer.render(ui, rect, Color32::RED);
     }
 
     /// Apply config changes that can be hot-reloaded at runtime.
@@ -1431,12 +1407,6 @@ impl FreminalTerminalWidget {
                 new_cell_h as usize,
             ));
         }
-    }
-
-    /// Provides mutable access to the debug renderer enable flag.
-    #[cfg(debug_assertions)]
-    pub const fn debug_renderer_enabled(&mut self) -> &mut bool {
-        &mut self.debug_renderer.enable
     }
 }
 
