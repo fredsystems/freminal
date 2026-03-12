@@ -9,11 +9,12 @@ use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
         format_tag::FormatTag,
+        mode::SetMode,
         mode::{Mode, TerminalModes},
         modes::{
-            ReportMode, decarm::Decarm, decckm::Decckm, keypad::KeypadMode,
-            reverse_wrap_around::ReverseWrapAround, sync_updates::SynchronizedUpdates,
-            xtmsewin::XtMseWin,
+            MouseModeNumber, ReportMode, decarm::Decarm, decckm::Decckm, keypad::KeypadMode,
+            mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround,
+            sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
         },
         tchar::TChar,
         terminal_output::TerminalOutput,
@@ -348,10 +349,19 @@ impl TerminalState {
                         let resp = self.modes.bracketed_paste.report(None);
                         self.send_decrpm(&resp);
                     }
-                    Mode::MouseMode(
-                        freminal_common::buffer_states::modes::mouse::MouseTrack::Query(_),
-                    ) => {
-                        let resp = self.modes.mouse_tracking.report(None);
+                    Mode::MouseMode(MouseTrack::Query(report_mode)) => {
+                        // Determine whether the queried mode number is the currently
+                        // active mouse tracking mode, then report via DECRPM using
+                        // the queried mode number as Ps.
+                        let active_num = self.modes.mouse_tracking.mouse_mode_number();
+                        let override_mode = if active_num == *report_mode
+                            && self.modes.mouse_tracking != MouseTrack::NoTracking
+                        {
+                            SetMode::DecSet
+                        } else {
+                            SetMode::DecRst
+                        };
+                        let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
                         self.send_decrpm(&resp);
                     }
                     Mode::XtMseWin(XtMseWin::Query) => {

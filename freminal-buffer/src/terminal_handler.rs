@@ -989,6 +989,12 @@ impl TerminalHandler {
         self.buffer.is_alternate_screen()
     }
 
+    /// Return `true` when a cursor has been saved via DECSC (ESC 7 / `\x1b[?1048h`).
+    #[must_use]
+    pub const fn has_saved_cursor(&self) -> bool {
+        self.buffer.has_saved_cursor()
+    }
+
     /// Return `true` if any row in the visible window (at the given scroll
     /// offset) has been mutated since it was last flattened into the cache.
     ///
@@ -1174,9 +1180,9 @@ impl TerminalHandler {
                     self.write_to_pty(&AltScreen47::Alternate.report(Some(mode)));
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Query) => {
-                    // SaveCursor1048 tracks whether save/restore was invoked.
-                    // Report based on alternate screen state as a proxy.
-                    let mode = if self.is_alternate_screen() {
+                    // Report based on whether a cursor has actually been saved
+                    // via DECSC/DECRC, not on alternate-screen state as a proxy.
+                    let mode = if self.buffer.has_saved_cursor() {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
