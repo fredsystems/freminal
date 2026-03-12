@@ -785,6 +785,14 @@ impl TerminalHandler {
         self.write_to_pty("\x1b[0n");
     }
 
+    /// Handle DSR ?996 — Color Theme Report.
+    /// Responds with `ESC [ ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
+    /// Freminal's default background is dark (#45475a), so we report dark (2).
+    pub fn handle_color_theme_report(&mut self) {
+        // 1 = light, 2 = dark
+        self.write_to_pty("\x1b[?997;2n");
+    }
+
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
@@ -1220,6 +1228,9 @@ impl TerminalHandler {
             }
             TerminalOutput::CursorReport => {
                 self.handle_cursor_report();
+            }
+            TerminalOutput::ColorThemeReport => {
+                self.handle_color_theme_report();
             }
             TerminalOutput::DeviceStatusReport => {
                 self.handle_device_status_report();

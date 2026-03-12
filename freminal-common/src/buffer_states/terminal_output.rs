@@ -98,6 +98,9 @@ pub enum TerminalOutput {
     InsertSpaces(usize),
     OscResponse(AnsiOscType),
     CursorReport,
+    /// DSR ?996 — Color theme query.
+    /// Respond with `CSI ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
+    ColorThemeReport,
     DeviceStatusReport,
     Invalid,
     Skipped,
@@ -215,6 +218,7 @@ impl std::fmt::Display for TerminalOutput {
             }
             Self::Invalid => write!(f, "Invalid"),
             Self::CursorReport => write!(f, "CursorReport"),
+            Self::ColorThemeReport => write!(f, "ColorThemeReport"),
             Self::DeviceStatusReport => write!(f, "DeviceStatusReport"),
             Self::Skipped => write!(f, "Skipped"),
             Self::ApplicationKeypadMode => write!(f, "ApplicationKeypadMode"),

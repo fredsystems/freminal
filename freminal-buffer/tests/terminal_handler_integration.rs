@@ -2399,6 +2399,30 @@ fn test_dsr_ps6_cursor_at_origin() {
     assert_eq!(response, "\x1b[1;1R", "Cursor at origin should report 1;1");
 }
 
+#[test]
+fn test_dsr_996_color_theme_report() {
+    // DSR ?996 should respond with CSI ? 997 ; 2 n (dark mode).
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::ColorThemeReport]);
+
+    let msg = rx
+        .try_recv()
+        .expect("ColorThemeReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[?997;2n",
+        "DSR ?996 must respond with ESC[?997;2n (dark mode)"
+    );
+}
+
 // ── RIS (Reset to Initial State, ESC c) integration tests ────────────
 
 #[test]

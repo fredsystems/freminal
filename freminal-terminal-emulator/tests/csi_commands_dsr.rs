@@ -90,3 +90,33 @@ fn dec_private_dsr_unknown_ps_produces_invalid() {
         "ESC[?99n must produce Invalid, got: {outputs:?}"
     );
 }
+
+// ── DSR ?996 (Color Theme Query) ────────────────────────────────────
+
+#[test]
+fn dec_private_dsr_ps996_produces_color_theme_report() {
+    let outputs = push_seq("\x1b[?996n");
+    assert!(
+        outputs
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::ColorThemeReport)),
+        "ESC[?996n must produce ColorThemeReport, got: {outputs:?}"
+    );
+}
+
+#[test]
+fn standard_dsr_ps996_does_not_produce_color_theme_report() {
+    // DSR 996 without the ? prefix is not a valid color theme query.
+    // It should produce Invalid, not ColorThemeReport.
+    let outputs = push_seq("\x1b[996n");
+    assert!(
+        !outputs
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::ColorThemeReport)),
+        "ESC[996n (no ? prefix) must NOT produce ColorThemeReport, got: {outputs:?}"
+    );
+    assert!(
+        outputs.iter().any(|o| matches!(o, TerminalOutput::Invalid)),
+        "ESC[996n (no ? prefix) must produce Invalid, got: {outputs:?}"
+    );
+}
