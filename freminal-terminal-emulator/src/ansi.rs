@@ -295,33 +295,53 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
-                ParserInner::Csi(parser) => match parser.ansiparser_inner_csi(b, &mut output) {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
-                        if output.last() == Some(&TerminalOutput::Invalid) {
-                            debug!("Invalid ANSI sequence; recent={}", self.current_trace_str());
+                ParserInner::Csi(parser) => {
+                    // ECMA-48 §5.5: C0 control characters received during a
+                    // control sequence are executed immediately; the control
+                    // sequence continues parsing afterwards.
+                    // ESC (0x1B) is special: it aborts the current CSI and
+                    // starts a new escape sequence.
+                    if b == 0x1B {
+                        self.inner = ParserInner::Escape;
+                        continue;
+                    }
+                    if b < 0x20 {
+                        // Execute C0 control inline; CSI parsing continues.
+                        let _ = self.ansi_parser_inner_empty(b, &mut data_output, &mut output);
+                        continue;
+                    }
+
+                    match parser.ansiparser_inner_csi(b, &mut output) {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                            if output.last() == Some(&TerminalOutput::Invalid) {
+                                debug!(
+                                    "Invalid ANSI sequence; recent={}",
+                                    self.current_trace_str()
+                                );
+                            }
+                        }
+                        ParserOutcome::Continue => (),
+                        ParserOutcome::InvalidParserFailure(message) => {
+                            debug!(
+                                "Invalid ANSI sequence: {}; recent={}",
+                                message,
+                                self.current_trace_str()
+                            );
+                            self.inner = ParserInner::Empty;
+                            output.push(TerminalOutput::Invalid);
+                        }
+                        ParserOutcome::Invalid(message) => {
+                            debug!(
+                                "Invalid ANSI sequence: {}; recent={}",
+                                message,
+                                self.current_trace_str()
+                            );
+                            self.inner = ParserInner::Empty;
+                            output.push(TerminalOutput::Invalid);
                         }
                     }
-                    ParserOutcome::Continue => (),
-                    ParserOutcome::InvalidParserFailure(message) => {
-                        debug!(
-                            "Invalid ANSI sequence: {}; recent={}",
-                            message,
-                            self.current_trace_str()
-                        );
-                        self.inner = ParserInner::Empty;
-                        output.push(TerminalOutput::Invalid);
-                    }
-                    ParserOutcome::Invalid(message) => {
-                        debug!(
-                            "Invalid ANSI sequence: {}; recent={}",
-                            message,
-                            self.current_trace_str()
-                        );
-                        self.inner = ParserInner::Empty;
-                        output.push(TerminalOutput::Invalid);
-                    }
-                },
+                }
                 ParserInner::Osc(parser) => match parser.ansiparser_inner_osc(b, &mut output) {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
@@ -646,6 +666,140 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(combined, b"Hello");
+    }
+
+    // -------------------------------------------------------------------------
+    // ECMA-48 §5.5: C0 controls inside CSI sequences
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn c0_bs_inside_csi() {
+        // ESC[2 BS C — BS is executed, then CSI 2C (CursorForward 2) completes
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x1b[2\x08C");
+        let has_backspace = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::Backspace));
+        let has_cursor_forward = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: Some(2),
+                    y: None
+                }
+            )
+        });
+        assert!(has_backspace, "BS should be executed inline: {result:?}");
+        assert!(
+            has_cursor_forward,
+            "CSI 2C should complete after BS: {result:?}"
+        );
+    }
+
+    #[test]
+    fn c0_cr_inside_csi() {
+        // ESC[ CR 2C — CR is executed, then CSI 2C completes
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x1b[\x0d2C");
+        let has_cr = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::CarriageReturn));
+        let has_cursor_forward = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: Some(2),
+                    y: None
+                }
+            )
+        });
+        assert!(has_cr, "CR should be executed inline: {result:?}");
+        assert!(
+            has_cursor_forward,
+            "CSI 2C should complete after CR: {result:?}"
+        );
+    }
+
+    #[test]
+    fn c0_vt_inside_csi() {
+        // ESC[1 VT A — VT (0x0B) is executed as Newline, then CSI 1A (CursorUp 1) completes
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x1b[1\x0bA");
+        let has_newline = result.iter().any(|o| matches!(o, TerminalOutput::Newline));
+        let has_cursor_up = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                }
+            )
+        });
+        assert!(has_newline, "VT should be executed as Newline: {result:?}");
+        assert!(has_cursor_up, "CSI 1A should complete after VT: {result:?}");
+    }
+
+    #[test]
+    fn c0_nul_inside_csi() {
+        // ESC[1 NUL A — NUL is silently ignored, CSI 1A (CursorUp 1) completes
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x1b[1\x00A");
+        let has_cursor_up = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                }
+            )
+        });
+        assert!(
+            has_cursor_up,
+            "CSI 1A should complete despite NUL: {result:?}"
+        );
+        // NUL should produce no extra output
+        let non_cursor: Vec<_> = result
+            .iter()
+            .filter(|o| !matches!(o, TerminalOutput::SetCursorPosRel { .. }))
+            .collect();
+        assert!(
+            non_cursor.is_empty(),
+            "NUL should not produce output: {non_cursor:?}"
+        );
+    }
+
+    #[test]
+    fn c0_esc_inside_csi_aborts() {
+        // ESC[2 ESC [1A — ESC aborts the first CSI, starts new CSI 1A (CursorUp 1)
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x1b[2\x1b[1A");
+        let has_cursor_up = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                }
+            )
+        });
+        assert!(
+            has_cursor_up,
+            "New CSI 1A should complete after ESC abort: {result:?}"
+        );
+        // The original CSI 2 was aborted — should not produce CursorForward
+        let has_cursor_forward = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: Some(_),
+                    y: None
+                }
+            )
+        });
+        assert!(
+            !has_cursor_forward,
+            "Aborted CSI should not produce CursorForward: {result:?}"
+        );
     }
 
     #[test]
