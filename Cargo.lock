@@ -1435,7 +1435,6 @@ dependencies = [
  "crossbeam-channel",
  "freminal-buffer",
  "freminal-common",
- "nix",
  "portable-pty",
  "proptest",
  "sys-locale",

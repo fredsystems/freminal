@@ -56,7 +56,6 @@ egui = { version = "0.33.2", default-features = false, features = [
 ] }
 fontdb = "0.23.0"
 glow = "0.16.0"
-nix = { version = "0.28.0", features = ["term"] }
 portable-pty = "0.9.0"
 rustybuzz = "0.20.1"
 serde = { version = "1.0.228", features = ["derive"] }

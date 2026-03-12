@@ -601,23 +601,6 @@ impl TerminalState {
         }
     }
 
-    pub fn report_device_name_and_version(&mut self) {
-        let version = format!(
-            "{}-{}",
-            env!("CARGO_PKG_VERSION"),
-            env!("VERGEN_BUILD_TIMESTAMP")
-        );
-        let output = collect_text(&format!("\x1bP>|Freminal {version}\x1b\\"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write device name and version: {e}");
-                }
-            }
-        }
-    }
-
     pub fn report_title(&mut self, title: &str) {
         let output = collect_text(&format!("\x1b]l{title}\x1b\\"));
         for input in output.iter() {

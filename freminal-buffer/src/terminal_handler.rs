@@ -452,13 +452,6 @@ impl TerminalHandler {
         self.write_to_pty("\x1b[>65;0;0c");
     }
 
-    /// Handle `XTVersion` — respond with the Freminal version string as an XTerm-style response.
-    /// Responds with `DCS > | Freminal <version> ST`.
-    pub fn handle_xt_version(&mut self) {
-        let version = env!("CARGO_PKG_VERSION");
-        self.write_to_pty(&format!("\x1bP>|Freminal {version}\x1b\\"));
-    }
-
     /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
     /// Responds with `DCS > | Freminal <version> ST`.
     pub fn handle_device_name_and_version(&mut self) {
@@ -1335,9 +1328,6 @@ impl TerminalHandler {
             }
             TerminalOutput::RequestSecondaryDeviceAttributes { param: _param } => {
                 self.handle_secondary_device_attributes();
-            }
-            TerminalOutput::RequestXtVersion => {
-                self.handle_xt_version();
             }
             // Silently ignore invalid, skipped, and any future variants
             TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {

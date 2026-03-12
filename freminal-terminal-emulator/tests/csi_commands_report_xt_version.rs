@@ -6,8 +6,8 @@
 //! Parser-level tests for **XT Version and Device Attribute queries**.
 //! This validates:
 //! - ESC[c (DA1)
-//! - ESC[>c (XTVERSION query)
-//! - ESC[>0c / ESC[>1c (DA2)
+//! - ESC[>c (DA2, implicit param 0)
+//! - ESC[>0c / ESC[>1c (DA2, explicit param)
 //! - ESC[>0q (XTerm style version report)
 //!   and malformed cases with recovery.
 
@@ -24,8 +24,8 @@ fn report_xtversion_and_device_attributes() {
     let cases = [
         (
             "\x1b[>c",
-            "XTVERSION no param (RequestXtVersion)",
-            TerminalOutput::RequestXtVersion,
+            "DA2 no param (implicit param 0)",
+            TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 },
         ),
         (
             "\x1b[>0c",
@@ -67,8 +67,7 @@ fn report_xtversion_and_device_attributes() {
         // Expect exactly one of our known variants
         assert!(
             outs.iter().any(|o| match (o, &expected) {
-                (TerminalOutput::RequestXtVersion, TerminalOutput::RequestXtVersion)
-                | (
+                (
                     TerminalOutput::RequestDeviceNameAndVersion,
                     TerminalOutput::RequestDeviceNameAndVersion,
                 )
@@ -122,11 +121,10 @@ fn report_xtversion_malformed_and_recovery() {
     assert!(
         rec.iter().any(|o| matches!(
             o,
-            TerminalOutput::RequestXtVersion
-                | TerminalOutput::RequestSecondaryDeviceAttributes { .. }
+            TerminalOutput::RequestSecondaryDeviceAttributes { .. }
                 | TerminalOutput::RequestDeviceNameAndVersion
         )),
-        "Expected valid XTVersion or DA2 output after recovery, got {:?}",
+        "Expected valid DA2 or DeviceNameAndVersion output after recovery, got {:?}",
         rec
     );
 }

@@ -158,8 +158,7 @@ pub enum TerminalOutput {
     RequestDeviceNameAndVersion,
     RequestSecondaryDeviceAttributes {
         param: usize,
-    }, // for ESC[>Ps c
-    RequestXtVersion, // for ESC[>c
+    }, // for ESC[c / ESC[>Ps c
     /// ESC D — IND (Index): move cursor down, scroll if at bottom margin
     Index,
     /// ESC M — RI (Reverse Index): move cursor up, scroll if at top margin
@@ -291,7 +290,6 @@ impl std::fmt::Display for TerminalOutput {
             Self::RequestSecondaryDeviceAttributes { param } => {
                 write!(f, "RequestSecondaryDeviceAttributes({param})")
             }
-            Self::RequestXtVersion => write!(f, "RequestXtVersion"),
             Self::Index => write!(f, "Index"),
             Self::ReverseIndex => write!(f, "ReverseIndex"),
             Self::NextLine => write!(f, "NextLine"),
