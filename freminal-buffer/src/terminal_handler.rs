@@ -71,6 +71,12 @@ pub struct TerminalHandler {
     /// Whether DECCOLM (132-column mode switching) is allowed.
     /// Controlled by `CSI?40h` / `CSI?40l` (`AllowColumnModeSwitch`).
     allow_column_mode_switch: bool,
+    /// The terminal width before DECCOLM was activated.
+    ///
+    /// Saved when `CSI?3h` (132-column mode) is received so that `CSI?3l`
+    /// (80-column reset) restores the actual GUI window width rather than
+    /// hardcoding 80.  `None` means DECCOLM has not changed the width.
+    pre_deccolm_width: Option<usize>,
 }
 
 impl TerminalHandler {
@@ -91,6 +97,7 @@ impl TerminalHandler {
             last_exit_code: None,
             palette: ColorPalette::default(),
             allow_column_mode_switch: true,
+            pre_deccolm_width: None,
         }
     }
 
@@ -110,13 +117,14 @@ impl TerminalHandler {
     /// If DECCOLM had changed the column width to 132, this resets it back
     /// to 80 columns and sends a PTY resize notification.
     pub fn full_reset(&mut self) {
-        // If DECCOLM switched us to 132 columns, reset back to 80 and notify
-        // the PTY before the buffer reset clears everything.
+        // If DECCOLM switched us to a different width, restore the pre-DECCOLM
+        // width.  Fall back to 80 if no prior width was saved.
         let prev_width = self.buffer.terminal_width();
+        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
         self.buffer.full_reset();
-        if prev_width == 132 {
-            self.buffer.set_column_mode(80);
-            self.send_pty_resize(80);
+        if prev_width != restore_width {
+            self.buffer.set_column_mode(restore_width);
+            self.send_pty_resize(restore_width);
         }
         self.current_format = FormatTag::default();
         self.show_cursor = Dectcem::default();
@@ -1266,14 +1274,23 @@ impl TerminalHandler {
                 }
                 Mode::Deccolm(Deccolm::Column132) => {
                     if self.allow_column_mode_switch {
+                        // Save the current width so CSI?3l can restore it
+                        // instead of hardcoding 80.
+                        if self.pre_deccolm_width.is_none() {
+                            self.pre_deccolm_width = Some(self.buffer.terminal_width());
+                        }
                         self.buffer.set_column_mode(132);
                         self.send_pty_resize(132);
                     }
                 }
                 Mode::Deccolm(Deccolm::Column80) => {
                     if self.allow_column_mode_switch {
-                        self.buffer.set_column_mode(80);
-                        self.send_pty_resize(80);
+                        // Restore the pre-DECCOLM width (falls back to 80 if
+                        // no prior width was saved — e.g. CSI?3l without a
+                        // preceding CSI?3h).
+                        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
+                        self.buffer.set_column_mode(restore_width);
+                        self.send_pty_resize(restore_width);
                     }
                 }
                 Mode::Deccolm(Deccolm::Query) => {

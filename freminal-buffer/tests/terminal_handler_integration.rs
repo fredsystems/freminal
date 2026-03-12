@@ -3552,3 +3552,59 @@ fn decrpm_deccolm_default_is_80() {
     // Default is 80 columns → Ps=2 (reset)
     assert_eq!(resp, "\x1b[?3;2$y", "DECCOLM default → Ps=2 (80-col)");
 }
+
+#[test]
+fn deccolm_reset_restores_original_non_80_width() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    // Start with a 96-column terminal (not 80).
+    let mut handler = TerminalHandler::new(96, 24);
+    assert_eq!(handler.buffer().terminal_width(), 96);
+
+    // Switch to 132-column mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(handler.buffer().terminal_width(), 132);
+
+    // Switch back via CSI?3l — should restore 96, not hardcode 80.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecRst,
+    )))]);
+
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        96,
+        "DECCOLM reset must restore original width (96), not hardcode 80"
+    );
+}
+
+#[test]
+fn ris_restores_original_non_80_width_after_deccolm() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    // Start with a 96-column terminal (not 80).
+    let mut handler = TerminalHandler::new(96, 24);
+    assert_eq!(handler.buffer().terminal_width(), 96);
+
+    // Switch to 132-column mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(handler.buffer().terminal_width(), 132);
+
+    // Full reset (RIS) — should restore 96, not hardcode 80.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        96,
+        "RIS after DECCOLM must restore original width (96), not hardcode 80"
+    );
+}
