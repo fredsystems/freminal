@@ -57,7 +57,7 @@ pub fn ansi_parser_inner_csi_set_top_and_bottom_margins(
         ));
     };
 
-    if params.len() != 2 {
+    if params.is_empty() || params.len() > 2 {
         return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECSTBMCommand(
             format!("{params:?}"),
         ));

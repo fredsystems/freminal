@@ -20,6 +20,8 @@ fn decstbm_valid_and_default() {
         "\x1b[1;24r", // typical full-screen
         "\x1b[r",     // default (entire screen)
         "\x1b[5;10r", // mid-range
+        "\x1b[10r",   // single param — top margin only, bottom defaults to page size
+        "\x1b[;r",    // both params omitted — full screen
     ];
     for s in cases {
         println!("DECSTBM valid case: {:?}", s);
@@ -28,11 +30,30 @@ fn decstbm_valid_and_default() {
             println!("variant: {:?}", o);
         }
         assert!(
-            !outs.is_empty(),
-            "Expected output for valid DECSTBM {:?}",
-            s
+            outs.iter()
+                .any(|o| matches!(o, TerminalOutput::SetTopAndBottomMargins { .. })),
+            "Expected SetTopAndBottomMargins for valid DECSTBM {:?}, got: {:?}",
+            s,
+            outs,
         );
     }
+}
+
+#[test]
+fn decstbm_single_param_sets_top_margin_only() {
+    let outs = push_seq("\x1b[3r");
+    let margin = outs.iter().find_map(|o| match o {
+        TerminalOutput::SetTopAndBottomMargins {
+            top_margin,
+            bottom_margin,
+        } => Some((*top_margin, *bottom_margin)),
+        _ => None,
+    });
+    assert_eq!(
+        margin,
+        Some((3, usize::MAX)),
+        "Single param '3r' should set top=3, bottom=MAX: got {outs:?}"
+    );
 }
 
 #[test]
@@ -40,9 +61,7 @@ fn decstbm_swapped_and_malformed() {
     // swapped and malformed param sets
     let bad = [
         "\x1b[20;10r", // swapped values (should clamp or reset)
-        "\x1b[10r",    // missing semicolon
         "\x1b[x;r",    // invalid ascii
-        "\x1b[;r",     // empty params
     ];
     for s in bad {
         let outs = push_seq(s);
