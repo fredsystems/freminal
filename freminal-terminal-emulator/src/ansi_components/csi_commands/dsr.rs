@@ -15,14 +15,25 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// 5 - Device status report: respond with CSI 0 n (device OK)
 /// 6 - Cursor position report: respond with CSI row ; col R
 ///
-/// ESC [ Ps n
+/// DEC private variants (with `?` prefix):
+/// ?5 - DEC device status report: respond with CSI 0 n (device OK)
+/// ?6 - DEC cursor position report (DECXCPR): respond with CSI row ; col R
+/// ?996 - Color theme query: respond with CSI ? 997 ; Ps n
+///        where Ps = 1 (light) or 2 (dark)
+///
+/// ESC [ Ps n        (standard DSR)
+/// ESC [ ? Ps n      (DEC private DSR)
 /// # Errors
 /// Will return an error if the parameter is not a valid number
 pub fn ansi_parser_inner_csi_finished_dsr(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
-    let Ok(param) = parse_param_as::<usize>(params) else {
+    // DEC private DSR: params start with '?' (e.g. "?6" for ESC[?6n)
+    let is_private = params.first() == Some(&b'?');
+    let actual_params = if is_private { &params[1..] } else { params };
+
+    let Ok(param) = parse_param_as::<usize>(actual_params) else {
         warn!("Invalid DSR command");
         output.push(TerminalOutput::Invalid);
 
@@ -37,6 +48,9 @@ pub fn ansi_parser_inner_csi_finished_dsr(
         }
         6 => {
             output.push(TerminalOutput::CursorReport);
+        }
+        996 if is_private => {
+            output.push(TerminalOutput::ColorThemeReport);
         }
         _ => {
             warn!("Unhandled DSR Ps value: {param:?}");

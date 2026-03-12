@@ -4,8 +4,9 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::ParserOutcome;
+use crate::ansi_components::csi::push_split_mode_params;
 use crate::error::ParserFailures;
-use freminal_common::buffer_states::mode::{Mode, SetMode};
+use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 /// DEC Private Mode Set
@@ -24,20 +25,11 @@ pub fn ansi_parser_inner_csi_finished_decrqm(
 ) -> ParserOutcome {
     // if intermediates contains '$' then we are querying
     if intermediates.contains(&b'$') {
-        output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-            params,
-            &SetMode::DecQuery,
-        )));
+        push_split_mode_params(params, SetMode::DecQuery, output);
     } else if terminator == b'h' {
-        output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-            params,
-            &SetMode::DecSet,
-        )));
+        push_split_mode_params(params, SetMode::DecSet, output);
     } else if terminator == b'l' {
-        output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-            params,
-            &SetMode::DecRst,
-        )));
+        push_split_mode_params(params, SetMode::DecRst, output);
     } else {
         return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECRQMCommand(
             params.to_vec(),

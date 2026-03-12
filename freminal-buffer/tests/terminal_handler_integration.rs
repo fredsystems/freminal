@@ -2399,6 +2399,30 @@ fn test_dsr_ps6_cursor_at_origin() {
     assert_eq!(response, "\x1b[1;1R", "Cursor at origin should report 1;1");
 }
 
+#[test]
+fn test_dsr_996_color_theme_report() {
+    // DSR ?996 should respond with CSI ? 997 ; 2 n (dark mode).
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::ColorThemeReport]);
+
+    let msg = rx
+        .try_recv()
+        .expect("ColorThemeReport must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[?997;2n",
+        "DSR ?996 must respond with ESC[?997;2n (dark mode)"
+    );
+}
+
 // ── RIS (Reset to Initial State, ESC c) integration tests ────────────
 
 #[test]
@@ -2895,19 +2919,19 @@ fn mode_from_params_maps_47_and_1047_to_alt_screen_47() {
         modes::xtextscrn::AltScreen47,
     };
 
-    let mode_47 = Mode::terminal_mode_from_params(b"?47", &SetMode::DecSet);
+    let mode_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecSet);
     assert_eq!(mode_47, Mode::AltScreen47(AltScreen47::Alternate));
 
-    let mode_1047 = Mode::terminal_mode_from_params(b"?1047", &SetMode::DecSet);
+    let mode_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecSet);
     assert_eq!(mode_1047, Mode::AltScreen47(AltScreen47::Alternate));
 
-    let rst_47 = Mode::terminal_mode_from_params(b"?47", &SetMode::DecRst);
+    let rst_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecRst);
     assert_eq!(rst_47, Mode::AltScreen47(AltScreen47::Primary));
 
-    let rst_1047 = Mode::terminal_mode_from_params(b"?1047", &SetMode::DecRst);
+    let rst_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecRst);
     assert_eq!(rst_1047, Mode::AltScreen47(AltScreen47::Primary));
 
-    let query_47 = Mode::terminal_mode_from_params(b"?47", &SetMode::DecQuery);
+    let query_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecQuery);
     assert_eq!(query_47, Mode::AltScreen47(AltScreen47::Query));
 }
 
@@ -2918,12 +2942,188 @@ fn mode_from_params_maps_1048_to_save_cursor() {
         modes::xtextscrn::SaveCursor1048,
     };
 
-    let set = Mode::terminal_mode_from_params(b"?1048", &SetMode::DecSet);
+    let set = Mode::terminal_mode_from_params(b"?1048", SetMode::DecSet);
     assert_eq!(set, Mode::SaveCursor1048(SaveCursor1048::Save));
 
-    let rst = Mode::terminal_mode_from_params(b"?1048", &SetMode::DecRst);
+    let rst = Mode::terminal_mode_from_params(b"?1048", SetMode::DecRst);
     assert_eq!(rst, Mode::SaveCursor1048(SaveCursor1048::Restore));
 
-    let query = Mode::terminal_mode_from_params(b"?1048", &SetMode::DecQuery);
+    let query = Mode::terminal_mode_from_params(b"?1048", SetMode::DecQuery);
     assert_eq!(query, Mode::SaveCursor1048(SaveCursor1048::Query));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DECRPM (Mode Query) response tests — handler-owned modes
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: create a handler with a PTY write channel, send a Mode Query
+/// output, and return the response string.
+fn query_handler_mode(handler: &mut TerminalHandler, mode_output: TerminalOutput) -> String {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    handler.set_write_tx(tx);
+    handler.process_outputs(&[mode_output]);
+    let msg = rx
+        .try_recv()
+        .expect("Mode query must produce a DECRPM response on the PTY channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    String::from_utf8(bytes).expect("DECRPM response must be valid UTF-8")
+}
+
+#[test]
+fn decrpm_dectcem_default_is_show() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::dectcem::Dectcem,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Dectem(Dectcem::new(&SetMode::DecQuery))),
+    );
+    // Default DECTCEM is Show → Ps=1 (set)
+    assert_eq!(resp, "\x1b[?25;1$y", "DECTCEM default (Show) → Ps=1");
+}
+
+#[test]
+fn decrpm_dectcem_after_hide() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::dectcem::Dectcem,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Hide cursor first
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Dectem(Dectcem::new(&SetMode::DecQuery))),
+    );
+    // After Hide → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?25;2$y", "DECTCEM after Hide → Ps=2");
+}
+
+#[test]
+fn decrpm_decawm_default_is_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decawm::Decawm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decawm(Decawm::new(&SetMode::DecQuery))),
+    );
+    // Default DECAWM is AutoWrap (enabled) → Ps=1 (set)
+    assert_eq!(resp, "\x1b[?7;1$y", "DECAWM default (AutoWrap) → Ps=1");
+}
+
+#[test]
+fn decrpm_decawm_after_disable() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decawm::Decawm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Disable auto-wrap
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decawm(Decawm::new(&SetMode::DecQuery))),
+    );
+    // After disable → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?7;2$y", "DECAWM after disable → Ps=2");
+}
+
+#[test]
+fn decrpm_xtextscrn_default_is_primary() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecQuery))),
+    );
+    // Default is primary screen → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?1049;2$y", "XtExtscrn default (primary) → Ps=2");
+}
+
+#[test]
+fn decrpm_xtcblink_default_is_steady() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtcblink::XtCBlink,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::new(&SetMode::DecQuery))),
+    );
+    // Default cursor is steady → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?12;2$y", "XtCBlink default (steady) → Ps=2");
+}
+
+#[test]
+fn decrpm_xtcblink_after_enable_blink() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtcblink::XtCBlink,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Enable cursor blink
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::new(&SetMode::DecQuery))),
+    );
+    // After enable → Ps=1 (set)
+    assert_eq!(resp, "\x1b[?12;1$y", "XtCBlink after blink enable → Ps=1");
+}
+
+#[test]
+fn decrpm_unknown_mode_returns_not_recognized() {
+    use freminal_common::buffer_states::mode::Mode;
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::UnknownQuery(b"9999".to_vec())),
+    );
+    // Unknown mode → Ps=0 (not recognized)
+    assert_eq!(
+        resp, "\x1b[?9999;0$y",
+        "Unknown mode query must return Ps=0"
+    );
+}
+
+#[test]
+fn decrpm_lnm_default_is_line_feed() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::lnm::Lnm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(&SetMode::DecQuery))),
+    );
+    // Default LNM is LineFeed (disabled) → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?20;2$y", "LNM default (LineFeed mode) → Ps=2");
 }

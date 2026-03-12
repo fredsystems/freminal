@@ -6,6 +6,51 @@
 use freminal_common::buffer_states::mode::{Mode, SetMode};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
+/// Split CSI mode parameters on `;` and emit one `TerminalOutput::Mode` per sub-parameter.
+///
+/// When the parameter string starts with `?` (DEC private indicator), the `?` prefix is
+/// re-applied to each sub-parameter so that `terminal_mode_from_params` matches correctly.
+///
+/// For example, `?1049;2004` is split into `?1049` and `?2004`, each producing its own
+/// `TerminalOutput::Mode`.
+pub(crate) fn push_split_mode_params(
+    params: &[u8],
+    mode: SetMode,
+    output: &mut Vec<TerminalOutput>,
+) {
+    let (is_dec_private, param_body) = if params.first() == Some(&b'?') {
+        (true, &params[1..])
+    } else {
+        (false, params)
+    };
+
+    // Fast path: no semicolons means a single parameter — avoid allocation.
+    if !param_body.contains(&b';') {
+        output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
+            params, mode,
+        )));
+        return;
+    }
+
+    for sub_param in param_body.split(|&b| b == b';') {
+        if sub_param.is_empty() {
+            continue;
+        }
+        if is_dec_private {
+            let mut prefixed = Vec::with_capacity(1 + sub_param.len());
+            prefixed.push(b'?');
+            prefixed.extend_from_slice(sub_param);
+            output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
+                &prefixed, mode,
+            )));
+        } else {
+            output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
+                sub_param, mode,
+            )));
+        }
+    }
+}
+
 use super::csi_commands::{
     cbt::ansi_parser_inner_csi_finished_cbt,
     cha::ansi_parser_inner_csi_finished_set_cursor_position_g,
@@ -228,17 +273,11 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_sgr_ansi(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'h') => {
-                output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-                    &self.params,
-                    &SetMode::DecSet,
-                )));
+                push_split_mode_params(&self.params, SetMode::DecSet, output);
                 push_result
             }
             AnsiCsiParserState::Finished(b'l') => {
-                output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-                    &self.params,
-                    &SetMode::DecRst,
-                )));
+                push_split_mode_params(&self.params, SetMode::DecRst, output);
                 push_result
             }
             AnsiCsiParserState::Finished(b'@') => {
@@ -299,4 +338,136 @@ fn is_csi_terminator(b: u8) -> bool {
 
 fn is_csi_intermediate(b: u8) -> bool {
     (0x20..=0x2f).contains(&b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::modes::{
+        decckm::Decckm, mouse::MouseTrack, rl_bracket::RlBracket, xtextscrn::XtExtscrn,
+    };
+
+    /// Helper: feed a full CSI sequence (everything after ESC[) into the parser
+    /// and return the collected `TerminalOutput` vec.
+    fn parse_csi_sequence(bytes: &[u8]) -> Vec<TerminalOutput> {
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        for &b in bytes {
+            parser.ansiparser_inner_csi(b, &mut output);
+        }
+        output
+    }
+
+    /// Extract `Mode` variants from a `Vec<TerminalOutput>`.
+    fn extract_modes(outputs: &[TerminalOutput]) -> Vec<&Mode> {
+        outputs
+            .iter()
+            .filter_map(|o| {
+                if let TerminalOutput::Mode(m) = o {
+                    Some(m)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_compound_mode_set_alternate_screen_and_bracketed_paste() {
+        // ESC[?1049;2004h — set alternate screen AND bracketed paste
+        let output = parse_csi_sequence(b"?1049;2004h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 2, "expected two modes, got {modes:?}");
+        assert_eq!(
+            *modes[0],
+            Mode::XtExtscrn(XtExtscrn::Alternate),
+            "first mode should be alternate screen"
+        );
+        assert_eq!(
+            *modes[1],
+            Mode::BracketedPaste(RlBracket::Enabled),
+            "second mode should be bracketed paste enabled"
+        );
+    }
+
+    #[test]
+    fn test_compound_mode_set_alternate_screen_and_decckm() {
+        // ESC[?1049;1h — set alternate screen AND DECCKM application mode
+        let output = parse_csi_sequence(b"?1049;1h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 2, "expected two modes, got {modes:?}");
+        assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Alternate));
+        assert_eq!(*modes[1], Mode::Decckm(Decckm::Application));
+    }
+
+    #[test]
+    fn test_compound_mode_set_mouse_x11_and_sgr() {
+        // ESC[?1000;1006h — set X11 mouse tracking AND SGR mouse encoding
+        let output = parse_csi_sequence(b"?1000;1006h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 2, "expected two modes, got {modes:?}");
+        assert_eq!(*modes[0], Mode::MouseMode(MouseTrack::XtMseX11));
+        assert_eq!(*modes[1], Mode::MouseMode(MouseTrack::XtMseSgr));
+    }
+
+    #[test]
+    fn test_compound_mode_reset() {
+        // ESC[?1049;2004l — reset alternate screen AND bracketed paste
+        let output = parse_csi_sequence(b"?1049;2004l");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 2, "expected two modes, got {modes:?}");
+        assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Primary));
+        assert_eq!(*modes[1], Mode::BracketedPaste(RlBracket::Disabled));
+    }
+
+    #[test]
+    fn test_single_param_mode_set_unchanged() {
+        // ESC[?1049h — single param, must still work
+        let output = parse_csi_sequence(b"?1049h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 1);
+        assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Alternate));
+    }
+
+    #[test]
+    fn test_single_param_mode_reset_unchanged() {
+        // ESC[?2004l — single param reset
+        let output = parse_csi_sequence(b"?2004l");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 1);
+        assert_eq!(*modes[0], Mode::BracketedPaste(RlBracket::Disabled));
+    }
+
+    #[test]
+    fn test_non_dec_single_param_unchanged() {
+        // ESC[20h — non-DEC single param (LNM)
+        let output = parse_csi_sequence(b"20h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 1);
+        assert_eq!(
+            *modes[0],
+            Mode::LineFeedMode(freminal_common::buffer_states::modes::lnm::Lnm::NewLine)
+        );
+    }
+
+    #[test]
+    fn test_three_params_compound() {
+        // ESC[?1049;1;2004h — three params: alternate screen + DECCKM + bracketed paste
+        let output = parse_csi_sequence(b"?1049;1;2004h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 3, "expected three modes, got {modes:?}");
+        assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Alternate));
+        assert_eq!(*modes[1], Mode::Decckm(Decckm::Application));
+        assert_eq!(*modes[2], Mode::BracketedPaste(RlBracket::Enabled));
+    }
+
+    #[test]
+    fn test_empty_sub_params_skipped() {
+        // ESC[?1049;;2004h — empty sub-param between semicolons should be skipped
+        let output = parse_csi_sequence(b"?1049;;2004h");
+        let modes = extract_modes(&output);
+        assert_eq!(modes.len(), 2, "empty sub-params should be skipped");
+        assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Alternate));
+        assert_eq!(*modes[1], Mode::BracketedPaste(RlBracket::Enabled));
+    }
 }

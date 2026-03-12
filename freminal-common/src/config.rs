@@ -122,8 +122,16 @@ pub struct ShellConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
-    /// Whether to write logs to a file. Equivalent to `--write-logs-to-file`.
+    /// **Deprecated.** File logging is now always on. This field is retained for
+    /// backwards-compatible deserialisation but is ignored at runtime.
+    #[serde(default)]
     pub write_to_file: bool,
+
+    /// Log level for the file appender. Accepts standard tracing level strings:
+    /// `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
+    /// Default: `"debug"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
 }
 
 /// ---------------------------------------------------------------------------------------------
@@ -189,22 +197,21 @@ impl Config {
     ///
     /// Only `Some` values override; `None` means the CLI flag was not specified
     /// and the TOML value (or default) is kept.
-    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, write_logs_to_file: Option<bool>) {
+    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, _write_logs_to_file: Option<bool>) {
         if let Some(shell_path) = shell {
             self.shell.path = Some(shell_path.to_owned());
         }
-        if let Some(write) = write_logs_to_file {
-            self.logging.write_to_file = write;
-        }
+        // `write_logs_to_file` is intentionally ignored — file logging is always on.
+        // The CLI flag is retained only for backwards compatibility (deprecation notice
+        // is printed by the caller).
     }
 
-    /// Returns the effective `write_logs_to_file` value.
+    /// Returns the effective file log level as a string.
     ///
-    /// This is a convenience accessor so callers don't need to reach into
-    /// `logging.write_to_file` directly.
+    /// Falls back to `"debug"` when the config does not specify a level.
     #[must_use]
-    pub const fn write_logs_to_file(&self) -> bool {
-        self.logging.write_to_file
+    pub fn file_log_level(&self) -> &str {
+        self.logging.level.as_deref().unwrap_or("debug")
     }
 
     /// Returns the effective shell path, if configured.
@@ -436,4 +443,52 @@ fn create_dir_if_missing(path: &Path) {
     if !path.exists() {
         let _ = fs::create_dir_all(path);
     }
+}
+
+/// Returns the platform-canonical log directory for Freminal.
+///
+/// | Platform  | Path                            |
+/// |-----------|---------------------------------|
+/// | Linux/BSD | `$XDG_STATE_HOME/freminal/`     |
+/// | macOS     | `~/Library/Logs/Freminal/`      |
+/// | Windows   | `%LOCALAPPDATA%\Freminal\logs\` |
+///
+/// The directory is created if it does not already exist.
+/// Returns `None` only if the platform's base directories cannot be determined
+/// (e.g. no home directory).
+#[allow(unreachable_code)]
+#[must_use]
+pub fn log_dir() -> Option<PathBuf> {
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.home_dir().join("Library/Logs/Freminal");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_local_dir().join("Freminal").join("logs");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // Linux / BSD / everything else Unix-y — use XDG state dir.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        // `state_dir()` returns `$XDG_STATE_HOME` (typically `~/.local/state`).
+        let p = base.state_dir()?.join("freminal");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    None
 }

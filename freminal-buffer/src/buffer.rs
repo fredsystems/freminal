@@ -2033,6 +2033,12 @@ impl Buffer {
         matches!(self.kind, BufferType::Alternate)
     }
 
+    /// Return `true` when a cursor has been saved via DECSC (ESC 7 / `\x1b[?1048h`).
+    #[must_use]
+    pub const fn has_saved_cursor(&self) -> bool {
+        self.saved_cursor.is_some()
+    }
+
     /// Return the terminal width (columns).
     #[must_use]
     pub const fn terminal_width(&self) -> usize {

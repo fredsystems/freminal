@@ -11,7 +11,8 @@ use freminal_common::{
         format_tag::FormatTag,
         ftcs::{FtcsMarker, FtcsState},
         line_draw::DecSpecialGraphics,
-        mode::Mode,
+        mode::{Mode, SetMode},
+        modes::ReportMode,
         modes::decawm::Decawm,
         modes::dectcem::Dectcem,
         modes::lnm::Lnm,
@@ -397,7 +398,7 @@ impl TerminalHandler {
                     ref other => other.clone(),
                 };
             }
-            // Query: deferred to Step 3.5
+            // Query is handled at the Mode dispatch level, not here.
             XtCBlink::Query => {}
         }
     }
@@ -449,13 +450,6 @@ impl TerminalHandler {
     /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
     pub fn handle_secondary_device_attributes(&mut self) {
         self.write_to_pty("\x1b[>65;0;0c");
-    }
-
-    /// Handle `XTVersion` — respond with the Freminal version string as an XTerm-style response.
-    /// Responds with `DCS > | Freminal <version> ST`.
-    pub fn handle_xt_version(&mut self) {
-        let version = env!("CARGO_PKG_VERSION");
-        self.write_to_pty(&format!("\x1bP>|Freminal {version}\x1b\\"));
     }
 
     /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
@@ -784,6 +778,14 @@ impl TerminalHandler {
         self.write_to_pty("\x1b[0n");
     }
 
+    /// Handle DSR ?996 — Color Theme Report.
+    /// Responds with `ESC [ ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
+    /// Freminal's default background is dark (#45475a), so we report dark (2).
+    pub fn handle_color_theme_report(&mut self) {
+        // 1 = light, 2 = dark
+        self.write_to_pty("\x1b[?997;2n");
+    }
+
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
@@ -987,6 +989,12 @@ impl TerminalHandler {
         self.buffer.is_alternate_screen()
     }
 
+    /// Return `true` when a cursor has been saved via DECSC (ESC 7 / `\x1b[?1048h`).
+    #[must_use]
+    pub const fn has_saved_cursor(&self) -> bool {
+        self.buffer.has_saved_cursor()
+    }
+
     /// Return `true` if any row in the visible window (at the given scroll
     /// offset) has been mutated since it was last flattened into the cache.
     ///
@@ -1134,14 +1142,72 @@ impl TerminalHandler {
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
                 Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
-                // Query variants: report mode — deferred to Step 3.5
-                Mode::XtExtscrn(XtExtscrn::Query)
-                | Mode::AltScreen47(AltScreen47::Query)
-                | Mode::SaveCursor1048(SaveCursor1048::Query)
-                | Mode::Decawm(Decawm::Query)
-                | Mode::LineFeedMode(Lnm::Query)
-                | Mode::Dectem(Dectcem::Query) => {
-                    // TODO: Step 3.5 — report mode via outbound write channel
+                // Query variants: report current mode state via DECRPM response
+                Mode::Dectem(Dectcem::Query) => {
+                    let current = &self.show_cursor;
+                    self.write_to_pty(&current.report(None));
+                }
+                Mode::Decawm(Decawm::Query) => {
+                    let mode = if self.buffer.is_wrap_enabled() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Decawm::AutoWrap.report(Some(mode)));
+                }
+                Mode::LineFeedMode(Lnm::Query) => {
+                    let mode = if self.buffer.is_lnm_enabled() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Lnm::NewLine.report(Some(mode)));
+                }
+                Mode::XtExtscrn(XtExtscrn::Query) => {
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&XtExtscrn::Alternate.report(Some(mode)));
+                }
+                Mode::AltScreen47(AltScreen47::Query) => {
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&AltScreen47::Alternate.report(Some(mode)));
+                }
+                Mode::SaveCursor1048(SaveCursor1048::Query) => {
+                    // Report based on whether a cursor has actually been saved
+                    // via DECSC/DECRC, not on alternate-screen state as a proxy.
+                    let mode = if self.buffer.has_saved_cursor() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&SaveCursor1048::Save.report(Some(mode)));
+                }
+                Mode::XtCBlink(XtCBlink::Query) => {
+                    let is_blinking = matches!(
+                        self.cursor_visual_style,
+                        CursorVisualStyle::BlockCursorBlink
+                            | CursorVisualStyle::UnderlineCursorBlink
+                            | CursorVisualStyle::VerticalLineCursorBlink
+                    );
+                    let mode = if is_blinking {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&XtCBlink::Blinking.report(Some(mode)));
+                }
+                Mode::UnknownQuery(params) => {
+                    // Unknown mode — respond with Ps=0 (not recognized)
+                    let digits: String = params.iter().map(|&x| x as char).collect();
+                    tracing::debug!("DECRQM: unknown mode ?{digits}, responding not recognized");
+                    self.write_to_pty(&format!("\x1b[?{digits};0$y"));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
                 Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(false),
@@ -1162,6 +1228,9 @@ impl TerminalHandler {
             TerminalOutput::CursorReport => {
                 self.handle_cursor_report();
             }
+            TerminalOutput::ColorThemeReport => {
+                self.handle_color_theme_report();
+            }
             TerminalOutput::DeviceStatusReport => {
                 self.handle_device_status_report();
             }
@@ -1178,19 +1247,19 @@ impl TerminalHandler {
                 self.handle_request_device_attributes();
             }
             TerminalOutput::EightBitControl => {
-                tracing::warn!("EightBitControl not yet implemented (ignored)");
+                tracing::debug!("EightBitControl not yet implemented (ignored)");
             }
             TerminalOutput::SevenBitControl => {
-                tracing::warn!("SevenBitControl not yet implemented (ignored)");
+                tracing::debug!("SevenBitControl not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelOne => {
-                tracing::warn!("AnsiConformanceLevelOne not yet implemented (ignored)");
+                tracing::debug!("AnsiConformanceLevelOne not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelTwo => {
-                tracing::warn!("AnsiConformanceLevelTwo not yet implemented (ignored)");
+                tracing::debug!("AnsiConformanceLevelTwo not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelThree => {
-                tracing::warn!("AnsiConformanceLevelThree not yet implemented (ignored)");
+                tracing::debug!("AnsiConformanceLevelThree not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightTop => {
                 tracing::debug!("DoubleLineHeightTop not yet implemented (ignored)");
@@ -1243,16 +1312,16 @@ impl TerminalHandler {
                 self.handle_restore_cursor();
             }
             TerminalOutput::CursorToLowerLeftCorner => {
-                tracing::warn!("CursorToLowerLeftCorner not yet implemented (ignored)");
+                tracing::debug!("CursorToLowerLeftCorner not yet implemented (ignored)");
             }
             TerminalOutput::ResetDevice => {
                 self.full_reset();
             }
             TerminalOutput::MemoryLock => {
-                tracing::warn!("MemoryLock not yet implemented (ignored)");
+                tracing::debug!("MemoryLock not yet implemented (ignored)");
             }
             TerminalOutput::MemoryUnlock => {
-                tracing::warn!("MemoryUnlock not yet implemented (ignored)");
+                tracing::debug!("MemoryUnlock not yet implemented (ignored)");
             }
             TerminalOutput::DeviceControlString(dcs) => {
                 self.handle_device_control_string(dcs);
@@ -1265,9 +1334,6 @@ impl TerminalHandler {
             }
             TerminalOutput::RequestSecondaryDeviceAttributes { param: _param } => {
                 self.handle_secondary_device_attributes();
-            }
-            TerminalOutput::RequestXtVersion => {
-                self.handle_xt_version();
             }
             // Silently ignore invalid, skipped, and any future variants
             TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates eight major development tasks for Freminal. Each task has a dedicated
+This document orchestrates nine major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -23,16 +23,17 @@ and plan document maintenance rules.
 
 ## Task Summary
 
-| #   | Task                      | Plan Document                 | Status      | Dependencies |
-| --- | ------------------------- | ----------------------------- | ----------- | ------------ |
-| 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`      | Complete    | None         |
-| 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`       | Complete    | None         |
-| 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`   | Complete    | Task 2       |
-| 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md` | Not Started | Task 2       |
-| 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`   | Not Started | Task 1       |
-| 6   | Test Gap Coverage         | `PLAN_06_TEST_GAPS.md`        | Not Started | None         |
-| 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md` | Complete    | None         |
-| 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`       | Complete    | None         |
+| #   | Task                      | Plan Document                        | Status      | Dependencies |
+| --- | ------------------------- | ------------------------------------ | ----------- | ------------ |
+| 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`             | Complete    | None         |
+| 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`              | Complete    | None         |
+| 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`          | Complete    | Task 2       |
+| 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md`        | Not Started | Task 2       |
+| 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`          | Not Started | Task 1       |
+| 6   | Test Gap Coverage         | `PLAN_06_TEST_GAPS.md`               | Not Started | None         |
+| 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md`        | Complete    | None         |
+| 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`              | Complete    | None         |
+| 9   | tmux Compat + Logging     | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md` | Complete    | None         |
 
 ---
 
@@ -49,6 +50,8 @@ Task 6 (Test Gap Coverage) ── independent, can run any time
 Task 7 (Escape Sequence Coverage) ── independent, can run any time
 
 Task 8 (Primary Screen Scrollback) ── independent, can run any time
+
+Task 9 (tmux Compat + Logging) ── independent, can run any time
 ```
 
 ### Dependency Details
@@ -175,16 +178,17 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                            |
-| ---- | ---------- | ---------- | -------------------------------- |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config  |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal |
-| 4    | —          | —          | Unblocked (Task 2 complete)      |
-| 5    | —          | —          | Unblocked (Task 1 complete)      |
-| 6    | —          | —          |                                  |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete         |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete          |
+| Task | Started    | Completed  | Notes                                      |
+| ---- | ---------- | ---------- | ------------------------------------------ |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas           |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config            |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal           |
+| 4    | —          | —          | Unblocked (Task 2 complete)                |
+| 5    | —          | —          | Unblocked (Task 1 complete)                |
+| 6    | —          | —          |                                            |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                   |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                    |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging |
 
 ---
 
@@ -195,4 +199,5 @@ Update this section as tasks complete:
 - `Documents/TODO.md` — Version roadmap
 - `Documents/PLAN_07_ESCAPE_SEQUENCES.md` — Escape sequence audit and implementation plan
 - `Documents/PLAN_08_SCROLLBACK.md` — Primary screen scrollback architecture and wiring
+- `Documents/PLAN_09_TMUX_COMPAT_AND_LOGGING.md` — tmux compatibility fixes and persistent logging
 - `config_example.toml` — Current config format

@@ -98,6 +98,9 @@ pub enum TerminalOutput {
     InsertSpaces(usize),
     OscResponse(AnsiOscType),
     CursorReport,
+    /// DSR ?996 — Color theme query.
+    /// Respond with `CSI ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
+    ColorThemeReport,
     DeviceStatusReport,
     Invalid,
     Skipped,
@@ -155,8 +158,7 @@ pub enum TerminalOutput {
     RequestDeviceNameAndVersion,
     RequestSecondaryDeviceAttributes {
         param: usize,
-    }, // for ESC[>Ps c
-    RequestXtVersion, // for ESC[>c
+    }, // for ESC[>c / ESC[>Ps c
     /// ESC D — IND (Index): move cursor down, scroll if at bottom margin
     Index,
     /// ESC M — RI (Reverse Index): move cursor up, scroll if at top margin
@@ -215,6 +217,7 @@ impl std::fmt::Display for TerminalOutput {
             }
             Self::Invalid => write!(f, "Invalid"),
             Self::CursorReport => write!(f, "CursorReport"),
+            Self::ColorThemeReport => write!(f, "ColorThemeReport"),
             Self::DeviceStatusReport => write!(f, "DeviceStatusReport"),
             Self::Skipped => write!(f, "Skipped"),
             Self::ApplicationKeypadMode => write!(f, "ApplicationKeypadMode"),
@@ -287,7 +290,6 @@ impl std::fmt::Display for TerminalOutput {
             Self::RequestSecondaryDeviceAttributes { param } => {
                 write!(f, "RequestSecondaryDeviceAttributes({param})")
             }
-            Self::RequestXtVersion => write!(f, "RequestXtVersion"),
             Self::Index => write!(f, "Index"),
             Self::ReverseIndex => write!(f, "ReverseIndex"),
             Self::NextLine => write!(f, "NextLine"),

@@ -71,6 +71,10 @@ pub struct SettingsModal {
     /// Path override for saving (from `--config` CLI flag). `None` means use
     /// the platform default.
     config_path: Option<std::path::PathBuf>,
+
+    /// Cached log directory display string, computed once when the modal is
+    /// opened rather than on every UI frame (avoids repeated filesystem calls).
+    log_dir_display: String,
 }
 
 impl SettingsModal {
@@ -83,6 +87,7 @@ impl SettingsModal {
             active_tab: SettingsTab::Font,
             status_message: None,
             config_path,
+            log_dir_display: String::new(),
         }
     }
 
@@ -91,6 +96,10 @@ impl SettingsModal {
         self.draft = live_config.clone();
         self.active_tab = SettingsTab::Font;
         self.status_message = None;
+        self.log_dir_display = config::log_dir().map_or_else(
+            || "(unable to determine log directory)".to_string(),
+            |p| p.display().to_string(),
+        );
         self.is_open = true;
     }
 
@@ -259,9 +268,45 @@ impl SettingsModal {
     }
 
     fn show_logging_tab(&mut self, ui: &mut Ui) {
-        ui.checkbox(&mut self.draft.logging.write_to_file, "Write logs to file");
+        ui.label("File logging is always enabled.");
+        ui.add_space(4.0);
+
+        // Show the log directory path (read-only). The value was cached when
+        // the modal was opened to avoid repeated filesystem calls per frame.
+        ui.horizontal(|ui| {
+            ui.label("Log directory:");
+            ui.monospace(&self.log_dir_display);
+        });
         ui.add_space(8.0);
-        ui.colored_label(egui::Color32::GRAY, "Changes take effect on next launch.");
+
+        // Log level dropdown.
+        ui.label("File Log Level:");
+        let current_level = self
+            .draft
+            .logging
+            .level
+            .clone()
+            .unwrap_or_else(|| "debug".to_string());
+        let mut selected = current_level;
+        ComboBox::from_id_salt("log_level")
+            .selected_text(selected.as_str())
+            .show_ui(ui, |ui| {
+                for level in &["trace", "debug", "info", "warn", "error"] {
+                    ui.selectable_value(&mut selected, (*level).to_string(), *level);
+                }
+            });
+        // Persist choice into the draft config.
+        self.draft.logging.level = if selected == "debug" {
+            None // default — omit from TOML
+        } else {
+            Some(selected)
+        };
+
+        ui.add_space(8.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Log level changes take effect on next launch.",
+        );
     }
 
     // -------------------------------------------------------------------------

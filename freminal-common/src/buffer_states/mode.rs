@@ -106,39 +106,39 @@ impl Mode {
     }
 
     #[must_use]
-    pub fn terminal_mode_from_params(params: &[u8], mode: &SetMode) -> Self {
+    pub fn terminal_mode_from_params(params: &[u8], mode: SetMode) -> Self {
         match params {
             // https://vt100.net/docs/vt510-rm/DECCKM.html
-            b"?1" => Self::Decckm(Decckm::new(mode)),
-            b"?3" => Self::Deccolm(Deccolm::new(mode)),
-            b"?4" => Self::Decsclm(Decsclm::new(mode)),
-            b"?5" => Self::Decscnm(Decscnm::new(mode)),
-            b"?6" => Self::Decom(Decom::new(mode)),
-            b"?7" => Self::Decawm(Decawm::new(mode)),
-            b"?8" => Self::Decarm(Decarm::new(mode)),
-            b"?9" => Self::mouse_mode(*mode, MouseTrack::XtMsex10, 9),
-            b"?12" => Self::XtCBlink(XtCBlink::new(mode)),
-            b"20" => Self::LineFeedMode(Lnm::new(mode)),
-            b"?25" => Self::Dectem(Dectcem::new(mode)),
-            b"?40" => Self::AllowColumnModeSwitch(AllowColumnModeSwitch::new(mode)),
-            b"?45" => Self::ReverseWrapAround(ReverseWrapAround::new(mode)),
-            b"?1000" => Self::mouse_mode(*mode, MouseTrack::XtMseX11, 1000),
-            b"?1002" => Self::mouse_mode(*mode, MouseTrack::XtMseBtn, 1002),
-            b"?1003" => Self::mouse_mode(*mode, MouseTrack::XtMseAny, 1003),
-            b"?1004" => Self::XtMseWin(XtMseWin::new(mode)),
-            b"?1005" => Self::mouse_mode(*mode, MouseTrack::XtMseUtf, 1005),
-            b"?1006" => Self::mouse_mode(*mode, MouseTrack::XtMseSgr, 1006),
+            b"?1" => Self::Decckm(Decckm::new(&mode)),
+            b"?3" => Self::Deccolm(Deccolm::new(&mode)),
+            b"?4" => Self::Decsclm(Decsclm::new(&mode)),
+            b"?5" => Self::Decscnm(Decscnm::new(&mode)),
+            b"?6" => Self::Decom(Decom::new(&mode)),
+            b"?7" => Self::Decawm(Decawm::new(&mode)),
+            b"?8" => Self::Decarm(Decarm::new(&mode)),
+            b"?9" => Self::mouse_mode(mode, MouseTrack::XtMsex10, 9),
+            b"?12" => Self::XtCBlink(XtCBlink::new(&mode)),
+            b"20" => Self::LineFeedMode(Lnm::new(&mode)),
+            b"?25" => Self::Dectem(Dectcem::new(&mode)),
+            b"?40" => Self::AllowColumnModeSwitch(AllowColumnModeSwitch::new(&mode)),
+            b"?45" => Self::ReverseWrapAround(ReverseWrapAround::new(&mode)),
+            b"?1000" => Self::mouse_mode(mode, MouseTrack::XtMseX11, 1000),
+            b"?1002" => Self::mouse_mode(mode, MouseTrack::XtMseBtn, 1002),
+            b"?1003" => Self::mouse_mode(mode, MouseTrack::XtMseAny, 1003),
+            b"?1004" => Self::XtMseWin(XtMseWin::new(&mode)),
+            b"?1005" => Self::mouse_mode(mode, MouseTrack::XtMseUtf, 1005),
+            b"?1006" => Self::mouse_mode(mode, MouseTrack::XtMseSgr, 1006),
             // ?1015 (urxvt mouse) intentionally omitted — the format clashes
             // with DL / SD / window manipulation sequences and is not
             // recommended; ?1006 (SGR) is the preferred replacement.
-            b"?1016" => Self::mouse_mode(*mode, MouseTrack::XtMseSgrPixels, 1016),
-            b"?1049" => Self::XtExtscrn(XtExtscrn::new(mode)),
-            b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(mode)),
-            b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(mode)),
-            b"?2004" => Self::BracketedPaste(RlBracket::new(mode)),
-            b"?2026" => Self::SynchronizedUpdates(SynchronizedUpdates::new(mode)),
-            b"?2027" => Self::GraphemeClustering(GraphemeClustering::new(mode)),
-            b"?2031" => Self::Theming(Theming::new(mode)),
+            b"?1016" => Self::mouse_mode(mode, MouseTrack::XtMseSgrPixels, 1016),
+            b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
+            b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
+            b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(&mode)),
+            b"?2004" => Self::BracketedPaste(RlBracket::new(&mode)),
+            b"?2026" => Self::SynchronizedUpdates(SynchronizedUpdates::new(&mode)),
+            b"?2027" => Self::GraphemeClustering(GraphemeClustering::new(&mode)),
+            b"?2031" => Self::Theming(Theming::new(&mode)),
             _ => {
                 let output_params = params
                     .to_vec()
@@ -147,10 +147,10 @@ impl Mode {
                     .copied()
                     .collect::<Vec<u8>>();
 
-                if mode == &SetMode::DecQuery {
+                if mode == SetMode::DecQuery {
                     Self::UnknownQuery(output_params)
                 } else {
-                    Self::Unknown(UnknownMode::new(&output_params, *mode))
+                    Self::Unknown(UnknownMode::new(&output_params, mode))
                 }
             }
         }

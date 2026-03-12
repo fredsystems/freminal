@@ -7,12 +7,15 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Request Device Attributes (DA1 / DA2 / `XTVersion`)
+/// Request Device Attributes (DA1 / DA2)
 ///
 /// Supported formats:
 /// - ESC [ c          → Primary Device Attributes (DA1)
-/// - ESC [ > c        → `XTVersion` query (xterm)
-/// - ESC [ > Ps c     → Secondary Device Attributes (DA2)
+/// - ESC [ > c        → Secondary Device Attributes (DA2, implicit param 0)
+/// - ESC [ > Ps c     → Secondary Device Attributes (DA2, explicit param)
+///
+/// Note: the XTVERSION query (`ESC [ > q`) uses terminator `q` and is
+/// dispatched through `report_xt_version.rs`, not this function.
 ///
 /// # Errors
 /// Returns `InvalidParserFailure` if parameters are malformed.
@@ -31,9 +34,9 @@ pub fn ansi_parser_inner_csi_finished_send_da(
             params
         };
 
-        // case 1: pure '>' only → XTVersion
+        // case 1: pure '>' only (ESC[>c) → DA2 with implicit param 0
         if clean_params.is_empty() {
-            output.push(TerminalOutput::RequestXtVersion);
+            output.push(TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 });
             return ParserOutcome::Finished;
         }
 

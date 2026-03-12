@@ -54,9 +54,20 @@ name = "catppuccin-mocha"
 # LOGGING SETTINGS
 ################################################################################
 [logging]
-# Write log output to a file in the current directory.
-# This can be overridden at runtime with the --write-logs-to-file CLI flag.
-write_to_file = false
+# Log level for file output. Logs are always written to the platform
+# log directory:
+#   Linux:   ~/.local/state/freminal/
+#   macOS:   ~/Library/Logs/Freminal/
+#   Windows: %LOCALAPPDATA%\Freminal\logs\
+#
+# Valid levels: "trace", "debug", "info", "warn", "error"
+# Default: "debug"
+#
+# To view logs in real time:
+#   tail -f ~/.local/state/freminal/freminal.YYYY-MM-DD.log
+#
+# Log files are rotated daily and kept for 7 days.
+# level = "debug"
 
 ################################################################################
 # SCROLLBACK SETTINGS
