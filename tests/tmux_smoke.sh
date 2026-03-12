@@ -154,7 +154,7 @@ fi
 # ── Step 10: Clean up ─────────────────────────────────────────────────
 
 echo ""
-echo "Step 9: Cleaning up tmux session..."
+echo "Step 10: Cleaning up tmux session..."
 if tmux kill-session -t freminal_test 2>/dev/null; then
 	pass "tmux kill-session succeeded"
 else
