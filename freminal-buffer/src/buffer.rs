@@ -17,6 +17,7 @@ use crate::{
 };
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Buffer {
     /// All rows in this buffer: scrollback + visible region.
     /// In the primary buffer, this grows until `scrollback_limit` is hit.
@@ -86,6 +87,10 @@ pub struct Buffer {
     /// `tab_stops[c] == true` means column `c` is a tab stop.
     /// Default: every 8 columns (8, 16, 24, ...).
     tab_stops: Vec<bool>,
+
+    /// DECOM (Origin Mode) — when enabled, cursor addressing is relative
+    /// to the scroll region top/bottom instead of the full screen.
+    decom_enabled: bool,
 }
 
 /// Everything we need to restore when leaving alternate buffer.
@@ -140,6 +145,7 @@ impl Buffer {
             scroll_region_top: 0,
             scroll_region_bottom: height.saturating_sub(1),
             tab_stops: Self::default_tab_stops(width),
+            decom_enabled: false,
         }
     }
 
@@ -178,6 +184,7 @@ impl Buffer {
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
         self.tab_stops = Self::default_tab_stops(self.width);
+        self.decom_enabled = false;
     }
 
     /// The maximum number of off-screen rows retained above the visible area.
@@ -1370,11 +1377,15 @@ impl Buffer {
         self.scroll_region_top = top;
         self.scroll_region_bottom = bottom;
 
-        // xterm behavior: move cursor to the top of the new scroll region, col 0.
-        // Use set_cursor_pos (screen coords) so rows are created if they don't
-        // exist yet — the buffer may have fewer than `height` rows when still
-        // filling up on first use.
-        self.set_cursor_pos(Some(0), Some(top));
+        // Move cursor to the top of the scroll region, col 0.
+        // When DECOM is enabled, set_cursor_pos interprets y=0 as
+        // scroll_region_top, which is already correct.
+        // When DECOM is disabled, we pass `top` directly as the screen row.
+        if self.decom_enabled {
+            self.set_cursor_pos(Some(0), Some(0));
+        } else {
+            self.set_cursor_pos(Some(0), Some(top));
+        }
     }
 
     /// Return the current scroll region as 0-based inclusive `(top, bottom)`.
@@ -1610,7 +1621,11 @@ impl Buffer {
     ///
     /// Move cursor to absolute position (CUP, HVP)
     ///
-    /// x and y are 0-indexed screen coordinates
+    /// x and y are 0-indexed screen coordinates.
+    ///
+    /// When DECOM (origin mode) is enabled, `y` is relative to `scroll_region_top`
+    /// and is clamped to the scroll region height.  When DECOM is disabled, `y` is
+    /// relative to the top of the visible window and clamped to the screen height.
     pub fn set_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
         // `None` means "leave this axis unchanged" (e.g. CHA only supplies x,
         // VPA only supplies y, CUP supplies both).
@@ -1619,13 +1634,24 @@ impl Buffer {
             None => self.cursor.pos.x,
         };
 
-        // y is a screen-relative coordinate (0 = top of visible window).
-        // When y is None we keep the current screen row.
+        // y is a screen-relative coordinate (0 = top of visible window in normal
+        // mode, or 0 = top of scroll region in DECOM mode).
         let new_buffer_y = match y {
             Some(row) => {
-                let clamped = row.min(self.height.saturating_sub(1));
-                // PTY always operates at live bottom (scroll_offset = 0)
-                self.visible_window_start(0) + clamped
+                if self.decom_enabled {
+                    // DECOM: row is relative to scroll_region_top, clamped to
+                    // the scroll region height.
+                    let region_height = self
+                        .scroll_region_bottom
+                        .saturating_sub(self.scroll_region_top);
+                    let clamped = row.min(region_height);
+                    let screen_row = self.scroll_region_top + clamped;
+                    self.visible_window_start(0) + screen_row
+                } else {
+                    let clamped = row.min(self.height.saturating_sub(1));
+                    // PTY always operates at live bottom (scroll_offset = 0)
+                    self.visible_window_start(0) + clamped
+                }
             }
             None => self.cursor.pos.y,
         };
@@ -2089,6 +2115,55 @@ impl Buffer {
     #[must_use]
     pub const fn is_wrap_enabled(&self) -> bool {
         self.wrap_enabled
+    }
+
+    /// Enable or disable DECOM (Origin Mode).
+    ///
+    /// When origin mode is enabled, cursor positioning (CUP, HVP, and similar
+    /// commands) is relative to the scroll region rather than the full screen.
+    /// Cursor movement is also constrained to the scroll region boundaries.
+    ///
+    /// Per DEC spec: enabling or disabling DECOM homes the cursor.
+    pub fn set_decom(&mut self, enabled: bool) {
+        self.decom_enabled = enabled;
+        // DEC spec: changing DECOM homes the cursor to position (1,1) in the
+        // current addressing mode.  With `set_cursor_pos` already DECOM-aware,
+        // passing (0, 0) does the right thing for both modes.
+        self.set_cursor_pos(Some(0), Some(0));
+    }
+
+    /// Return whether DECOM (Origin Mode) is currently enabled.
+    #[must_use]
+    pub const fn is_decom_enabled(&self) -> bool {
+        self.decom_enabled
+    }
+
+    /// Switch the buffer to a different column width (DECCOLM).
+    ///
+    /// This performs all the side effects mandated by the DEC spec:
+    /// - Reflows the buffer to the new width
+    /// - Clears the screen
+    /// - Resets the scroll region to full screen
+    /// - Resets DECOM (Origin Mode)
+    /// - Homes the cursor to (0, 0)
+    pub fn set_column_mode(&mut self, columns: usize) {
+        // Reflow to the new width (height stays the same).
+        // set_size returns the new scroll offset; DECCOLM always operates at
+        // live bottom, so pass 0 and discard the result.
+        let _ = self.set_size(columns, self.height, 0);
+
+        // Clear the visible screen.
+        self.erase_display();
+
+        // Reset scroll region to full screen.
+        self.scroll_region_top = 0;
+        self.scroll_region_bottom = self.height.saturating_sub(1);
+
+        // Reset DECOM without the cursor-home side effect (we home below).
+        self.decom_enabled = false;
+
+        // Home cursor.
+        self.set_cursor_pos(Some(0), Some(0));
     }
 
     /// Switch to the alternate screen buffer.

@@ -109,15 +109,6 @@ impl FreminalGui {
 
                 ui.separator();
 
-                #[cfg(debug_assertions)]
-                {
-                    ui.checkbox(
-                        self.terminal_widget.debug_renderer_enabled(),
-                        "Debug render",
-                    );
-                    ui.separator();
-                }
-
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }

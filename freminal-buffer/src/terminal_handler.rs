@@ -13,7 +13,10 @@ use freminal_common::{
         line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode},
         modes::ReportMode,
+        modes::allow_column_mode_switch::AllowColumnModeSwitch,
         modes::decawm::Decawm,
+        modes::deccolm::Deccolm,
+        modes::decom::Decom,
         modes::dectcem::Dectcem,
         modes::lnm::Lnm,
         modes::xtcblink::XtCBlink,
@@ -27,7 +30,7 @@ use freminal_common::{
     },
     colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
-    pty_write::PtyWrite,
+    pty_write::{FreminalTerminalSize, PtyWrite},
     sgr::SelectGraphicRendition,
 };
 use std::borrow::Cow;
@@ -65,6 +68,15 @@ pub struct TerminalHandler {
     last_exit_code: Option<i32>,
     /// Mutable 256-color palette with optional per-index overrides.
     palette: ColorPalette,
+    /// Whether DECCOLM (132-column mode switching) is allowed.
+    /// Controlled by `CSI?40h` / `CSI?40l` (`AllowColumnModeSwitch`).
+    allow_column_mode_switch: bool,
+    /// The terminal width before DECCOLM was activated.
+    ///
+    /// Saved when `CSI?3h` (132-column mode) is received so that `CSI?3l`
+    /// (80-column reset) restores the actual GUI window width rather than
+    /// hardcoding 80.  `None` means DECCOLM has not changed the width.
+    pre_deccolm_width: Option<usize>,
 }
 
 impl TerminalHandler {
@@ -84,6 +96,8 @@ impl TerminalHandler {
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
             palette: ColorPalette::default(),
+            allow_column_mode_switch: true,
+            pre_deccolm_width: None,
         }
     }
 
@@ -99,8 +113,19 @@ impl TerminalHandler {
     ///
     /// Restores the handler and buffer to initial startup state.
     /// Preserves the PTY write channel and terminal geometry/scrollback config.
+    ///
+    /// If DECCOLM had changed the column width to 132, this resets it back
+    /// to 80 columns and sends a PTY resize notification.
     pub fn full_reset(&mut self) {
+        // If DECCOLM switched us to a different width, restore the pre-DECCOLM
+        // width.  Fall back to 80 if no prior width was saved.
+        let prev_width = self.buffer.terminal_width();
+        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
         self.buffer.full_reset();
+        if prev_width != restore_width {
+            self.buffer.set_column_mode(restore_width);
+            self.send_pty_resize(restore_width);
+        }
         self.current_format = FormatTag::default();
         self.show_cursor = Dectcem::default();
         self.cursor_visual_style = CursorVisualStyle::default();
@@ -111,6 +136,7 @@ impl TerminalHandler {
         self.ftcs_state = FtcsState::default();
         self.last_exit_code = None;
         self.palette.reset_all();
+        self.allow_column_mode_switch = true;
     }
 
     /// Get a reference to the underlying buffer
@@ -443,6 +469,26 @@ impl TerminalHandler {
             && let Err(e) = tx.send(PtyWrite::Write(text.as_bytes().to_vec()))
         {
             tracing::error!("Failed to write to PTY: {e}");
+        }
+    }
+
+    /// Notify the PTY of a column-mode resize (DECCOLM).
+    ///
+    /// Sends a `PtyWrite::Resize` with the new width and the current height.
+    /// Pixel dimensions are set to 0 — the PTY thread will use the character
+    /// dimensions to compute the actual pixel size.
+    fn send_pty_resize(&self, new_width: usize) {
+        let height = self.buffer.terminal_height();
+        if let Some(tx) = &self.write_tx {
+            let size = FreminalTerminalSize {
+                width: new_width,
+                height,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            if let Err(e) = tx.send(PtyWrite::Resize(size)) {
+                tracing::error!("Failed to send PTY resize: {e}");
+            }
         }
     }
 
@@ -1216,6 +1262,62 @@ impl TerminalHandler {
                 Mode::Dectem(Dectcem::Show) => self.show_cursor = Dectcem::Show,
                 Mode::Dectem(Dectcem::Hide) => self.show_cursor = Dectcem::Hide,
                 Mode::XtCBlink(blink) => self.apply_xtcblink(blink),
+                Mode::Decom(Decom::OriginMode) => self.buffer.set_decom(true),
+                Mode::Decom(Decom::NormalCursor) => self.buffer.set_decom(false),
+                Mode::Decom(Decom::Query) => {
+                    let mode = if self.buffer.is_decom_enabled() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Decom::OriginMode.report(Some(mode)));
+                }
+                Mode::Deccolm(Deccolm::Column132) => {
+                    if self.allow_column_mode_switch {
+                        // Save the current width so CSI?3l can restore it
+                        // instead of hardcoding 80.
+                        if self.pre_deccolm_width.is_none() {
+                            self.pre_deccolm_width = Some(self.buffer.terminal_width());
+                        }
+                        self.buffer.set_column_mode(132);
+                        self.send_pty_resize(132);
+                    }
+                }
+                Mode::Deccolm(Deccolm::Column80) => {
+                    if self.allow_column_mode_switch {
+                        // Restore the pre-DECCOLM width (falls back to 80 if
+                        // no prior width was saved — e.g. CSI?3l without a
+                        // preceding CSI?3h).
+                        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
+                        self.buffer.set_column_mode(restore_width);
+                        self.send_pty_resize(restore_width);
+                    }
+                }
+                Mode::Deccolm(Deccolm::Query) => {
+                    // Report current column mode: 132 if width == 132, else 80.
+                    let mode = if self.buffer.terminal_width() == 132 {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Deccolm::Column132.report(Some(mode)));
+                }
+                Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch) => {
+                    self.allow_column_mode_switch = true;
+                }
+                Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::NoAllowColumnModeSwitch) => {
+                    self.allow_column_mode_switch = false;
+                }
+                Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::Query) => {
+                    let mode = if self.allow_column_mode_switch {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(
+                        &AllowColumnModeSwitch::AllowColumnModeSwitch.report(Some(mode)),
+                    );
+                }
                 other => {
                     // Modes handled by TerminalState's mode-sync loop, or
                     // modes not yet acted on.  Log for diagnostic visibility.

@@ -2511,6 +2511,35 @@ fn test_ris_via_process_outputs_does_not_panic() {
     assert_eq!(handler.cursor_pos().y, 0);
 }
 
+#[test]
+fn test_ris_resets_deccolm_back_to_80() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Switch to 132 columns.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(handler.buffer().terminal_width(), 132);
+
+    // Full reset.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    // Width should be back to 80.
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        80,
+        "RIS must reset DECCOLM back to 80 columns"
+    );
+    // Cursor at home.
+    assert_eq!(handler.cursor_pos().x, 0);
+    assert_eq!(handler.cursor_pos().y, 0);
+}
+
 // ── 7.21 — HTS, TBC, CHT, CBT (Tab Stop Control) ────────────────────
 
 #[test]
@@ -3126,4 +3155,456 @@ fn decrpm_lnm_default_is_line_feed() {
     );
     // Default LNM is LineFeed (disabled) → Ps=2 (reset)
     assert_eq!(resp, "\x1b[?20;2$y", "LNM default (LineFeed mode) → Ps=2");
+}
+
+// ── DECOM (Origin Mode ?6) ────────────────────────────────────────────────────
+
+/// Helper: fill the handler's buffer so that rows.len() >= height by writing
+/// enough newlines.  This ensures `visible_window_start(0) == 0` for simple
+/// position math in tests.
+fn fill_buffer(handler: &mut TerminalHandler) {
+    let (_, h) = handler.get_win_size();
+    for _ in 0..h {
+        handler.handle_newline();
+    }
+    // Home cursor
+    handler.handle_cursor_pos(Some(1), Some(1));
+}
+
+#[test]
+fn decom_mode_dispatch() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default is DECOM off.
+    assert!(
+        !handler.buffer().is_decom_enabled(),
+        "DECOM must be disabled by default"
+    );
+
+    // Enable DECOM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        handler.buffer().is_decom_enabled(),
+        "DECOM must be enabled after DecSet"
+    );
+
+    // Disable DECOM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecRst,
+    )))]);
+    assert!(
+        !handler.buffer().is_decom_enabled(),
+        "DECOM must be disabled after DecRst"
+    );
+
+    // Query variant must not panic and must leave state unchanged.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::Query))]);
+    assert!(
+        !handler.buffer().is_decom_enabled(),
+        "DECOM state must not change after a Query"
+    );
+}
+
+#[test]
+fn decom_enable_homes_cursor_to_region_top() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    fill_buffer(&mut handler);
+
+    // Set a scroll region lines 5–20 (0-based: rows 4–19).
+    handler.handle_set_scroll_region(5, 20);
+
+    // Move cursor somewhere random.
+    handler.handle_cursor_pos(Some(10), Some(15));
+    assert_ne!(handler.buffer().get_cursor().pos.x, 0);
+
+    // Enable DECOM — cursor should home to (0, region_top) in buffer coords.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+
+    let cursor = handler.buffer().get_cursor().pos;
+    // In DECOM mode, set_cursor_pos(0,0) offsets y by scroll_region_top (4).
+    // After fill_buffer, visible_window_start(0) is a known offset; cursor.pos.y
+    // relative to the start of the visible window should equal scroll_region_top.
+    let rows_len = handler.buffer().get_rows().len();
+    let vis_start = rows_len.saturating_sub(24);
+    assert_eq!(cursor.x, 0, "DECOM enable must home x to 0");
+    assert_eq!(
+        cursor.y,
+        vis_start + 4,
+        "DECOM enable must home cursor to scroll region top"
+    );
+}
+
+#[test]
+fn decom_cursor_pos_is_relative_to_scroll_region() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    fill_buffer(&mut handler);
+
+    // Set scroll region 5–15 (0-based: 4–14).
+    handler.handle_set_scroll_region(5, 15);
+
+    // Enable DECOM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // CUP to row 3, col 5 (1-based) → within-region row 2, col 4 (0-based).
+    // With DECOM, row 3 maps to screen row scroll_region_top + 2 = 4 + 2 = 6.
+    // handle_cursor_pos(x=col, y=row)
+    handler.handle_cursor_pos(Some(5), Some(3));
+
+    let cursor = handler.buffer().get_cursor().pos;
+    let rows_len = handler.buffer().get_rows().len();
+    let vis_start = rows_len.saturating_sub(24);
+    // handle_cursor_pos converts 1-based to 0-based, then set_cursor_pos adds
+    // scroll_region_top (4).
+    assert_eq!(
+        cursor.x, 4,
+        "DECOM cursor x should be col 4 (0-based from 5)"
+    );
+    assert_eq!(
+        cursor.y,
+        vis_start + 6,
+        "DECOM cursor y should be vis_start + region_top(4) + row(2) = vis_start + 6"
+    );
+}
+
+#[test]
+fn decom_cursor_clamped_to_scroll_region() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    fill_buffer(&mut handler);
+
+    // Set scroll region 5–10 (0-based: 4–9, region height = 5).
+    handler.handle_set_scroll_region(5, 10);
+
+    // Enable DECOM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // CUP to row 100 (way beyond region) — should clamp to region bottom.
+    // handle_cursor_pos(x=col, y=row)
+    handler.handle_cursor_pos(Some(1), Some(100));
+
+    let cursor = handler.buffer().get_cursor().pos;
+    let rows_len = handler.buffer().get_rows().len();
+    let vis_start = rows_len.saturating_sub(24);
+    // Region height = bottom - top = 9 - 4 = 5 rows (rows 4..=9).
+    // Clamped row = min(99, 5) = 5 → screen row = 4 + 5 = 9.
+    assert_eq!(
+        cursor.y,
+        vis_start + 9,
+        "DECOM cursor y should clamp to bottom of scroll region"
+    );
+}
+
+#[test]
+fn decom_disable_homes_cursor_to_screen_top() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    fill_buffer(&mut handler);
+
+    // Set scroll region, enable DECOM, move cursor somewhere.
+    handler.handle_set_scroll_region(5, 20);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.handle_cursor_pos(Some(5), Some(10));
+
+    // Disable DECOM — cursor should home to (0, 0) screen-relative.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecRst,
+    )))]);
+
+    let cursor = handler.buffer().get_cursor().pos;
+    let rows_len = handler.buffer().get_rows().len();
+    let vis_start = rows_len.saturating_sub(24);
+    assert_eq!(cursor.x, 0, "DECOM disable must home x to 0");
+    assert_eq!(
+        cursor.y, vis_start,
+        "DECOM disable must home cursor to screen row 0"
+    );
+}
+
+#[test]
+fn decrpm_decom_default_is_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decom(Decom::new(&SetMode::DecQuery))),
+    );
+    // Default DECOM is NormalCursor (disabled) → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?6;2$y", "DECOM default (NormalCursor) → Ps=2");
+}
+
+#[test]
+fn decrpm_decom_after_enable() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Enable DECOM
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decom(Decom::new(&SetMode::DecQuery))),
+    );
+    // After enable → Ps=1 (set)
+    assert_eq!(resp, "\x1b[?6;1$y", "DECOM after enable → Ps=1");
+}
+
+// ---------------------------------------------------------------------------
+// DECCOLM (132-column mode) tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deccolm_set_switches_to_132_columns() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Write some data so the buffer is not empty.
+    handler.process_outputs(&[TerminalOutput::Data(b"Hello, world!".to_vec())]);
+
+    // Switch to 132-column mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Buffer width should be 132.
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        132,
+        "DECCOLM set → 132 cols"
+    );
+    // Cursor should be at home (0, 0 screen-relative).
+    let cursor = handler.buffer().get_cursor().pos;
+    let vis_start = handler.buffer().get_rows().len().saturating_sub(24);
+    assert_eq!(cursor.x, 0, "DECCOLM set → cursor x = 0");
+    assert_eq!(cursor.y, vis_start, "DECCOLM set → cursor y = vis_start");
+}
+
+#[test]
+fn deccolm_reset_switches_to_80_columns() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // First switch to 132.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(handler.buffer().terminal_width(), 132);
+
+    // Write some data.
+    handler.process_outputs(&[TerminalOutput::Data(b"Test data".to_vec())]);
+
+    // Switch back to 80.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecRst,
+    )))]);
+
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        80,
+        "DECCOLM reset → 80 cols"
+    );
+    let cursor = handler.buffer().get_cursor().pos;
+    let vis_start = handler.buffer().get_rows().len().saturating_sub(24);
+    assert_eq!(cursor.x, 0, "DECCOLM reset → cursor x = 0");
+    assert_eq!(cursor.y, vis_start, "DECCOLM reset → cursor y = vis_start");
+}
+
+#[test]
+fn deccolm_blocked_by_allow_column_mode_switch() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_column_mode_switch::AllowColumnModeSwitch,
+        modes::deccolm::Deccolm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Disable column mode switching.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+        AllowColumnModeSwitch::new(&SetMode::DecRst),
+    ))]);
+
+    // Attempt to switch to 132 columns — should be blocked.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    // Width should remain 80.
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        80,
+        "DECCOLM blocked → width unchanged"
+    );
+}
+
+#[test]
+fn deccolm_resets_decom() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+        modes::decom::Decom,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Enable DECOM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(handler.buffer().is_decom_enabled());
+
+    // Switch to 132-column mode — should reset DECOM.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    assert!(
+        !handler.buffer().is_decom_enabled(),
+        "DECCOLM set must reset DECOM"
+    );
+}
+
+#[test]
+fn deccolm_resets_scroll_region() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set a non-default scroll region.
+    handler.handle_set_scroll_region(5, 20);
+    assert_eq!(handler.buffer().scroll_region(), (4, 19));
+
+    // Switch to 132 columns — scroll region should reset to full screen.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+
+    assert_eq!(
+        handler.buffer().scroll_region(),
+        (0, 23),
+        "DECCOLM set must reset scroll region to full screen"
+    );
+}
+
+#[test]
+fn decrpm_deccolm_default_is_80() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(&SetMode::DecQuery))),
+    );
+    // Default is 80 columns → Ps=2 (reset)
+    assert_eq!(resp, "\x1b[?3;2$y", "DECCOLM default → Ps=2 (80-col)");
+}
+
+#[test]
+fn deccolm_reset_restores_original_non_80_width() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    // Start with a 96-column terminal (not 80).
+    let mut handler = TerminalHandler::new(96, 24);
+    assert_eq!(handler.buffer().terminal_width(), 96);
+
+    // Switch to 132-column mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(handler.buffer().terminal_width(), 132);
+
+    // Switch back via CSI?3l — should restore 96, not hardcode 80.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecRst,
+    )))]);
+
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        96,
+        "DECCOLM reset must restore original width (96), not hardcode 80"
+    );
+}
+
+#[test]
+fn ris_restores_original_non_80_width_after_deccolm() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::deccolm::Deccolm,
+    };
+
+    // Start with a 96-column terminal (not 80).
+    let mut handler = TerminalHandler::new(96, 24);
+    assert_eq!(handler.buffer().terminal_width(), 96);
+
+    // Switch to 132-column mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
+        &SetMode::DecSet,
+    )))]);
+    assert_eq!(handler.buffer().terminal_width(), 132);
+
+    // Full reset (RIS) — should restore 96, not hardcode 80.
+    handler.process_outputs(&[TerminalOutput::ResetDevice]);
+
+    assert_eq!(
+        handler.buffer().terminal_width(),
+        96,
+        "RIS after DECCOLM must restore original width (96), not hardcode 80"
+    );
 }
