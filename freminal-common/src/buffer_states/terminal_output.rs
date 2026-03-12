@@ -158,7 +158,7 @@ pub enum TerminalOutput {
     RequestDeviceNameAndVersion,
     RequestSecondaryDeviceAttributes {
         param: usize,
-    }, // for ESC[c / ESC[>Ps c
+    }, // for ESC[>c / ESC[>Ps c
     /// ESC D — IND (Index): move cursor down, scroll if at bottom margin
     Index,
     /// ESC M — RI (Reverse Index): move cursor up, scroll if at top margin
