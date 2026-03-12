@@ -69,8 +69,10 @@ fn main() {
     if args.write_logs_to_file.is_some() {
         eprintln!(
             "WARNING: --write-logs-to-file is deprecated and ignored. \
-             File logging is now always on. Logs are written to the \
-             platform log directory."
+             File logging is now managed automatically. Freminal will \
+             attempt to write logs to the platform log directory; if no \
+             suitable log directory is available or log files cannot be \
+             created, logs will only be written to the console."
         );
     }
 
