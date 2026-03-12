@@ -2,66 +2,71 @@
 
 ## Last updated
 
-Last updated: 2026-03-09 — Corrected via comprehensive codebase audit (Task 7)
+Last updated: 2026-03-12 — Rewritten post-Task 7 completion (all 30 subtasks done)
 
 ## Overview
 
-Freminal implements approximately **50–55 %** of the escape sequences needed for a fully
-compatible modern terminal emulator. Core cursor movement, SGR colors, and basic screen
-manipulation work correctly. However, the audit revealed several **critical bugs** (DECSTBM
-double-decrement, DL not wired, DEC private modes silently swallowed) and significant gaps
-in C0 control handling, tab stop infrastructure, and modern features (mouse tracking,
-bracketed paste, clipboard). These findings are tracked in `PLAN_07_ESCAPE_SEQUENCES.md`.
+Freminal implements approximately **85–90 %** of the escape sequences needed for a fully
+compatible modern terminal emulator. All critical bugs identified in the March 2026 audit have
+been fixed. Core cursor movement, SGR colors, screen manipulation, tab stops, DEC private
+modes (including cursor key mode, DECOM, DECCOLM, bracketed paste, mouse tracking, focus
+reporting), clipboard (OSC 52), hyperlinks (OSC 8), shell integration (OSC 133), and modern
+queries (DECRQSS, XTGETTCAP, XTVERSION, DA1/DA2) all work correctly. C0 mid-sequence handling
+is ECMA-48 compliant.
+
+The remaining gaps are primarily optional features: full renderer-side reverse video (DECSCNM),
+double-height/width lines, legacy G1–G3 charset switching, and a handful of niche DEC modes.
 
 ### Status Legend
 
 - ✅ Implemented and working correctly
-- 🚧 Partially implemented or has known bugs
+- 🚧 Partially implemented or has known limitations
 - ⬜ Recognized/parsed but not functional (stub or silently swallowed)
 - ❌ Not implemented / not planned
 
 ---
 
-## Known Bugs
+## Known Bugs (pre-Task 7, now fixed)
 
-These are sequences that appear to work but produce incorrect behavior:
+All eight bugs documented in the previous audit have been resolved:
 
-| Bug                                      | Location                                              | Description                                                                                                                                                                                                                                                  |
-| ---------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **DECSTBM double-decrement**             | `terminal_handler.rs:212-216` + `buffer.rs:1198-1225` | `handle_set_scroll_region` subtracts 1 from params, then `Buffer::set_scroll_region` subtracts 1 again. `CSI 3;20 r` produces region [1,18] instead of correct [2,19]. Default case accidentally works. **Likely cause of vttest cursor movement failures.** |
-| **DL (CSI M) not wired**                 | `csi.rs` dispatch table                               | Buffer has `delete_lines()`, handler has `handle_delete_lines()`, but CSI dispatch has NO `b'M'` arm. The sequence is silently consumed.                                                                                                                     |
-| **DSR ignores Ps value**                 | `terminal_handler.rs`                                 | `CSI n` always emits cursor position report regardless of Ps. `Ps=5` should respond with device status `CSI 0 n`, not cursor position.                                                                                                                       |
-| **CSI u blocks ANSI restore cursor**     | `csi.rs` dispatch                                     | CSI u is mapped to Kitty keyboard protocol handler (always returns `Skipped`), preventing standard ANSI restore-cursor (SCORC) from working.                                                                                                                 |
-| **DEC private modes silently swallowed** | `terminal_handler.rs:651-654`                         | 14+ DEC private modes (including ?1 DECCKM, ?2004 bracketed paste, ?1000–?1006 mouse) fall through the `_other` catch-all with NO logging and no effect on `TerminalModes`.                                                                                  |
-| **TerminalModes never written**          | `state/internal.rs`                                   | `TerminalState.modes` has fields for cursor_key, bracketed_paste, focus_reporting, mouse_tracking, synchronized_updates, etc. — these are read by snapshots but NEVER WRITTEN by the mode handler. Only `playback.rs` writes them.                           |
-| **Unrecognized CSI silently consumed**   | `csi.rs:240`                                          | Unknown CSI final bytes fall through with no log and no effect. Should at least emit `warn!`.                                                                                                                                                                |
-| **OSC unknown double emission**          | `osc.rs`                                              | Unrecognized OSC produces error-level logging AND `TerminalOutput::Invalid` (double emission). Most terminals silently consume unknown OSC.                                                                                                                  |
+| Bug                                      | Status   | Fix Summary                                                        |
+| ---------------------------------------- | -------- | ------------------------------------------------------------------ |
+| DECSTBM double-decrement                 | ✅ Fixed | Removed extra `-1` from `Buffer::set_scroll_region`                |
+| DL (CSI M) not wired                     | ✅ Fixed | Added `b'M'` arm in CSI dispatch calling `handle_delete_lines()`   |
+| DSR ignores Ps value                     | ✅ Fixed | Ps=5 → device status, Ps=6 → cursor position report                |
+| CSI u blocks ANSI restore cursor (SCORC) | ✅ Fixed | CSI u now handles SCORC; Kitty uses `CSI > u` (different prefix)   |
+| DEC private modes silently swallowed     | ✅ Fixed | All modes have explicit handler arms or TerminalState mode-sync    |
+| TerminalModes never written              | ✅ Fixed | mode-sync loop in `state/internal.rs` writes all modes after parse |
+| Unrecognized CSI silently consumed       | ✅ Fixed | `warn!` log emitted for unknown CSI final bytes                    |
+| OSC unknown double emission              | ✅ Fixed | Unknown OSC now emits `debug!` only, no `TerminalOutput::Invalid`  |
 
 ---
 
 ## C0 / C1 Control Characters
 
-| Code       | Name            | Status | Notes                                                                                                                                                                    |
-| ---------- | --------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| NUL (0x00) | Null            | ⬜     | **Not handled** — included in data instead of being ignored                                                                                                              |
-| BEL (0x07) | Bell            | ✅     | Emits `TerminalOutput::Bell`                                                                                                                                             |
-| BS (0x08)  | Backspace       | ✅     | Moves cursor left one cell                                                                                                                                               |
-| HT (0x09)  | Horizontal Tab  | ⬜     | **Not handled as C0** — byte falls through as data. No tab stop infrastructure exists (no default 8-column stops, no tab stop array). Breaks `ls`, `man`, shell prompts. |
-| LF (0x0A)  | Line Feed       | ✅     | Moves cursor down one line                                                                                                                                               |
-| VT (0x0B)  | Vertical Tab    | ⬜     | **Not handled** — should act as LF per VT spec                                                                                                                           |
-| FF (0x0C)  | Form Feed       | ⬜     | **Not handled** — should act as LF per VT spec                                                                                                                           |
-| CR (0x0D)  | Carriage Return | ✅     | Moves cursor to column 0                                                                                                                                                 |
-| SO (0x0E)  | Shift Out       | ⬜     | **Not handled** — G1 charset switching missing                                                                                                                           |
-| SI (0x0F)  | Shift In        | ⬜     | **Not handled** — G0 charset switching missing                                                                                                                           |
-| ESC (0x1B) | Escape          | ✅     | Introduces C1/ESC/CSI/OSC sequences                                                                                                                                      |
-| DEL (0x7F) | Delete          | ⬜     | **Not handled** — should be silently ignored                                                                                                                             |
-| CSI (0x9B) | CSI (8-bit)     | ⬜     | **Not recognized** — 8-bit C1 controls not parsed                                                                                                                        |
+| Code       | Name            | Status | Notes                                                                |
+| ---------- | --------------- | ------ | -------------------------------------------------------------------- |
+| NUL (0x00) | Null            | ✅     | Silently ignored                                                     |
+| BEL (0x07) | Bell            | ✅     | Emits `TerminalOutput::Bell`                                         |
+| BS (0x08)  | Backspace       | ✅     | Moves cursor left one cell                                           |
+| HT (0x09)  | Horizontal Tab  | ✅     | Advances to next 8-column tab stop; tab stop infrastructure complete |
+| LF (0x0A)  | Line Feed       | ✅     | Moves cursor down one line                                           |
+| VT (0x0B)  | Vertical Tab    | ✅     | Treated as LF per VT spec                                            |
+| FF (0x0C)  | Form Feed       | ✅     | Treated as LF per VT spec                                            |
+| CR (0x0D)  | Carriage Return | ✅     | Moves cursor to column 0                                             |
+| SO (0x0E)  | Shift Out       | ⬜     | G1 charset switching not implemented (parsed, no functional effect)  |
+| SI (0x0F)  | Shift In        | ⬜     | G0 charset switching not implemented (parsed, no functional effect)  |
+| ESC (0x1B) | Escape          | ✅     | Introduces C1/ESC/CSI/OSC sequences                                  |
+| DEL (0x7F) | Delete          | ✅     | Silently ignored                                                     |
+| CSI (0x9B) | CSI (8-bit)     | ⬜     | 8-bit C1 controls not parsed                                         |
 
 ### C0 Mid-Sequence Handling
 
 The VT500 spec requires C0 controls to be executed inline even during CSI/OSC sequence
-parsing. The current parser treats C0 mid-CSI as errors and aborts the sequence. This is
-a conformance issue but low practical impact.
+parsing. Freminal's parser is **ECMA-48 compliant** here: C0 controls (BS, CR, LF, VT, FF,
+etc.) encountered mid-CSI are executed inline, and the CSI sequence resumes afterward. This
+is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside_csi`).
 
 ---
 
@@ -71,21 +76,21 @@ a conformance issue but low practical impact.
 | ---------------------- | -------------------------- | ------ | -------------------------------------------------------------------------- |
 | ESC 7                  | Save Cursor (DECSC)        | ✅     | Saves cursor position and attributes                                       |
 | ESC 8                  | Restore Cursor (DECRC)     | ✅     | Restores saved cursor                                                      |
-| ESC =                  | DECPAM                     | ⬜     | **Stub** — parsed with `warn!` log, no effect on keypad mode               |
-| ESC >                  | DECPNM                     | ⬜     | **Stub** — parsed with `warn!` log, no effect on keypad mode               |
-| ESC F                  | Cursor to lower-left       | ⬜     | **Stub** — parsed with `warn!` log                                         |
-| ESC c                  | RIS — Full Reset           | ⬜     | **Stub** — parsed with `warn!` log, does not actually reset terminal state |
+| ESC =                  | DECPAM                     | ✅     | Sets application keypad mode in `TerminalModes.keypad_mode`                |
+| ESC >                  | DECPNM                     | ✅     | Sets numeric keypad mode in `TerminalModes.keypad_mode`                    |
+| ESC F                  | Cursor to lower-left       | ⬜     | Parsed, stub with debug log                                                |
+| ESC c                  | RIS — Full Reset           | ✅     | Fully implemented — resets buffer, cursor, modes, tab stops, scroll region |
 | ESC D                  | Index (IND)                | ✅     | Move cursor down one line, scrolls if at bottom                            |
 | ESC E                  | Next Line (NEL)            | ✅     | CR + LF combined                                                           |
-| ESC H                  | Tab Set (HTS)              | ⬜     | **Not parsed** — no tab stop infrastructure                                |
+| ESC H                  | Tab Set (HTS)              | ✅     | Sets tab stop at current cursor column                                     |
 | ESC M                  | Reverse Index (RI)         | ✅     | Scroll up one line — fully implemented                                     |
-| ESC Z                  | Return Terminal ID (DECID) | ⬜     | **Not parsed**                                                             |
-| ESC l                  | Memory Lock                | ⬜     | **Stub** — parsed with `warn!` log                                         |
-| ESC m                  | Memory Unlock              | ⬜     | **Stub** — parsed with `warn!` log                                         |
+| ESC Z                  | Return Terminal ID (DECID) | ⬜     | Not parsed                                                                 |
+| ESC l                  | Memory Lock                | ⬜     | Parsed, stub with debug log                                                |
+| ESC m                  | Memory Unlock              | ⬜     | Parsed, stub with debug log                                                |
 | ESC ( 0                | G0 Charset — Line Drawing  | ✅     | DEC Special Graphics charset                                               |
 | ESC ( B                | G0 Charset — US ASCII      | ✅     | Default ASCII charset                                                      |
-| ESC n / o / \| / } / ~ | Charset invokes (GL/GR)    | ⬜     | **Stub** — parsed in standard.rs, no functional effect                     |
-| ESC # 8                | DECALN                     | ⬜     | Screen alignment test — stub only                                          |
+| ESC n / o / \| / } / ~ | Charset invokes (GL/GR)    | ⬜     | Parsed, no functional effect (G1–G3 switching not implemented)             |
+| ESC # 8                | DECALN                     | ✅     | Fills screen with 'E', resets cursor and scroll region                     |
 | ESC % @ / G            | Charset set default/UTF    | ❌     | Not planned                                                                |
 | ESC SP F / G           | 7-/8-bit control indicator | ❌     | Out of scope                                                               |
 
@@ -93,126 +98,134 @@ a conformance issue but low practical impact.
 
 ## C1 (8-bit) Control Characters
 
-| Sequence        | Name                        | Status | Notes                                                                                                  |
-| --------------- | --------------------------- | ------ | ------------------------------------------------------------------------------------------------------ |
-| ESC P           | DCS (Device Control String) | 🚧     | Parser captures bytes, debug log only. No sub-command parsing (DECRQSS, XTGETTCAP, Sixel all missing). |
-| ESC X / ESC V/W | Start/End Guarded Area      | ❌     | Not implemented                                                                                        |
-| ESC [           | CSI intro                   | ✅     | Delegated to CSI parser                                                                                |
-| ESC ]           | OSC intro                   | ✅     | Delegated to OSC parser                                                                                |
-| ESC ^           | Privacy Message (PM)        | ❌     | Not implemented (no PM state in parser)                                                                |
-| ESC \_          | APC                         | 🚧     | Captured as opaque bytes, no sub-command parsing                                                       |
+| Sequence        | Name                        | Status | Notes                                                                               |
+| --------------- | --------------------------- | ------ | ----------------------------------------------------------------------------------- |
+| ESC P           | DCS (Device Control String) | ✅     | Sub-command dispatch implemented: DECRQSS (`$q`) and XTGETTCAP (`+q`) fully handled |
+| ESC X / ESC V/W | Start/End Guarded Area      | ❌     | Not implemented                                                                     |
+| ESC [           | CSI intro                   | ✅     | Delegated to CSI parser                                                             |
+| ESC ]           | OSC intro                   | ✅     | Delegated to OSC parser                                                             |
+| ESC ^           | Privacy Message (PM)        | ❌     | Not implemented                                                                     |
+| ESC \_          | APC                         | 🚧     | Captured as opaque bytes, no sub-command parsing                                    |
 
 ---
 
 ## CSI — Control Sequence Introducer
 
-| Sequence      | Name                                | Status | Notes                                                                               |
-| ------------- | ----------------------------------- | ------ | ----------------------------------------------------------------------------------- |
-| CSI Ps A      | CUU — Cursor Up                     | ✅     | Relative cursor motion                                                              |
-| CSI Ps B      | CUD — Cursor Down                   | ✅     | Relative cursor motion                                                              |
-| CSI Ps C      | CUF — Cursor Forward                | ✅     | Relative cursor motion                                                              |
-| CSI Ps D      | CUB — Cursor Backward               | ✅     | Relative cursor motion                                                              |
-| CSI Ps E      | CNL — Cursor Next Line              | ⬜     | **Not implemented** — missing from CSI dispatch                                     |
-| CSI Ps F      | CPL — Cursor Previous Line          | ⬜     | **Not implemented** — missing from CSI dispatch                                     |
-| CSI Ps G      | CHA — Cursor Horizontal Absolute    | ✅     | Move cursor to column n                                                             |
-| CSI Ps H      | CUP — Cursor Position               | ✅     | Move cursor to row;col                                                              |
-| CSI Ps I      | CHT — Cursor Horizontal Forward Tab | ⬜     | **Not implemented** — no tab stop infrastructure                                    |
-| CSI Ps J      | ED — Erase in Display               | ✅     | 0 → end, 1 → begin, 2 → all                                                         |
-| CSI Ps K      | EL — Erase in Line                  | ✅     | 0 → end, 1 → begin, 2 → all                                                         |
-| CSI Ps L      | IL — Insert Lines                   | ✅     | Inserts n blank lines                                                               |
-| CSI Ps M      | DL — Delete Lines                   | 🐛     | **BUG: Not wired** — handler + buffer code exist but CSI dispatch has no `b'M'` arm |
-| CSI Ps P      | DCH — Delete Characters             | ✅     | Fully implemented                                                                   |
-| CSI Ps S      | SU — Scroll Up                      | ⬜     | **Not implemented**                                                                 |
-| CSI Ps T      | SD — Scroll Down                    | ⬜     | **Not implemented**                                                                 |
-| CSI Ps X      | ECH — Erase Characters              | ✅     | Erases n cells on line                                                              |
-| CSI Ps Z      | CBT — Cursor Backward Tab           | ⬜     | **Not implemented** — no tab stop infrastructure                                    |
-| CSI Ps @      | ICH — Insert Characters             | ✅     | Fully implemented                                                                   |
-| CSI Ps \`     | HPA — Horizontal Position Absolute  | ⬜     | **Not implemented**                                                                 |
-| CSI Ps b      | REP — Repeat Last Character         | ⬜     | **Not implemented**                                                                 |
-| CSI Ps d      | VPA — Vertical Position Absolute    | ✅     | Move cursor to row n                                                                |
-| CSI Ps f      | HVP — Horizontal Vertical Position  | ✅     | Same as CUP                                                                         |
-| CSI Ps g      | TBC — Tab Clear                     | ⬜     | **Not implemented** — no tab stop infrastructure                                    |
-| CSI Ps ; Ps r | DECSTBM — Set Scrolling Margins     | 🐛     | **BUG: Double-decrement** — both handler and buffer subtract 1 from params          |
-| CSI Ps n      | DSR — Device Status Report          | 🐛     | **BUG: Ignores Ps** — always emits cursor report, Ps=5 should give status report    |
-| CSI Ps c      | DA1 — Primary Device Attributes     | ✅     | Responds with device attributes                                                     |
-| CSI > Ps c    | DA2 — Secondary Device Attributes   | ✅     | Responds with version info                                                          |
-| CSI Ps > q    | XTVERSION                           | ✅     | Reports emulator version                                                            |
-| CSI Ps SP q   | DECSCUSR — Set Cursor Style         | ✅     | Block, underline, bar cursor styles                                                 |
-| CSI Ps m      | SGR — Select Graphic Rendition      | ✅     | Full color + attribute support ([SGR.md](./SGR.md))                                 |
-| CSI Ps t      | Window Manipulation                 | ✅     | Terminal geometry interactions                                                      |
-| CSI ? Pm h    | DECSET — Set DEC Private Mode       | 🚧     | Only 4 of 18+ modes actually take effect (see DEC Private Modes section)            |
-| CSI ? Pm l    | DECRST — Reset DEC Private Mode     | 🚧     | Same issue as DECSET                                                                |
-| CSI s         | Save Cursor Position (SCOSC)        | ⬜     | **Not implemented** — no `b's'` arm in CSI dispatch                                 |
-| CSI u         | Restore Cursor Position (SCORC)     | ⬜     | **Blocked** — mapped to Kitty keyboard protocol (always Skipped)                    |
-| CSI ? Pm $p   | DECRQM — Request Mode               | 🚧     | Partial mode query support                                                          |
-| CSI Ps h      | SM — Set Standard Mode              | 🚧     | Only LNM (mode 20) implemented. IRM (4), SRM (12) missing.                          |
-| CSI Ps l      | RM — Reset Standard Mode            | 🚧     | Same as SM                                                                          |
+| Sequence      | Name                                | Status | Notes                                                                       |
+| ------------- | ----------------------------------- | ------ | --------------------------------------------------------------------------- |
+| CSI Ps A      | CUU — Cursor Up                     | ✅     | Relative cursor motion                                                      |
+| CSI Ps B      | CUD — Cursor Down                   | ✅     | Relative cursor motion                                                      |
+| CSI Ps C      | CUF — Cursor Forward                | ✅     | Relative cursor motion                                                      |
+| CSI Ps D      | CUB — Cursor Backward               | ✅     | Relative cursor motion                                                      |
+| CSI Ps E      | CNL — Cursor Next Line              | ✅     | Moves down Ps lines, then to column 1                                       |
+| CSI Ps F      | CPL — Cursor Previous Line          | ✅     | Moves up Ps lines, then to column 1                                         |
+| CSI Ps G      | CHA — Cursor Horizontal Absolute    | ✅     | Move cursor to column n                                                     |
+| CSI Ps H      | CUP — Cursor Position               | ✅     | Move cursor to row;col                                                      |
+| CSI Ps I      | CHT — Cursor Horizontal Forward Tab | ✅     | Advances cursor by Ps tab stops                                             |
+| CSI Ps J      | ED — Erase in Display               | ✅     | 0 → end, 1 → begin, 2 → all, 3 → scrollback                                 |
+| CSI Ps K      | EL — Erase in Line                  | ✅     | 0 → end, 1 → begin, 2 → all                                                 |
+| CSI Ps L      | IL — Insert Lines                   | ✅     | Inserts n blank lines                                                       |
+| CSI Ps M      | DL — Delete Lines                   | ✅     | Deletes n lines at cursor position                                          |
+| CSI Ps P      | DCH — Delete Characters             | ✅     | Fully implemented                                                           |
+| CSI Ps S      | SU — Scroll Up                      | ✅     | Scrolls content up n lines within scroll region                             |
+| CSI Ps T      | SD — Scroll Down                    | ✅     | Scrolls content down n lines within scroll region                           |
+| CSI Ps X      | ECH — Erase Characters              | ✅     | Erases n cells on line                                                      |
+| CSI Ps Z      | CBT — Cursor Backward Tab           | ✅     | Moves cursor back by Ps tab stops                                           |
+| CSI Ps @      | ICH — Insert Characters             | ✅     | Fully implemented                                                           |
+| CSI Ps \`     | HPA — Horizontal Position Absolute  | ✅     | Alias for CHA (CSI G)                                                       |
+| CSI Ps b      | REP — Repeat Last Character         | ✅     | Repeats preceding graphic character Ps times with same SGR attributes       |
+| CSI Ps d      | VPA — Vertical Position Absolute    | ✅     | Move cursor to row n                                                        |
+| CSI Ps f      | HVP — Horizontal Vertical Position  | ✅     | Same as CUP                                                                 |
+| CSI Ps g      | TBC — Tab Clear                     | ✅     | Ps=0 clears at current column, Ps=3 clears all tab stops                    |
+| CSI Ps ; Ps r | DECSTBM — Set Scrolling Margins     | ✅     | Double-decrement bug fixed; correct 0-based region from 1-based params      |
+| CSI Ps n      | DSR — Device Status Report          | ✅     | Ps=5 → device status, Ps=6 → cursor position report                         |
+| CSI Ps c      | DA1 — Primary Device Attributes     | ✅     | Responds with device attributes                                             |
+| CSI > Ps c    | DA2 — Secondary Device Attributes   | ✅     | Responds with version info                                                  |
+| CSI Ps > q    | XTVERSION                           | ✅     | Reports emulator version                                                    |
+| CSI Ps SP q   | DECSCUSR — Set Cursor Style         | ✅     | Block, underline, bar cursor styles                                         |
+| CSI Ps m      | SGR — Select Graphic Rendition      | ✅     | Full color + attribute support ([SGR.md](./SGR.md))                         |
+| CSI Ps t      | Window Manipulation                 | ✅     | Terminal geometry interactions                                              |
+| CSI ? Pm h    | DECSET — Set DEC Private Mode       | ✅     | All recognized modes have explicit handlers (see DEC Private Modes section) |
+| CSI ? Pm l    | DECRST — Reset DEC Private Mode     | ✅     | Same as DECSET                                                              |
+| CSI s         | Save Cursor Position (SCOSC)        | ✅     | Implemented                                                                 |
+| CSI u         | Restore Cursor Position (SCORC)     | ✅     | Fixed; Kitty protocol uses `CSI > u` (different prefix)                     |
+| CSI ? Pm $p   | DECRQM — Request Mode               | ✅     | Full mode query support via mode-sync loop                                  |
+| CSI Ps h      | SM — Set Standard Mode              | 🚧     | LNM (mode 20) implemented. IRM (4), SRM (12) missing.                       |
+| CSI Ps l      | RM — Reset Standard Mode            | 🚧     | Same as SM                                                                  |
 
 ---
 
 ## OSC — Operating System Commands
 
-| Sequence                 | Purpose                       | Status | Notes                                                         |
-| ------------------------ | ----------------------------- | ------ | ------------------------------------------------------------- |
-| OSC 0 ; txt BEL          | Set icon + window title       | 🚧     | Works, but icon name vs. title not distinguished              |
-| OSC 1 ; txt BEL          | Set icon title only           | 🚧     | Shares handler with OSC 0 (treats as full title)              |
-| OSC 2 ; txt BEL          | Set window title only         | ✅     | Implemented                                                   |
-| OSC 4 ; n ; rgb          | Set palette entry             | ⬜     | Not implemented                                               |
-| OSC 7 ; URI              | Current Working Directory     | ⬜     | Recognized, debug log only, no functional effect              |
-| OSC 8 ; params ; URI BEL | Hyperlink                     | ✅     | **Fully implemented** — hyperlink start/end with URL metadata |
-| OSC 10 ; ? BEL           | Foreground color query        | 🚧     | Query responds with hardcoded color; set is a no-op           |
-| OSC 11 ; ? BEL           | Background color query        | 🚧     | Query responds with hardcoded color; set is a no-op           |
-| OSC 12 ; color           | Set cursor color              | ⬜     | Not implemented                                               |
-| OSC 52 ; c ; data BEL    | Clipboard copy/paste          | ⬜     | Not implemented                                               |
-| OSC 104                  | Reset palette entry           | ⬜     | Not implemented                                               |
-| OSC 110                  | Reset foreground color        | ⬜     | Not implemented                                               |
-| OSC 111                  | Reset background color        | ⬜     | Not implemented                                               |
-| OSC 112                  | Reset cursor color            | ⬜     | Recognized — empty match arm, no-op                           |
-| OSC 133 ; …              | FTCS / Shell Integration      | ⬜     | Recognized, debug log only, no functional effect              |
-| OSC 777                  | System notification (Konsole) | ⬜     | Not implemented                                               |
-| OSC 1337                 | iTerm2 / WezTerm extensions   | ⬜     | Recognized if enabled (debug log only)                        |
+| Sequence                 | Purpose                       | Status | Notes                                                                  |
+| ------------------------ | ----------------------------- | ------ | ---------------------------------------------------------------------- |
+| OSC 0 ; txt BEL          | Set icon + window title       | 🚧     | Works, but icon name vs. title not distinguished                       |
+| OSC 1 ; txt BEL          | Set icon title only           | 🚧     | Shares handler with OSC 0 (treats as full title)                       |
+| OSC 2 ; txt BEL          | Set window title only         | ✅     | Implemented                                                            |
+| OSC 4 ; n ; rgb          | Set palette entry             | ✅     | Sets 256-color palette entry; query responds with current value        |
+| OSC 7 ; URI              | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`       |
+| OSC 8 ; params ; URI BEL | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata              |
+| OSC 10 ; ? BEL           | Foreground color query        | 🚧     | Query responds with hardcoded Catppuccin Mocha default; set is a no-op |
+| OSC 11 ; ? BEL           | Background color query        | 🚧     | Query responds with hardcoded Catppuccin Mocha default; set is a no-op |
+| OSC 12 ; color           | Set cursor color              | ⬜     | Not implemented                                                        |
+| OSC 52 ; c ; data BEL    | Clipboard copy/paste          | ✅     | Implemented — base64 encode/decode, clipboard set/query                |
+| OSC 104                  | Reset palette entry           | ✅     | Resets specific or all palette entries to defaults                     |
+| OSC 110                  | Reset foreground color        | ⬜     | Not implemented                                                        |
+| OSC 111                  | Reset background color        | ⬜     | Not implemented                                                        |
+| OSC 112                  | Reset cursor color            | ⬜     | Empty match arm, no-op                                                 |
+| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed and stored in `FtcsState`                      |
+| OSC 777                  | System notification (Konsole) | ⬜     | Not implemented                                                        |
+| OSC 1337                 | iTerm2 / WezTerm extensions   | ⬜     | Recognized if enabled (debug log only)                                 |
 
 ---
 
 ## DCS — Device Control String
 
-| Sequence     | Name                 | Status | Notes                                    |
-| ------------ | -------------------- | ------ | ---------------------------------------- |
-| DCS (all)    | General DCS handling | 🚧     | Captured as opaque bytes, debug log only |
-| DCS $ q … ST | DECRQSS              | ⬜     | Not parsed — no sub-command dispatch     |
-| DCS + q … ST | XTGETTCAP            | ⬜     | Not parsed — nvim sends this             |
-| DCS Sixel    | Sixel Graphics       | ⬜     | Not parsed — large undertaking           |
+| Sequence     | Name                 | Status | Notes                                                                          |
+| ------------ | -------------------- | ------ | ------------------------------------------------------------------------------ |
+| DCS (all)    | General DCS handling | ✅     | Sub-command dispatch via `handle_device_control_string()`                      |
+| DCS $ q … ST | DECRQSS              | ✅     | Supports `m` (SGR), `r` (DECSTBM), `SP q` (DECSCUSR); unknown → error response |
+| DCS + q … ST | XTGETTCAP            | ✅     | Responds to common capability queries; unknown → error response                |
+| DCS Sixel    | Sixel Graphics       | ⬜     | Not parsed — large undertaking                                                 |
 
 ---
 
 ## DEC Private Modes (CSI ? Pm h / l)
 
-| ?Ps   | Name                             | Status | Notes                                                                                                                                                    |
-| ----- | -------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ?1    | DECCKM — Cursor Keys Mode        | ⬜     | **Parsed but silently swallowed** — `_other` catch-all at `terminal_handler.rs:651`. TerminalModes.cursor_key never written. **Breaks vim, tmux, htop.** |
-| ?3    | DECCOLM — 80/132 Column Mode     | ⬜     | **Parsed but silently swallowed** via `_other` catch-all                                                                                                 |
-| ?5    | DECSCNM — Reverse Video          | ⬜     | **Parsed but silently swallowed** — reverse video never toggles                                                                                          |
-| ?6    | DECOM — Origin Mode              | ⬜     | **Parsed but silently swallowed** — origin mode ignored                                                                                                  |
-| ?7    | DECAWM — Auto Wrap Mode          | ✅     | Implemented (`Decawm` enum)                                                                                                                              |
-| ?12   | XtCBlink — Cursor Blink          | ✅     | Implemented                                                                                                                                              |
-| ?25   | DECTCEM — Show/Hide Cursor       | ✅     | Implemented                                                                                                                                              |
-| ?47   | Alt Screen Buffer (legacy)       | ⬜     | **Not parsed** — only ?1049 is implemented                                                                                                               |
-| ?1000 | X11 Mouse — Normal Tracking      | ⬜     | **Parsed but silently swallowed** — TerminalModes never written                                                                                          |
-| ?1002 | X11 Mouse — Button Event         | ⬜     | **Parsed but silently swallowed**                                                                                                                        |
-| ?1003 | X11 Mouse — Any Event            | ⬜     | **Parsed but silently swallowed**                                                                                                                        |
-| ?1004 | Focus Reporting                  | ⬜     | **Parsed but silently swallowed**                                                                                                                        |
-| ?1006 | SGR Mouse — Extended Coordinates | ⬜     | **Parsed but silently swallowed**                                                                                                                        |
-| ?1047 | Alt Screen Buffer (legacy)       | ⬜     | **Not parsed** — only ?1049 is implemented                                                                                                               |
-| ?1048 | Save/Restore Cursor (legacy)     | ⬜     | **Not parsed**                                                                                                                                           |
-| ?1049 | Alt Screen Buffer + Save Cursor  | ✅     | Implemented — swaps screen buffers                                                                                                                       |
-| ?2004 | Bracketed Paste                  | ⬜     | **Parsed but silently swallowed** — TerminalModes never written. **Breaks paste in shells/editors.**                                                     |
-| ?2026 | Synchronized Output              | ⬜     | **Parsed but silently swallowed** — TerminalModes never written                                                                                          |
+| ?Ps   | Name                             | Status | Notes                                                                                                                                |
+| ----- | -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| ?1    | DECCKM — Cursor Keys Mode        | ✅     | Wired to `TerminalModes.cursor_key`; GUI reads for application/normal arrow key translation                                          |
+| ?3    | DECCOLM — 80/132 Column Mode     | ✅     | Mode stored and acted on when `AllowColumnModeSwitch (?40)` is enabled                                                               |
+| ?5    | DECSCNM — Reverse Video          | 🚧     | Mode stored in `TerminalModes.invert_screen`; renderer swaps background fill but full cell-level fg/bg inversion not yet implemented |
+| ?6    | DECOM — Origin Mode              | ✅     | Mode stored and applied; CUP row 1 → top of scroll region when set                                                                   |
+| ?7    | DECAWM — Auto Wrap Mode          | ✅     | Implemented (`Decawm` enum)                                                                                                          |
+| ?8    | DECARM — Auto Repeat Keys        | ✅     | Mode stored in `TerminalModes.repeat_keys`                                                                                           |
+| ?12   | XtCBlink — Cursor Blink          | ✅     | Implemented                                                                                                                          |
+| ?25   | DECTCEM — Show/Hide Cursor       | ✅     | Implemented                                                                                                                          |
+| ?40   | AllowColumnModeSwitch            | ✅     | Gates DECCOLM behavior                                                                                                               |
+| ?45   | ReverseWrapAround                | ✅     | Mode stored in `TerminalModes.reverse_wrap_around`                                                                                   |
+| ?47   | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                          |
+| ?1000 | X11 Mouse — Normal Tracking      | ✅     | Mode stored in `TerminalModes.mouse_tracking`; GUI reads and forwards events                                                         |
+| ?1002 | X11 Mouse — Button Event         | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                        |
+| ?1003 | X11 Mouse — Any Event            | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                        |
+| ?1004 | Focus Reporting                  | ✅     | Mode stored in `TerminalModes.focus_reporting`; GUI sends focus events                                                               |
+| ?1006 | SGR Mouse — Extended Coordinates | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                        |
+| ?1047 | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                          |
+| ?1048 | Save/Restore Cursor (legacy)     | ✅     | Wired to existing save/restore cursor machinery                                                                                      |
+| ?1049 | Alt Screen Buffer + Save Cursor  | ✅     | Implemented — swaps screen buffers                                                                                                   |
+| ?2004 | Bracketed Paste                  | ✅     | Mode stored in `TerminalModes.bracketed_paste`; GUI wraps paste with bracket sequences                                               |
+| ?2026 | Synchronized Output              | ✅     | Mode stored in `TerminalModes.synchronized_updates`                                                                                  |
 
-### Not Even Parsed
+### Not Yet Parsed
 
-These DEC private modes are not recognized by the parser at all:
-
-- ?2 (DECANM), ?66 (DECNKM), ?67 (DECBKM), ?69 (DECLRMM), ?1001, ?1007, ?1034
+| Mode          | Description                    |
+| ------------- | ------------------------------ |
+| ?2 (DECANM)   | VT52 mode                      |
+| ?66 (DECNKM)  | Numeric keypad mode (DEC)      |
+| ?67 (DECBKM)  | Backarrow key mode             |
+| ?69 (DECLRMM) | Left/right margin mode         |
+| ?1001, ?1007  | Hilite mouse, alternate scroll |
+| ?1034         | Interpret meta key             |
 
 ---
 
@@ -226,38 +239,46 @@ These DEC private modes are not recognized by the parser at all:
 
 ---
 
-## FTCS — FinalTerm Control Sequences
+## FTCS — FinalTerm Control Sequences (OSC 133)
 
-| Sequence  | Name                  | Status | Notes                      |
-| --------- | --------------------- | ------ | -------------------------- |
-| OSC 133 A | Prompt Start          | ⬜     | Recognized, debug log only |
-| OSC 133 B | Prompt End            | ⬜     | Recognized, debug log only |
-| OSC 133 C | Pre-execution (input) | ⬜     | Recognized, debug log only |
-| OSC 133 D | Command Finished      | ⬜     | Recognized, debug log only |
+| Sequence  | Name                  | Status | Notes                                            |
+| --------- | --------------------- | ------ | ------------------------------------------------ |
+| OSC 133 A | Prompt Start          | ✅     | Parsed and stored in `FtcsState`                 |
+| OSC 133 B | Prompt End            | ✅     | Parsed and stored in `FtcsState`                 |
+| OSC 133 C | Pre-execution (input) | ✅     | Parsed and stored in `FtcsState`                 |
+| OSC 133 D | Command Finished      | ✅     | Parsed with exit code stored in `last_exit_code` |
 
 ---
 
 ## Specification Coverage Summary
 
-| Category                       | Freminal Status | Common in VT/xterm | Notes                                                                                  |
-| ------------------------------ | --------------- | ------------------ | -------------------------------------------------------------------------------------- |
-| Core C0/C1                     | 🚧              | ✅                 | BEL/BS/LF/CR/ESC work; **HT, VT, FF, NUL, DEL missing**                                |
-| ESC                            | 🚧              | ✅                 | Save/restore cursor, IND, NEL, RI work; DECPAM/DECPNM/RIS are stubs; HTS not parsed    |
-| CSI Cursor + Erase             | ✅              | ✅                 | CUU/CUD/CUF/CUB/CHA/CUP/ED/EL all correct                                              |
-| CSI Edit (IL/DL/DCH)           | 🚧              | ✅                 | IL and DCH work; **DL not wired**; ICH works                                           |
-| CSI Scroll (SU/SD)             | ⬜              | ✅                 | **Not implemented**                                                                    |
-| Tab Stops (HT/HTS/TBC/CHT/CBT) | ⬜              | ✅                 | **Entirely missing** — no tab stop infrastructure                                      |
-| SGR (Colors/Attrs)             | ✅              | ✅                 | 256 + TrueColor supported                                                              |
-| OSC 0/2 (Title)                | ✅              | ✅                 | Implemented                                                                            |
-| OSC 8 (Hyperlink)              | ✅              | ✅                 | Fully implemented                                                                      |
-| OSC 52 (Clipboard)             | ⬜              | ✅                 | Not implemented                                                                        |
-| Mouse Tracking                 | ⬜              | ✅                 | **Parsed but silently swallowed** — TerminalModes never written                        |
-| Bracketed Paste                | ⬜              | ✅                 | **Parsed but silently swallowed** — TerminalModes never written                        |
-| DSR/DA Queries                 | 🚧              | ✅                 | DA1/DA2 work; DSR has Ps-ignoring bug                                                  |
-| DECSET Modes                   | 🚧              | ✅                 | Only DECAWM, XtCBlink, DECTCEM, ?1049 actually work. **14+ modes silently swallowed.** |
-| FTCS                           | ⬜              | ⬜                 | Recognized but no functional effect                                                    |
-| Sixel Graphics                 | ⬜              | 🚧                 | Not implemented                                                                        |
-| DCS Sub-commands               | ⬜              | 🚧                 | Captured as bytes but no parsing (DECRQSS, XTGETTCAP)                                  |
+| Category                       | Freminal Status | Common in VT/xterm | Notes                                                                  |
+| ------------------------------ | --------------- | ------------------ | ---------------------------------------------------------------------- |
+| Core C0/C1                     | ✅              | ✅                 | BEL/BS/LF/CR/HT/VT/FF/ESC/NUL/DEL all handled correctly                |
+| ESC                            | ✅              | ✅                 | Save/restore cursor, IND, NEL, RI, HTS, RIS, DECPAM/DECPNM all working |
+| CSI Cursor + Erase             | ✅              | ✅                 | CUU/CUD/CUF/CUB/CHA/CUP/CNL/CPL/ED/EL all correct                      |
+| CSI Edit (IL/DL/DCH/ICH/REP)   | ✅              | ✅                 | All working including REP                                              |
+| CSI Scroll (SU/SD)             | ✅              | ✅                 | Implemented, respects scroll region                                    |
+| Tab Stops (HT/HTS/TBC/CHT/CBT) | ✅              | ✅                 | Full tab stop infrastructure with default 8-column stops               |
+| SGR (Colors/Attrs)             | ✅              | ✅                 | 256 + TrueColor supported                                              |
+| OSC 0/2 (Title)                | ✅              | ✅                 | Implemented                                                            |
+| OSC 4/104 (Palette)            | ✅              | ✅                 | Mutable 256-color palette with set/query/reset                         |
+| OSC 7 (CWD)                    | ✅              | ✅                 | CWD parsed and stored                                                  |
+| OSC 8 (Hyperlink)              | ✅              | ✅                 | Fully implemented                                                      |
+| OSC 52 (Clipboard)             | ✅              | ✅                 | Clipboard copy/query via base64                                        |
+| OSC 133 (FTCS)                 | ✅              | 🚧                 | All four markers parsed and stored                                     |
+| Mouse Tracking                 | ✅              | ✅                 | Modes wired; GUI reads and forwards events                             |
+| Bracketed Paste                | ✅              | ✅                 | Mode wired; GUI wraps paste events                                     |
+| DSR/DA Queries                 | ✅              | ✅                 | DA1/DA2/DSR all work correctly                                         |
+| DECSET Modes                   | ✅              | ✅                 | All commonly-used modes handled                                        |
+| DCS Sub-commands               | ✅              | 🚧                 | DECRQSS and XTGETTCAP fully implemented                                |
+| DECOM / Origin Mode            | ✅              | ✅                 | CUP addressing relative to scroll region when DECOM is set             |
+| DECCOLM                        | ✅              | 🚧                 | Column switching works when AllowColumnModeSwitch (?40) is enabled     |
+| DECSCNM / Reverse Video        | 🚧              | ✅                 | Mode tracked; renderer screen-inversion not yet implemented            |
+| Double-height/width lines      | ⬜              | 🚧                 | Parsed but renderer does not implement visual double-height/width      |
+| SO/SI (G1 charset switching)   | ⬜              | 🚧                 | Parsed but G1 rendering not implemented                                |
+| Sixel Graphics                 | ⬜              | 🚧                 | Not implemented                                                        |
+| OSC 10/11 (FG/BG color query)  | 🚧              | ✅                 | Query responds with hardcoded Catppuccin defaults; set is a no-op      |
 
 ---
 
@@ -265,19 +286,23 @@ These DEC private modes are not recognized by the parser at all:
 
 - [SGR.md](./SGR.md) — Detailed SGR attribute coverage
 - [SUPPORTED_CONTROL_CODES.md](./SUPPORTED_CONTROL_CODES.md) — Raw control code listing
-- [ESCAPE_SEQUENCE_GAPS.md](./ESCAPE_SEQUENCE_GAPS.md) — Gap analysis and roadmap
-- [PLAN_07_ESCAPE_SEQUENCES.md](./PLAN_07_ESCAPE_SEQUENCES.md) — Implementation plan for fixing all gaps
+- [ESCAPE_SEQUENCE_GAPS.md](./ESCAPE_SEQUENCE_GAPS.md) — Remaining gaps and roadmap
+- [PLAN_07_ESCAPE_SEQUENCES.md](./PLAN_07_ESCAPE_SEQUENCES.md) — Completed implementation plan (all 30 subtasks done)
 
 ---
 
-## Next Steps
+## Remaining Gaps
 
-See `PLAN_07_ESCAPE_SEQUENCES.md` for the full prioritized implementation plan. Summary:
+The gaps that remain are either low-priority polish or require significant new infrastructure:
 
-1. **Priority 1 (Critical):** Fix DECSTBM double-decrement, wire DL, implement tab stops, handle VT/FF/NUL/DEL, add CNL/CPL.
-2. **Priority 2 (Breaks real apps):** Wire DECCKM, bracketed paste, mouse tracking, focus events to TerminalModes. Implement SU/SD. Fix DSR. Implement RIS/DECPAM/DECPNM properly.
-3. **Priority 3 (Modern features):** OSC 52 clipboard, OSC 7 CWD, OSC 133 shell integration, HTS/TBC/CHT/CBT, DECRQSS, XTGETTCAP.
-4. **Priority 4 (Polish):** CSI s/u cursor save/restore, REP, HPA, OSC palette, DECALN, legacy alt screen variants.
+1. **Renderer-side DECSCNM** — The mode is tracked but the renderer does not yet invert the screen colors.
+2. **OSC 10/11 color set** — Dynamic foreground/background color setting is a no-op; queries return hardcoded defaults.
+3. **Double-height/width lines** (ESC # 3/4/5/6) — The renderer does not support these.
+4. **SO/SI G1 charset switching** — Parsed but rendering from G1 not implemented.
+5. **OSC 12** (cursor color), **OSC 110/111** (reset FG/BG color) — Not implemented.
+6. **Sixel Graphics** — Large undertaking, not planned near-term.
+7. **Standard modes IRM/SRM** — Rare in practice.
+8. **Unparsed DEC modes** — ?2 (DECANM/VT52), ?66 (DECNKM), ?67 (DECBKM), ?69 (DECLRMM).
 
 ---
 
