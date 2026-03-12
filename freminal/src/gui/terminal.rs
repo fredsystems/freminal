@@ -1006,6 +1006,8 @@ pub struct FreminalTerminalWidget {
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild.
     previous_selection: Option<(CellCoord, CellCoord)>,
+    /// Whether OpenType ligatures are enabled for text shaping.
+    ligatures: bool,
 }
 
 impl FreminalTerminalWidget {
@@ -1036,6 +1038,7 @@ impl FreminalTerminalWidget {
             previous_show_cursor: false,
             last_rendered_visible: None,
             previous_selection: None,
+            ligatures: config.font.ligatures,
         }
     }
 
@@ -1226,6 +1229,7 @@ impl FreminalTerminalWidget {
                     snap.term_width,
                     &mut self.font_manager,
                     cell_w_f,
+                    self.ligatures,
                 );
 
                 let bg_verts = build_background_verts(
@@ -1374,6 +1378,7 @@ impl FreminalTerminalWidget {
             drop(rs);
             self.shaping_cache.clear();
         }
+        self.ligatures = new_config.font.ligatures;
 
         // Keep egui font infrastructure updated for chrome (menu bar, settings
         // modal).  This is retained from the old pipeline; it will be cleaned

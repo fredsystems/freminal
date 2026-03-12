@@ -147,6 +147,7 @@ impl ShapingCache {
         term_width: usize,
         font_manager: &mut FontManager,
         cell_width: f32,
+        ligatures: bool,
     ) -> Vec<ShapedLine> {
         let lines = split_into_lines(visible_chars);
         let line_count = lines.len();
@@ -183,7 +184,7 @@ impl ShapingCache {
                     term_width,
                     font_manager,
                 );
-                let shaped_runs = shape_runs(&runs, font_manager, cell_width);
+                let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
                 let shaped_line = ShapedLine { runs: shaped_runs };
                 self.entries[line_idx] = Some((line_hash, shaped_line.clone()));
                 shaped_line
@@ -434,24 +435,39 @@ fn push_char_to_run(text: &mut String, ch: char) {
 //  Shaping
 // ---------------------------------------------------------------------------
 
-/// Rustybuzz features: only `kern` initially.  Ligatures disabled.
-fn shaping_features() -> Vec<rustybuzz::Feature> {
+/// Build the rustybuzz OpenType feature list.
+///
+/// When `ligatures` is `true`, `liga` and `calt` are enabled (value 1) so the
+/// font's standard and contextual ligatures are applied during shaping.
+/// When `false`, all three ligature tags (`liga`, `calt`, `dlig`) are
+/// explicitly disabled (value 0) to prevent ligature formation even in fonts
+/// that enable them by default.
+///
+/// `kern` (kerning) is always enabled.
+fn shaping_features(ligatures: bool) -> Vec<rustybuzz::Feature> {
     use rustybuzz::ttf_parser::Tag;
+    let lig_value = u32::from(ligatures);
     vec![
         // Enable kerning.
         rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 1, ..),
-        // Disable standard ligatures.
-        rustybuzz::Feature::new(Tag::from_bytes(b"liga"), 0, ..),
-        // Disable contextual alternates.
-        rustybuzz::Feature::new(Tag::from_bytes(b"calt"), 0, ..),
-        // Disable discretionary ligatures.
+        // Standard ligatures — controlled by config.
+        rustybuzz::Feature::new(Tag::from_bytes(b"liga"), lig_value, ..),
+        // Contextual alternates — controlled by config.
+        rustybuzz::Feature::new(Tag::from_bytes(b"calt"), lig_value, ..),
+        // Discretionary ligatures — always disabled (too aggressive for
+        // terminal use; can be revisited later).
         rustybuzz::Feature::new(Tag::from_bytes(b"dlig"), 0, ..),
     ]
 }
 
 /// Shape a set of `TextRun`s into `ShapedRun`s.
-fn shape_runs(runs: &[TextRun], font_manager: &FontManager, cell_width: f32) -> Vec<ShapedRun> {
-    let features = shaping_features();
+fn shape_runs(
+    runs: &[TextRun],
+    font_manager: &FontManager,
+    cell_width: f32,
+    ligatures: bool,
+) -> Vec<ShapedRun> {
+    let features = shaping_features(ligatures);
 
     runs.iter()
         .map(|run| shape_single_run(run, font_manager, cell_width, &features))
@@ -691,7 +707,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs(&runs, &fm, cell_w);
+        let shaped = shape_runs(&runs, &fm, cell_w, false);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 3);
@@ -723,7 +739,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs(&runs, &fm, cell_w);
+        let shaped = shape_runs(&runs, &fm, cell_w, false);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 1);
@@ -746,7 +762,7 @@ mod tests {
 
         // The run should have face_id == FaceId::Emoji (if system has an emoji font)
         // or some system fallback.  Either way, shaping should succeed.
-        let shaped = shape_runs(&runs, &fm, cell_w);
+        let shaped = shape_runs(&runs, &fm, cell_w, false);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());
     }
@@ -781,11 +797,11 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         // First call — cache miss.
-        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
+        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
         assert_eq!(r1.len(), 1);
 
         // Second call with identical input — cache hit.
-        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
+        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
         assert_eq!(r2.len(), 1);
 
         // Results should be identical (same glyph count).
@@ -802,11 +818,11 @@ mod tests {
         let chars1 = vec![TChar::Ascii(b'X')];
         let tags = vec![make_tag(0, 10)];
 
-        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w);
+        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w, false);
 
         // Change content.
         let chars2 = vec![TChar::Ascii(b'Y')];
-        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w);
+        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w, false);
 
         // Should still produce valid output (cache miss, re-shaped).
         assert_eq!(r2.len(), 1);

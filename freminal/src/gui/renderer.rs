@@ -1890,7 +1890,7 @@ mod tests {
             .map(|&b| freminal_common::buffer_states::tchar::TChar::Ascii(b))
             .collect();
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
-        let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
+        let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
 
         let verts = build_foreground_verts(&lines, &mut atlas, &fm, cell_h, ascent, None);
 
