@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates nine major development tasks for Freminal. Each task has a dedicated
+This document orchestrates thirteen major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -34,6 +34,10 @@ and plan document maintenance rules.
 | 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md`        | Complete    | None         |
 | 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`              | Complete    | None         |
 | 9   | tmux Compat + Logging     | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md` | Complete    | None         |
+| 10  | vttest Cursor Movement    | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`  | Complete    | None         |
+| 11  | Theming                   | `PLAN_11_THEMING.md`                 | Not Started | Tasks 2, 3   |
+| 12  | Terminfo Audit            | `PLAN_12_TERMINFO.md`                | Not Started | None         |
+| 13  | Image Protocol Support    | `PLAN_13_IMAGE_PROTOCOL.md`          | Not Started | Task 1       |
 
 ---
 
@@ -42,8 +46,9 @@ and plan document maintenance rules.
 ```text
 Task 1 (Custom Terminal Renderer) ──► Task 5 (Font Ligatures)
 
-Task 2 (CLI Args + TOML Config) ──┬──► Task 3 (Settings Modal)
-                                   └──► Task 4 (Deployment Flake)
+Task 2 (CLI Args + TOML Config) ──┬──► Task 3 (Settings Modal) ──┬──► Task 11 (Theming)
+                                   └──► Task 4 (Deployment Flake) │
+                                                                   └──► (Task 2 also required)
 
 Task 6 (Test Gap Coverage) ── independent, can run any time
 
@@ -52,6 +57,12 @@ Task 7 (Escape Sequence Coverage) ── independent, can run any time
 Task 8 (Primary Screen Scrollback) ── independent, can run any time
 
 Task 9 (tmux Compat + Logging) ── independent, can run any time
+
+Task 10 (vttest Cursor Movement) ── independent, can run any time
+
+Task 12 (Terminfo Audit) ── independent, can run any time
+
+Task 1 (Custom Terminal Renderer) ──► Task 13 (Image Protocol Support)
 ```
 
 ### Dependency Details
@@ -83,41 +94,63 @@ Recommended to start early since it fixes bugs that affect daily use.
 primary-screen scrollback works. The `Buffer` layer already supports offset-based rendering;
 this task is purely plumbing. Medium scope (7 subtasks).
 
+**Task 10:** Independent. Addresses vttest cursor movement test failures. Can run any time but
+benefits from Task 7's escape sequence fixes being complete.
+
+**Task 11:** Depends on Tasks 2 and 3. Adds ~25 curated embedded color themes (Catppuccin variants,
+Dracula, Solarized, Nord, Gruvbox, Tokyo Night, etc.) with a theme picker in the Settings Modal.
+Requires the config system (Task 2) and settings UI (Task 3) to be complete. Theme selection
+persists to `config.toml` and takes effect immediately via hot-reload.
+
+**Task 12:** Independent. Audits the `freminal.ti` terminfo source for correctness, fixes the
+build.rs rerun detection bug, and audits XTGETTCAP responses. Strategy: stay with
+`TERM=xterm-256color` (matching WezTerm/Alacritty) and use XTGETTCAP to advertise extra
+capabilities. Low scope (4 subtasks).
+
+**Task 13:** Depends on Task 1. Implements inline image display via OSC protocols: iTerm2 inline
+images (Phase 1), Kitty graphics protocol minimal subset (Phase 2), Sixel (Phase 3, deferred).
+Requires the custom OpenGL renderer from Task 1 for GPU-side image textures. Medium-high scope
+(9 subtasks across 3 phases).
+
 ---
 
 ## Recommended Execution Order
 
-### Phase 1 — Foundation (Parallel)
+The following reflects the actual execution state: Tasks 1, 2, 3, 7, 8, 9, and 10 are complete.
+The remaining tasks are ordered as follows.
 
-Run these four tasks in parallel since they have no dependencies on each other:
+### Phase 3 — Next Up
 
-- **Task 2** — CLI Args + TOML Config (foundation for Tasks 3 & 4)
-- **Task 6** — Test Gap Coverage (improves safety net for everything)
-- **Task 7** — Escape Sequence Coverage (fixes bugs, improves daily-use compatibility)
-- **Task 8** — Primary Screen Scrollback (wires scroll offset into snapshot pipeline)
-- **Task 1** — Custom Terminal Renderer (largest task, long lead time)
+- **Task 5** — Font Ligatures (unblocked by Task 1)
 
-### Phase 2 — Dependents (After Phase 1 completes)
+### Phase 4 — Feature Work
 
-These tasks depend on Phase 1 completions:
+Run after Task 5 completes. These are independent of each other and can run in parallel:
 
-- **Task 3** — Settings Modal (requires Task 2)
-- **Task 4** — Deployment Flake (requires Task 2)
-- **Task 5** — Font Ligatures (requires Task 1)
+- **Task 11** — Theming (unblocked by Tasks 2 + 3)
+- **Task 12** — Terminfo Audit (independent)
+- **Task 13** — Image Protocol Support (unblocked by Task 1)
 
-Tasks 3 and 4 can run in parallel with each other. Task 5 can run in parallel with Tasks 3 and 4,
-but only after Task 1 is complete.
+### Phase 5 — Test Coverage
+
+- **Task 6** — Test Gap Coverage (run after feature work to maximise coverage of new code)
+
+### Phase 6 — Packaging
+
+- **Task 4** — Deployment Flake (run last; benefits from a stable config schema and feature set)
 
 ```text
-Phase 1:  ├── Task 2 (CLI/Config) ────────────┤
-          ├── Task 6 (Test Gaps) ──────────────┤
-          ├── Task 7 (Escape Sequences) ───────┤
-          ├── Task 8 (Scrollback) ─────────────┤
-          ├── Task 1 (Custom Renderer) ─────────────────────────────┤
-          │                                    │                   │
-Phase 2:  │                                    ├── Task 3 (Modal) ─┤
-          │                                    ├── Task 4 (Flake) ─┤
-          │                                                        ├── Task 5 (Ligatures) ─┤
+Complete:     Tasks 1, 2, 3, 7, 8, 9, 10
+              │
+Phase 3:      ├── Task 5  (Font Ligatures) ────────────────────┤
+              │                                                 │
+Phase 4:      │                        ├── Task 11 (Theming)    ┤
+              │                        ├── Task 12 (Terminfo)   ┤
+              │                        ├── Task 13 (Images)     ┤
+              │                                                 │
+Phase 5:      │                        ├── Task 6  (Test Gaps) ──┤
+              │                                                   │
+Phase 6:      │                        ├── Task 4  (Deployment) ──┤
 ```
 
 ---
@@ -142,13 +175,14 @@ intra-task parallelism guidance. Cross-task parallelism follows the dependency g
 
 ### Config Schema Evolution
 
-Tasks 2, 3, and 4 all interact with the config schema:
+Tasks 2, 3, 4, and 11 all interact with the config schema:
 
 - Task 2 defines the schema (Rust structs + TOML format)
 - Task 3 reads and writes the schema (settings UI + persistence)
 - Task 4 mirrors the schema (Nix attrs → TOML generation)
+- Task 11 extends the schema (theme name in `[theme]` section, persisted on Apply)
 
-Any config schema changes after Task 2 is complete must be propagated to Tasks 3 and 4.
+Any config schema changes after Task 2 is complete must be propagated to Tasks 3, 4, and 11.
 
 ### Rendering Pipeline
 
@@ -189,6 +223,10 @@ Update this section as tasks complete:
 | 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                   |
 | 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                    |
 | 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                      |
+| 11   | —          | —          | Plan created, unblocked (Tasks 2+3 done)   |
+| 12   | —          | —          | Plan created, independent                  |
+| 13   | —          | —          | Plan created, unblocked (Task 1 done)      |
 
 ---
 
@@ -200,4 +238,8 @@ Update this section as tasks complete:
 - `Documents/PLAN_07_ESCAPE_SEQUENCES.md` — Escape sequence audit and implementation plan
 - `Documents/PLAN_08_SCROLLBACK.md` — Primary screen scrollback architecture and wiring
 - `Documents/PLAN_09_TMUX_COMPAT_AND_LOGGING.md` — tmux compatibility fixes and persistent logging
+- `Documents/PLAN_10_VTTEST_CURSOR_MOVEMENT.md` — vttest cursor movement test failures
+- `Documents/PLAN_11_THEMING.md` — Embedded color themes and theme picker
+- `Documents/PLAN_12_TERMINFO.md` — Terminfo audit, build.rs fix, XTGETTCAP audit
+- `Documents/PLAN_13_IMAGE_PROTOCOL.md` — Image protocol support (iTerm2, Kitty, Sixel)
 - `config_example.toml` — Current config format

@@ -17,6 +17,7 @@ use eframe::glow::{self, HasContext};
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::fonts::FontDecorations;
 use freminal_common::cursor::CursorVisualStyle;
+use tracing::error;
 
 use super::atlas::{GlyphAtlas, GlyphKey};
 use super::colors::{CURSOR_F, SELECTION_BG_F, SELECTION_FG_F, internal_color_to_gl};
@@ -299,10 +300,6 @@ impl TerminalRenderer {
     /// draws the background pass then the foreground pass.  Restores the egui
     /// intermediate FBO on completion.
     ///
-    /// # Panics
-    ///
-    /// Panics if `init()` has not been called.  Check `initialized()` first.
-    ///
     /// # Safety
     ///
     /// This method calls `glow` functions which are marked `unsafe`.  The caller
@@ -328,10 +325,10 @@ impl TerminalRenderer {
         viewport_height: i32,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
-        assert!(
-            self.initialized,
-            "TerminalRenderer::draw() called before init()"
-        );
+        if !self.initialized {
+            error!("TerminalRenderer::draw() called before init()");
+            return;
+        }
 
         // 1. Sync atlas texture.
         self.sync_atlas(gl, atlas);
@@ -383,11 +380,6 @@ impl TerminalRenderer {
     /// `PaintCallback` closure, which must be `Send + Sync` and therefore
     /// cannot capture a `FontManager`.
     ///
-    /// # Panics
-    ///
-    /// Panics if [`init`][`Self::init`] has not been called.  Check
-    /// [`initialized`][`Self::initialized`] first.
-    ///
     /// # Safety
     ///
     /// This method calls `glow` functions which are marked `unsafe`.  The
@@ -403,10 +395,10 @@ impl TerminalRenderer {
         viewport_height: i32,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
-        assert!(
-            self.initialized,
-            "TerminalRenderer::draw_with_verts() called before init()"
-        );
+        if !self.initialized {
+            error!("TerminalRenderer::draw_with_verts() called before init()");
+            return;
+        }
 
         // 1. Sync atlas texture to the GPU.
         self.sync_atlas(gl, atlas);
@@ -447,10 +439,6 @@ impl TerminalRenderer {
     /// set the draw vertex count correctly).  `cursor_verts` contains exactly
     /// `CURSOR_QUAD_FLOATS` floats (or is empty when the cursor is hidden).
     ///
-    /// # Panics
-    ///
-    /// Panics if [`init`][`Self::init`] has not been called.
-    ///
     /// # Safety
     ///
     /// Caller must ensure a valid GL context exists.
@@ -467,10 +455,10 @@ impl TerminalRenderer {
         viewport_height: i32,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
-        assert!(
-            self.initialized,
-            "TerminalRenderer::draw_with_cursor_only_update() called before init()"
-        );
+        if !self.initialized {
+            error!("TerminalRenderer::draw_with_cursor_only_update() called before init()");
+            return;
+        }
 
         // 1. Sync atlas (may have new glyphs from a previous frame).
         self.sync_atlas(gl, atlas);
