@@ -20,6 +20,11 @@ family = "CaskaydiaCove Nerd Font"
 # Font size in points
 size = 12.0
 
+# Enable OpenType ligatures (liga, clig).
+# Programming fonts like JetBrains Mono, Fira Code, and Cascadia Code
+# contain ligatures for sequences like ->, =>, !=, >=, etc.
+ligatures = true
+
 ################################################################################
 # CURSOR SETTINGS
 ################################################################################

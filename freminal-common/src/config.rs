@@ -49,6 +49,8 @@ pub struct FontConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
     pub size: f32,
+    /// Enable OpenType ligatures (`liga`, `clig`).  Default: `true`.
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
@@ -56,6 +58,7 @@ impl Default for FontConfig {
         Self {
             family: None,
             size: 12.0,
+            ligatures: true,
         }
     }
 }
@@ -491,4 +494,73 @@ pub fn log_dir() -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_config_default_ligatures_true() {
+        let cfg = FontConfig::default();
+        assert!(cfg.ligatures, "ligatures should default to true");
+    }
+
+    #[test]
+    fn font_config_deserialize_ligatures_true() {
+        let toml_str = r"
+[font]
+size = 14.0
+ligatures = true
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(font.ligatures);
+    }
+
+    #[test]
+    fn font_config_deserialize_ligatures_false() {
+        let toml_str = r"
+[font]
+size = 14.0
+ligatures = false
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(!font.ligatures);
+    }
+
+    #[test]
+    fn font_config_missing_ligatures_defaults_true() {
+        // Backward compatibility: old config files without `ligatures` field
+        // should default to true.
+        let toml_str = r"
+[font]
+size = 14.0
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(
+            font.ligatures,
+            "missing ligatures field should default to true"
+        );
+    }
+
+    #[test]
+    fn full_config_default_has_ligatures_true() {
+        let cfg = Config::default();
+        assert!(cfg.font.ligatures);
+    }
+
+    #[test]
+    fn config_roundtrip_preserves_ligatures() {
+        let mut cfg = Config::default();
+        cfg.font.ligatures = false;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize to TOML");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(!deserialized.font.ligatures);
+    }
 }

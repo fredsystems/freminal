@@ -1364,7 +1364,8 @@ impl FreminalTerminalWidget {
         input_tx: &Sender<InputEvent>,
     ) {
         let rebuild_result = self.font_manager.rebuild(new_config);
-        if rebuild_result.font_changed() {
+        let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
+        if rebuild_result.font_changed() || ligatures_changed {
             let mut rs = self
                 .render_state
                 .lock()
