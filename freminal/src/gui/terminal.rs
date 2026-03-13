@@ -1191,13 +1191,12 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
-                    &freminal_common::themes::CATPPUCCIN_MOCHA,
+                    snap.theme,
                 );
                 let mut rs = self
                     .render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // Patch the cursor region in bg_verts so the PaintCallback can
                 // detect the cursor-only mode via a separate flag.
                 // We overwrite the cursor quad data in the CPU copy so that if
                 // a full rebuild happens next frame it starts from correct state.
@@ -1245,7 +1244,7 @@ impl FreminalTerminalWidget {
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
-                    &freminal_common::themes::CATPPUCCIN_MOCHA,
+                    snap.theme,
                 );
 
                 // Record where the cursor quad starts in the background VBO.
@@ -1270,7 +1269,7 @@ impl FreminalTerminalWidget {
                     cell_h,
                     self.font_manager.ascent(),
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
-                    &freminal_common::themes::CATPPUCCIN_MOCHA,
+                    snap.theme,
                 );
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;

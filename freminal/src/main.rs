@@ -42,7 +42,7 @@ use tracing_subscriber::{
 
 pub mod gui;
 
-use freminal_common::{args::Args, config, config::load_config};
+use freminal_common::{args::Args, config, config::load_config, themes};
 
 use clap::Parser;
 
@@ -186,7 +186,12 @@ fn main() {
     }
 
     let res = match TerminalEmulator::new(&args, Some(cfg.scrollback.limit)) {
-        Ok((terminal, pty_read_rx)) => {
+        Ok((mut terminal, pty_read_rx)) => {
+            // Apply the configured theme to the emulator so all snapshots carry
+            // the correct palette from the start.
+            let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
+            terminal.internal.handler.set_theme(theme);
+
             // Shared snapshot published by the PTY thread, consumed lock-free by the GUI.
             let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
                 Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));

@@ -708,6 +708,7 @@ impl TerminalEmulator {
 
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
+        let theme = self.internal.handler.theme();
 
         TerminalSnapshot {
             visible_chars,
@@ -731,6 +732,7 @@ impl TerminalEmulator {
             cwd,
             ftcs_state,
             last_exit_code,
+            theme,
         }
     }
 }

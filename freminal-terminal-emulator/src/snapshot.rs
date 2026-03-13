@@ -22,6 +22,7 @@ use freminal_common::{
         tchar::TChar,
     },
     cursor::CursorVisualStyle,
+    themes::ThemePalette,
 };
 
 /// A point-in-time snapshot of the terminal state, ready for the GUI to render.
@@ -138,6 +139,12 @@ pub struct TerminalSnapshot {
     ///
     /// The GUI can use this to display command success/failure indicators.
     pub last_exit_code: Option<i32>,
+
+    /// The active color theme palette.
+    ///
+    /// Carried in the snapshot so the GUI can render with the user's chosen
+    /// theme without holding any lock.
+    pub theme: &'static ThemePalette,
 }
 
 impl TerminalSnapshot {
@@ -168,6 +175,7 @@ impl TerminalSnapshot {
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
+            theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
         }
     }
 }
