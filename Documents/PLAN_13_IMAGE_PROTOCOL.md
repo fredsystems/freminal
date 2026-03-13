@@ -356,12 +356,17 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.8 — Implement Kitty Unicode placeholders**
+- [x] **13.8 — Implement Kitty Unicode placeholders**
   - Handle the Unicode placeholder virtual character (U+10EEEE) in the buffer.
   - Map placeholder characters to image placements.
   - Render placeholder cells as image texture quads.
   - This is required for yazi's preferred "Kgp" adapter and for tmux passthrough.
   - **Verify:** `cargo test --all` passes. yazi detects and uses the Kitty protocol.
+  - ✅ Completed. Added `unicode_placeholder` module with diacritics table (297 entries),
+    parsing helpers, and color-to-ID extraction (17 unit tests). Intercept U+10EEEE graphemes
+    in `handle_data()` with fast path when no virtual placements exist. Diacritic inheritance
+    rules fully implemented. Virtual placements stored on `a=T,U=1` / `a=p,U=1` and cleaned
+    on delete. 11 integration tests. Committed as `e02cf64`.
 
 ---
 
