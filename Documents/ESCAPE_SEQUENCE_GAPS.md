@@ -18,7 +18,7 @@ output) are now parsed and written to `TerminalModes`. All tab stop infrastructu
 DCS sub-commands (DECRQSS, XTGETTCAP) are implemented. The remaining gaps are:
 
 - **Renderer gaps:** DECSCNM full cell-level inversion (background swap exists), double-height/width lines
-- **OSC gaps:** OSC 10/11 set (no-op), OSC 12/110/111 (not implemented)
+- **OSC gaps:** OSC 12 (cursor color not implemented)
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
 - **Rare/low-priority:** Sixel, IRM/SRM standard modes, unparsed DEC modes (?2, ?66, ?67, ?69)
 - **8-bit C1 controls** (0x9B CSI) not parsed (no practical impact)
@@ -45,19 +45,10 @@ These features are tracked at the state-machine level but the renderer does not 
 
 ## OSC Gaps
 
-| Sequence           | Importance | Type | Notes                                                                  |
-| ------------------ | ---------- | ---- | ---------------------------------------------------------------------- |
-| OSC 10 ; color BEL | 🟨         | 🚧   | Query responds with hardcoded Catppuccin Mocha default; set is a no-op |
-| OSC 11 ; color BEL | 🟨         | 🚧   | Query responds with hardcoded Catppuccin Mocha default; set is a no-op |
-| OSC 12 ; color BEL | ⬜         | ⬜   | Set cursor color — not implemented                                     |
-| OSC 110 BEL        | ⬜         | ⬜   | Reset foreground color — not implemented                               |
-| OSC 111 BEL        | ⬜         | ⬜   | Reset background color — not implemented                               |
-| OSC 777            | ⬜         | ⬜   | Konsole system notification — not implemented                          |
-
-**Implementation note for OSC 10/11:** The OSC 10/11 query path already works. To make the set
-path functional, the configured theme foreground/background colors need to be mutable at runtime
-and the renderer needs to read them from `TerminalSnapshot`. This is a config integration task,
-not a parser task.
+| Sequence           | Importance | Type | Notes                                         |
+| ------------------ | ---------- | ---- | --------------------------------------------- |
+| OSC 12 ; color BEL | ⬜         | ⬜   | Set cursor color — not implemented            |
+| OSC 777            | ⬜         | ⬜   | Konsole system notification — not implemented |
 
 ---
 
@@ -146,16 +137,14 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | Item                       | Rationale                                                        |
 | -------------------------- | ---------------------------------------------------------------- |
 | DECSCNM renderer inversion | Mode is tracked; renderer just needs to invert the color palette |
-| OSC 10/11 set path         | Requires making theme FG/BG mutable; config integration work     |
 
 ### Priority 2 — Polish
 
-| Item                      | Rationale                                           |
-| ------------------------- | --------------------------------------------------- |
-| OSC 12 (cursor color)     | Per-session cursor color customization              |
-| OSC 110/111 (reset FG/BG) | Counterpart to OSC 10/11 set                        |
-| BEL visual bell           | Accessibility and feedback for scripts that use BEL |
-| ESC Z (DECID)             | Some legacy scripts probe terminal type via DECID   |
+| Item                  | Rationale                                           |
+| --------------------- | --------------------------------------------------- |
+| OSC 12 (cursor color) | Per-session cursor color customization              |
+| BEL visual bell       | Accessibility and feedback for scripts that use BEL |
+| ESC Z (DECID)         | Some legacy scripts probe terminal type via DECID   |
 
 ### Priority 3 — Low priority / optional
 

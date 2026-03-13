@@ -157,25 +157,25 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 
 ## OSC — Operating System Commands
 
-| Sequence                 | Purpose                       | Status | Notes                                                                  |
-| ------------------------ | ----------------------------- | ------ | ---------------------------------------------------------------------- |
-| OSC 0 ; txt BEL          | Set icon + window title       | 🚧     | Works, but icon name vs. title not distinguished                       |
-| OSC 1 ; txt BEL          | Set icon title only           | 🚧     | Shares handler with OSC 0 (treats as full title)                       |
-| OSC 2 ; txt BEL          | Set window title only         | ✅     | Implemented                                                            |
-| OSC 4 ; n ; rgb          | Set palette entry             | ✅     | Sets 256-color palette entry; query responds with current value        |
-| OSC 7 ; URI              | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`       |
-| OSC 8 ; params ; URI BEL | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata              |
-| OSC 10 ; ? BEL           | Foreground color query        | 🚧     | Query responds with hardcoded Catppuccin Mocha default; set is a no-op |
-| OSC 11 ; ? BEL           | Background color query        | 🚧     | Query responds with hardcoded Catppuccin Mocha default; set is a no-op |
-| OSC 12 ; color           | Set cursor color              | ⬜     | Not implemented                                                        |
-| OSC 52 ; c ; data BEL    | Clipboard copy/paste          | ✅     | Implemented — base64 encode/decode, clipboard set/query                |
-| OSC 104                  | Reset palette entry           | ✅     | Resets specific or all palette entries to defaults                     |
-| OSC 110                  | Reset foreground color        | ⬜     | Not implemented                                                        |
-| OSC 111                  | Reset background color        | ⬜     | Not implemented                                                        |
-| OSC 112                  | Reset cursor color            | ⬜     | Empty match arm, no-op                                                 |
-| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed and stored in `FtcsState`                      |
-| OSC 777                  | System notification (Konsole) | ⬜     | Not implemented                                                        |
-| OSC 1337                 | iTerm2 / WezTerm extensions   | ⬜     | Recognized if enabled (debug log only)                                 |
+| Sequence                 | Purpose                       | Status | Notes                                                             |
+| ------------------------ | ----------------------------- | ------ | ----------------------------------------------------------------- |
+| OSC 0 ; txt BEL          | Set icon + window title       | 🚧     | Works, but icon name vs. title not distinguished                  |
+| OSC 1 ; txt BEL          | Set icon title only           | 🚧     | Shares handler with OSC 0 (treats as full title)                  |
+| OSC 2 ; txt BEL          | Set window title only         | ✅     | Implemented                                                       |
+| OSC 4 ; n ; rgb          | Set palette entry             | ✅     | Sets 256-color palette entry; query responds with current value   |
+| OSC 7 ; URI              | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`  |
+| OSC 8 ; params ; URI BEL | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata         |
+| OSC 10 ; ? BEL           | Foreground color query/set    | ✅     | Query returns theme fg (or dynamic override); set stores override |
+| OSC 11 ; ? BEL           | Background color query/set    | ✅     | Query returns theme bg (or dynamic override); set stores override |
+| OSC 12 ; color           | Set cursor color              | ⬜     | Not implemented                                                   |
+| OSC 52 ; c ; data BEL    | Clipboard copy/paste          | ✅     | Implemented — base64 encode/decode, clipboard set/query           |
+| OSC 104                  | Reset palette entry           | ✅     | Resets specific or all palette entries to defaults                |
+| OSC 110                  | Reset foreground color        | ✅     | Clears dynamic fg override; query returns theme default           |
+| OSC 111                  | Reset background color        | ✅     | Clears dynamic bg override; query returns theme default           |
+| OSC 112                  | Reset cursor color            | ⬜     | Empty match arm, no-op                                            |
+| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed and stored in `FtcsState`                 |
+| OSC 777                  | System notification (Konsole) | ⬜     | Not implemented                                                   |
+| OSC 1337                 | iTerm2 / WezTerm extensions   | ⬜     | Recognized if enabled (debug log only)                            |
 
 ---
 
@@ -278,7 +278,7 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | Double-height/width lines      | ⬜              | 🚧                 | Parsed but renderer does not implement visual double-height/width      |
 | SO/SI (G1 charset switching)   | ⬜              | 🚧                 | Parsed but G1 rendering not implemented                                |
 | Sixel Graphics                 | ⬜              | 🚧                 | Not implemented                                                        |
-| OSC 10/11 (FG/BG color query)  | 🚧              | ✅                 | Query responds with hardcoded Catppuccin defaults; set is a no-op      |
+| OSC 10/11 (FG/BG color query)  | ✅              | ✅                 | Query/set/reset fully implemented with theme-aware defaults            |
 
 ---
 
@@ -296,13 +296,12 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 The gaps that remain are either low-priority polish or require significant new infrastructure:
 
 1. **Renderer-side DECSCNM** — The mode is tracked but the renderer does not yet invert the screen colors.
-2. **OSC 10/11 color set** — Dynamic foreground/background color setting is a no-op; queries return hardcoded defaults.
-3. **Double-height/width lines** (ESC # 3/4/5/6) — The renderer does not support these.
-4. **SO/SI G1 charset switching** — Parsed but rendering from G1 not implemented.
-5. **OSC 12** (cursor color), **OSC 110/111** (reset FG/BG color) — Not implemented.
-6. **Sixel Graphics** — Large undertaking, not planned near-term.
-7. **Standard modes IRM/SRM** — Rare in practice.
-8. **Unparsed DEC modes** — ?2 (DECANM/VT52), ?66 (DECNKM), ?67 (DECBKM), ?69 (DECLRMM).
+2. **Double-height/width lines** (ESC # 3/4/5/6) — The renderer does not support these.
+3. **SO/SI G1 charset switching** — Parsed but rendering from G1 not implemented.
+4. **OSC 12** (cursor color) — Not implemented.
+5. **Sixel Graphics** — Large undertaking, not planned near-term.
+6. **Standard modes IRM/SRM** — Rare in practice.
+7. **Unparsed DEC modes** — ?2 (DECANM/VT52), ?66 (DECNKM), ?67 (DECBKM), ?69 (DECLRMM).
 
 ---
 

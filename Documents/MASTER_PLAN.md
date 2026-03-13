@@ -35,7 +35,7 @@ and plan document maintenance rules.
 | 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`              | Complete    | None         |
 | 9   | tmux Compat + Logging     | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md` | Complete    | None         |
 | 10  | vttest Cursor Movement    | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`  | Complete    | None         |
-| 11  | Theming                   | `PLAN_11_THEMING.md`                 | Not Started | Tasks 2, 3   |
+| 11  | Theming                   | `PLAN_11_THEMING.md`                 | Complete    | Tasks 2, 3   |
 | 12  | Terminfo Audit            | `PLAN_12_TERMINFO.md`                | Not Started | None         |
 | 13  | Image Protocol Support    | `PLAN_13_IMAGE_PROTOCOL.md`          | Not Started | Task 1       |
 
@@ -224,7 +224,7 @@ Update this section as tasks complete:
 | 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                       |
 | 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging    |
 | 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                         |
-| 11   | —          | —          | Plan created, unblocked (Tasks 2+3 done)      |
+| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4 |
 | 12   | —          | —          | Plan created, independent                     |
 | 13   | —          | —          | Plan created, unblocked (Task 1 done)         |
 

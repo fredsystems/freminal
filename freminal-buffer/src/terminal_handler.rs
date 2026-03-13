@@ -3455,4 +3455,80 @@ mod tests {
         };
         assert_eq!(bg_response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
     }
+
+    #[test]
+    fn theme_switch_changes_osc10_osc11_responses() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Switch from default CATPPUCCIN_MOCHA to DRACULA.
+        handler.set_theme(&freminal_common::themes::DRACULA);
+
+        // OSC 10 query — should return DRACULA foreground (0xf8, 0xf8, 0xf2).
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(fg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 10 query after theme switch");
+        };
+        let Ok(fg_response) = String::from_utf8(fg_bytes) else {
+            panic!("OSC 10 response should be valid UTF-8");
+        };
+        assert_eq!(fg_response, "\x1b]10;rgb:f8/f8/f2\x1b\\");
+
+        // OSC 11 query — should return DRACULA background (0x28, 0x2a, 0x36).
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(bg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 11 query after theme switch");
+        };
+        let Ok(bg_response) = String::from_utf8(bg_bytes) else {
+            panic!("OSC 11 response should be valid UTF-8");
+        };
+        assert_eq!(bg_response, "\x1b]11;rgb:28/2a/36\x1b\\");
+    }
+
+    #[test]
+    fn osc10_override_persists_across_theme_switch() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set foreground override to #ff0000.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("#ff0000".to_string()),
+        ));
+
+        // Switch theme to DRACULA — override should survive.
+        handler.set_theme(&freminal_common::themes::DRACULA);
+
+        // OSC 10 query — override (#ff0000) takes precedence over the new theme.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(override_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for OSC 10 query while override is active");
+        };
+        let Ok(override_response) = String::from_utf8(override_bytes) else {
+            panic!("OSC 10 response should be valid UTF-8");
+        };
+        assert_eq!(override_response, "\x1b]10;rgb:ff/00/00\x1b\\");
+
+        // Reset the override via OSC 110.
+        handler.handle_osc(&AnsiOscType::ResetForegroundColor);
+
+        // OSC 10 query — should now return DRACULA foreground (0xf8, 0xf8, 0xf2).
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(theme_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for OSC 10 query after OSC 110 reset");
+        };
+        let Ok(theme_response) = String::from_utf8(theme_bytes) else {
+            panic!("OSC 10 response should be valid UTF-8");
+        };
+        assert_eq!(theme_response, "\x1b]10;rgb:f8/f8/f2\x1b\\");
+    }
 }
