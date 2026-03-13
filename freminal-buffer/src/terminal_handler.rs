@@ -935,17 +935,18 @@ impl TerminalHandler {
 
     /// Handle `a=q` — query whether the terminal supports the Kitty graphics protocol.
     ///
-    /// Responds with OK for format 32 (RGBA) and 100 (PNG). Other formats
-    /// get an error response.
+    /// Responds with OK for formats 24 (RGB), 32 (RGBA), and 100 (PNG).
+    /// Other formats get an error response.
     fn handle_kitty_query(&self, cmd: &KittyGraphicsCommand) {
         let image_id = cmd.control.image_id.unwrap_or(0);
         let quiet = cmd.control.quiet;
 
-        // We support RGBA (f=32) and PNG (f=100).
+        // We support RGB (f=24), RGBA (f=32), and PNG (f=100).
         let supported = cmd.control.format.is_none_or(|f| {
             matches!(
                 f,
-                freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgba
+                freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgb
+                    | freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgba
                     | freminal_common::buffer_states::kitty_graphics::KittyFormat::Png
             )
         });
@@ -1032,37 +1033,247 @@ impl TerminalHandler {
 
     /// Handle a single (non-chunked) Kitty graphics command.
     ///
-    /// For now, logs the command. Actual image decoding and placement will be
-    /// implemented in subtask 13.7.
-    fn handle_kitty_single(&self, cmd: &KittyGraphicsCommand, action: KittyAction) {
-        let image_id = cmd.control.image_id.unwrap_or(0);
+    /// Decodes the image payload according to the format (`f=24` RGB, `f=32`
+    /// RGBA, `f=100` PNG), computes display dimensions, stores as an
+    /// `InlineImage`, and places into the buffer.
+    fn handle_kitty_single(&mut self, cmd: &KittyGraphicsCommand, action: KittyAction) {
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
         let quiet = cmd.control.quiet;
 
-        tracing::debug!(
-            "Kitty graphics: single command a={action:?}, id={image_id}, \
-             payload={} bytes (decoding not yet implemented)",
-            cmd.payload.len(),
+        if cmd.payload.is_empty() && action != KittyAction::Put {
+            tracing::debug!("Kitty graphics: empty payload for a={action:?}; ignoring");
+            self.send_kitty_error(image_id_hint, quiet, "ENODATA:no payload");
+            return;
+        }
+
+        // Decode payload into RGBA pixels + dimensions.
+        let Some((rgba_pixels, img_width_px, img_height_px)) =
+            self.decode_kitty_payload(cmd, image_id_hint, quiet)
+        else {
+            return; // Error already sent by decode_kitty_payload.
+        };
+
+        // Compute display size in cells and place the image.
+        self.place_kitty_image(
+            &cmd.control,
+            action,
+            rgba_pixels,
+            img_width_px,
+            img_height_px,
+            image_id_hint,
+            quiet,
+        );
+    }
+
+    /// Decode a Kitty graphics payload into RGBA pixel data.
+    ///
+    /// Returns `None` if decoding fails (an error response is sent to the PTY).
+    fn decode_kitty_payload(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        image_id_hint: u32,
+        quiet: u8,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        use freminal_common::buffer_states::kitty_graphics::KittyFormat;
+
+        let format = cmd.control.format.unwrap_or(KittyFormat::Rgba);
+
+        match format {
+            KittyFormat::Rgba => {
+                let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
+                let expected = (w as usize) * (h as usize) * 4;
+                if cmd.payload.len() != expected {
+                    tracing::debug!(
+                        "Kitty RGBA: expected {expected} bytes, got {}",
+                        cmd.payload.len()
+                    );
+                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
+                    return None;
+                }
+                Some((cmd.payload.clone(), w, h))
+            }
+            KittyFormat::Rgb => {
+                let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
+                let expected = (w as usize) * (h as usize) * 3;
+                if cmd.payload.len() != expected {
+                    tracing::debug!(
+                        "Kitty RGB: expected {expected} bytes, got {}",
+                        cmd.payload.len()
+                    );
+                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
+                    return None;
+                }
+                let pixel_count = (w as usize) * (h as usize);
+                let mut rgba = Vec::with_capacity(pixel_count * 4);
+                for chunk in cmd.payload.chunks_exact(3) {
+                    rgba.extend_from_slice(chunk);
+                    rgba.push(255);
+                }
+                Some((rgba, w, h))
+            }
+            KittyFormat::Png => match image::load_from_memory(&cmd.payload) {
+                Ok(img) => {
+                    let rgba_img = img.to_rgba8();
+                    let w = rgba_img.width();
+                    let h = rgba_img.height();
+                    if w == 0 || h == 0 {
+                        self.send_kitty_error(
+                            image_id_hint,
+                            quiet,
+                            "EINVAL:decoded image has zero dimensions",
+                        );
+                        return None;
+                    }
+                    Some((rgba_img.into_raw(), w, h))
+                }
+                Err(e) => {
+                    tracing::debug!("Kitty PNG decode failed: {e}");
+                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:PNG decode failed");
+                    None
+                }
+            },
+        }
+    }
+
+    /// Extract required `s` (width) and `v` (height) from Kitty control data.
+    ///
+    /// Returns `None` and sends an error if either is missing.
+    fn require_kitty_dimensions(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        image_id_hint: u32,
+        quiet: u8,
+    ) -> Option<(u32, u32)> {
+        let Some(w) = cmd.control.src_width else {
+            self.send_kitty_error(image_id_hint, quiet, "EINVAL:missing width (s)");
+            return None;
+        };
+        let Some(h) = cmd.control.src_height else {
+            self.send_kitty_error(image_id_hint, quiet, "EINVAL:missing height (v)");
+            return None;
+        };
+        Some((w, h))
+    }
+
+    /// Compute display dimensions, store an `InlineImage`, and optionally place
+    /// it into the buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn place_kitty_image(
+        &mut self,
+        control: &KittyControlData,
+        action: KittyAction,
+        rgba_pixels: Vec<u8>,
+        img_width_px: u32,
+        img_height_px: u32,
+        image_id_hint: u32,
+        quiet: u8,
+    ) {
+        if img_width_px == 0 || img_height_px == 0 {
+            self.send_kitty_error(image_id_hint, quiet, "EINVAL:zero dimension");
+            return;
+        }
+
+        let (term_width, term_height) = self.get_win_size();
+
+        let display_cols = control.display_cols.map_or_else(
+            || {
+                #[allow(clippy::cast_possible_truncation)]
+                let cols = img_width_px.div_ceil(8) as usize;
+                cols.min(term_width).max(1)
+            },
+            |c| {
+                #[allow(clippy::cast_possible_truncation)]
+                let cols = c as usize;
+                cols.min(term_width).max(1)
+            },
         );
 
-        // Send an OK response unless suppressed by quiet mode.
-        // quiet=1 suppresses OK; quiet=2 suppresses all.
-        if quiet < 1 && image_id > 0 {
-            let response = format_kitty_response(image_id, true, "");
+        let display_rows = control.display_rows.map_or_else(
+            || {
+                #[allow(clippy::cast_possible_truncation)]
+                let rows = img_height_px.div_ceil(16) as usize;
+                rows.min(term_height).max(1)
+            },
+            |r| {
+                #[allow(clippy::cast_possible_truncation)]
+                let rows = r as usize;
+                rows.min(term_height).max(1)
+            },
+        );
+
+        let assigned_id = if image_id_hint > 0 {
+            u64::from(image_id_hint)
+        } else {
+            next_image_id()
+        };
+
+        let inline_image = InlineImage {
+            id: assigned_id,
+            pixels: std::sync::Arc::new(rgba_pixels),
+            width_px: img_width_px,
+            height_px: img_height_px,
+            display_cols,
+            display_rows,
+        };
+
+        self.buffer.image_store_mut().insert(inline_image.clone());
+
+        let should_display = matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
+        if should_display {
+            let _new_offset = self.buffer.place_image(inline_image, 0);
+        }
+
+        // Send OK response unless suppressed.
+        if quiet < 1 && assigned_id > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let response_id = assigned_id as u32;
+            let response = format_kitty_response(response_id, true, "");
             self.write_to_pty(&response);
         }
     }
 
+    /// Send a Kitty graphics error response, respecting quiet mode.
+    fn send_kitty_error(&self, image_id: u32, quiet: u8, message: &str) {
+        // quiet=2 suppresses all responses (including errors).
+        if quiet >= 2 {
+            return;
+        }
+        let response = format_kitty_response(image_id, false, message);
+        self.write_to_pty(&response);
+    }
+
     /// Handle `a=d` — delete images.
     ///
-    /// For now, logs the command. Full delete-target handling will be
-    /// implemented in a later subtask.
-    #[allow(clippy::unused_self)]
-    fn handle_kitty_delete(&self, cmd: &KittyGraphicsCommand) {
-        tracing::debug!(
-            "Kitty graphics: delete command (target={:?}, id={:?}) — not yet implemented",
-            cmd.control.delete_target,
-            cmd.control.image_id,
-        );
+    /// Supports the most common delete targets: delete all (`d=a`/`d=A`),
+    /// delete by ID (`d=i`/`d=I`), and delete at cursor (`d=c`/`d=C`).
+    /// Unsupported targets are logged and ignored.
+    fn handle_kitty_delete(&mut self, cmd: &KittyGraphicsCommand) {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
+
+        let target = cmd.control.delete_target.unwrap_or(KittyDeleteTarget::All);
+
+        match target {
+            KittyDeleteTarget::All | KittyDeleteTarget::AllIncludingNonVisible => {
+                tracing::debug!("Kitty graphics: deleting all images");
+                // Clear all image placements from cells.
+                self.buffer.clear_all_image_placements();
+                // Clear the image store.
+                self.buffer.image_store_mut().clear();
+            }
+            KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter => {
+                if let Some(image_id) = cmd.control.image_id {
+                    let id = u64::from(image_id);
+                    tracing::debug!("Kitty graphics: deleting image id={id}");
+                    self.buffer.clear_image_placements_by_id(id);
+                    self.buffer.image_store_mut().remove(id);
+                }
+            }
+            other => {
+                tracing::debug!(
+                    "Kitty graphics: delete target {other:?} not yet implemented; ignoring"
+                );
+            }
+        }
     }
 
     /// Handle CPR — Cursor Position Report.
@@ -4682,5 +4893,572 @@ mod tests {
             !has_image,
             "Non-inline multipart transfer should not place an image"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty graphics direct transfer tests
+    // ------------------------------------------------------------------
+
+    /// Helper: create a `TerminalHandler` with a write channel and return
+    /// `(handler, rx)` so tests can inspect PTY responses.
+    fn kitty_handler() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        (handler, rx)
+    }
+
+    /// Helper: build a `KittyGraphicsCommand` with the given control data and
+    /// raw RGBA payload for a 2x2 image.
+    fn kitty_rgba_2x2_cmd(action: KittyAction) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        // 2x2 RGBA = 16 bytes.
+        let rgba_data: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ];
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(action),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: rgba_data,
+        }
+    }
+
+    #[test]
+    fn kitty_single_rgba_transmit_and_display_places_image() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, _rx) = kitty_handler();
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be placed in the buffer.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Expected image cells after Kitty TransmitAndDisplay"
+        );
+
+        // Image should be in the store.
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "Expected image id=42 in the image store"
+        );
+    }
+
+    #[test]
+    fn kitty_single_rgba_transmit_only_stores_but_does_not_place() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, _rx) = kitty_handler();
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be in the store but NOT placed in cells.
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "Expected image id=42 in the store after Transmit"
+        );
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(!has_image, "Transmit-only should not place image cells");
+    }
+
+    #[test]
+    fn kitty_single_rgb_converts_to_rgba() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // 2x2 RGB = 12 bytes (no alpha channel).
+        let rgb_data: Vec<u8> = vec![
+            255, 0, 0, // red
+            0, 255, 0, // green
+            0, 0, 255, // blue
+            255, 255, 0, // yellow
+        ];
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgb),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                ..KittyControlData::default()
+            },
+            payload: rgb_data,
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // The stored image should have RGBA pixels (16 bytes for 2x2).
+        let img = handler.buffer().image_store().get(99).unwrap();
+        assert_eq!(
+            img.pixels.len(),
+            16,
+            "RGB should be converted to RGBA (4 bytes/pixel)"
+        );
+        // Verify alpha was inserted: first pixel should be [255, 0, 0, 255].
+        assert_eq!(&img.pixels[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn kitty_single_png_decodes_and_places() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let png_data = make_test_png(); // 2x2 red PNG.
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                image_id: Some(77),
+                // PNG does not require s/v — dimensions come from the image.
+                ..KittyControlData::default()
+            },
+            payload: png_data,
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler.buffer().image_store().get(77).unwrap();
+        assert_eq!(img.width_px, 2);
+        assert_eq!(img.height_px, 2);
+        // PNG decoded to RGBA: 2*2*4 = 16 bytes.
+        assert_eq!(img.pixels.len(), 16);
+    }
+
+    #[test]
+    fn kitty_single_rgba_missing_dimensions_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // RGBA payload but no s/v dimensions → should send error.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                image_id: Some(10),
+                // No src_width or src_height!
+                ..KittyControlData::default()
+            },
+            payload: vec![0; 16],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Should NOT be stored.
+        assert!(
+            handler.buffer().image_store().get(10).is_none(),
+            "Image should not be stored when dimensions are missing"
+        );
+
+        // Should have sent an error response.
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_rgba_payload_size_mismatch_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Says 2x2 RGBA (expects 16 bytes) but payload is only 8 bytes.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(11),
+                ..KittyControlData::default()
+            },
+            payload: vec![0; 8], // too small
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(handler.buffer().image_store().get(11).is_none());
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_empty_payload_sends_enodata() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(12),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(), // empty
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENODATA"), "Expected ENODATA error, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_ok_response_sent_for_verbose_mode() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, rx) = kitty_handler();
+
+        // quiet=0 (default) → should send OK.
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("OK"), "Expected OK response, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_quiet_1_suppresses_ok() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(50),
+                quiet: 1, // suppress OK but not errors
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should still be placed.
+        assert!(handler.buffer().image_store().get(50).is_some());
+
+        // But no OK response should be sent.
+        assert!(
+            rx.try_recv().is_err(),
+            "quiet=1 should suppress OK response"
+        );
+    }
+
+    #[test]
+    fn kitty_single_quiet_2_suppresses_all_responses() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // quiet=2 with a bad payload → error should be suppressed.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(51),
+                quiet: 2,
+                ..KittyControlData::default()
+            },
+            payload: vec![0; 8], // wrong size → EINVAL
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // No response at all.
+        assert!(
+            rx.try_recv().is_err(),
+            "quiet=2 should suppress all responses including errors"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_all_clears_images() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // First, place an image.
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.buffer().image_store().get(42).is_some());
+
+        // Now delete all.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::All),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        // Image should be gone from the store.
+        assert!(
+            handler.buffer().image_store().get(42).is_none(),
+            "Delete all should remove all images"
+        );
+
+        // No image cells should remain.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(!has_image, "Delete all should clear image cells");
+    }
+
+    #[test]
+    fn kitty_delete_by_id_removes_only_target() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place image id=42.
+        let cmd1 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd1);
+
+        // Place image id=99.
+        let cmd2 = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+        handler.handle_kitty_graphics(cmd2);
+
+        assert!(handler.buffer().image_store().get(42).is_some());
+        assert!(handler.buffer().image_store().get(99).is_some());
+
+        // Delete only id=42.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(42).is_none(),
+            "id=42 should be removed"
+        );
+        assert!(
+            handler.buffer().image_store().get(99).is_some(),
+            "id=99 should survive delete-by-id of 42"
+        );
+    }
+
+    #[test]
+    fn kitty_display_cols_and_rows_override() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(55),
+                display_cols: Some(10),
+                display_rows: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler.buffer().image_store().get(55).unwrap();
+        assert_eq!(img.display_cols, 10);
+        assert_eq!(img.display_rows, 5);
+    }
+
+    #[test]
+    fn kitty_query_rgb_format_responds_ok() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Query),
+                format: Some(KittyFormat::Rgb),
+                image_id: Some(31),
+                ..KittyControlData::default()
+            },
+            payload: vec![0, 0, 0], // minimal payload for query
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(
+                    s.contains("OK"),
+                    "f=24 (RGB) query should succeed, got: {s}"
+                );
+                assert!(!s.contains("ENOTSUP"), "f=24 should NOT be unsupported");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_chunked_transfer_assembles_and_places() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Full RGBA payload for 2x2 = 16 bytes, split into two 8-byte chunks.
+        let full_payload: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+
+        // First chunk (more_data=true).
+        let chunk1 = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(88),
+                more_data: true,
+                ..KittyControlData::default()
+            },
+            payload: full_payload[..8].to_vec(),
+        };
+
+        // Last chunk (more_data=false / default).
+        let chunk2 = KittyGraphicsCommand {
+            control: KittyControlData {
+                more_data: false,
+                ..KittyControlData::default()
+            },
+            payload: full_payload[8..].to_vec(),
+        };
+
+        handler.handle_kitty_graphics(chunk1);
+        // After first chunk, image should NOT be in the store yet.
+        assert!(
+            handler.buffer().image_store().get(88).is_none(),
+            "Image should not appear until final chunk"
+        );
+
+        handler.handle_kitty_graphics(chunk2);
+        // After final chunk, image should be stored and placed.
+        assert!(
+            handler.buffer().image_store().get(88).is_some(),
+            "Image should appear after final chunk"
+        );
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image, "Chunked TransmitAndDisplay should place image");
     }
 }

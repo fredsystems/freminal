@@ -138,6 +138,11 @@ impl Row {
         &self.cells
     }
 
+    /// Returns the cells in this row as a mutable slice.
+    pub fn cells_mut(&mut self) -> &mut [Cell] {
+        &mut self.cells
+    }
+
     /// Clean up when overwriting wide cells:
     /// - If overwriting a continuation, clear the head + all its continuations.
     /// - If overwriting a head, clear its continuations.

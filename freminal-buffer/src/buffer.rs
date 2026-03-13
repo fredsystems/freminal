@@ -2318,6 +2318,47 @@ impl Buffer {
         &mut self.image_store
     }
 
+    /// Clear all image placements from every cell in the buffer.
+    pub fn clear_all_image_placements(&mut self) {
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell.has_image() {
+                    cell.clear_image();
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+    }
+
+    /// Clear all image placements for a specific image ID from every cell.
+    pub fn clear_image_placements_by_id(&mut self, image_id: u64) {
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell
+                    .image_placement()
+                    .is_some_and(|p| p.image_id == image_id)
+                {
+                    cell.clear_image();
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+    }
+
     /// Place an inline image at the current cursor position.
     ///
     /// The image is stored in the central `ImageStore` and cells in the
