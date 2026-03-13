@@ -221,13 +221,22 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.1 — Add image storage types to freminal-buffer**
+- [x] **13.1 — Add image storage types to freminal-buffer**
   - Define `InlineImage`, `ImagePlacement`, and the image store (`HashMap<u64, InlineImage>`).
   - Add `Option<ImagePlacement>` to `Cell` (or a parallel structure to avoid bloating every
     cell — investigate the performance tradeoff).
   - Add methods to insert an image at a cursor position, spanning multiple cells.
   - Add tests for image insertion, scrolling, and reflow behavior.
   - **Verify:** `cargo test --all` passes. No existing test regressions.
+  - **Completed 2026-03-12.** Created `freminal-buffer/src/image_store.rs` with `InlineImage`
+    (Arc pixel data), `ImagePlacement`, `ImageStore` (HashMap + retain_referenced GC).
+    Added `Option<Box<ImagePlacement>>` to `Cell` (8 bytes null for non-image cells).
+    Added `place_image()` to `Buffer` with width clipping and scroll support.
+    Image store saved/restored across alternate screen, cleared on full_reset, GC'd
+    in `enforce_scrollback_limit()`. 23 unit tests covering placement, scrolling, GC,
+    alternate screen, cell accessors, and store operations. Fixed infinite loop bug
+    in place_image (now uses push_row + enforce_scrollback_limit matching handle_lf).
+    Commit: `4309da7`.
 
 ---
 
