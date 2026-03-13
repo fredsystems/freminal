@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use crate::themes::ThemePalette;
 use conv2::ValueInto;
 use std::fmt;
 
@@ -52,21 +53,21 @@ impl ColorPalette {
 
     /// Look up the effective color for `index`, consulting overrides first.
     #[must_use]
-    pub fn lookup(&self, index: usize) -> TerminalColor {
+    pub fn lookup(&self, index: usize, theme: &ThemePalette) -> TerminalColor {
         if let Some(Some((r, g, b))) = self.overrides.get(index) {
             TerminalColor::Custom(*r, *g, *b)
         } else {
-            lookup_default_256_color(index)
+            lookup_default_256_color(index, theme)
         }
     }
 
     /// Get the current RGB value for a palette index (override or default).
     #[must_use]
-    pub fn get_rgb(&self, index: u8) -> (u8, u8, u8) {
+    pub fn get_rgb(&self, index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
         if let Some((r, g, b)) = self.overrides[usize::from(index)] {
             (r, g, b)
         } else {
-            default_index_to_rgb(index)
+            default_index_to_rgb(index, theme)
         }
     }
 }
@@ -76,36 +77,26 @@ impl ColorPalette {
 /// This is the original stateless lookup. Prefer `ColorPalette::lookup()`
 /// when a palette with overrides is available.
 #[must_use]
-pub fn lookup_256_color_by_index(index: usize) -> TerminalColor {
-    lookup_default_256_color(index)
+pub fn lookup_256_color_by_index(index: usize, theme: &ThemePalette) -> TerminalColor {
+    lookup_default_256_color(index, theme)
 }
 
 /// Internal default lookup — used by both `lookup_256_color_by_index` and `ColorPalette`.
 #[must_use]
-fn lookup_default_256_color(index: usize) -> TerminalColor {
+fn lookup_default_256_color(index: usize, theme: &ThemePalette) -> TerminalColor {
     // https://stackoverflow.com/questions/69138165/how-to-get-the-rgb-values-of-a-256-color-palette-terminal-color
     match index {
-        // standard colors 0 -15, as well as their bright counterparts 8-15
-        // And the other values that map to them further up the color table
-        // Standard ANSI colors (0–7)
-        0 | 16 | 256 => TerminalColor::Black,
-        1 => TerminalColor::Red,
-        2 => TerminalColor::Green,
-        3 => TerminalColor::Yellow,
-        4 => TerminalColor::Blue,
-        5 => TerminalColor::Magenta,
-        6 => TerminalColor::Cyan,
-        7 => TerminalColor::White,
-
-        // Bright ANSI colors (8–15)
-        8 => TerminalColor::BrightBlack,
-        9 => TerminalColor::BrightRed,
-        10 => TerminalColor::BrightGreen,
-        11 => TerminalColor::BrightYellow,
-        12 => TerminalColor::BrightBlue,
-        13 => TerminalColor::BrightMagenta,
-        14 => TerminalColor::BrightCyan,
-        15 => TerminalColor::BrightWhite,
+        // Standard ANSI colors (0–15): read from the theme palette
+        0..=15 => {
+            let (r, g, b) = theme.ansi[index];
+            TerminalColor::Custom(r, g, b)
+        }
+        // Alias: index 16 maps to the same as index 0 (black).
+        // Out-of-range (256+) also maps to black.
+        16 | 256.. => {
+            let (r, g, b) = theme.ansi[0];
+            TerminalColor::Custom(r, g, b)
+        }
         // gray scale
         232..=255 => {
             let value = (2056 + 2570 * (index - 232)) / 256;
@@ -113,9 +104,8 @@ fn lookup_default_256_color(index: usize) -> TerminalColor {
             // use conv2 crate to ensure safe casting
             let value: u8 = value.value_into().unwrap_or(0);
             TerminalColor::Custom(value, value, value)
-        } // // the blacks
-        // 0 | 16 | 256.. => (0, 0, 0),
-        // // programtic colors
+        }
+        // programmatic colors (6x6x6 color cube)
         _ => {
             let r = cube_component(index, 36).value_into().unwrap_or(0);
             let g = cube_component(index, 6).value_into().unwrap_or(0);
@@ -134,30 +124,13 @@ pub const fn cube_component(value: usize, modifier: usize) -> usize {
 
 /// Map a default palette index to its RGB triple.
 ///
-/// For named ANSI colors (0-15), we use the Catppuccin Mocha hex values
-/// that the GUI renders.  For 16-231 and 232-255 we use the standard
-/// xterm cube / greyscale formulas.
+/// For named ANSI colors (0-15), we use the theme's ansi palette values.
+/// For 16-231 and 232-255 we use the standard xterm cube / greyscale formulas.
 #[must_use]
-pub fn default_index_to_rgb(index: u8) -> (u8, u8, u8) {
+pub fn default_index_to_rgb(index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
     match index {
-        // Catppuccin Mocha base palette 0-7
-        0 => (0x45, 0x47, 0x5a), // Black
-        1 => (0xf3, 0x8b, 0xa8), // Red
-        2 => (0xa6, 0xe3, 0xa1), // Green
-        3 => (0xf9, 0xe2, 0xaf), // Yellow
-        4 => (0x89, 0xb4, 0xfa), // Blue
-        5 => (0xf5, 0xc2, 0xe7), // Magenta
-        6 => (0x94, 0xe2, 0xd5), // Cyan
-        7 => (0xa6, 0xad, 0xc8), // White
-        // Catppuccin Mocha bright palette 8-15
-        8 => (0x58, 0x5b, 0x70),  // BrightBlack
-        9 => (0xf3, 0x77, 0x99),  // BrightRed
-        10 => (0x89, 0xd8, 0x8b), // BrightGreen
-        11 => (0xeb, 0xd3, 0x91), // BrightYellow
-        12 => (0x74, 0xa8, 0xfc), // BrightBlue
-        13 => (0xf2, 0xae, 0xde), // BrightMagenta
-        14 => (0x6b, 0xd7, 0xca), // BrightCyan
-        15 => (0xba, 0xc2, 0xde), // BrightWhite
+        // ANSI colors 0-15: read from theme
+        0..=15 => theme.ansi[usize::from(index)],
         // Greyscale ramp 232-255
         232..=255 => {
             let value = (2056 + 2570 * (usize::from(index) - 232)) / 256;
@@ -221,9 +194,9 @@ impl TerminalColor {
     ///
     /// Returns `self` unchanged for all other variants.
     #[must_use]
-    pub fn resolve_palette_default(self) -> Self {
+    pub fn resolve_palette_default(self, theme: &ThemePalette) -> Self {
         match self {
-            Self::PaletteIndex(idx) => lookup_default_256_color(usize::from(idx)),
+            Self::PaletteIndex(idx) => lookup_default_256_color(usize::from(idx), theme),
             other => other,
         }
     }

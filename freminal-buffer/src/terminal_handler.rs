@@ -32,6 +32,7 @@ use freminal_common::{
     cursor::CursorVisualStyle,
     pty_write::{FreminalTerminalSize, PtyWrite},
     sgr::SelectGraphicRendition,
+    themes::ThemePalette,
 };
 use std::borrow::Cow;
 
@@ -77,6 +78,8 @@ pub struct TerminalHandler {
     /// (80-column reset) restores the actual GUI window width rather than
     /// hardcoding 80.  `None` means DECCOLM has not changed the width.
     pre_deccolm_width: Option<usize>,
+    /// Active color theme for default palette lookups.
+    theme: &'static ThemePalette,
 }
 
 impl TerminalHandler {
@@ -98,6 +101,7 @@ impl TerminalHandler {
             palette: ColorPalette::default(),
             allow_column_mode_switch: true,
             pre_deccolm_width: None,
+            theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
         }
     }
 
@@ -107,6 +111,17 @@ impl TerminalHandler {
     pub fn with_scrollback_limit(mut self, limit: usize) -> Self {
         self.buffer = self.buffer.with_scrollback_limit(limit);
         self
+    }
+
+    /// Get the active theme palette.
+    #[must_use]
+    pub const fn theme(&self) -> &'static ThemePalette {
+        self.theme
+    }
+
+    /// Set the active theme palette.
+    pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
+        self.theme = theme;
     }
 
     /// Full terminal reset (RIS — Reset to Initial State).
@@ -342,13 +357,19 @@ impl TerminalHandler {
         // Resolve PaletteIndex colors against the mutable palette before applying.
         let resolved = match sgr {
             SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Foreground(self.palette.lookup(usize::from(*idx)))
+                SelectGraphicRendition::Foreground(
+                    self.palette.lookup(usize::from(*idx), self.theme),
+                )
             }
             SelectGraphicRendition::Background(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Background(self.palette.lookup(usize::from(*idx)))
+                SelectGraphicRendition::Background(
+                    self.palette.lookup(usize::from(*idx), self.theme),
+                )
             }
             SelectGraphicRendition::UnderlineColor(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::UnderlineColor(self.palette.lookup(usize::from(*idx)))
+                SelectGraphicRendition::UnderlineColor(
+                    self.palette.lookup(usize::from(*idx), self.theme),
+                )
             }
             _ => *sgr,
         };
@@ -923,7 +944,7 @@ impl TerminalHandler {
                 self.palette.set(*idx, *r, *g, *b);
             }
             AnsiOscType::QueryPaletteColor(idx) => {
-                let (r, g, b) = self.palette.get_rgb(*idx);
+                let (r, g, b) = self.palette.get_rgb(*idx, self.theme);
                 // Respond with 4-digit hex per channel (xterm convention):
                 // OSC 4 ; index ; rgb:RRRR/GGGG/BBBB ST
                 let response = format!(
@@ -2647,7 +2668,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xAA, 0xBB, 0xCC));
 
-        let (r, g, b) = handler.palette().get_rgb(42);
+        let (r, g, b) = handler.palette().get_rgb(42, handler.theme());
         assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
     }
 
@@ -2699,14 +2720,17 @@ mod tests {
 
         // Set index 5 to a custom value.
         handler.handle_osc(&AnsiOscType::SetPaletteColor(5, 0x11, 0x22, 0x33));
-        assert_eq!(handler.palette().get_rgb(5), (0x11, 0x22, 0x33));
+        assert_eq!(
+            handler.palette().get_rgb(5, handler.theme()),
+            (0x11, 0x22, 0x33)
+        );
 
         // Reset just index 5.
         handler.handle_osc(&AnsiOscType::ResetPaletteColor(Some(5)));
 
         // Should revert to the default for index 5.
-        let default_rgb = freminal_common::colors::default_index_to_rgb(5);
-        assert_eq!(handler.palette().get_rgb(5), default_rgb);
+        let default_rgb = freminal_common::colors::default_index_to_rgb(5, handler.theme());
+        assert_eq!(handler.palette().get_rgb(5, handler.theme()), default_rgb);
     }
 
     #[test]
@@ -2783,7 +2807,7 @@ mod tests {
             TerminalColor::PaletteIndex(1),
         ));
 
-        let expected = handler.palette().lookup(1);
+        let expected = handler.palette().lookup(1, handler.theme());
         assert_eq!(
             handler.current_format().colors.color,
             expected,

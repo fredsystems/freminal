@@ -5,6 +5,7 @@
 
 use eframe::egui::Color32;
 use freminal_common::colors::TerminalColor;
+use freminal_common::themes;
 
 // ---------------------------------------------------------------------------
 //  Catppuccin Mocha palette — compile-time constants
@@ -128,7 +129,7 @@ pub fn internal_color_to_egui(color: TerminalColor, make_faint: bool) -> Color32
         // PaletteIndex should have been resolved by the handler before reaching
         // the GUI.  If it somehow arrives here, fall back to the default palette.
         TerminalColor::PaletteIndex(_idx) => {
-            let resolved = color.resolve_palette_default();
+            let resolved = color.resolve_palette_default(&themes::CATPPUCCIN_MOCHA);
             return internal_color_to_egui(resolved, make_faint);
         }
     };
@@ -178,7 +179,7 @@ pub fn internal_color_to_gl(color: TerminalColor, make_faint: bool) -> [f32; 4] 
         ],
 
         TerminalColor::PaletteIndex(_idx) => {
-            let resolved = color.resolve_palette_default();
+            let resolved = color.resolve_palette_default(&themes::CATPPUCCIN_MOCHA);
             return internal_color_to_gl(resolved, make_faint);
         }
     };
@@ -342,9 +343,10 @@ mod tests {
     /// `PaletteIndex` resolves recursively in both paths.
     #[test]
     fn palette_index_resolves() {
-        // Index 1 = Red in the standard palette.
+        // Index 1 = Red in the Catppuccin Mocha palette.
+        // PaletteIndex(1) resolves to Custom(0xf3, 0x8b, 0xa8) which then maps
+        // to the same RGB as our RED constant.
         let c = internal_color_to_egui(TerminalColor::PaletteIndex(1), false);
-        // PaletteIndex(1) resolves to TerminalColor::Red → our RED constant.
         assert_eq!(c, RED);
 
         let gl_val = internal_color_to_gl(TerminalColor::PaletteIndex(1), false);
