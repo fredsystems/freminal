@@ -334,7 +334,7 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.7 — Implement Kitty direct transfer and display**
+- [x] **13.7 — Implement Kitty direct transfer and display**
   - Handle `a=t` (transmit) and `a=T` (transmit + display) actions.
   - Support `f=32` (RGBA), `f=24` (RGB), and `f=100` (PNG) formats.
   - Support `t=d` (direct/base64) transmission medium.
@@ -343,6 +343,16 @@ quads for image regions is straightforward:
   - Reuse the GL texture rendering from 13.4.
   - **Verify:** `cargo test --all` passes. `kitty icat` displays images (if testing against
     kitty tools).
+  - **Completed 2026-03-13.** Implemented `handle_kitty_single()` split into helper methods
+    (`decode_kitty_payload`, `require_kitty_dimensions`, `place_kitty_image`, `send_kitty_error`).
+    Supports `a=t` (transmit), `a=T` (transmit+display), `a=p` (place with stored image ID).
+    RGB (`f=24`) pixels converted to RGBA on the fly. PNG (`f=100`) decoded via `image` crate.
+    Chunked transfers (m=0/m=1) assemble multi-part payloads before decoding. Fixed
+    `handle_kitty_query()` to accept `f=24` (RGB) format. Implemented `handle_kitty_delete()`
+    with delete-all and delete-by-id support via new `Buffer::clear_all_image_placements()` and
+    `clear_image_placements_by_id()` methods. Added `Row::cells_mut()` accessor. 15 new tests
+    covering all transfer modes, formats, error cases, quiet modes, and delete operations.
+    Committed as `ecba3fd`. All tests pass, clippy clean, machete clean.
 
 ---
 
