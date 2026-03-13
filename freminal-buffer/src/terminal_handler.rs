@@ -1400,6 +1400,24 @@ impl TerminalHandler {
         self.buffer.any_visible_dirty(scroll_offset)
     }
 
+    /// Extract image placements for all cells in the visible window.
+    ///
+    /// Returns a flat `Vec` of `Option<ImagePlacement>`, one entry per cell
+    /// in row-major order, matching the layout of `visible_chars`.
+    #[must_use]
+    pub fn visible_image_placements(
+        &self,
+        scroll_offset: usize,
+    ) -> Vec<Option<crate::image_store::ImagePlacement>> {
+        self.buffer.visible_image_placements(scroll_offset)
+    }
+
+    /// Returns `true` if any cell in the visible window carries an image placement.
+    #[must_use]
+    pub fn has_visible_images(&self, scroll_offset: usize) -> bool {
+        self.buffer.has_visible_images(scroll_offset)
+    }
+
     /// Process an array of `TerminalOutput` commands
     ///
     /// This is the main entry point for integrating with the parser.

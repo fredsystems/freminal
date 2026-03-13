@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Cached flat representation of the visible window stored between snapshots.
@@ -13,12 +14,22 @@ use std::sync::Arc;
 /// with no `Vec` allocation.
 type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>)>;
 
+/// Image data collected from the visible window for a snapshot.
+///
+/// First element: map of referenced images (keyed by ID).
+/// Second element: per-cell placement vector (parallel to `visible_chars`).
+type VisibleImages = (
+    Arc<HashMap<u64, InlineImage>>,
+    Arc<Vec<Option<ImagePlacement>>>,
+);
+
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{data::TerminalSections, internal::TerminalState};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, unbounded};
+use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
@@ -710,6 +721,9 @@ impl TerminalEmulator {
         let last_exit_code = self.internal.handler.last_exit_code();
         let theme = self.internal.handler.theme();
 
+        // ── Inline image data ────────────────────────────────────────────────
+        let (images, visible_image_placements) = self.collect_visible_images(scroll_offset);
+
         TerminalSnapshot {
             visible_chars,
             visible_tags,
@@ -733,6 +747,38 @@ impl TerminalEmulator {
             ftcs_state,
             last_exit_code,
             theme,
+            images,
+            visible_image_placements,
         }
+    }
+
+    /// Build the image map and placement vector for the visible window.
+    ///
+    /// Returns `(images, placements)` — both wrapped in `Arc` for cheap
+    /// snapshot cloning.  The common case (no images) returns empty containers
+    /// with zero allocation.
+    fn collect_visible_images(&self, scroll_offset: usize) -> VisibleImages {
+        if !self.internal.handler.has_visible_images(scroll_offset) {
+            return (Arc::new(HashMap::new()), Arc::new(Vec::new()));
+        }
+
+        let placements = self
+            .internal
+            .handler
+            .visible_image_placements(scroll_offset);
+
+        // Collect only the images actually referenced by a visible cell so the
+        // snapshot doesn't grow without bound.
+        let mut img_map: HashMap<u64, InlineImage> = HashMap::new();
+        for placement in placements.iter().flatten() {
+            let id = placement.image_id;
+            if let std::collections::hash_map::Entry::Vacant(entry) = img_map.entry(id)
+                && let Some(img) = self.internal.handler.buffer().image_store().get(id)
+            {
+                entry.insert(img.clone());
+            }
+        }
+
+        (Arc::new(img_map), Arc::new(placements))
     }
 }

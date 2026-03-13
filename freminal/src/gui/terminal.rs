@@ -19,6 +19,7 @@ use freminal_common::{
     pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
+    InlineImage,
     interface::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
     io::InputEvent,
     snapshot::TerminalSnapshot,
@@ -34,7 +35,7 @@ use super::{
     font_manager::FontManager,
     renderer::{
         CURSOR_QUAD_FLOATS, TerminalRenderer, build_background_verts, build_cursor_verts_only,
-        build_foreground_verts,
+        build_foreground_verts, build_image_verts,
     },
     shaping::ShapingCache,
 };
@@ -979,6 +980,11 @@ struct RenderState {
     atlas: GlyphAtlas,
     bg_verts: Vec<f32>,
     fg_verts: Vec<f32>,
+    /// Pre-built image vertex data (one quad per unique inline image).
+    image_verts: Vec<f32>,
+    /// Snapshot image map from the last full rebuild, cloned into `RenderState`
+    /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
+    snap_images: std::collections::HashMap<u64, InlineImage>,
     /// Float offset (not byte offset) into `bg_verts` where the cursor quad
     /// data begins.  Set after every full vertex rebuild so cursor-only frames
     /// can patch just this region.
@@ -1028,6 +1034,8 @@ impl FreminalTerminalWidget {
                 atlas: GlyphAtlas::default(),
                 bg_verts: Vec::new(),
                 fg_verts: Vec::new(),
+                image_verts: Vec::new(),
+                snap_images: std::collections::HashMap::new(),
                 cursor_vert_float_offset: 0,
             })),
             previous_mouse_state: None,
@@ -1271,8 +1279,19 @@ impl FreminalTerminalWidget {
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
                     snap.theme,
                 );
+                let image_verts = build_image_verts(
+                    &snap.visible_image_placements,
+                    &snap.images,
+                    snap.term_width,
+                    cell_w,
+                    cell_h,
+                );
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;
+                rs.image_verts = image_verts;
+                // Clone the image map into RenderState so the PaintCallback
+                // (which must be Send+Sync+'static) can pass it to the renderer.
+                rs.snap_images.clone_from(snap.images.as_ref());
                 rs.cursor_vert_float_offset = cursor_vert_float_offset;
                 drop(rs);
 
@@ -1323,6 +1342,8 @@ impl FreminalTerminalWidget {
                 // Clone pre-built verts to avoid conflicting borrows of `rs`.
                 let bg = rs.bg_verts.clone();
                 let fg = rs.fg_verts.clone();
+                let img = rs.image_verts.clone();
+                let images = rs.snap_images.clone();
                 // Split borrow: get &mut RenderState so the borrow checker sees
                 // renderer and atlas as disjoint fields.
                 let rs_ref: &mut RenderState = &mut rs;
@@ -1333,6 +1354,8 @@ impl FreminalTerminalWidget {
                     atlas,
                     &bg,
                     &fg,
+                    &img,
+                    &images,
                     vp.width_px,
                     vp.height_px,
                     painter.intermediate_fbo(),
@@ -1434,6 +1457,8 @@ mod subtask_1_7_tests {
             bg_verts: Vec::new(),
             fg_verts: Vec::new(),
             cursor_vert_float_offset: 0,
+            image_verts: Vec::new(),
+            snap_images: std::collections::HashMap::new(),
         };
         assert!(rs.bg_verts.is_empty(), "bg_verts should be empty");
         assert!(rs.fg_verts.is_empty(), "fg_verts should be empty");

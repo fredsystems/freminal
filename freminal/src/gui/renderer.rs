@@ -24,6 +24,7 @@ use super::colors::{cursor_f, internal_color_to_gl, selection_bg_f, selection_fg
 use super::font_manager::FontManager;
 use super::shaping::{ShapedGlyph, ShapedLine};
 use freminal_common::themes::ThemePalette;
+use freminal_terminal_emulator::{ImagePlacement, InlineImage};
 
 // ---------------------------------------------------------------------------
 //  GLSL shaders  (GL 3.3 core profile)
@@ -106,6 +107,37 @@ void main() {
 }
 ";
 
+/// Image pass: textured quads for inline images.
+///
+/// Vertex layout: `vec2 a_pos, vec2 a_uv`  (stride = 4 × f32 = 16 bytes)
+const IMG_VERT_SRC: &str = r"#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+
+out vec2 v_uv;
+
+uniform vec2 u_viewport_size;
+
+void main() {
+    vec2 ndc = (a_pos / u_viewport_size) * 2.0 - 1.0;
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    v_uv = a_uv;
+}
+";
+
+const IMG_FRAG_SRC: &str = r"#version 330 core
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_image;
+
+void main() {
+    // Image pixels are stored as straight RGBA; output premultiplied alpha.
+    vec4 c = texture(u_image, v_uv);
+    frag_color = vec4(c.rgb * c.a, c.a);
+}
+";
+
 // ---------------------------------------------------------------------------
 //  Vertex strides (in f32 components)
 // ---------------------------------------------------------------------------
@@ -114,6 +146,8 @@ void main() {
 const BG_VERTEX_FLOATS: usize = 6;
 /// Foreground vertex: `x, y, u, v, r, g, b, a, is_color` — 9 floats per vertex.
 const FG_VERTEX_FLOATS: usize = 9;
+/// Image vertex: `x, y, u, v` — 4 floats per vertex.
+const IMG_VERTEX_FLOATS: usize = 4;
 /// Vertices per quad (2 triangles, 6 vertices).
 pub(crate) const VERTS_PER_QUAD: usize = 6;
 /// Floats for one cursor quad in the background VBO.
@@ -145,10 +179,21 @@ pub struct TerminalRenderer {
     // ---- atlas texture ----
     atlas_texture: Option<glow::Texture>,
 
+    // ---- image pass ----
+    img_program: Option<glow::Program>,
+    img_vao: Option<glow::VertexArray>,
+    img_vbo: [Option<glow::Buffer>; 2],
+    /// Per-image GL textures, keyed by `InlineImage::id`.
+    ///
+    /// Populated on first use and evicted when the image is no longer visible.
+    image_textures: std::collections::HashMap<u64, glow::Texture>,
+
     // ---- uniform locations ----
     bg_u_viewport: Option<glow::UniformLocation>,
     fg_u_viewport: Option<glow::UniformLocation>,
     fg_u_atlas: Option<glow::UniformLocation>,
+    img_u_viewport: Option<glow::UniformLocation>,
+    img_u_image: Option<glow::UniformLocation>,
 
     // ---- double-buffer index ----
     vbo_index: usize,
@@ -165,7 +210,7 @@ impl TerminalRenderer {
     ///
     /// GPU resources are created lazily on the first call to [`Self::init`].
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             initialized: false,
             bg_program: None,
@@ -175,9 +220,15 @@ impl TerminalRenderer {
             fg_vao: None,
             fg_vbo: [None, None],
             atlas_texture: None,
+            img_program: None,
+            img_vao: None,
+            img_vbo: [None, None],
+            image_textures: std::collections::HashMap::new(),
             bg_u_viewport: None,
             fg_u_viewport: None,
             fg_u_atlas: None,
+            img_u_viewport: None,
+            img_u_image: None,
             vbo_index: 0,
         }
     }
@@ -290,7 +341,47 @@ impl TerminalRenderer {
         self.bg_u_viewport = bg_u_viewport;
         self.fg_u_viewport = fg_u_viewport;
         self.fg_u_atlas = fg_u_atlas;
+
+        // --- image pass ---
+        self.init_image_pass(gl)?;
+
         self.initialized = true;
+
+        Ok(())
+    }
+
+    /// Initialise the image-pass GL resources (shader, VAO, double-buffered VBOs).
+    fn init_image_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let img_program = compile_program(gl, IMG_VERT_SRC, IMG_FRAG_SRC, "image")?;
+
+        let img_u_viewport = unsafe { gl.get_uniform_location(img_program, "u_viewport_size") };
+        let img_u_image = unsafe { gl.get_uniform_location(img_program, "u_image") };
+
+        let img_vao = unsafe {
+            gl.create_vertex_array()
+                .map_err(|e| format!("create image VAO: {e}"))?
+        };
+        let img_vbo0 = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create image VBO 0: {e}"))?
+        };
+        let img_vbo1 = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create image VBO 1: {e}"))?
+        };
+
+        unsafe {
+            gl.bind_vertex_array(Some(img_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(img_vbo0));
+            setup_img_attribs(gl);
+            gl.bind_vertex_array(None);
+        }
+
+        self.img_program = Some(img_program);
+        self.img_vao = Some(img_vao);
+        self.img_vbo = [Some(img_vbo0), Some(img_vbo1)];
+        self.img_u_viewport = img_u_viewport;
+        self.img_u_image = img_u_image;
 
         Ok(())
     }
@@ -400,6 +491,8 @@ impl TerminalRenderer {
         atlas: &mut GlyphAtlas,
         bg_verts: &[f32],
         fg_verts: &[f32],
+        image_verts: &[f32],
+        snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
         viewport_height: i32,
         intermediate_fbo: Option<glow::Framebuffer>,
@@ -412,12 +505,16 @@ impl TerminalRenderer {
         // 1. Sync atlas texture to the GPU.
         self.sync_atlas(gl, atlas);
 
+        // 1b. Sync image textures (upload new, evict stale).
+        self.sync_image_textures(gl, snap_images);
+
         // 2. Upload pre-built vertex data using orphan-then-write.
         let buf_idx = self.vbo_index;
         self.upload_bg_verts(gl, bg_verts, buf_idx);
         self.upload_fg_verts(gl, fg_verts, buf_idx);
+        self.upload_img_verts(gl, image_verts, buf_idx);
 
-        // 3. Draw background pass then foreground pass.
+        // 3. Draw background pass then foreground pass then image pass.
         #[allow(clippy::cast_precision_loss)]
         let vp_w = viewport_width as f32;
         #[allow(clippy::cast_precision_loss)]
@@ -425,6 +522,7 @@ impl TerminalRenderer {
 
         self.draw_background(gl, bg_verts.len(), vp_w, vp_h, buf_idx);
         self.draw_foreground(gl, fg_verts.len(), vp_w, vp_h, buf_idx);
+        self.draw_images(gl, image_verts.len(), snap_images, vp_w, vp_h, buf_idx);
 
         // 4. Restore egui's framebuffer binding.
         unsafe {
@@ -460,6 +558,8 @@ impl TerminalRenderer {
         bg_total_floats: usize,
         cursor_verts: &[f32],
         fg_total_floats: usize,
+        image_total_floats: usize,
+        snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
         viewport_height: i32,
         intermediate_fbo: Option<glow::Framebuffer>,
@@ -495,6 +595,7 @@ impl TerminalRenderer {
 
         self.draw_background(gl, bg_total_floats, vp_w, vp_h, buf_idx);
         self.draw_foreground(gl, fg_total_floats, vp_w, vp_h, buf_idx);
+        self.draw_images(gl, image_total_floats, snap_images, vp_w, vp_h, buf_idx);
 
         // 4. Restore egui's framebuffer binding.
         unsafe {
@@ -585,6 +686,175 @@ impl TerminalRenderer {
             return;
         };
         upload_verts(gl, vbo, verts);
+    }
+
+    /// Upload image vertex data via orphan-then-write.
+    fn upload_img_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
+        let Some(vbo) = self.img_vbo[buf_idx] else {
+            return;
+        };
+        upload_verts(gl, vbo, verts);
+    }
+
+    /// Synchronise the set of image GL textures with the current snapshot's
+    /// image map.
+    ///
+    /// - New images (ID not yet in `self.image_textures`) are uploaded.
+    /// - Stale images (ID in `self.image_textures` but not in `snap_images`)
+    ///   are deleted.
+    fn sync_image_textures(
+        &mut self,
+        gl: &glow::Context,
+        snap_images: &std::collections::HashMap<u64, InlineImage>,
+    ) {
+        // Delete textures for images no longer in the visible snapshot.
+        self.image_textures.retain(|id, tex| {
+            if snap_images.contains_key(id) {
+                true
+            } else {
+                unsafe { gl.delete_texture(*tex) };
+                false
+            }
+        });
+
+        // Upload textures for new images.
+        for (id, img) in snap_images {
+            if self.image_textures.contains_key(id) {
+                continue; // Already uploaded.
+            }
+            let tex = unsafe {
+                match gl.create_texture() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("create image texture {id}: {e}");
+                        continue;
+                    }
+                }
+            };
+
+            #[allow(clippy::cast_possible_wrap)]
+            let w = img.width_px as i32;
+            #[allow(clippy::cast_possible_wrap)]
+            let h = img.height_px as i32;
+
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR.cast_signed(),
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR.cast_signed(),
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_S,
+                    glow::CLAMP_TO_EDGE.cast_signed(),
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_T,
+                    glow::CLAMP_TO_EDGE.cast_signed(),
+                );
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA.cast_signed(),
+                    w,
+                    h,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&img.pixels)),
+                );
+                gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+
+            self.image_textures.insert(*id, tex);
+        }
+    }
+
+    /// Execute the image draw call.
+    ///
+    /// Draws one textured quad per image that has vertices in `image_verts`.
+    /// Iterates images in the order they appear (by ID from the map); each
+    /// image is bound to `TEXTURE1` and drawn with the corresponding 6-vertex
+    /// slab from `image_verts`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_images(
+        &self,
+        gl: &glow::Context,
+        vert_floats: usize,
+        snap_images: &std::collections::HashMap<u64, InlineImage>,
+        vp_w: f32,
+        vp_h: f32,
+        buf_idx: usize,
+    ) {
+        let (Some(prog), Some(vao), Some(vbo)) =
+            (self.img_program, self.img_vao, self.img_vbo[buf_idx])
+        else {
+            return;
+        };
+
+        if vert_floats == 0 {
+            return;
+        }
+
+        // How many quads do we have in the buffer?
+        let total_quads = vert_floats / (VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+        if total_quads == 0 {
+            return;
+        }
+
+        unsafe {
+            gl.use_program(Some(prog));
+            if let Some(loc) = &self.img_u_viewport {
+                gl.uniform_2_f32(Some(loc), vp_w, vp_h);
+            }
+            if let Some(loc) = &self.img_u_image {
+                gl.uniform_1_i32(Some(loc), 1); // TEXTURE1
+            }
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            setup_img_attribs(gl);
+        }
+
+        // Draw one quad (6 vertices) per image, in snap_images iteration order.
+        // `build_image_verts` emits quads in the same order (sorted by image ID).
+        let mut quad_idx: i32 = 0;
+        let mut sorted_ids: Vec<u64> = snap_images.keys().copied().collect();
+        sorted_ids.sort_unstable();
+        for id in &sorted_ids {
+            let Some(tex) = self.image_textures.get(id) else {
+                // Texture not uploaded yet (race) — skip.
+                quad_idx += 1;
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            if quad_idx >= total_quads as i32 {
+                break;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let first_vertex = quad_idx * VERTS_PER_QUAD as i32;
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                gl.draw_arrays(glow::TRIANGLES, first_vertex, VERTS_PER_QUAD as i32);
+            }
+            quad_idx += 1;
+        }
+
+        unsafe {
+            gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
+            gl.use_program(None);
+        }
     }
 
     /// Execute the background draw call.
@@ -702,6 +972,20 @@ impl TerminalRenderer {
             if let Some(t) = self.atlas_texture.take() {
                 gl.delete_texture(t);
             }
+            if let Some(p) = self.img_program.take() {
+                gl.delete_program(p);
+            }
+            if let Some(v) = self.img_vao.take() {
+                gl.delete_vertex_array(v);
+            }
+            for slot in &mut self.img_vbo {
+                if let Some(b) = slot.take() {
+                    gl.delete_buffer(b);
+                }
+            }
+            for tex in self.image_textures.drain() {
+                gl.delete_texture(tex.1);
+            }
         }
 
         self.initialized = false;
@@ -748,6 +1032,23 @@ unsafe fn setup_fg_attribs(gl: &glow::Context) {
         gl.vertex_attrib_pointer_f32(2, 4, glow::FLOAT, false, stride, 4 * f);
         gl.enable_vertex_attrib_array(3);
         gl.vertex_attrib_pointer_f32(3, 1, glow::FLOAT, false, stride, 8 * f);
+    }
+}
+
+/// Configure vertex attributes for the image shader.
+///
+/// Layout: `location 0 = vec2 pos, location 1 = vec2 uv`.
+/// Stride = `IMG_VERTEX_FLOATS * 4` bytes.
+unsafe fn setup_img_attribs(gl: &glow::Context) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let stride = (IMG_VERTEX_FLOATS * size_of::<f32>()) as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let f = size_of::<f32>() as i32;
+    unsafe {
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 2 * f);
     }
 }
 
@@ -1248,6 +1549,94 @@ pub fn build_foreground_verts(
                 col += glyph.cell_width;
             }
         }
+    }
+
+    verts
+}
+
+/// Build the image vertex buffer from the visible placements.
+///
+/// Emits one textured quad per unique image ID found in `placements`.
+/// Images are sorted by ID before emission so that `draw_images` (which
+/// iterates `snap_images.keys()` in the same sorted order) draws the
+/// correct texture for each quad.
+///
+/// Each quad covers the union of all cells that belong to a given image in
+/// the current visible window (i.e. the full image bounding box).
+///
+/// `placements` is parallel to `visible_chars`: one entry per cell in
+/// row-major order.  `term_width` is the number of columns per row.
+/// `cell_width` and `cell_height` are integer pixel sizes.
+///
+/// Returns a flat `Vec<f32>` with `IMG_VERTEX_FLOATS` floats per vertex,
+/// `VERTS_PER_QUAD` vertices per image quad.
+#[must_use]
+#[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
+pub fn build_image_verts(
+    placements: &[Option<ImagePlacement>],
+    snap_images: &std::collections::HashMap<u64, InlineImage>,
+    term_width: usize,
+    cell_width: u32,
+    cell_height: u32,
+) -> Vec<f32> {
+    if placements.is_empty() || snap_images.is_empty() {
+        return Vec::new();
+    }
+
+    // Compute per-image pixel bounding boxes from the placement cells.
+    // Key: image_id.  Value: (x0_px, y0_px, x1_px, y1_px).
+    let mut bounds: std::collections::HashMap<u64, (f32, f32, f32, f32)> =
+        std::collections::HashMap::new();
+
+    for (cell_idx, placement) in placements.iter().enumerate() {
+        let Some(p) = placement else { continue };
+        let col = if term_width == 0 {
+            0
+        } else {
+            cell_idx % term_width
+        };
+        let row = if term_width == 0 {
+            0
+        } else {
+            cell_idx / term_width
+        };
+
+        #[allow(clippy::cast_precision_loss)]
+        let x0 = col as f32 * cell_width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let y0 = row as f32 * cell_height as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let x1 = x0 + cell_width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let y1 = y0 + cell_height as f32;
+
+        let _ = p; // p used for image_id below
+        let id = p.image_id;
+        let entry = bounds.entry(id).or_insert((x0, y0, x1, y1));
+        entry.0 = entry.0.min(x0);
+        entry.1 = entry.1.min(y0);
+        entry.2 = entry.2.max(x1);
+        entry.3 = entry.3.max(y1);
+    }
+
+    // Emit quads sorted by image ID (must match draw_images iteration order).
+    let mut sorted_ids: Vec<u64> = bounds.keys().copied().collect();
+    sorted_ids.sort_unstable();
+
+    let mut verts = Vec::with_capacity(sorted_ids.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+
+    for id in &sorted_ids {
+        let Some(&(x0, y0, x1, y1)) = bounds.get(id) else {
+            continue;
+        };
+
+        // Full image bounding box in pixel coords → UV (0,0)-(1,1).
+        let quad: [f32; 4 * VERTS_PER_QUAD] = [
+            // Triangle 1
+            x0, y0, 0.0, 0.0, x1, y0, 1.0, 0.0, x0, y1, 0.0, 1.0, // Triangle 2
+            x1, y0, 1.0, 0.0, x1, y1, 1.0, 1.0, x0, y1, 0.0, 1.0,
+        ];
+        verts.extend_from_slice(&quad);
     }
 
     verts

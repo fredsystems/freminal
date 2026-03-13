@@ -1445,6 +1445,50 @@ impl Buffer {
         self.rows[vis_start..vis_end].iter().any(|r| r.dirty)
     }
 
+    /// Extract image placements for all cells in the visible window.
+    ///
+    /// Returns a flat `Vec` of `Option<ImagePlacement>`, one entry per cell,
+    /// in row-major order (row 0, col 0..width; row 1, col 0..width; …).
+    ///
+    /// `None` means the cell carries no image data.
+    /// `Some(placement)` means the cell is part of an inline image.
+    ///
+    /// The length of the returned `Vec` is `height * width` (clamped to the
+    /// actual number of visible rows × terminal width), matching the layout
+    /// of `visible_chars` so the caller can index them in parallel.
+    #[must_use]
+    pub fn visible_image_placements(&self, scroll_offset: usize) -> Vec<Option<ImagePlacement>> {
+        if self.rows.is_empty() || self.height == 0 || self.width == 0 {
+            return Vec::new();
+        }
+        let vis_start = self.visible_window_start(scroll_offset);
+        let vis_end = (vis_start + self.height).min(self.rows.len());
+        let mut out = Vec::with_capacity((vis_end - vis_start) * self.width);
+        for row in &self.rows[vis_start..vis_end] {
+            let cells = row.cells();
+            for col in 0..self.width {
+                let placement = cells.get(col).and_then(|c| c.image_placement()).cloned();
+                out.push(placement);
+            }
+        }
+        out
+    }
+
+    /// Returns `true` if any cell in the visible window carries an image
+    /// placement.  Used by `build_snapshot` to cheaply decide whether to
+    /// include image data in the snapshot.
+    #[must_use]
+    pub fn has_visible_images(&self, scroll_offset: usize) -> bool {
+        if self.rows.is_empty() || self.height == 0 {
+            return false;
+        }
+        let vis_start = self.visible_window_start(scroll_offset);
+        let vis_end = (vis_start + self.height).min(self.rows.len());
+        self.rows[vis_start..vis_end]
+            .iter()
+            .any(|r| r.cells().iter().any(|c| c.image_placement().is_some()))
+    }
+
     /// Cursor Y expressed in "screen coordinates" (0..height-1).
     /// If the buffer is shorter than the height, we just return the raw Y.
     /// Always computed relative to the live bottom (`scroll_offset` = 0), because the
