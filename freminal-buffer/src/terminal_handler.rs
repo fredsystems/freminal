@@ -21,7 +21,9 @@ use freminal_common::{
         modes::lnm::Lnm,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
-        osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
+        osc::{
+            AnsiOscInternalType, AnsiOscType, ITerm2InlineImageData, ImageDimension, UrlResponse,
+        },
         tchar::TChar,
         terminal_output::TerminalOutput,
         terminal_sections::TerminalSections,
@@ -37,6 +39,7 @@ use freminal_common::{
 use std::borrow::Cow;
 
 use crate::buffer::Buffer;
+use crate::image_store::{InlineImage, next_image_id};
 
 /// High-level handler that processes terminal output commands and applies them to a buffer.
 ///
@@ -932,8 +935,11 @@ impl TerminalHandler {
                     }
                 }
             }
-            AnsiOscType::ITerm2 => {
-                tracing::debug!("OSC iTerm2 (ignored)");
+            AnsiOscType::ITerm2FileInline(data) => {
+                self.handle_iterm2_inline_image(data);
+            }
+            AnsiOscType::ITerm2Unknown => {
+                tracing::debug!("OSC 1337: unrecognised sub-command (ignored)");
             }
 
             // Clipboard: forward to GUI via window_commands
@@ -1021,6 +1027,172 @@ impl TerminalHandler {
             }
             // Unknown internal-type variants and unreachable arms — silently ignore.
             _ => {}
+        }
+    }
+
+    /// Handle an iTerm2 `OSC 1337 ; File=` inline image.
+    ///
+    /// Decodes the raw image bytes into RGBA pixels, computes the display size
+    /// in terminal cells from the dimension specs, and places the image into
+    /// the buffer at the cursor position.
+    fn handle_iterm2_inline_image(&mut self, data: &ITerm2InlineImageData) {
+        if !data.inline {
+            tracing::debug!("OSC 1337 File=: inline=0 (download), ignoring");
+            return;
+        }
+
+        // Decode the raw image bytes into RGBA pixels.
+        let img = match image::load_from_memory(&data.data) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                tracing::debug!("OSC 1337 File=: image decode failed: {e}");
+                return;
+            }
+        };
+
+        let img_width_px = img.width();
+        let img_height_px = img.height();
+
+        if img_width_px == 0 || img_height_px == 0 {
+            tracing::debug!("OSC 1337 File=: decoded image has zero dimensions");
+            return;
+        }
+
+        let (term_width, term_height) = self.get_win_size();
+
+        // Compute the display size in cells from the iTerm2 dimension specs.
+        let display_cols =
+            Self::resolve_image_dimension(data.width.as_ref(), img_width_px, term_width, true);
+        let display_rows =
+            Self::resolve_image_dimension(data.height.as_ref(), img_height_px, term_height, false);
+
+        // Apply aspect-ratio preservation when only one dimension was
+        // explicitly specified by the user.
+        let (display_cols, display_rows) = if data.preserve_aspect_ratio {
+            Self::apply_aspect_ratio(
+                data.width.as_ref(),
+                data.height.as_ref(),
+                display_cols,
+                display_rows,
+                img_width_px,
+                img_height_px,
+                term_width,
+                term_height,
+            )
+        } else {
+            (display_cols, display_rows)
+        };
+
+        if display_cols == 0 || display_rows == 0 {
+            tracing::debug!("OSC 1337 File=: computed display size is 0x0");
+            return;
+        }
+
+        let pixels = img.into_raw();
+        let inline_image = InlineImage {
+            id: next_image_id(),
+            pixels: std::sync::Arc::new(pixels),
+            width_px: img_width_px,
+            height_px: img_height_px,
+            display_cols,
+            display_rows,
+        };
+
+        // Place the image into the buffer. Pass 0 for scroll_offset — the
+        // PTY thread always operates at the live bottom.
+        let _new_offset = self.buffer.place_image(inline_image, 0);
+    }
+
+    /// Resolve an iTerm2 image dimension spec to a cell count.
+    ///
+    /// `is_width` indicates whether we are computing columns (true) or rows (false).
+    /// When the spec is `Auto` or `None`, the full image pixel size is used,
+    /// divided by the terminal dimension to get a proportional cell count.
+    fn resolve_image_dimension(
+        spec: Option<&ImageDimension>,
+        image_pixels: u32,
+        term_cells: usize,
+        is_width: bool,
+    ) -> usize {
+        // For Auto/None we assume each terminal cell is roughly square. Without
+        // access to the pixel size of each cell we use the simple heuristic of
+        // 1 cell ≈ 8px wide, 16px tall (common default for monospace fonts).
+        // This gives a reasonable approximation; the exact pixel sizes are only
+        // available on the GUI side.
+        let cell_pixels: u32 = if is_width { 8 } else { 16 };
+
+        match spec {
+            None | Some(ImageDimension::Auto) => {
+                // image_pixels / cell_pixels, rounded up, clamped to term size.
+                let cells = image_pixels.saturating_add(cell_pixels - 1) / cell_pixels;
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (cells as usize).min(term_cells).max(1);
+                result
+            }
+            Some(ImageDimension::Cells(n)) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (*n as usize).min(term_cells).max(1);
+                result
+            }
+            Some(ImageDimension::Pixels(px)) => {
+                let cells = px.saturating_add(cell_pixels - 1) / cell_pixels;
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (cells as usize).min(term_cells).max(1);
+                result
+            }
+            Some(ImageDimension::Percent(pct)) => {
+                let cells = (u64::from(*pct) * term_cells as u64) / 100;
+                // Safe: cells is bounded by term_cells which fits in usize.
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (cells as usize).min(term_cells).max(1);
+                result
+            }
+        }
+    }
+
+    /// Adjust display dimensions to preserve aspect ratio.
+    ///
+    /// When `preserve_aspect_ratio` is true and one dimension is auto/unspecified,
+    /// scale the auto dimension to match the other.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_aspect_ratio(
+        width_spec: Option<&ImageDimension>,
+        height_spec: Option<&ImageDimension>,
+        display_cols: usize,
+        display_rows: usize,
+        img_width_px: u32,
+        img_height_px: u32,
+        term_width: usize,
+        term_height: usize,
+    ) -> (usize, usize) {
+        let width_is_auto = matches!(width_spec, None | Some(ImageDimension::Auto));
+        let height_is_auto = matches!(height_spec, None | Some(ImageDimension::Auto));
+
+        if width_is_auto && !height_is_auto {
+            // Height was explicitly set; scale width to preserve aspect ratio.
+            // Approximate: each cell is ~8px wide, ~16px tall (2:1 aspect).
+            // scaled_cols = display_rows * (img_w / img_h) * (cell_h / cell_w)
+            //             = display_rows * img_w * 16 / (img_h * 8)
+            //             = display_rows * img_w * 2 / img_h
+            let scaled = (u64::from(img_width_px) * display_rows as u64 * 2)
+                / u64::from(img_height_px).max(1);
+            // Safe: scaled is bounded by term_width which fits in usize.
+            #[allow(clippy::cast_possible_truncation)]
+            let cols = (scaled as usize).min(term_width).max(1);
+            (cols, display_rows)
+        } else if !width_is_auto && height_is_auto {
+            // Width was explicitly set; scale height to preserve aspect ratio.
+            // scaled_rows = display_cols * (img_h / img_w) * (cell_w / cell_h)
+            //             = display_cols * img_h / (img_w * 2)
+            let scaled = (u64::from(img_height_px) * display_cols as u64)
+                / (u64::from(img_width_px).max(1) * 2);
+            // Safe: scaled is bounded by term_height which fits in usize.
+            #[allow(clippy::cast_possible_truncation)]
+            let rows = (scaled as usize).min(term_height).max(1);
+            (display_cols, rows)
+        } else {
+            // Both auto or both explicit — no adjustment needed.
+            (display_cols, display_rows)
         }
     }
 
@@ -1769,6 +1941,7 @@ const fn hex_val(b: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::{
         buffer_states::{
@@ -3653,5 +3826,275 @@ mod tests {
             panic!("OSC 10 response should be valid UTF-8");
         };
         assert_eq!(theme_response, "\x1b]10;rgb:f8/f8/f2\x1b\\");
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_image_dimension tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn resolve_auto_uses_image_pixels() {
+        // 160px wide image, 8px per cell → 20 cells
+        let result = TerminalHandler::resolve_image_dimension(None, 160, 80, true);
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn resolve_auto_explicit() {
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Auto), 160, 80, true);
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn resolve_auto_height() {
+        // 320px tall image, 16px per cell → 20 rows
+        let result = TerminalHandler::resolve_image_dimension(None, 320, 24, false);
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn resolve_auto_clamps_to_term_size() {
+        // 10000px wide, 8px/cell = 1250 cells, but term is only 80
+        let result = TerminalHandler::resolve_image_dimension(None, 10000, 80, true);
+        assert_eq!(result, 80);
+    }
+
+    #[test]
+    fn resolve_auto_minimum_is_1() {
+        // 0px image → would be 0 cells, but minimum is 1
+        let result = TerminalHandler::resolve_image_dimension(None, 0, 80, true);
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn resolve_cells_direct() {
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Cells(10)),
+            999,
+            80,
+            true,
+        );
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn resolve_cells_clamped_to_term() {
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Cells(200)),
+            999,
+            80,
+            true,
+        );
+        assert_eq!(result, 80);
+    }
+
+    #[test]
+    fn resolve_pixels() {
+        // 80px wide, 8px/cell → 10 cells
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Pixels(80)),
+            999,
+            80,
+            true,
+        );
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn resolve_pixels_rounds_up() {
+        // 81px wide, 8px/cell → ceil(81/8) = 11 cells
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Pixels(81)),
+            999,
+            80,
+            true,
+        );
+        assert_eq!(result, 11);
+    }
+
+    #[test]
+    fn resolve_percent() {
+        // 50% of 80 cols = 40
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Percent(50)),
+            999,
+            80,
+            true,
+        );
+        assert_eq!(result, 40);
+    }
+
+    #[test]
+    fn resolve_percent_100() {
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Percent(100)),
+            999,
+            80,
+            true,
+        );
+        assert_eq!(result, 80);
+    }
+
+    // ------------------------------------------------------------------
+    // apply_aspect_ratio tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn aspect_ratio_both_auto_no_adjustment() {
+        let (cols, rows) =
+            TerminalHandler::apply_aspect_ratio(None, None, 20, 10, 160, 160, 80, 24);
+        // Both auto → no change
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn aspect_ratio_both_explicit_no_adjustment() {
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            Some(&ImageDimension::Cells(20)),
+            Some(&ImageDimension::Cells(10)),
+            20,
+            10,
+            160,
+            160,
+            80,
+            24,
+        );
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn aspect_ratio_width_auto_height_explicit() {
+        // height=10 rows, image is square (100x100), cell aspect ~2:1 (8w x 16h)
+        // scaled_cols = 10 * 100 * 2 / 100 = 20
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            None,
+            Some(&ImageDimension::Cells(10)),
+            1, // initial cols (ignored, will be recomputed)
+            10,
+            100,
+            100,
+            80,
+            24,
+        );
+        assert_eq!(rows, 10);
+        assert_eq!(cols, 20);
+    }
+
+    #[test]
+    fn aspect_ratio_height_auto_width_explicit() {
+        // width=20 cols, image is square (100x100), cell aspect ~2:1
+        // scaled_rows = 20 * 100 / (100 * 2) = 10
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            Some(&ImageDimension::Cells(20)),
+            None,
+            20,
+            1, // initial rows (ignored, will be recomputed)
+            100,
+            100,
+            80,
+            24,
+        );
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn aspect_ratio_clamped_to_term_size() {
+        // width=80 cols, image is very tall (100w x 10000h)
+        // scaled_rows = 80 * 10000 / (100 * 2) = 4000, clamped to 24
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            Some(&ImageDimension::Cells(80)),
+            None,
+            80,
+            1,
+            100,
+            10000,
+            80,
+            24,
+        );
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 24);
+    }
+
+    // ------------------------------------------------------------------
+    // handle_iterm2_inline_image integration test
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handle_iterm2_inline_image_places_image_in_buffer() {
+        use freminal_common::buffer_states::osc::ITerm2InlineImageData;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Create a minimal 2x2 red PNG image in memory.
+        let mut png_buf = Vec::new();
+        {
+            use image::ImageEncoder;
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            // 2x2 RGBA image: all red
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, // pixel (0,0)
+                255, 0, 0, 255, // pixel (1,0)
+                255, 0, 0, 255, // pixel (0,1)
+                255, 0, 0, 255, // pixel (1,1)
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        let image_data = ITerm2InlineImageData {
+            name: Some("red.png".to_string()),
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            data: png_buf,
+        };
+
+        handler.handle_iterm2_inline_image(&image_data);
+
+        // After placement, cursor should have moved down by display_rows (2).
+        // The buffer should contain image cells.
+        let buf = handler.buffer();
+        let rows = buf.get_rows();
+
+        // Check that at least one cell has an image placement.
+        let has_image_cell = rows.iter().any(|row| {
+            let cells = row.cells();
+            cells.iter().any(crate::cell::Cell::has_image)
+        });
+        assert!(has_image_cell, "Expected at least one image cell in buffer");
+    }
+
+    #[test]
+    fn handle_iterm2_inline_image_non_inline_ignored() {
+        use freminal_common::buffer_states::osc::ITerm2InlineImageData;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let image_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: false, // not inline → should be ignored
+            data: vec![0xFF; 100],
+        };
+
+        // Cursor should not move.
+        let cursor_before = handler.cursor_pos();
+        handler.handle_iterm2_inline_image(&image_data);
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(cursor_before, cursor_after);
     }
 }

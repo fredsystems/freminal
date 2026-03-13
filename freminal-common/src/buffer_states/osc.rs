@@ -7,6 +7,76 @@ use anyhow::{Error, Result};
 use std::str::FromStr;
 
 use crate::buffer_states::{ftcs::FtcsMarker, url::Url};
+use std::fmt;
+
+/// iTerm2 inline image dimension specification.
+///
+/// Used for `width` and `height` parameters in `OSC 1337 ; File=` sequences.
+/// Possible values: `N` (cells), `Npx` (pixels), `N%` (percentage), `auto`.
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub enum ImageDimension {
+    /// Size in terminal cells.
+    Cells(u32),
+    /// Size in pixels.
+    Pixels(u32),
+    /// Size as a percentage of the terminal area.
+    Percent(u32),
+    /// Let the terminal decide automatically.
+    Auto,
+}
+
+impl fmt::Display for ImageDimension {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cells(n) => write!(f, "{n}"),
+            Self::Pixels(n) => write!(f, "{n}px"),
+            Self::Percent(n) => write!(f, "{n}%"),
+            Self::Auto => write!(f, "auto"),
+        }
+    }
+}
+
+impl ImageDimension {
+    /// Parse an iTerm2 dimension spec string.
+    ///
+    /// Returns `None` if the string is empty or unparsable.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+            return Some(Self::Auto);
+        }
+
+        s.strip_suffix("px").map_or_else(
+            || {
+                s.strip_suffix('%').map_or_else(
+                    || s.parse::<u32>().ok().map(Self::Cells),
+                    |rest| rest.parse::<u32>().ok().map(Self::Percent),
+                )
+            },
+            |rest| rest.parse::<u32>().ok().map(Self::Pixels),
+        )
+    }
+}
+
+/// Parsed data from an iTerm2 `OSC 1337 ; File=` inline image sequence.
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub struct ITerm2InlineImageData {
+    /// Original filename (decoded from base64 name parameter), if provided.
+    pub name: Option<String>,
+    /// Declared file size in bytes, if provided.
+    pub size: Option<usize>,
+    /// Requested display width.
+    pub width: Option<ImageDimension>,
+    /// Requested display height.
+    pub height: Option<ImageDimension>,
+    /// Whether to preserve the image's aspect ratio (default: true).
+    pub preserve_aspect_ratio: bool,
+    /// Whether to display inline (true) or treat as download (false).
+    pub inline: bool,
+    /// Raw decoded file bytes (from base64 payload).
+    pub data: Vec<u8>,
+}
 
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub enum AnsiOscInternalType {
@@ -178,7 +248,10 @@ pub enum AnsiOscType {
     Url(UrlResponse),
     RemoteHost(String),
     ResetCursorColor,
-    ITerm2,
+    /// OSC 1337 File= inline image (iTerm2 protocol).
+    ITerm2FileInline(ITerm2InlineImageData),
+    /// OSC 1337 unrecognised sub-command (silently consumed).
+    ITerm2Unknown,
     /// OSC 52 clipboard set: selection name + decoded (plaintext) content.
     SetClipboard(String, String),
     /// OSC 52 clipboard query: selection name.
@@ -210,7 +283,16 @@ impl std::fmt::Display for AnsiOscType {
             Self::Ftcs(marker) => write!(f, "Ftcs ({marker})"),
             Self::RemoteHost(value) => write!(f, "RemoteHost ({value:?})"),
             Self::ResetCursorColor => write!(f, "ResetCursorColor"),
-            Self::ITerm2 => write!(f, "ITerm2"),
+            Self::ITerm2FileInline(data) => {
+                write!(
+                    f,
+                    "ITerm2FileInline(name={:?}, size={:?}, {}B payload)",
+                    data.name,
+                    data.size,
+                    data.data.len()
+                )
+            }
+            Self::ITerm2Unknown => write!(f, "ITerm2Unknown"),
             Self::SetClipboard(sel, content) => write!(f, "SetClipboard({sel:?}, {content:?})"),
             Self::QueryClipboard(sel) => write!(f, "QueryClipboard({sel:?})"),
             Self::SetPaletteColor(idx, r, g, b) => {
@@ -238,5 +320,135 @@ impl FromStr for AnsiOscToken {
             |_| Ok(Self::String(s.to_string())),
             |value| Ok(Self::OscValue(value)),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // ImageDimension::parse tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_auto_lowercase() {
+        assert_eq!(ImageDimension::parse("auto"), Some(ImageDimension::Auto));
+    }
+
+    #[test]
+    fn parse_auto_mixed_case() {
+        assert_eq!(ImageDimension::parse("Auto"), Some(ImageDimension::Auto));
+        assert_eq!(ImageDimension::parse("AUTO"), Some(ImageDimension::Auto));
+    }
+
+    #[test]
+    fn parse_empty_string_is_auto() {
+        assert_eq!(ImageDimension::parse(""), Some(ImageDimension::Auto));
+    }
+
+    #[test]
+    fn parse_whitespace_only_is_auto() {
+        assert_eq!(ImageDimension::parse("   "), Some(ImageDimension::Auto));
+    }
+
+    #[test]
+    fn parse_cells() {
+        assert_eq!(ImageDimension::parse("10"), Some(ImageDimension::Cells(10)));
+        assert_eq!(ImageDimension::parse("1"), Some(ImageDimension::Cells(1)));
+        assert_eq!(ImageDimension::parse("0"), Some(ImageDimension::Cells(0)));
+        assert_eq!(
+            ImageDimension::parse("200"),
+            Some(ImageDimension::Cells(200))
+        );
+    }
+
+    #[test]
+    fn parse_pixels() {
+        assert_eq!(
+            ImageDimension::parse("100px"),
+            Some(ImageDimension::Pixels(100))
+        );
+        assert_eq!(
+            ImageDimension::parse("0px"),
+            Some(ImageDimension::Pixels(0))
+        );
+        assert_eq!(
+            ImageDimension::parse("1920px"),
+            Some(ImageDimension::Pixels(1920))
+        );
+    }
+
+    #[test]
+    fn parse_percent() {
+        assert_eq!(
+            ImageDimension::parse("50%"),
+            Some(ImageDimension::Percent(50))
+        );
+        assert_eq!(
+            ImageDimension::parse("100%"),
+            Some(ImageDimension::Percent(100))
+        );
+        assert_eq!(
+            ImageDimension::parse("0%"),
+            Some(ImageDimension::Percent(0))
+        );
+    }
+
+    #[test]
+    fn parse_with_whitespace_padding() {
+        assert_eq!(
+            ImageDimension::parse("  10px  "),
+            Some(ImageDimension::Pixels(10))
+        );
+        assert_eq!(
+            ImageDimension::parse(" 50% "),
+            Some(ImageDimension::Percent(50))
+        );
+        assert_eq!(
+            ImageDimension::parse("  5  "),
+            Some(ImageDimension::Cells(5))
+        );
+    }
+
+    #[test]
+    fn parse_invalid_returns_none() {
+        assert_eq!(ImageDimension::parse("abc"), None);
+        assert_eq!(ImageDimension::parse("pxpx"), None);
+        assert_eq!(ImageDimension::parse("10em"), None);
+        assert_eq!(ImageDimension::parse("-5"), None);
+    }
+
+    #[test]
+    fn parse_invalid_numeric_suffix_returns_none() {
+        // "abcpx" — the "abc" prefix is not a valid number
+        assert_eq!(ImageDimension::parse("abcpx"), None);
+        // "abc%" — the "abc" prefix is not a valid number
+        assert_eq!(ImageDimension::parse("abc%"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // ImageDimension Display tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn display_cells() {
+        assert_eq!(ImageDimension::Cells(10).to_string(), "10");
+    }
+
+    #[test]
+    fn display_pixels() {
+        assert_eq!(ImageDimension::Pixels(100).to_string(), "100px");
+    }
+
+    #[test]
+    fn display_percent() {
+        assert_eq!(ImageDimension::Percent(50).to_string(), "50%");
+    }
+
+    #[test]
+    fn display_auto() {
+        assert_eq!(ImageDimension::Auto.to_string(), "auto");
     }
 }

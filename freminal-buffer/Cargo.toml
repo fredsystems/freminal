@@ -19,6 +19,7 @@ categories.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true
 freminal-common = { path = "../freminal-common" }
+image.workspace = true
 
 # dev dependencies
 [features]

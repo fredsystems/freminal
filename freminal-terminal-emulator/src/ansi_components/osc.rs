@@ -10,7 +10,8 @@ use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use anyhow::Result;
 use freminal_common::buffer_states::ftcs::parse_ftcs_params;
 use freminal_common::buffer_states::osc::{
-    AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
+    AnsiOscInternalType, AnsiOscToken, AnsiOscType, ITerm2InlineImageData, ImageDimension,
+    OscTarget, UrlResponse,
 };
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::colors::parse_color_spec;
@@ -169,6 +170,7 @@ impl AnsiOscParser {
                         &osc_target,
                         osc_internal_type,
                         params,
+                        &self.params,
                         &self.seq_trace,
                         output,
                     );
@@ -193,6 +195,7 @@ fn dispatch_osc_target(
     osc_target: &OscTarget,
     osc_internal_type: AnsiOscInternalType,
     params: Vec<Option<AnsiOscToken>>,
+    raw_params: &[u8],
     seq_trace: &SequenceTracer,
     output: &mut Vec<TerminalOutput>,
 ) {
@@ -266,7 +269,7 @@ fn dispatch_osc_target(
             ));
         }
         OscTarget::ITerm2 => {
-            output.push(TerminalOutput::OscResponse(AnsiOscType::ITerm2));
+            handle_osc_iterm2(raw_params, seq_trace, output);
         }
         OscTarget::Unknown => {
             // Unknown OSC sequences are silently consumed (like
@@ -421,6 +424,148 @@ fn handle_osc_reset_palette(params: &[Option<AnsiOscToken>], output: &mut Vec<Te
                 tracing::debug!("OSC 104: invalid index: {s}");
             }
         }
+    }
+}
+
+/// Handle OSC 1337 (iTerm2 extensions).
+///
+/// The primary sub-command we support is `File=`, which carries an inline
+/// image.  Format:
+///
+/// ```text
+/// 1337 ; File = [key=value[;key=value]...] : <base64 data>
+/// ```
+///
+/// `raw_params` is the full, un-split OSC parameter bytes (before `;` splitting).
+/// We parse from the raw bytes because the `;` delimiter inside the `File=` args
+/// must be handled together with the `:` that separates args from the base64 payload.
+fn handle_osc_iterm2(
+    raw_params: &[u8],
+    seq_trace: &SequenceTracer,
+    output: &mut Vec<TerminalOutput>,
+) {
+    // raw_params looks like: b"1337;File=inline=1;width=auto:BASE64DATA"
+    // or: b"1337;SomeOtherCommand=..."
+    //
+    // Find the first ';' to skip past "1337".
+    let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
+        tracing::debug!(
+            "OSC 1337: missing sub-command: recent='{}'",
+            seq_trace.as_str()
+        );
+        return;
+    };
+
+    let rest = &raw_params[first_semi + 1..];
+
+    // Check for "File=" prefix (case-sensitive, per iTerm2 spec).
+    let Some(after_file) = strip_ascii_prefix(rest, b"File=") else {
+        // Not a File= sub-command — silently consume, like xterm/VTE.
+        tracing::debug!(
+            "OSC 1337: unrecognised sub-command: recent='{}'",
+            seq_trace.as_str()
+        );
+        output.push(TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown));
+        return;
+    };
+
+    // `after_file` is: b"inline=1;width=auto:BASE64DATA"
+    // Split on ':' to separate key=value args from the base64 payload.
+    // The LAST ':' could be inside base64 (no — base64 alphabet is A-Za-z0-9+/=),
+    // so the FIRST ':' is the correct split point.
+    let Some(colon_pos) = after_file.iter().position(|&b| b == b':') else {
+        tracing::debug!(
+            "OSC 1337 File=: missing ':' separator: recent='{}'",
+            seq_trace.as_str()
+        );
+        return;
+    };
+
+    let args_bytes = &after_file[..colon_pos];
+    let b64_bytes = &after_file[colon_pos + 1..];
+
+    // Parse key=value pairs (separated by ';').
+    let Ok(args_str) = std::str::from_utf8(args_bytes) else {
+        tracing::debug!("OSC 1337 File=: non-UTF-8 args");
+        return;
+    };
+
+    let mut name: Option<String> = None;
+    let mut size: Option<usize> = None;
+    let mut width: Option<ImageDimension> = None;
+    let mut height: Option<ImageDimension> = None;
+    let mut preserve_aspect_ratio = true;
+    let mut inline = false;
+
+    for pair in args_str.split(';') {
+        if let Some((key, value)) = pair.split_once('=') {
+            match key {
+                "name" => {
+                    // Name is base64-encoded.
+                    if let Ok(decoded) = freminal_common::base64::decode(value) {
+                        name = Some(String::from_utf8_lossy(&decoded).into_owned());
+                    }
+                }
+                "size" => {
+                    size = value.parse().ok();
+                }
+                "width" => {
+                    width = ImageDimension::parse(value);
+                }
+                "height" => {
+                    height = ImageDimension::parse(value);
+                }
+                "preserveAspectRatio" => {
+                    preserve_aspect_ratio = value != "0";
+                }
+                "inline" => {
+                    inline = value == "1";
+                }
+                _ => {
+                    tracing::debug!("OSC 1337 File=: unknown arg: {key}={value}");
+                }
+            }
+        }
+    }
+
+    // Decode base64 payload.
+    let Ok(b64_str) = std::str::from_utf8(b64_bytes) else {
+        tracing::debug!("OSC 1337 File=: non-UTF-8 base64 payload");
+        return;
+    };
+
+    let data = match freminal_common::base64::decode(b64_str) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::debug!("OSC 1337 File=: base64 decode failed: {e}");
+            return;
+        }
+    };
+
+    if data.is_empty() {
+        tracing::debug!("OSC 1337 File=: empty payload after base64 decode");
+        return;
+    }
+
+    output.push(TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(
+        ITerm2InlineImageData {
+            name,
+            size,
+            width,
+            height,
+            preserve_aspect_ratio,
+            inline,
+            data,
+        },
+    )));
+}
+
+/// Strip an ASCII prefix from a byte slice, returning the remainder.
+fn strip_ascii_prefix<'a>(haystack: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if haystack.len() >= prefix.len() && &haystack[..prefix.len()] == prefix {
+        Some(&haystack[prefix.len()..])
+    } else {
+        None
     }
 }
 
@@ -694,5 +839,177 @@ mod tests {
         let payload = b"104;300\x07";
         let output = feed_osc(payload);
         assert!(output.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 1337 (iTerm2) parser tests
+    // ------------------------------------------------------------------
+
+    /// Build a minimal valid OSC 1337 File= payload with base64-encoded data.
+    fn build_iterm2_file_payload(args: &str, raw_data: &[u8]) -> Vec<u8> {
+        let b64 = freminal_common::base64::encode(raw_data);
+        let mut payload = format!("1337;File={args}:{b64}").into_bytes();
+        payload.push(0x07); // BEL terminator
+        payload
+    }
+
+    #[test]
+    fn osc1337_file_inline_basic() {
+        // Minimal: inline=1 with a small fake payload.
+        let payload = build_iterm2_file_payload("inline=1", b"FAKEIMAGE");
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(data.inline);
+                assert!(data.preserve_aspect_ratio); // default
+                assert_eq!(data.name, None);
+                assert_eq!(data.size, None);
+                assert_eq!(data.width, None);
+                assert_eq!(data.height, None);
+                assert_eq!(data.data, b"FAKEIMAGE");
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc1337_file_all_args() {
+        // name is base64-encoded "test.png"
+        let name_b64 = freminal_common::base64::encode(b"test.png");
+        let args = format!(
+            "name={name_b64};size=12345;width=10;height=50%;preserveAspectRatio=0;inline=1"
+        );
+        let payload = build_iterm2_file_payload(&args, b"DATA");
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert_eq!(data.name, Some("test.png".to_string()));
+                assert_eq!(data.size, Some(12345));
+                assert_eq!(data.width, Some(ImageDimension::Cells(10)));
+                assert_eq!(data.height, Some(ImageDimension::Percent(50)));
+                assert!(!data.preserve_aspect_ratio);
+                assert!(data.inline);
+                assert_eq!(data.data, b"DATA");
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc1337_file_width_pixels_height_auto() {
+        let args = "inline=1;width=100px;height=auto";
+        let payload = build_iterm2_file_payload(args, b"PX");
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert_eq!(data.width, Some(ImageDimension::Pixels(100)));
+                assert_eq!(data.height, Some(ImageDimension::Auto));
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc1337_file_inline_false_by_default() {
+        // No inline= arg → inline defaults to false
+        let payload = build_iterm2_file_payload("size=10", b"DATA");
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(!data.inline);
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc1337_non_file_subcommand_returns_unknown() {
+        // OSC 1337 ; SetUserVar=foo=bar BEL
+        let mut payload = b"1337;SetUserVar=foo=bar\x07".to_vec();
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown)
+        ));
+
+        // Also test with ST terminator
+        payload = b"1337;SetUserVar=foo=bar\x1b\\".to_vec();
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown)
+        ));
+    }
+
+    #[test]
+    fn osc1337_missing_colon_no_output() {
+        // File= args without ':' separator before base64 data
+        let payload = b"1337;File=inline=1\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn osc1337_empty_base64_no_output() {
+        // File= with colon but empty base64 payload → empty after decode → no output
+        let payload = b"1337;File=inline=1:\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn osc1337_missing_semicolon_no_output() {
+        // "1337File=inline=1:..." — missing ';' after 1337
+        let payload = b"1337File=inline=1:QUFB\x07";
+        let output = feed_osc(payload);
+        // The parser splits on ';' first — "1337File" won't parse as a valid
+        // OscValue, so this becomes an Invalid sequence.
+        // Either no output or an invalid output is acceptable.
+        for item in &output {
+            assert!(!matches!(
+                item,
+                TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn osc1337_file_st_terminator() {
+        // Same as basic test but with ESC \ (ST) terminator instead of BEL
+        let b64 = freminal_common::base64::encode(b"HELLO");
+        let mut payload = format!("1337;File=inline=1:{b64}").into_bytes();
+        payload.push(0x1b);
+        payload.push(0x5c);
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(data.inline);
+                assert_eq!(data.data, b"HELLO");
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc1337_file_unknown_args_ignored() {
+        // Unknown key=value pairs should be silently ignored.
+        let args = "inline=1;unknown_key=some_value;another=42";
+        let payload = build_iterm2_file_payload(args, b"OK");
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(data.inline);
+                assert_eq!(data.data, b"OK");
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
     }
 }
