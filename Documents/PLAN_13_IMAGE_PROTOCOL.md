@@ -275,13 +275,26 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.4 — Render inline images via GL textures**
+- [x] **13.4 — Render inline images via GL textures**
   - In `freminal/src/gui/renderer.rs`, add support for textured quads.
   - Upload `InlineImage` pixel data as GL textures (cached by image ID).
   - During the draw pass, emit textured quads for cells with `ImagePlacement`.
   - Handle image eviction when images scroll out of the scrollback limit.
   - Include image data in `TerminalSnapshot` (via `Arc` to avoid copies).
   - **Verify:** Manual test: `imgcat` displays an image inline. `cargo test --all` passes.
+  - ✅ **Completed 2026-03-13.** Full end-to-end image rendering pipeline implemented:
+    `TerminalSnapshot` carries `images: Arc<HashMap<u64, InlineImage>>` and
+    `visible_image_placements: Arc<Vec<Option<ImagePlacement>>>`. `build_snapshot()` populates
+    these via `has_visible_images()` / `visible_image_placements()` (extracted into
+    `collect_visible_images()` helper). `renderer.rs` has dedicated image shader program
+    (`IMG_VERT_SRC`/`IMG_FRAG_SRC`), `sync_image_textures()` (uploads new / evicts stale),
+    `draw_images()` (one textured quad per image), `build_image_verts()` (CPU vertex builder).
+    `terminal.rs` `RenderState` carries `image_verts` and `snap_images`; the paint callback
+    passes both to `draw_with_verts()`. Image pass initialisation extracted to
+    `init_image_pass()` to keep `init()` within the 100-line limit. Fixed clippy issues:
+    collapsible if-let chains, `entry` API, type alias for complex return, `clone_from`,
+    `implicit_hasher`, cast allows, doc backticks. All tests pass, clippy clean,
+    machete clean.
 
 ---
 
