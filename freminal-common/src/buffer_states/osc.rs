@@ -250,6 +250,15 @@ pub enum AnsiOscType {
     ResetCursorColor,
     /// OSC 1337 File= inline image (iTerm2 protocol).
     ITerm2FileInline(ITerm2InlineImageData),
+    /// OSC 1337 `MultipartFile`= begin (iTerm2 multipart protocol).
+    /// Carries the metadata (name, size, width, height, etc.) with empty data.
+    ITerm2MultipartBegin(ITerm2InlineImageData),
+    /// OSC 1337 `FilePart`= chunk (iTerm2 multipart protocol).
+    /// Carries decoded bytes from one base64-encoded chunk.
+    ITerm2FilePart(Vec<u8>),
+    /// OSC 1337 `FileEnd` (iTerm2 multipart protocol).
+    /// Signals the end of a multipart file transfer.
+    ITerm2FileEnd,
     /// OSC 1337 unrecognised sub-command (silently consumed).
     ITerm2Unknown,
     /// OSC 52 clipboard set: selection name + decoded (plaintext) content.
@@ -292,6 +301,17 @@ impl std::fmt::Display for AnsiOscType {
                     data.data.len()
                 )
             }
+            Self::ITerm2MultipartBegin(data) => {
+                write!(
+                    f,
+                    "ITerm2MultipartBegin(name={:?}, size={:?})",
+                    data.name, data.size
+                )
+            }
+            Self::ITerm2FilePart(bytes) => {
+                write!(f, "ITerm2FilePart({}B)", bytes.len())
+            }
+            Self::ITerm2FileEnd => write!(f, "ITerm2FileEnd"),
             Self::ITerm2Unknown => write!(f, "ITerm2Unknown"),
             Self::SetClipboard(sel, content) => write!(f, "SetClipboard({sel:?}, {content:?})"),
             Self::QueryClipboard(sel) => write!(f, "QueryClipboard({sel:?})"),

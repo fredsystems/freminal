@@ -41,6 +41,18 @@ use std::borrow::Cow;
 use crate::buffer::Buffer;
 use crate::image_store::{InlineImage, next_image_id};
 
+/// In-progress state for an iTerm2 multipart file transfer.
+///
+/// Accumulates metadata from `MultipartFile=` and decoded byte chunks from `FilePart=`
+/// until `FileEnd` signals completion.
+#[derive(Debug)]
+struct MultipartImageState {
+    /// Metadata parsed from the `MultipartFile=` begin sequence.
+    metadata: ITerm2InlineImageData,
+    /// Accumulated decoded bytes from all `FilePart=` chunks so far.
+    accumulated_data: Vec<u8>,
+}
+
 /// High-level handler that processes terminal output commands and applies them to a buffer.
 ///
 /// This is the main entry point for integrating the buffer with a terminal emulator.
@@ -93,6 +105,11 @@ pub struct TerminalHandler {
     /// When `Some`, responses to OSC 11 queries use this value instead of the
     /// theme's `background` field.
     bg_color_override: Option<(u8, u8, u8)>,
+    /// In-progress iTerm2 multipart file transfer, if any.
+    ///
+    /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
+    /// and cleared by `ITerm2FileEnd`.
+    multipart_state: Option<MultipartImageState>,
 }
 
 impl TerminalHandler {
@@ -117,6 +134,7 @@ impl TerminalHandler {
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             fg_color_override: None,
             bg_color_override: None,
+            multipart_state: None,
         }
     }
 
@@ -938,6 +956,15 @@ impl TerminalHandler {
             AnsiOscType::ITerm2FileInline(data) => {
                 self.handle_iterm2_inline_image(data);
             }
+            AnsiOscType::ITerm2MultipartBegin(data) => {
+                self.handle_iterm2_multipart_begin(data);
+            }
+            AnsiOscType::ITerm2FilePart(bytes) => {
+                self.handle_iterm2_file_part(bytes);
+            }
+            AnsiOscType::ITerm2FileEnd => {
+                self.handle_iterm2_file_end();
+            }
             AnsiOscType::ITerm2Unknown => {
                 tracing::debug!("OSC 1337: unrecognised sub-command (ignored)");
             }
@@ -1101,6 +1128,80 @@ impl TerminalHandler {
         // Place the image into the buffer. Pass 0 for scroll_offset — the
         // PTY thread always operates at the live bottom.
         let _new_offset = self.buffer.place_image(inline_image, 0);
+    }
+
+    /// Handle `OSC 1337 ; MultipartFile = [args]` — begin a multipart transfer.
+    ///
+    /// Stores the metadata and initialises an accumulator for incoming `FilePart`
+    /// chunks.  If a previous multipart transfer was in progress, it is discarded
+    /// with a warning.
+    fn handle_iterm2_multipart_begin(&mut self, data: &ITerm2InlineImageData) {
+        if self.multipart_state.is_some() {
+            tracing::warn!(
+                "OSC 1337 MultipartFile=: new transfer started while previous was in progress; \
+                 discarding incomplete transfer"
+            );
+        }
+
+        // Pre-allocate the accumulator to the declared size if available,
+        // otherwise start with an empty vec.
+        let capacity = data.size.unwrap_or(0);
+
+        self.multipart_state = Some(MultipartImageState {
+            metadata: data.clone(),
+            accumulated_data: Vec::with_capacity(capacity),
+        });
+
+        tracing::debug!(
+            "OSC 1337 MultipartFile=: started transfer (name={:?}, size={:?})",
+            data.name,
+            data.size,
+        );
+    }
+
+    /// Handle `OSC 1337 ; FilePart = [base64]` — append a chunk to the active
+    /// multipart transfer.
+    fn handle_iterm2_file_part(&mut self, bytes: &[u8]) {
+        let Some(state) = &mut self.multipart_state else {
+            tracing::warn!("OSC 1337 FilePart=: no active multipart transfer; ignoring chunk");
+            return;
+        };
+
+        state.accumulated_data.extend_from_slice(bytes);
+        tracing::debug!(
+            "OSC 1337 FilePart=: appended {} bytes (total so far: {})",
+            bytes.len(),
+            state.accumulated_data.len(),
+        );
+    }
+
+    /// Handle `OSC 1337 ; FileEnd` — complete the active multipart transfer.
+    ///
+    /// Assembles the final `ITerm2InlineImageData` from the accumulated chunks
+    /// and delegates to `handle_iterm2_inline_image` for decoding and placement.
+    fn handle_iterm2_file_end(&mut self) {
+        let Some(state) = self.multipart_state.take() else {
+            tracing::warn!("OSC 1337 FileEnd: no active multipart transfer; ignoring");
+            return;
+        };
+
+        if state.accumulated_data.is_empty() {
+            tracing::debug!("OSC 1337 FileEnd: transfer completed with empty payload; ignoring");
+            return;
+        }
+
+        tracing::debug!(
+            "OSC 1337 FileEnd: transfer complete ({} bytes)",
+            state.accumulated_data.len(),
+        );
+
+        // Assemble the final image data from metadata + accumulated bytes.
+        let final_data = ITerm2InlineImageData {
+            data: state.accumulated_data,
+            ..state.metadata
+        };
+
+        self.handle_iterm2_inline_image(&final_data);
     }
 
     /// Resolve an iTerm2 image dimension spec to a cell count.
@@ -4096,5 +4197,272 @@ mod tests {
         handler.handle_iterm2_inline_image(&image_data);
         let cursor_after = handler.cursor_pos();
         assert_eq!(cursor_before, cursor_after);
+    }
+
+    // ------------------------------------------------------------------
+    // iTerm2 multipart file transfer integration tests
+    // ------------------------------------------------------------------
+
+    /// Create a minimal 2x2 red PNG image as raw bytes.
+    fn make_test_png() -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut png_buf = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+        // 2x2 RGBA image: all red
+        let rgba_data: [u8; 16] = [
+            255, 0, 0, 255, // pixel (0,0)
+            255, 0, 0, 255, // pixel (1,0)
+            255, 0, 0, 255, // pixel (0,1)
+            255, 0, 0, 255, // pixel (1,1)
+        ];
+        encoder
+            .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        png_buf
+    }
+
+    #[test]
+    fn multipart_begin_part_end_places_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        // Begin: metadata with no payload
+        let begin_data = ITerm2InlineImageData {
+            name: Some("red.png".to_string()),
+            size: Some(png_data.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+
+        // Verify no image placed yet
+        let has_image_before = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image_before,
+            "No image should be placed before FileEnd"
+        );
+
+        // Send data in two chunks
+        let mid = png_data.len() / 2;
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data[..mid].to_vec()));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data[mid..].to_vec()));
+
+        // End: assemble and place
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        // Verify image was placed
+        let has_image_after = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image_after, "Image should be placed after FileEnd");
+
+        // Verify multipart state was cleared
+        assert!(
+            handler.multipart_state.is_none(),
+            "multipart_state should be None after FileEnd"
+        );
+    }
+
+    #[test]
+    fn multipart_single_chunk_places_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        let begin_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Image should be placed after single-chunk transfer"
+        );
+    }
+
+    #[test]
+    fn multipart_file_part_without_begin_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // FilePart with no active transfer — should be silently ignored
+        let cursor_before = handler.cursor_pos();
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![1, 2, 3]));
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(cursor_before, cursor_after);
+
+        // Verify no multipart state was created
+        assert!(handler.multipart_state.is_none());
+    }
+
+    #[test]
+    fn multipart_file_end_without_begin_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // FileEnd with no active transfer — should be silently ignored
+        let cursor_before = handler.cursor_pos();
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(cursor_before, cursor_after);
+    }
+
+    #[test]
+    fn multipart_begin_resets_previous_incomplete_transfer() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        // Start first transfer (will be abandoned)
+        let begin1 = ITerm2InlineImageData {
+            name: Some("first.png".to_string()),
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin1));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![0xDE, 0xAD]));
+
+        // Start second transfer — should discard the first
+        let begin2 = ITerm2InlineImageData {
+            name: Some("second.png".to_string()),
+            size: Some(png_data.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin2));
+
+        // Verify state was replaced (accumulated data from first transfer is gone)
+        let state = handler.multipart_state.as_ref().unwrap();
+        assert_eq!(state.metadata.name, Some("second.png".to_string()));
+        assert!(
+            state.accumulated_data.is_empty(),
+            "accumulated data should be empty after new begin"
+        );
+
+        // Complete second transfer with real image data
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image, "Second transfer should produce an image");
+    }
+
+    #[test]
+    fn multipart_empty_payload_ignored_on_file_end() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Begin a transfer but send no FilePart chunks
+        let begin_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        // No image should be placed (empty payload)
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Empty multipart transfer should not place an image"
+        );
+
+        // State should be cleared
+        assert!(handler.multipart_state.is_none());
+    }
+
+    #[test]
+    fn multipart_non_inline_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        // Begin with inline=false (download, not display)
+        let begin_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: false, // not inline
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
+
+        let cursor_before = handler.cursor_pos();
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        let cursor_after = handler.cursor_pos();
+
+        // inline=false means the image is a download, not an inline display.
+        // handle_iterm2_inline_image returns early for non-inline, so no image placed.
+        assert_eq!(
+            cursor_before, cursor_after,
+            "Cursor should not move for non-inline"
+        );
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Non-inline multipart transfer should not place an image"
+        );
     }
 }
