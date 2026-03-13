@@ -240,7 +240,7 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.2 — Parse iTerm2 OSC 1337 File sequences**
+- [x] **13.2 — Parse iTerm2 OSC 1337 File sequences**
   - Extend the OSC handler in `freminal-terminal-emulator` to recognize `1337;File=`.
   - Parse arguments: `name`, `size`, `width`, `height`, `preserveAspectRatio`, `inline`.
   - Accumulate base64 payload, decode on BEL/ST.
@@ -251,6 +251,13 @@ quads for image regions is straightforward:
   - Add tests with sample base64-encoded PNG/JPEG payloads.
   - **Verify:** `cargo test --all` passes. Parser correctly extracts image data from
     OSC 1337 sequences.
+  - ✅ **Completed 2026-03-12.** Added `ImageDimension` enum and `ITerm2InlineImageData`
+    struct to `freminal-common/src/buffer_states/osc.rs`. Replaced `AnsiOscType::ITerm2`
+    with `ITerm2FileInline(ITerm2InlineImageData)` and `ITerm2Unknown` variants. Implemented
+    `handle_osc_iterm2()` parser in `freminal-terminal-emulator/src/ansi_components/osc.rs`.
+    Added `image` crate dependency to `freminal-buffer`. Added `resolve_image_dimension()`,
+    `apply_aspect_ratio()`, and `handle_iterm2_inline_image()` to `TerminalHandler`. 43 new
+    tests across three crates. Committed as `40b2582`.
 
 ---
 
