@@ -20,9 +20,10 @@ use freminal_common::cursor::CursorVisualStyle;
 use tracing::error;
 
 use super::atlas::{GlyphAtlas, GlyphKey};
-use super::colors::{CURSOR_F, SELECTION_BG_F, SELECTION_FG_F, internal_color_to_gl};
+use super::colors::{cursor_f, internal_color_to_gl, selection_bg_f, selection_fg_f};
 use super::font_manager::FontManager;
 use super::shaping::{ShapedGlyph, ShapedLine};
+use freminal_common::themes::ThemePalette;
 
 // ---------------------------------------------------------------------------
 //  GLSL shaders  (GL 3.3 core profile)
@@ -346,9 +347,17 @@ impl TerminalRenderer {
             cursor_pos,
             cursor_visual_style,
             None,
+            &freminal_common::themes::CATPPUCCIN_MOCHA,
         );
-        let fg_verts =
-            build_foreground_verts(shaped_lines, atlas, font_manager, cell_height, ascent, None);
+        let fg_verts = build_foreground_verts(
+            shaped_lines,
+            atlas,
+            font_manager,
+            cell_height,
+            ascent,
+            None,
+            &freminal_common::themes::CATPPUCCIN_MOCHA,
+        );
 
         // 3. Upload vertex data using orphan-then-write.
         let buf_idx = self.vbo_index;
@@ -909,6 +918,7 @@ pub fn build_background_verts(
     cursor_pos: CursorPos,
     cursor_visual_style: &CursorVisualStyle,
     selection: Option<(usize, usize, usize, usize)>,
+    theme: &ThemePalette,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -951,7 +961,7 @@ pub fn build_background_verts(
                 continue;
             }
 
-            let bg_color = internal_color_to_gl(bg_color_raw, is_faint);
+            let bg_color = internal_color_to_gl(bg_color_raw, is_faint, theme);
 
             // Extend or start a merge run.
             if let Some(ref existing_bg) = merge_bg {
@@ -1011,7 +1021,7 @@ pub fn build_background_verts(
                 continue;
             }
 
-            let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint);
+            let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
             let col_end = run.col_start + run_col_count(run);
 
             #[allow(clippy::cast_precision_loss)]
@@ -1077,7 +1087,7 @@ pub fn build_background_verts(
             let y0 = row as f32 * ch;
             let y1 = y0 + ch;
 
-            push_quad(&mut verts, x0, y0, x1, y1, SELECTION_BG_F);
+            push_quad(&mut verts, x0, y0, x1, y1, selection_bg_f(theme));
         }
     }
 
@@ -1092,7 +1102,7 @@ pub fn build_background_verts(
         #[allow(clippy::cast_precision_loss)]
         let ch = cell_height as f32;
 
-        let color = CURSOR_F;
+        let color = cursor_f(theme);
 
         match cursor_visual_style {
             CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
@@ -1143,6 +1153,7 @@ pub fn build_cursor_verts_only(
     cursor_blink_on: bool,
     cursor_pos: CursorPos,
     cursor_visual_style: &CursorVisualStyle,
+    theme: &ThemePalette,
 ) -> Vec<f32> {
     let mut verts = Vec::new();
 
@@ -1156,7 +1167,7 @@ pub fn build_cursor_verts_only(
         #[allow(clippy::cast_precision_loss)]
         let ch = cell_height as f32;
 
-        let color = CURSOR_F;
+        let color = cursor_f(theme);
 
         match cursor_visual_style {
             CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
@@ -1195,6 +1206,7 @@ pub fn build_foreground_verts(
     cell_height: u32,
     ascent: f32,
     selection: Option<(usize, usize, usize, usize)>,
+    theme: &ThemePalette,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -1211,14 +1223,14 @@ pub fn build_foreground_verts(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
-            let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint);
+            let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
 
             // Track the current column as we iterate glyphs within the run.
             let mut col = run.col_start;
 
             for glyph in &run.glyphs {
                 let fg_color = if is_cell_selected(row_idx, col, selection) {
-                    SELECTION_FG_F
+                    selection_fg_f(theme)
                 } else {
                     normal_fg
                 };
@@ -1455,6 +1467,7 @@ fn colors_equal(a: &[f32; 4], b: &[f32; 4]) -> bool {
 mod tests {
     use super::*;
     use freminal_common::config::Config;
+    use freminal_common::themes;
 
     use crate::gui::font_manager::FontManager;
     use crate::gui::shaping::{ShapedGlyph, ShapedLine, ShapedRun};
@@ -1536,6 +1549,7 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(verts.len(), 0, "default background should produce no quads");
     }
@@ -1558,6 +1572,7 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         // One quad = VERTS_PER_QUAD * BG_VERTEX_FLOATS floats.
         assert_eq!(
@@ -1623,6 +1638,7 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         // Two adjacent same-color runs → one merged quad.
         assert_eq!(
@@ -1690,6 +1706,7 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(
             verts.len(),
@@ -1715,6 +1732,7 @@ mod tests {
             CursorPos { x: 1, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(
             verts.len(),
@@ -1738,6 +1756,7 @@ mod tests {
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(
             verts.len(),
@@ -1761,6 +1780,7 @@ mod tests {
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(
             verts.len(),
@@ -1784,6 +1804,7 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         // One underline quad.
         assert_eq!(
@@ -1813,6 +1834,7 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(
             verts.len(),
@@ -1841,6 +1863,7 @@ mod tests {
             CursorPos { x: 2, y: 1 },
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         // The cursor quad is the last 36 floats (6 verts × 6 floats).
         assert!(verts.len() >= VERTS_PER_QUAD * BG_VERTEX_FLOATS);
@@ -1870,6 +1893,7 @@ mod tests {
             16,
             13.0,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(verts.len(), 0);
     }
@@ -1892,7 +1916,15 @@ mod tests {
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
         let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
 
-        let verts = build_foreground_verts(&lines, &mut atlas, &fm, cell_h, ascent, None);
+        let verts = build_foreground_verts(
+            &lines,
+            &mut atlas,
+            &fm,
+            cell_h,
+            ascent,
+            None,
+            &themes::CATPPUCCIN_MOCHA,
+        );
 
         // Three ASCII glyphs each produce one quad = VERTS_PER_QUAD * FG_VERTEX_FLOATS.
         // Some glyphs may be spaces (zero-size) — so at minimum some quads must exist.
@@ -2017,6 +2049,7 @@ mod tests {
             true,
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert!(verts.is_empty(), "hidden cursor should produce no verts");
     }
@@ -2033,6 +2066,7 @@ mod tests {
                 blink_on,
                 CursorPos { x: 1, y: 2 },
                 &CursorVisualStyle::BlockCursorSteady,
+                &themes::CATPPUCCIN_MOCHA,
             );
             assert_eq!(
                 verts.len(),
@@ -2052,6 +2086,7 @@ mod tests {
             false,
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
+            &themes::CATPPUCCIN_MOCHA,
         );
         assert!(verts.is_empty(), "blink-off cursor should produce no verts");
     }
@@ -2081,6 +2116,7 @@ mod tests {
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
             None,
+            &themes::CATPPUCCIN_MOCHA,
         );
 
         // Record where the cursor quad starts (it is appended at the end).
@@ -2100,6 +2136,7 @@ mod tests {
             false, // blink off → empty verts (only true for blinking style)
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
+            &themes::CATPPUCCIN_MOCHA,
         );
 
         // Simulate the partial-update patch: mutate full_verts in-place to

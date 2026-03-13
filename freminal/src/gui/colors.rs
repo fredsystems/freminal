@@ -5,53 +5,13 @@
 
 use eframe::egui::Color32;
 use freminal_common::colors::TerminalColor;
-use freminal_common::themes;
+use freminal_common::themes::ThemePalette;
 
 // ---------------------------------------------------------------------------
-//  Catppuccin Mocha palette — compile-time constants
-// ---------------------------------------------------------------------------
-
-// Foreground / Default text
-pub const TEXT: Color32 = Color32::from_rgb(0xcd, 0xd6, 0xf4);
-// Background
-pub const BASE: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x2e);
-// Selection background (bright grey for clear visibility)
-pub const SELECTION_BG: Color32 = Color32::from_rgb(0xa0, 0xa4, 0xb8);
-// Selection foreground (black text over the bright selection background)
-pub const SELECTION_FG: Color32 = Color32::from_rgb(0x11, 0x11, 0x1b);
-// Cursor color
-pub const CURSOR: Color32 = Color32::from_rgb(0xf5, 0xe0, 0xdc);
-// Cursor text
-pub const CURSOR_TEXT: Color32 = Color32::from_rgb(0x11, 0x11, 0x1b);
-
-// Named palette 0-7
-pub const BLACK: Color32 = Color32::from_rgb(0x45, 0x47, 0x5a);
-pub const RED: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
-pub const GREEN: Color32 = Color32::from_rgb(0xa6, 0xe3, 0xa1);
-pub const YELLOW: Color32 = Color32::from_rgb(0xf9, 0xe2, 0xaf);
-pub const BLUE: Color32 = Color32::from_rgb(0x89, 0xb4, 0xfa);
-pub const MAGENTA: Color32 = Color32::from_rgb(0xf5, 0xc2, 0xe7);
-pub const CYAN: Color32 = Color32::from_rgb(0x94, 0xe2, 0xd5);
-pub const WHITE: Color32 = Color32::from_rgb(0xa6, 0xad, 0xc8);
-
-// Bright palette 8-15
-pub const BRIGHT_BLACK: Color32 = Color32::from_rgb(0x58, 0x5b, 0x70);
-pub const BRIGHT_RED: Color32 = Color32::from_rgb(0xf3, 0x77, 0x99);
-pub const BRIGHT_GREEN: Color32 = Color32::from_rgb(0x89, 0xd8, 0x8b);
-pub const BRIGHT_YELLOW: Color32 = Color32::from_rgb(0xeb, 0xd3, 0x91);
-pub const BRIGHT_BLUE: Color32 = Color32::from_rgb(0x74, 0xa8, 0xfc);
-pub const BRIGHT_MAGENTA: Color32 = Color32::from_rgb(0xf2, 0xae, 0xde);
-pub const BRIGHT_CYAN: Color32 = Color32::from_rgb(0x6b, 0xd7, 0xca);
-pub const BRIGHT_WHITE: Color32 = Color32::from_rgb(0xba, 0xc2, 0xde);
-
-// ---------------------------------------------------------------------------
-//  [f32; 4] RGBA versions for GL vertex attributes (premultiplied-compatible)
+//  Utility
 // ---------------------------------------------------------------------------
 
 /// Convert a [`Color32`] to `[f32; 4]` RGBA in `[0.0, 1.0]` range.
-///
-/// This is a `const fn` helper so that GL-side color constants can also be
-/// computed at compile time.
 #[must_use]
 pub const fn color32_to_f32(color: Color32) -> [f32; 4] {
     let rgba = color.to_array();
@@ -63,30 +23,44 @@ pub const fn color32_to_f32(color: Color32) -> [f32; 4] {
     ]
 }
 
-pub const TEXT_F: [f32; 4] = color32_to_f32(TEXT);
-pub const BASE_F: [f32; 4] = color32_to_f32(BASE);
-pub const SELECTION_BG_F: [f32; 4] = color32_to_f32(SELECTION_BG);
-pub const SELECTION_FG_F: [f32; 4] = color32_to_f32(SELECTION_FG);
-pub const CURSOR_F: [f32; 4] = color32_to_f32(CURSOR);
-pub const CURSOR_TEXT_F: [f32; 4] = color32_to_f32(CURSOR_TEXT);
+/// Convert an `(r, g, b)` tuple to a `Color32`.
+#[must_use]
+const fn rgb_to_color32(rgb: (u8, u8, u8)) -> Color32 {
+    Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+}
 
-pub const BLACK_F: [f32; 4] = color32_to_f32(BLACK);
-pub const RED_F: [f32; 4] = color32_to_f32(RED);
-pub const GREEN_F: [f32; 4] = color32_to_f32(GREEN);
-pub const YELLOW_F: [f32; 4] = color32_to_f32(YELLOW);
-pub const BLUE_F: [f32; 4] = color32_to_f32(BLUE);
-pub const MAGENTA_F: [f32; 4] = color32_to_f32(MAGENTA);
-pub const CYAN_F: [f32; 4] = color32_to_f32(CYAN);
-pub const WHITE_F: [f32; 4] = color32_to_f32(WHITE);
+/// Convert an `(r, g, b)` tuple to `[f32; 4]` RGBA with alpha 1.0.
+#[must_use]
+const fn rgb_to_f32(rgb: (u8, u8, u8)) -> [f32; 4] {
+    [
+        rgb.0 as f32 / 255.0,
+        rgb.1 as f32 / 255.0,
+        rgb.2 as f32 / 255.0,
+        1.0,
+    ]
+}
 
-pub const BRIGHT_BLACK_F: [f32; 4] = color32_to_f32(BRIGHT_BLACK);
-pub const BRIGHT_RED_F: [f32; 4] = color32_to_f32(BRIGHT_RED);
-pub const BRIGHT_GREEN_F: [f32; 4] = color32_to_f32(BRIGHT_GREEN);
-pub const BRIGHT_YELLOW_F: [f32; 4] = color32_to_f32(BRIGHT_YELLOW);
-pub const BRIGHT_BLUE_F: [f32; 4] = color32_to_f32(BRIGHT_BLUE);
-pub const BRIGHT_MAGENTA_F: [f32; 4] = color32_to_f32(BRIGHT_MAGENTA);
-pub const BRIGHT_CYAN_F: [f32; 4] = color32_to_f32(BRIGHT_CYAN);
-pub const BRIGHT_WHITE_F: [f32; 4] = color32_to_f32(BRIGHT_WHITE);
+// ---------------------------------------------------------------------------
+//  Theme-derived accessors used by renderer.rs
+// ---------------------------------------------------------------------------
+
+/// Selection background color as `[f32; 4]` from the active theme.
+#[must_use]
+pub const fn selection_bg_f(theme: &ThemePalette) -> [f32; 4] {
+    rgb_to_f32(theme.selection_bg)
+}
+
+/// Selection foreground color as `[f32; 4]` from the active theme.
+#[must_use]
+pub const fn selection_fg_f(theme: &ThemePalette) -> [f32; 4] {
+    rgb_to_f32(theme.selection_fg)
+}
+
+/// Cursor color as `[f32; 4]` from the active theme.
+#[must_use]
+pub const fn cursor_f(theme: &ThemePalette) -> [f32; 4] {
+    rgb_to_f32(theme.cursor)
+}
 
 // ---------------------------------------------------------------------------
 //  Color conversion functions
@@ -94,43 +68,47 @@ pub const BRIGHT_WHITE_F: [f32; 4] = color32_to_f32(BRIGHT_WHITE);
 
 /// Map a `TerminalColor` to an egui `Color32`, applying faint dimming if requested.
 ///
-/// All named colors use compile-time constants — zero heap allocations.
+/// Named colors are resolved from the active theme palette.
 #[must_use]
-pub fn internal_color_to_egui(color: TerminalColor, make_faint: bool) -> Color32 {
+pub fn internal_color_to_egui(
+    color: TerminalColor,
+    make_faint: bool,
+    theme: &ThemePalette,
+) -> Color32 {
     let color_before_faint = match color {
         TerminalColor::Default
         | TerminalColor::DefaultUnderlineColor
-        | TerminalColor::DefaultCursorColor => TEXT,
+        | TerminalColor::DefaultCursorColor => rgb_to_color32(theme.foreground),
 
-        TerminalColor::DefaultBackground => BASE,
+        TerminalColor::DefaultBackground => rgb_to_color32(theme.background),
 
         // Base palette 0-7
-        TerminalColor::Black => BLACK,
-        TerminalColor::Red => RED,
-        TerminalColor::Green => GREEN,
-        TerminalColor::Yellow => YELLOW,
-        TerminalColor::Blue => BLUE,
-        TerminalColor::Magenta => MAGENTA,
-        TerminalColor::Cyan => CYAN,
-        TerminalColor::White => WHITE,
+        TerminalColor::Black => rgb_to_color32(theme.ansi[0]),
+        TerminalColor::Red => rgb_to_color32(theme.ansi[1]),
+        TerminalColor::Green => rgb_to_color32(theme.ansi[2]),
+        TerminalColor::Yellow => rgb_to_color32(theme.ansi[3]),
+        TerminalColor::Blue => rgb_to_color32(theme.ansi[4]),
+        TerminalColor::Magenta => rgb_to_color32(theme.ansi[5]),
+        TerminalColor::Cyan => rgb_to_color32(theme.ansi[6]),
+        TerminalColor::White => rgb_to_color32(theme.ansi[7]),
 
         // Bright palette 8-15
-        TerminalColor::BrightBlack => BRIGHT_BLACK,
-        TerminalColor::BrightRed => BRIGHT_RED,
-        TerminalColor::BrightGreen => BRIGHT_GREEN,
-        TerminalColor::BrightYellow => BRIGHT_YELLOW,
-        TerminalColor::BrightBlue => BRIGHT_BLUE,
-        TerminalColor::BrightMagenta => BRIGHT_MAGENTA,
-        TerminalColor::BrightCyan => BRIGHT_CYAN,
-        TerminalColor::BrightWhite => BRIGHT_WHITE,
+        TerminalColor::BrightBlack => rgb_to_color32(theme.ansi[8]),
+        TerminalColor::BrightRed => rgb_to_color32(theme.ansi[9]),
+        TerminalColor::BrightGreen => rgb_to_color32(theme.ansi[10]),
+        TerminalColor::BrightYellow => rgb_to_color32(theme.ansi[11]),
+        TerminalColor::BrightBlue => rgb_to_color32(theme.ansi[12]),
+        TerminalColor::BrightMagenta => rgb_to_color32(theme.ansi[13]),
+        TerminalColor::BrightCyan => rgb_to_color32(theme.ansi[14]),
+        TerminalColor::BrightWhite => rgb_to_color32(theme.ansi[15]),
 
         TerminalColor::Custom(r, g, b) => Color32::from_rgb(r, g, b),
 
         // PaletteIndex should have been resolved by the handler before reaching
         // the GUI.  If it somehow arrives here, fall back to the default palette.
         TerminalColor::PaletteIndex(_idx) => {
-            let resolved = color.resolve_palette_default(&themes::CATPPUCCIN_MOCHA);
-            return internal_color_to_egui(resolved, make_faint);
+            let resolved = color.resolve_palette_default(theme);
+            return internal_color_to_egui(resolved, make_faint, theme);
         }
     };
 
@@ -145,31 +123,35 @@ pub fn internal_color_to_egui(color: TerminalColor, make_faint: bool) -> Color32
 ///
 /// Faint dimming is applied by halving the alpha channel.
 #[must_use]
-pub fn internal_color_to_gl(color: TerminalColor, make_faint: bool) -> [f32; 4] {
+pub fn internal_color_to_gl(
+    color: TerminalColor,
+    make_faint: bool,
+    theme: &ThemePalette,
+) -> [f32; 4] {
     let base = match color {
         TerminalColor::Default
         | TerminalColor::DefaultUnderlineColor
-        | TerminalColor::DefaultCursorColor => TEXT_F,
+        | TerminalColor::DefaultCursorColor => rgb_to_f32(theme.foreground),
 
-        TerminalColor::DefaultBackground => BASE_F,
+        TerminalColor::DefaultBackground => rgb_to_f32(theme.background),
 
-        TerminalColor::Black => BLACK_F,
-        TerminalColor::Red => RED_F,
-        TerminalColor::Green => GREEN_F,
-        TerminalColor::Yellow => YELLOW_F,
-        TerminalColor::Blue => BLUE_F,
-        TerminalColor::Magenta => MAGENTA_F,
-        TerminalColor::Cyan => CYAN_F,
-        TerminalColor::White => WHITE_F,
+        TerminalColor::Black => rgb_to_f32(theme.ansi[0]),
+        TerminalColor::Red => rgb_to_f32(theme.ansi[1]),
+        TerminalColor::Green => rgb_to_f32(theme.ansi[2]),
+        TerminalColor::Yellow => rgb_to_f32(theme.ansi[3]),
+        TerminalColor::Blue => rgb_to_f32(theme.ansi[4]),
+        TerminalColor::Magenta => rgb_to_f32(theme.ansi[5]),
+        TerminalColor::Cyan => rgb_to_f32(theme.ansi[6]),
+        TerminalColor::White => rgb_to_f32(theme.ansi[7]),
 
-        TerminalColor::BrightBlack => BRIGHT_BLACK_F,
-        TerminalColor::BrightRed => BRIGHT_RED_F,
-        TerminalColor::BrightGreen => BRIGHT_GREEN_F,
-        TerminalColor::BrightYellow => BRIGHT_YELLOW_F,
-        TerminalColor::BrightBlue => BRIGHT_BLUE_F,
-        TerminalColor::BrightMagenta => BRIGHT_MAGENTA_F,
-        TerminalColor::BrightCyan => BRIGHT_CYAN_F,
-        TerminalColor::BrightWhite => BRIGHT_WHITE_F,
+        TerminalColor::BrightBlack => rgb_to_f32(theme.ansi[8]),
+        TerminalColor::BrightRed => rgb_to_f32(theme.ansi[9]),
+        TerminalColor::BrightGreen => rgb_to_f32(theme.ansi[10]),
+        TerminalColor::BrightYellow => rgb_to_f32(theme.ansi[11]),
+        TerminalColor::BrightBlue => rgb_to_f32(theme.ansi[12]),
+        TerminalColor::BrightMagenta => rgb_to_f32(theme.ansi[13]),
+        TerminalColor::BrightCyan => rgb_to_f32(theme.ansi[14]),
+        TerminalColor::BrightWhite => rgb_to_f32(theme.ansi[15]),
 
         TerminalColor::Custom(r, g, b) => [
             f32::from(r) / 255.0,
@@ -179,8 +161,8 @@ pub fn internal_color_to_gl(color: TerminalColor, make_faint: bool) -> [f32; 4] 
         ],
 
         TerminalColor::PaletteIndex(_idx) => {
-            let resolved = color.resolve_palette_default(&themes::CATPPUCCIN_MOCHA);
-            return internal_color_to_gl(resolved, make_faint);
+            let resolved = color.resolve_palette_default(theme);
+            return internal_color_to_gl(resolved, make_faint, theme);
         }
     };
 
@@ -198,96 +180,49 @@ pub fn internal_color_to_gl(color: TerminalColor, make_faint: bool) -> [f32; 4] 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use freminal_common::themes;
 
-    /// Verify that each named `Color32` constant matches the original hex values.
-    #[test]
-    fn named_colors_match_hex_values() {
-        // Text / foreground: #cdd6f4
-        assert_eq!(TEXT, Color32::from_rgb(0xcd, 0xd6, 0xf4));
-        // Background: #1e1e2e
-        assert_eq!(BASE, Color32::from_rgb(0x1e, 0x1e, 0x2e));
-        // Palette 0-7
-        assert_eq!(BLACK, Color32::from_rgb(0x45, 0x47, 0x5a));
-        assert_eq!(RED, Color32::from_rgb(0xf3, 0x8b, 0xa8));
-        assert_eq!(GREEN, Color32::from_rgb(0xa6, 0xe3, 0xa1));
-        assert_eq!(YELLOW, Color32::from_rgb(0xf9, 0xe2, 0xaf));
-        assert_eq!(BLUE, Color32::from_rgb(0x89, 0xb4, 0xfa));
-        assert_eq!(MAGENTA, Color32::from_rgb(0xf5, 0xc2, 0xe7));
-        assert_eq!(CYAN, Color32::from_rgb(0x94, 0xe2, 0xd5));
-        assert_eq!(WHITE, Color32::from_rgb(0xa6, 0xad, 0xc8));
-        // Bright 8-15
-        assert_eq!(BRIGHT_BLACK, Color32::from_rgb(0x58, 0x5b, 0x70));
-        assert_eq!(BRIGHT_RED, Color32::from_rgb(0xf3, 0x77, 0x99));
-        assert_eq!(BRIGHT_GREEN, Color32::from_rgb(0x89, 0xd8, 0x8b));
-        assert_eq!(BRIGHT_YELLOW, Color32::from_rgb(0xeb, 0xd3, 0x91));
-        assert_eq!(BRIGHT_BLUE, Color32::from_rgb(0x74, 0xa8, 0xfc));
-        assert_eq!(BRIGHT_MAGENTA, Color32::from_rgb(0xf2, 0xae, 0xde));
-        assert_eq!(BRIGHT_CYAN, Color32::from_rgb(0x6b, 0xd7, 0xca));
-        assert_eq!(BRIGHT_WHITE, Color32::from_rgb(0xba, 0xc2, 0xde));
+    const THEME: &ThemePalette = &themes::CATPPUCCIN_MOCHA;
+
+    /// Helper: `Color32` from a theme (r,g,b) tuple.
+    fn c32(rgb: (u8, u8, u8)) -> Color32 {
+        Color32::from_rgb(rgb.0, rgb.1, rgb.2)
     }
 
-    /// Verify that `Color32` and `[f32; 4]` representations are consistent.
-    #[test]
-    fn f32_matches_color32() {
-        fn check(name: &str, c32: Color32, gl_color: [f32; 4]) {
-            let rgba = c32.to_array();
-            let tolerance = 1.0 / 255.0 + f32::EPSILON;
-            assert!(
-                (gl_color[0] - f32::from(rgba[0]) / 255.0).abs() < tolerance,
-                "{name} R mismatch"
-            );
-            assert!(
-                (gl_color[1] - f32::from(rgba[1]) / 255.0).abs() < tolerance,
-                "{name} G mismatch"
-            );
-            assert!(
-                (gl_color[2] - f32::from(rgba[2]) / 255.0).abs() < tolerance,
-                "{name} B mismatch"
-            );
-            assert!(
-                (gl_color[3] - f32::from(rgba[3]) / 255.0).abs() < tolerance,
-                "{name} A mismatch"
-            );
-        }
-
-        check("TEXT", TEXT, TEXT_F);
-        check("BASE", BASE, BASE_F);
-        check("BLACK", BLACK, BLACK_F);
-        check("RED", RED, RED_F);
-        check("GREEN", GREEN, GREEN_F);
-        check("YELLOW", YELLOW, YELLOW_F);
-        check("BLUE", BLUE, BLUE_F);
-        check("MAGENTA", MAGENTA, MAGENTA_F);
-        check("CYAN", CYAN, CYAN_F);
-        check("WHITE", WHITE, WHITE_F);
-        check("BRIGHT_BLACK", BRIGHT_BLACK, BRIGHT_BLACK_F);
-        check("BRIGHT_RED", BRIGHT_RED, BRIGHT_RED_F);
-        check("BRIGHT_GREEN", BRIGHT_GREEN, BRIGHT_GREEN_F);
-        check("BRIGHT_YELLOW", BRIGHT_YELLOW, BRIGHT_YELLOW_F);
-        check("BRIGHT_BLUE", BRIGHT_BLUE, BRIGHT_BLUE_F);
-        check("BRIGHT_MAGENTA", BRIGHT_MAGENTA, BRIGHT_MAGENTA_F);
-        check("BRIGHT_CYAN", BRIGHT_CYAN, BRIGHT_CYAN_F);
-        check("BRIGHT_WHITE", BRIGHT_WHITE, BRIGHT_WHITE_F);
+    /// Helper: `[f32; 4]` from a theme (r,g,b) tuple.
+    fn f4(rgb: (u8, u8, u8)) -> [f32; 4] {
+        [
+            f32::from(rgb.0) / 255.0,
+            f32::from(rgb.1) / 255.0,
+            f32::from(rgb.2) / 255.0,
+            1.0,
+        ]
     }
 
-    /// Verify that `internal_color_to_egui` returns the const values (no heap allocation).
+    /// Verify that `internal_color_to_egui` reads theme values correctly.
     #[test]
-    fn internal_color_to_egui_uses_consts() {
-        assert_eq!(internal_color_to_egui(TerminalColor::Default, false), TEXT);
+    fn internal_color_to_egui_reads_theme() {
         assert_eq!(
-            internal_color_to_egui(TerminalColor::DefaultBackground, false),
-            BASE
+            internal_color_to_egui(TerminalColor::Default, false, THEME),
+            c32(THEME.foreground)
         );
-        assert_eq!(internal_color_to_egui(TerminalColor::Red, false), RED);
         assert_eq!(
-            internal_color_to_egui(TerminalColor::BrightCyan, false),
-            BRIGHT_CYAN
+            internal_color_to_egui(TerminalColor::DefaultBackground, false, THEME),
+            c32(THEME.background)
+        );
+        assert_eq!(
+            internal_color_to_egui(TerminalColor::Red, false, THEME),
+            c32(THEME.ansi[1])
+        );
+        assert_eq!(
+            internal_color_to_egui(TerminalColor::BrightCyan, false, THEME),
+            c32(THEME.ansi[14])
         );
     }
 
-    /// Verify that `internal_color_to_gl` produces the const values.
+    /// Verify that `internal_color_to_gl` reads theme values correctly.
     #[test]
-    fn internal_color_to_gl_uses_consts() {
+    fn internal_color_to_gl_reads_theme() {
         fn assert_gl_eq(actual: [f32; 4], expected: [f32; 4], label: &str) {
             assert!(
                 actual
@@ -298,18 +233,18 @@ mod tests {
             );
         }
         assert_gl_eq(
-            internal_color_to_gl(TerminalColor::Default, false),
-            TEXT_F,
+            internal_color_to_gl(TerminalColor::Default, false, THEME),
+            f4(THEME.foreground),
             "Default",
         );
         assert_gl_eq(
-            internal_color_to_gl(TerminalColor::DefaultBackground, false),
-            BASE_F,
+            internal_color_to_gl(TerminalColor::DefaultBackground, false, THEME),
+            f4(THEME.background),
             "DefaultBackground",
         );
         assert_gl_eq(
-            internal_color_to_gl(TerminalColor::Red, false),
-            RED_F,
+            internal_color_to_gl(TerminalColor::Red, false, THEME),
+            f4(THEME.ansi[1]),
             "Red",
         );
     }
@@ -317,8 +252,8 @@ mod tests {
     /// Faint dimming halves the alpha in the GL path.
     #[test]
     fn faint_dims_alpha_gl() {
-        let normal = internal_color_to_gl(TerminalColor::Red, false);
-        let faint = internal_color_to_gl(TerminalColor::Red, true);
+        let normal = internal_color_to_gl(TerminalColor::Red, false, THEME);
+        let faint = internal_color_to_gl(TerminalColor::Red, true, THEME);
         assert!(normal[3].mul_add(-0.5, faint[3]).abs() < f32::EPSILON);
         // RGB channels unchanged.
         assert!((faint[0] - normal[0]).abs() < f32::EPSILON);
@@ -329,10 +264,10 @@ mod tests {
     /// Custom colors pass through correctly.
     #[test]
     fn custom_color_passthrough() {
-        let c = internal_color_to_egui(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false);
+        let c = internal_color_to_egui(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false, THEME);
         assert_eq!(c, Color32::from_rgb(0xAB, 0xCD, 0xEF));
 
-        let gl_val = internal_color_to_gl(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false);
+        let gl_val = internal_color_to_gl(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false, THEME);
         let tolerance = 1.0 / 255.0 + f32::EPSILON;
         assert!((gl_val[0] - f32::from(0xAB_u8) / 255.0).abs() < tolerance);
         assert!((gl_val[1] - f32::from(0xCD_u8) / 255.0).abs() < tolerance);
@@ -344,18 +279,92 @@ mod tests {
     #[test]
     fn palette_index_resolves() {
         // Index 1 = Red in the Catppuccin Mocha palette.
-        // PaletteIndex(1) resolves to Custom(0xf3, 0x8b, 0xa8) which then maps
-        // to the same RGB as our RED constant.
-        let c = internal_color_to_egui(TerminalColor::PaletteIndex(1), false);
-        assert_eq!(c, RED);
+        let c = internal_color_to_egui(TerminalColor::PaletteIndex(1), false, THEME);
+        assert_eq!(c, c32(THEME.ansi[1]));
 
-        let gl_val = internal_color_to_gl(TerminalColor::PaletteIndex(1), false);
+        let gl_val = internal_color_to_gl(TerminalColor::PaletteIndex(1), false, THEME);
+        let expected = f4(THEME.ansi[1]);
         assert!(
             gl_val
                 .iter()
-                .zip(RED_F.iter())
+                .zip(expected.iter())
                 .all(|(a, e)| (a - e).abs() < f32::EPSILON),
-            "PaletteIndex(1) GL should match RED_F"
+            "PaletteIndex(1) GL should match theme.ansi[1]"
+        );
+    }
+
+    /// `f32` and `Color32` paths agree for the same theme color.
+    #[test]
+    fn f32_matches_color32_for_theme() {
+        let check = |label: &str, color: TerminalColor| {
+            let c32 = internal_color_to_egui(color, false, THEME);
+            let gl = internal_color_to_gl(color, false, THEME);
+            let rgba = c32.to_array();
+            let tolerance = 1.0 / 255.0 + f32::EPSILON;
+            assert!(
+                (gl[0] - f32::from(rgba[0]) / 255.0).abs() < tolerance,
+                "{label} R mismatch"
+            );
+            assert!(
+                (gl[1] - f32::from(rgba[1]) / 255.0).abs() < tolerance,
+                "{label} G mismatch"
+            );
+            assert!(
+                (gl[2] - f32::from(rgba[2]) / 255.0).abs() < tolerance,
+                "{label} B mismatch"
+            );
+        };
+
+        check("Default", TerminalColor::Default);
+        check("DefaultBackground", TerminalColor::DefaultBackground);
+        check("Black", TerminalColor::Black);
+        check("Red", TerminalColor::Red);
+        check("Green", TerminalColor::Green);
+        check("Yellow", TerminalColor::Yellow);
+        check("Blue", TerminalColor::Blue);
+        check("Magenta", TerminalColor::Magenta);
+        check("Cyan", TerminalColor::Cyan);
+        check("White", TerminalColor::White);
+        check("BrightBlack", TerminalColor::BrightBlack);
+        check("BrightRed", TerminalColor::BrightRed);
+        check("BrightGreen", TerminalColor::BrightGreen);
+        check("BrightYellow", TerminalColor::BrightYellow);
+        check("BrightBlue", TerminalColor::BrightBlue);
+        check("BrightMagenta", TerminalColor::BrightMagenta);
+        check("BrightCyan", TerminalColor::BrightCyan);
+        check("BrightWhite", TerminalColor::BrightWhite);
+    }
+
+    /// Theme-derived accessors produce correct values.
+    #[test]
+    fn theme_accessor_fns() {
+        let sel_bg = selection_bg_f(THEME);
+        let expected = f4(THEME.selection_bg);
+        assert!(
+            sel_bg
+                .iter()
+                .zip(expected.iter())
+                .all(|(a, e)| (a - e).abs() < f32::EPSILON),
+            "selection_bg_f mismatch"
+        );
+
+        let sel_fg_color = selection_fg_f(THEME);
+        let expected = f4(THEME.selection_fg);
+        assert!(
+            sel_fg_color
+                .iter()
+                .zip(expected.iter())
+                .all(|(a, e)| (a - e).abs() < f32::EPSILON),
+            "selection_fg_f mismatch"
+        );
+
+        let cur = cursor_f(THEME);
+        let expected = f4(THEME.cursor);
+        assert!(
+            cur.iter()
+                .zip(expected.iter())
+                .all(|(a, e)| (a - e).abs() < f32::EPSILON),
+            "cursor_f mismatch"
         );
     }
 }

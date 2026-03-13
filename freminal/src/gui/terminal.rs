@@ -1191,6 +1191,7 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
+                    &freminal_common::themes::CATPPUCCIN_MOCHA,
                 );
                 let mut rs = self
                     .render_state
@@ -1244,6 +1245,7 @@ impl FreminalTerminalWidget {
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    &freminal_common::themes::CATPPUCCIN_MOCHA,
                 );
 
                 // Record where the cursor quad starts in the background VBO.
@@ -1268,6 +1270,7 @@ impl FreminalTerminalWidget {
                     cell_h,
                     self.font_manager.ascent(),
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    &freminal_common::themes::CATPPUCCIN_MOCHA,
                 );
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;

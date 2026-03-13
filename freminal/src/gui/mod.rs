@@ -36,10 +36,12 @@ fn set_egui_options(ctx: &egui::Context) {
         style.visuals.window_fill = internal_color_to_egui(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
+            &freminal_common::themes::CATPPUCCIN_MOCHA,
         );
         style.visuals.panel_fill = internal_color_to_egui(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
+            &freminal_common::themes::CATPPUCCIN_MOCHA,
         );
     });
     ctx.options_mut(|options| {
@@ -473,10 +475,12 @@ impl eframe::App for FreminalGui {
                     style.visuals.window_fill = internal_color_to_egui(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
+                        &freminal_common::themes::CATPPUCCIN_MOCHA,
                     );
                     style.visuals.panel_fill = internal_color_to_egui(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
+                        &freminal_common::themes::CATPPUCCIN_MOCHA,
                     );
                 });
             } else {
