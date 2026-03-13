@@ -267,3 +267,65 @@ impl std::str::FromStr for TerminalColor {
         Ok(ret)
     }
 }
+
+/// Parse an X11 color spec string to an RGB triple.
+///
+/// Supported formats:
+/// - `rgb:R/G/B` where R, G, B are 1–4 hex digits each (`XParseColor` format)
+/// - `#RRGGBB` (6-digit hex)
+/// - `#RGB` (3-digit hex, expanded to 6)
+///
+/// Returns `None` if the string is not a recognised color spec.
+#[must_use]
+pub fn parse_color_spec(spec: &str) -> Option<(u8, u8, u8)> {
+    if let Some(rest) = spec.strip_prefix("rgb:") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let r = scale_hex_channel(parts[0])?;
+        let g = scale_hex_channel(parts[1])?;
+        let b = scale_hex_channel(parts[2])?;
+        Some((r, g, b))
+    } else if let Some(hex) = spec.strip_prefix('#') {
+        match hex.len() {
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                Some((r, g, b))
+            }
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+                let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+                let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+                // Expand: 0xA → 0xAA
+                Some((r * 17, g * 17, b * 17))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Scale a 1–4 hex-digit channel value to 8-bit.
+///
+/// Follows the `XParseColor` convention:
+/// - 1 digit:  0xH   → (H << 4) | H  (e.g. `a` → 0xaa)
+/// - 2 digits: 0xHH  → HH as-is
+/// - 3 digits: 0xHHH → top 8 bits (shift right 4)
+/// - 4 digits: 0xHHHH → top 8 bits (shift right 8)
+#[must_use]
+pub fn scale_hex_channel(s: &str) -> Option<u8> {
+    let v = u16::from_str_radix(s, 16).ok()?;
+    let scaled = match s.len() {
+        1 => (v << 4) | v,
+        2 => v,
+        3 => v >> 4,
+        4 => v >> 8,
+        _ => return None,
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    Some(scaled as u8)
+}

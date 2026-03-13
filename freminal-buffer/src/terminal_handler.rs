@@ -28,7 +28,7 @@ use freminal_common::{
         url::Url,
         window_manipulation::WindowManipulation,
     },
-    colors::{ColorPalette, TerminalColor},
+    colors::{ColorPalette, TerminalColor, parse_color_spec},
     cursor::CursorVisualStyle,
     pty_write::{FreminalTerminalSize, PtyWrite},
     sgr::SelectGraphicRendition,
@@ -80,6 +80,16 @@ pub struct TerminalHandler {
     pre_deccolm_width: Option<usize>,
     /// Active color theme for default palette lookups.
     theme: &'static ThemePalette,
+    /// Dynamic foreground color override (set via OSC 10; reset via OSC 110).
+    ///
+    /// When `Some`, responses to OSC 10 queries use this value instead of the
+    /// theme's `foreground` field.
+    fg_color_override: Option<(u8, u8, u8)>,
+    /// Dynamic background color override (set via OSC 11; reset via OSC 111).
+    ///
+    /// When `Some`, responses to OSC 11 queries use this value instead of the
+    /// theme's `background` field.
+    bg_color_override: Option<(u8, u8, u8)>,
 }
 
 impl TerminalHandler {
@@ -102,6 +112,8 @@ impl TerminalHandler {
             allow_column_mode_switch: true,
             pre_deccolm_width: None,
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            fg_color_override: None,
+            bg_color_override: None,
         }
     }
 
@@ -151,6 +163,8 @@ impl TerminalHandler {
         self.ftcs_state = FtcsState::default();
         self.last_exit_code = None;
         self.palette.reset_all();
+        self.fg_color_override = None;
+        self.bg_color_override = None;
         self.allow_column_mode_switch = true;
     }
 
@@ -883,16 +897,14 @@ impl TerminalHandler {
                     .push(WindowManipulation::SetTitleBarText(title.clone()));
             }
 
-            // Color queries — respond with hardcoded defaults matching the old buffer.
-            // TODO: make these configurable once a theme/color API exists.
-            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
-                // Hardcoded Catppuccin Mocha base: #45475a
-                self.write_to_pty("\x1b]11;rgb:45/47/5a\x1b\\");
+            // OSC 10/11 foreground/background color query, set, and reset.
+            AnsiOscType::RequestColorQueryBackground(_)
+            | AnsiOscType::RequestColorQueryForeground(_)
+            | AnsiOscType::ResetForegroundColor
+            | AnsiOscType::ResetBackgroundColor => {
+                self.handle_osc_fg_bg_color(osc);
             }
-            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
-                // Hardcoded white foreground: #ffffff
-                self.write_to_pty("\x1b]10;rgb:ff/ff/ff\x1b\\");
-            }
+
             // Remote host / CWD: OSC 7 ; file://hostname/path ST
             AnsiOscType::RemoteHost(value) => {
                 self.current_working_directory = parse_osc7_uri(value);
@@ -916,9 +928,6 @@ impl TerminalHandler {
                     }
                     FtcsMarker::CommandFinished(exit_code) => {
                         self.last_exit_code = *exit_code;
-                        // After a command finishes we are back in no specific
-                        // region — the next marker will typically be `A`
-                        // (prompt start) again.
                         self.ftcs_state = FtcsState::None;
                     }
                 }
@@ -945,8 +954,6 @@ impl TerminalHandler {
             }
             AnsiOscType::QueryPaletteColor(idx) => {
                 let (r, g, b) = self.palette.get_rgb(*idx, self.theme);
-                // Respond with 4-digit hex per channel (xterm convention):
-                // OSC 4 ; index ; rgb:RRRR/GGGG/BBBB ST
                 let response = format!(
                     "\x1b]4;{idx};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
                     u16::from(r) * 257,
@@ -962,11 +969,58 @@ impl TerminalHandler {
                 self.palette.reset_all();
             }
 
-            // NoOp, non-Query color variants, cursor-color reset — nothing to do.
-            AnsiOscType::NoOp
-            | AnsiOscType::ResetCursorColor
-            | AnsiOscType::RequestColorQueryBackground(_)
-            | AnsiOscType::RequestColorQueryForeground(_) => {}
+            AnsiOscType::NoOp | AnsiOscType::ResetCursorColor => {}
+        }
+    }
+
+    /// Handle OSC 10/11 foreground/background color query, set, and reset.
+    ///
+    /// Extracted from `handle_osc` to keep that function within the 100-line clippy limit.
+    ///
+    /// - `RequestColorQueryBackground(Query)` / `RequestColorQueryForeground(Query)`:
+    ///   respond with the effective color (override or theme default).
+    /// - `RequestColorQueryBackground(String(spec))` / `RequestColorQueryForeground(String(spec))`:
+    ///   parse the X11 color spec and store as an override.
+    /// - `ResetForegroundColor` / `ResetBackgroundColor`:
+    ///   clear the corresponding override so subsequent queries return the theme color.
+    fn handle_osc_fg_bg_color(&mut self, osc: &AnsiOscType) {
+        match osc {
+            // OSC 11 query: respond with the effective background color.
+            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
+                let (r, g, b) = self.bg_color_override.unwrap_or(self.theme.background);
+                self.write_to_pty(&format!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+            }
+            // OSC 10 query: respond with the effective foreground color.
+            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
+                let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
+                self.write_to_pty(&format!("\x1b]10;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+            }
+            // OSC 11 set: store a dynamic background color override.
+            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
+                if let Some(rgb) = parse_color_spec(spec) {
+                    self.bg_color_override = Some(rgb);
+                } else {
+                    tracing::debug!("OSC 11: unrecognised color spec: {spec:?}");
+                }
+            }
+            // OSC 10 set: store a dynamic foreground color override.
+            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::String(spec)) => {
+                if let Some(rgb) = parse_color_spec(spec) {
+                    self.fg_color_override = Some(rgb);
+                } else {
+                    tracing::debug!("OSC 10: unrecognised color spec: {spec:?}");
+                }
+            }
+            // OSC 110: reset dynamic foreground color override.
+            AnsiOscType::ResetForegroundColor => {
+                self.fg_color_override = None;
+            }
+            // OSC 111: reset dynamic background color override.
+            AnsiOscType::ResetBackgroundColor => {
+                self.bg_color_override = None;
+            }
+            // Unknown internal-type variants and unreachable arms — silently ignore.
+            _ => {}
         }
     }
 
@@ -3204,5 +3258,201 @@ mod tests {
             response,
             format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 10/11/110/111 foreground/background color tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc11_query_returns_theme_background_by_default() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // OSC 11 query — no override set, should return CATPPUCCIN_MOCHA background.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 11 query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA background = (0x1e, 0x1e, 0x2e)
+        assert_eq!(response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
+    }
+
+    #[test]
+    fn osc10_query_returns_theme_foreground_by_default() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // OSC 10 query — no override set, should return CATPPUCCIN_MOCHA foreground.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 10 query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA foreground = (0xcd, 0xd6, 0xf4)
+        assert_eq!(response, "\x1b]10;rgb:cd/d6/f4\x1b\\");
+    }
+
+    #[test]
+    fn osc11_set_stores_override_and_query_returns_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set background override to #ff0080.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::String("#ff0080".to_string()),
+        ));
+
+        // Query — should return the override, not the theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 11 set + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        assert_eq!(response, "\x1b]11;rgb:ff/00/80\x1b\\");
+    }
+
+    #[test]
+    fn osc10_set_stores_override_and_query_returns_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set foreground override via rgb: format.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("rgb:aa/bb/cc".to_string()),
+        ));
+
+        // Query — should return the override.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 10 set + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        assert_eq!(response, "\x1b]10;rgb:aa/bb/cc\x1b\\");
+    }
+
+    #[test]
+    fn osc111_resets_bg_override_and_query_returns_theme() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set override first.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::String("#112233".to_string()),
+        ));
+
+        // Reset via OSC 111.
+        handler.handle_osc(&AnsiOscType::ResetBackgroundColor);
+
+        // Query — should return theme background again.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 111 reset + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA background = (0x1e, 0x1e, 0x2e)
+        assert_eq!(response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
+    }
+
+    #[test]
+    fn osc110_resets_fg_override_and_query_returns_theme() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set override first.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("rgb:ff/00/00".to_string()),
+        ));
+
+        // Reset via OSC 110.
+        handler.handle_osc(&AnsiOscType::ResetForegroundColor);
+
+        // Query — should return theme foreground again.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 110 reset + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA foreground = (0xcd, 0xd6, 0xf4)
+        assert_eq!(response, "\x1b]10;rgb:cd/d6/f4\x1b\\");
+    }
+
+    #[test]
+    fn full_reset_clears_fg_bg_color_overrides() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set both overrides.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("#ff0000".to_string()),
+        ));
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::String("#0000ff".to_string()),
+        ));
+
+        // full_reset should clear both.
+        handler.full_reset();
+
+        // Foreground query should return theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(fg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for fg query after full_reset");
+        };
+        let Ok(fg_response) = String::from_utf8(fg_bytes) else {
+            panic!("fg OSC response should be valid UTF-8");
+        };
+        assert_eq!(fg_response, "\x1b]10;rgb:cd/d6/f4\x1b\\");
+
+        // Background query should return theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(bg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for bg query after full_reset");
+        };
+        let Ok(bg_response) = String::from_utf8(bg_bytes) else {
+            panic!("bg OSC response should be valid UTF-8");
+        };
+        assert_eq!(bg_response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
     }
 }

@@ -63,6 +63,10 @@ pub enum OscTarget {
     RemoteHost,
     Url,
     ResetCursorColor,
+    /// OSC 110 — reset text foreground color to the theme default.
+    ResetForeground,
+    /// OSC 111 — reset text background color to the theme default.
+    ResetBackground,
     Unknown,
     ITerm2,
 }
@@ -111,6 +115,8 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
             AnsiOscToken::OscValue(133) => Self::Ftcs,
             AnsiOscToken::OscValue(1337) => Self::ITerm2,
+            AnsiOscToken::OscValue(110) => Self::ResetForeground,
+            AnsiOscToken::OscValue(111) => Self::ResetBackground,
             _ => Self::Unknown,
         }
     }
@@ -183,6 +189,10 @@ pub enum AnsiOscType {
     QueryPaletteColor(u8),
     /// OSC 104 reset palette color at index, or all if `None`.
     ResetPaletteColor(Option<u8>),
+    /// OSC 110 — reset the dynamic foreground color override.
+    ResetForegroundColor,
+    /// OSC 111 — reset the dynamic background color override.
+    ResetBackgroundColor,
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -208,6 +218,8 @@ impl std::fmt::Display for AnsiOscType {
             }
             Self::QueryPaletteColor(idx) => write!(f, "QueryPaletteColor({idx})"),
             Self::ResetPaletteColor(idx) => write!(f, "ResetPaletteColor({idx:?})"),
+            Self::ResetForegroundColor => write!(f, "ResetForegroundColor"),
+            Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
         }
     }
 }
