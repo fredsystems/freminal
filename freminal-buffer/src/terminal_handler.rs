@@ -10,6 +10,10 @@ use freminal_common::{
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
         ftcs::{FtcsMarker, FtcsState},
+        kitty_graphics::{
+            KittyAction, KittyControlData, KittyGraphicsCommand, KittyParseError,
+            format_kitty_response, parse_kitty_graphics,
+        },
         line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode},
         modes::ReportMode,
@@ -50,6 +54,18 @@ struct MultipartImageState {
     /// Metadata parsed from the `MultipartFile=` begin sequence.
     metadata: ITerm2InlineImageData,
     /// Accumulated decoded bytes from all `FilePart=` chunks so far.
+    accumulated_data: Vec<u8>,
+}
+
+/// In-progress state for a Kitty graphics chunked transfer.
+///
+/// Accumulates control data from the first chunk and decoded payload bytes from
+/// subsequent `m=1` chunks until a `m=0` final chunk arrives.
+#[derive(Debug)]
+struct KittyImageState {
+    /// Control data from the first chunk of the transfer.
+    control: KittyControlData,
+    /// Accumulated decoded payload bytes from all chunks so far.
     accumulated_data: Vec<u8>,
 }
 
@@ -110,6 +126,11 @@ pub struct TerminalHandler {
     /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
     /// and cleared by `ITerm2FileEnd`.
     multipart_state: Option<MultipartImageState>,
+    /// In-progress Kitty graphics chunked transfer, if any.
+    ///
+    /// Set by a Kitty graphics command with `m=1`, appended by subsequent
+    /// `m=1` chunks, consumed and cleared by a final `m=0` chunk.
+    kitty_state: Option<KittyImageState>,
 }
 
 impl TerminalHandler {
@@ -135,6 +156,7 @@ impl TerminalHandler {
             fg_color_override: None,
             bg_color_override: None,
             multipart_state: None,
+            kitty_state: None,
         }
     }
 
@@ -859,10 +881,188 @@ impl TerminalHandler {
 
     /// Handle an APC (Application Program Command) sequence.
     ///
-    /// APC sequences are application-defined and rarely require a response.
-    /// Silently log and ignore.
-    pub fn handle_application_program_command(&self, apc: &[u8]) {
-        tracing::debug!("APC received (ignored): {}", String::from_utf8_lossy(apc));
+    /// Attempts to parse the data as a Kitty graphics command (`_G...`).
+    /// If it is not a Kitty graphics command, logs and ignores.
+    pub fn handle_application_program_command(&mut self, apc: &[u8]) {
+        match parse_kitty_graphics(apc) {
+            Ok(cmd) => self.handle_kitty_graphics(cmd),
+            Err(KittyParseError::NotKittyGraphics) => {
+                tracing::debug!(
+                    "APC received (not Kitty graphics, ignored): {}",
+                    String::from_utf8_lossy(apc)
+                );
+            }
+            Err(e) => {
+                tracing::debug!("Kitty graphics parse error: {e}");
+            }
+        }
+    }
+
+    /// Dispatch a parsed Kitty graphics command.
+    fn handle_kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {
+        let action = cmd.control.action.unwrap_or(KittyAction::Transmit);
+
+        // If this is a continuation chunk for an in-progress chunked transfer,
+        // append the payload regardless of the action field.
+        if self.kitty_state.is_some() && action != KittyAction::Query {
+            self.handle_kitty_chunk(&cmd);
+            return;
+        }
+
+        match action {
+            KittyAction::Query => self.handle_kitty_query(&cmd),
+            KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::Put => {
+                if cmd.control.more_data {
+                    // First chunk of a chunked transfer — start accumulating.
+                    self.handle_kitty_chunk_start(cmd);
+                } else {
+                    // Single-chunk command (or final chunk with no prior state).
+                    self.handle_kitty_single(&cmd, action);
+                }
+            }
+            KittyAction::Delete => {
+                self.handle_kitty_delete(&cmd);
+            }
+            KittyAction::AnimationFrame
+            | KittyAction::AnimationControl
+            | KittyAction::AnimationCompose => {
+                tracing::debug!(
+                    "Kitty graphics: animation commands not yet supported (a={action:?})"
+                );
+            }
+        }
+    }
+
+    /// Handle `a=q` — query whether the terminal supports the Kitty graphics protocol.
+    ///
+    /// Responds with OK for format 32 (RGBA) and 100 (PNG). Other formats
+    /// get an error response.
+    fn handle_kitty_query(&self, cmd: &KittyGraphicsCommand) {
+        let image_id = cmd.control.image_id.unwrap_or(0);
+        let quiet = cmd.control.quiet;
+
+        // We support RGBA (f=32) and PNG (f=100).
+        let supported = cmd.control.format.is_none_or(|f| {
+            matches!(
+                f,
+                freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgba
+                    | freminal_common::buffer_states::kitty_graphics::KittyFormat::Png
+            )
+        });
+
+        // quiet=1 suppresses OK responses; quiet=2 suppresses all responses.
+        if quiet >= 2 || (quiet >= 1 && supported) {
+            return;
+        }
+
+        let response = if supported {
+            format_kitty_response(image_id, true, "")
+        } else {
+            format_kitty_response(image_id, false, "ENOTSUP:unsupported format")
+        };
+
+        self.write_to_pty(&response);
+    }
+
+    /// Start a chunked Kitty graphics transfer (first chunk, `m=1`).
+    fn handle_kitty_chunk_start(&mut self, cmd: KittyGraphicsCommand) {
+        if self.kitty_state.is_some() {
+            tracing::warn!(
+                "Kitty graphics: new chunked transfer started while previous was in progress; \
+                 discarding incomplete transfer"
+            );
+        }
+
+        let capacity = cmd.control.data_size.unwrap_or(0) as usize;
+        let mut accumulated_data = Vec::with_capacity(capacity);
+        accumulated_data.extend_from_slice(&cmd.payload);
+
+        self.kitty_state = Some(KittyImageState {
+            control: cmd.control,
+            accumulated_data,
+        });
+
+        tracing::debug!(
+            "Kitty graphics: started chunked transfer (id={:?})",
+            self.kitty_state.as_ref().map(|s| s.control.image_id),
+        );
+    }
+
+    /// Append a chunk to the in-progress Kitty graphics transfer.
+    ///
+    /// If `m=0` (final chunk), finalise the transfer and dispatch.
+    fn handle_kitty_chunk(&mut self, cmd: &KittyGraphicsCommand) {
+        let Some(state) = &mut self.kitty_state else {
+            tracing::warn!("Kitty graphics: chunk received with no active transfer; ignoring");
+            return;
+        };
+
+        state.accumulated_data.extend_from_slice(&cmd.payload);
+
+        if cmd.control.more_data {
+            // More chunks to come.
+            tracing::debug!(
+                "Kitty graphics: appended chunk ({} bytes total so far)",
+                state.accumulated_data.len(),
+            );
+        } else {
+            // Final chunk — take ownership and dispatch.
+            let final_state = self.kitty_state.take().unwrap_or_else(|| {
+                // This branch is unreachable because we checked `is_some` above,
+                // but we need to avoid `unwrap()` in production code.
+                KittyImageState {
+                    control: KittyControlData::default(),
+                    accumulated_data: Vec::new(),
+                }
+            });
+
+            tracing::debug!(
+                "Kitty graphics: chunked transfer complete ({} bytes)",
+                final_state.accumulated_data.len(),
+            );
+
+            let action = final_state.control.action.unwrap_or(KittyAction::Transmit);
+            let final_cmd = KittyGraphicsCommand {
+                control: final_state.control,
+                payload: final_state.accumulated_data,
+            };
+            self.handle_kitty_single(&final_cmd, action);
+        }
+    }
+
+    /// Handle a single (non-chunked) Kitty graphics command.
+    ///
+    /// For now, logs the command. Actual image decoding and placement will be
+    /// implemented in subtask 13.7.
+    fn handle_kitty_single(&self, cmd: &KittyGraphicsCommand, action: KittyAction) {
+        let image_id = cmd.control.image_id.unwrap_or(0);
+        let quiet = cmd.control.quiet;
+
+        tracing::debug!(
+            "Kitty graphics: single command a={action:?}, id={image_id}, \
+             payload={} bytes (decoding not yet implemented)",
+            cmd.payload.len(),
+        );
+
+        // Send an OK response unless suppressed by quiet mode.
+        // quiet=1 suppresses OK; quiet=2 suppresses all.
+        if quiet < 1 && image_id > 0 {
+            let response = format_kitty_response(image_id, true, "");
+            self.write_to_pty(&response);
+        }
+    }
+
+    /// Handle `a=d` — delete images.
+    ///
+    /// For now, logs the command. Full delete-target handling will be
+    /// implemented in a later subtask.
+    #[allow(clippy::unused_self)]
+    fn handle_kitty_delete(&self, cmd: &KittyGraphicsCommand) {
+        tracing::debug!(
+            "Kitty graphics: delete command (target={:?}, id={:?}) — not yet implemented",
+            cmd.control.delete_target,
+            cmd.control.image_id,
+        );
     }
 
     /// Handle CPR — Cursor Position Report.
