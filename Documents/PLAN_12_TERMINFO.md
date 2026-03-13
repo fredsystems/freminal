@@ -121,15 +121,14 @@ directory (some programs check `TERMINFO` exists even with a standard TERM value
 
 ---
 
-- [ ] **12.2 — Fix bugs in freminal.ti**
-  - Add the missing dim attribute (`%?%p5%t;2%;`) to the `sgr` string.
-  - Add missing `smcup`/`rmcup` title-stack save/restore sequences to match xterm-256color:
-    `\E[?1049h\E[22;0;0t` / `\E[?1049l\E[23;0;0t`.
-  - Review `rs1` and align with xterm-256color if appropriate.
-  - Add any missing capabilities that Freminal actually supports (check against the escape
-    sequence coverage audit in `Documents/ESCAPE_SEQUENCE_COVERAGE.md`).
-  - Regenerate `res/terminfo.tar` after changes.
-  - **Verify:** `infocmp -x xterm-freminal` shows the corrected entries. `cargo build --all`.
+- [x] **12.2 — Fix bugs in freminal.ti**
+  - Added the missing dim attribute (`%?%p5%t;2%;`) to the `sgr` string.
+  - Updated `smcup`/`rmcup` to include title-stack save/restore sequences matching
+    xterm-256color: `\E[?1049h\E[22;0;0t` / `\E[?1049l\E[23;0;0t`.
+  - Fixed `rs1` to match xterm-256color: `\Ec\E]104\007` (was `\E]\E\\\Ec`).
+  - Regenerated `res/terminfo.tar` via `tic -x -o`.
+  - **Verified:** `infocmp -x xterm-freminal` shows all corrected entries.
+    `cargo build --all` succeeds. `cargo test --all` passes.
 
 ---
 
