@@ -111,11 +111,13 @@ directory (some programs check `TERMINFO` exists even with a standard TERM value
 
 ---
 
-- [ ] **12.1 — Fix the build.rs rerun detection bug**
-  - In `freminal-common/buildback.rs`, fix the `rerun-if-changed` directive so that changes to
-    `res/freminal.ti` trigger a rebuild of `res/terminfo.tar`.
-  - Verify: modify `freminal.ti`, run `cargo build`, confirm the tarball is regenerated.
-  - **Verify:** `cargo test --all` passes. `cargo build --all` succeeds.
+- [x] **12.1 — Remove dead `buildback.rs` file**
+  - `freminal-common/buildback.rs` was not wired into `Cargo.toml` (no `build = "buildback.rs"`
+    entry), so it was completely inert dead code. Removed the file entirely.
+  - The pre-compiled `res/terminfo.tar` continues to be embedded via `include_bytes!` in
+    `freminal-common/src/terminfo.rs`. If `freminal.ti` changes, the tarball must be manually
+    regenerated with `tic`.
+  - **Verified:** `cargo test --all` passes. `cargo build --all` succeeds.
 
 ---
 
