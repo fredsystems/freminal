@@ -3104,12 +3104,14 @@ mod tests {
 
     #[test]
     fn xtgettcap_hex_decode_lowercase() {
-        // "RGB" in lowercase hex
-        let decoded = TerminalHandler::hex_decode("524742");
-        assert_eq!(decoded.as_deref(), Some("RGB"));
+        // "Ms" = 0x4D 0x73 → uppercase hex "4D73", lowercase "4d73"
+        // 'd' is a hex letter that differs between cases — a good test for
+        // case-insensitive parsing.
+        let decoded_upper = TerminalHandler::hex_decode("4D73");
+        assert_eq!(decoded_upper.as_deref(), Some("Ms"));
 
-        let decoded_lower = TerminalHandler::hex_decode("524742");
-        assert_eq!(decoded_lower.as_deref(), Some("RGB"));
+        let decoded_lower = TerminalHandler::hex_decode("4d73");
+        assert_eq!(decoded_lower.as_deref(), Some("Ms"));
     }
 
     #[test]
@@ -3254,6 +3256,127 @@ mod tests {
 
         let response = recv_pty_response(&rx);
         let expected_val_hex = TerminalHandler::hex_encode("\x1b[38;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_setrgbb() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("setrgbb");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[48;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_co_alias() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "Co" is an alias for "colors"; both should return "256"
+        // "Co" = 0x43 0x6F → hex "436F"
+        let dcs = build_dcs_payload(b"+q436F");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "256" → hex "323536"
+        assert_eq!(response, "\x1bP1+r436F=323536\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_ms() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Ms");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b]52;%p1%s;%p2%s\x1b\\");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_ss() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Ss");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[%p1%d q");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_smulx() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Smulx");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[4:%p1%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_setulc() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Setulc");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[58;2;%p1%d;%p2%d;%p3%dm");
         assert_eq!(
             response,
             format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
