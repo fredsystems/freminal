@@ -261,11 +261,17 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.3 — Add iTerm2 MultipartFile support**
+- [x] **13.3 — Add iTerm2 MultipartFile support**
   - Handle `1337;MultipartFile=`, `1337;FilePart=`, and `1337;FileEnd` sequences.
   - Accumulate parts into a single payload buffer, then decode as in 13.2.
   - Add tests for multi-part image transfer.
   - **Verify:** `cargo test --all` passes.
+  - ✅ **Completed 2026-03-13.** Added `ITerm2MultipartBegin`, `ITerm2FilePart`, `ITerm2FileEnd`
+    variants to `AnsiOscType`. Refactored `handle_osc_iterm2()` into a dispatcher with
+    sub-handlers and shared `parse_iterm2_file_args()`. Added `MultipartImageState` accumulator
+    to `TerminalHandler` with begin/part/end lifecycle methods. 9 parser tests and 7 integration
+    tests covering normal flow, edge cases (orphan part/end, begin-resets-previous, empty payload,
+    non-inline). Committed as `e132bef`.
 
 ---
 
