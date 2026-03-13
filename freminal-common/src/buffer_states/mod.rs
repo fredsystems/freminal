@@ -18,5 +18,6 @@ pub mod osc;
 pub mod tchar;
 pub mod terminal_output;
 pub mod terminal_sections;
+pub mod unicode_placeholder;
 pub mod url;
 pub mod window_manipulation;

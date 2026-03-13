@@ -31,6 +31,10 @@ use freminal_common::{
         tchar::TChar,
         terminal_output::TerminalOutput,
         terminal_sections::TerminalSections,
+        unicode_placeholder::{
+            VirtualPlacement, color_to_image_id, color_to_placement_id, is_placeholder,
+            parse_placeholder_diacritics,
+        },
         url::Url,
         window_manipulation::WindowManipulation,
     },
@@ -41,9 +45,10 @@ use freminal_common::{
     themes::ThemePalette,
 };
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::buffer::Buffer;
-use crate::image_store::{InlineImage, next_image_id};
+use crate::image_store::{ImagePlacement, InlineImage, next_image_id};
 
 /// In-progress state for an iTerm2 multipart file transfer.
 ///
@@ -67,6 +72,29 @@ struct KittyImageState {
     control: KittyControlData,
     /// Accumulated decoded payload bytes from all chunks so far.
     accumulated_data: Vec<u8>,
+}
+
+/// Tracked state for diacritic inheritance between consecutive placeholder cells.
+///
+/// When a U+10EEEE placeholder character omits some or all diacritics, the
+/// missing values are inherited from the previous placeholder cell if the
+/// foreground and underline colors match.
+#[derive(Debug, Clone)]
+struct PrevPlaceholder {
+    /// Image ID extracted from the foreground color.
+    image_id: u32,
+    /// Placement ID extracted from the underline color.
+    placement_id: u32,
+    /// Row index within the image.
+    row: u16,
+    /// Column index within the image.
+    col: u16,
+    /// MSB of the image ID (from 3rd diacritic).
+    id_msb: u16,
+    /// The foreground color used for comparison.
+    fg_color: TerminalColor,
+    /// The underline color used for comparison.
+    underline_color: TerminalColor,
 }
 
 /// High-level handler that processes terminal output commands and applies them to a buffer.
@@ -131,6 +159,17 @@ pub struct TerminalHandler {
     /// Set by a Kitty graphics command with `m=1`, appended by subsequent
     /// `m=1` chunks, consumed and cleared by a final `m=0` chunk.
     kitty_state: Option<KittyImageState>,
+    /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands.
+    ///
+    /// Keyed by `(image_id, placement_id)`.  When U+10EEEE placeholder characters
+    /// appear in the text stream, these are looked up to determine image tile
+    /// dimensions.
+    virtual_placements: HashMap<(u64, u32), VirtualPlacement>,
+    /// State of the most recent placeholder cell, for diacritic inheritance.
+    ///
+    /// Reset to `None` on any non-placeholder text insertion, newline, or
+    /// cursor movement.
+    prev_placeholder: Option<PrevPlaceholder>,
 }
 
 impl TerminalHandler {
@@ -157,6 +196,8 @@ impl TerminalHandler {
             bg_color_override: None,
             multipart_state: None,
             kitty_state: None,
+            virtual_placements: HashMap::new(),
+            prev_placeholder: None,
         }
     }
 
@@ -209,6 +250,8 @@ impl TerminalHandler {
         self.fg_color_override = None;
         self.bg_color_override = None;
         self.allow_column_mode_switch = true;
+        self.virtual_placements.clear();
+        self.prev_placeholder = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -237,18 +280,212 @@ impl TerminalHandler {
     /// Handle raw data bytes - convert to `TChar` and insert.
     /// When DEC Special Graphics mode is active, bytes 0x5F–0x7E are remapped
     /// to their Unicode box-drawing equivalents before conversion.
+    ///
+    /// If any grapheme cluster begins with U+10EEEE (the Kitty Unicode
+    /// placeholder character), it is intercepted and converted into an image
+    /// cell referencing the appropriate virtual placement.
     pub fn handle_data(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
         }
 
         let remapped: Cow<[u8]> = apply_dec_special(data, &self.character_replace);
-        if let Ok(text) = TChar::from_vec(&remapped) {
-            // Track the last graphic character for REP (CSI b)
+        let Ok(text) = TChar::from_vec(&remapped) else {
+            return;
+        };
+
+        // Fast path: if no virtual placements exist, no placeholder can resolve.
+        if self.virtual_placements.is_empty() {
             if let Some(last) = text.last() {
                 self.last_graphic_char = Some(last.clone());
             }
+            self.prev_placeholder = None;
             self.buffer.insert_text(&text);
+            return;
+        }
+
+        self.handle_data_with_placeholders(&text);
+    }
+
+    /// Slow path for `handle_data` when virtual placements exist.
+    ///
+    /// Scans the parsed `TChar` sequence for U+10EEEE placeholder graphemes,
+    /// batching normal text for bulk insertion and converting placeholders
+    /// into image cells individually.
+    fn handle_data_with_placeholders(&mut self, text: &[TChar]) {
+        let mut batch_start: usize = 0;
+
+        for (i, tch) in text.iter().enumerate() {
+            let is_ph = matches!(tch, TChar::Utf8(b) if is_placeholder(b));
+
+            if is_ph {
+                // Flush any pending normal text batch.
+                if batch_start < i {
+                    let batch = &text[batch_start..i];
+                    if let Some(last) = batch.last() {
+                        self.last_graphic_char = Some(last.clone());
+                    }
+                    self.prev_placeholder = None;
+                    self.buffer.insert_text(batch);
+                }
+                batch_start = i + 1;
+
+                // Process the placeholder character.
+                if let TChar::Utf8(bytes) = tch {
+                    self.handle_placeholder_char(bytes);
+                }
+            }
+        }
+
+        // Flush remaining normal text.
+        if batch_start < text.len() {
+            let batch = &text[batch_start..];
+            if let Some(last) = batch.last() {
+                self.last_graphic_char = Some(last.clone());
+            }
+            self.prev_placeholder = None;
+            self.buffer.insert_text(batch);
+        }
+    }
+
+    /// Process a single U+10EEEE placeholder character and insert an image cell.
+    ///
+    /// Extracts the image ID from the current foreground color, the placement
+    /// ID from the underline color, and row/col indices from combining
+    /// diacritics.  Applies the Kitty diacritic inheritance rules when
+    /// diacritics are omitted.
+    fn handle_placeholder_char(&mut self, bytes: &[u8]) {
+        let Some(diacritics) = parse_placeholder_diacritics(bytes) else {
+            return;
+        };
+
+        let fg = self.current_format.colors.color;
+        let ul = self.current_format.colors.underline_color;
+        let image_id_24 = color_to_image_id(&fg);
+        let placement_id = color_to_placement_id(&ul);
+
+        // Apply diacritic inheritance rules from the Kitty spec.
+        let (row, col, id_msb) =
+            self.resolve_placeholder_diacritics(diacritics, image_id_24, placement_id, fg, ul);
+
+        // Combine image ID with MSB from the 3rd diacritic.
+        let full_image_id = u64::from(image_id_24) | (u64::from(id_msb) << 24);
+
+        // Look up a matching virtual placement.
+        let vp = self
+            .virtual_placements
+            .get(&(full_image_id, placement_id))
+            .or_else(|| {
+                // Fall back to placement_id=0 (any virtual placement for this image).
+                if placement_id != 0 {
+                    self.virtual_placements.get(&(full_image_id, 0))
+                } else {
+                    None
+                }
+            });
+
+        let Some(_vp) = vp else {
+            tracing::debug!(
+                "Kitty placeholder: no virtual placement for image_id={full_image_id}, \
+                 placement_id={placement_id}; inserting space"
+            );
+            // No matching virtual placement — insert a space and move on.
+            self.buffer.insert_text(&[TChar::Space]);
+            self.prev_placeholder = None;
+            return;
+        };
+
+        // Insert an image cell at the current cursor position.
+        let placement = ImagePlacement {
+            image_id: full_image_id,
+            col_in_image: usize::from(col),
+            row_in_image: usize::from(row),
+        };
+
+        let cursor_pos = self.buffer.get_cursor().pos;
+        let row_idx = cursor_pos.y;
+        let col_idx = cursor_pos.x;
+
+        // Ensure the row exists.
+        while row_idx >= self.buffer.get_rows().len() {
+            self.buffer.handle_lf();
+        }
+
+        self.buffer
+            .set_image_cell_at(row_idx, col_idx, placement, self.current_format.clone());
+
+        // Advance cursor by one column (placeholder occupies one cell).
+        self.buffer.advance_cursor_one();
+
+        // Update the inheritance tracker.
+        self.prev_placeholder = Some(PrevPlaceholder {
+            image_id: image_id_24,
+            placement_id,
+            row,
+            col,
+            id_msb,
+            fg_color: fg,
+            underline_color: ul,
+        });
+    }
+
+    /// Resolve diacritics for a placeholder, applying inheritance from the
+    /// previous placeholder cell when diacritics are omitted.
+    ///
+    /// Returns `(row, col, id_msb)` after applying the Kitty spec rules:
+    ///
+    /// 1. No diacritics + same fg/underline as previous → inherit row, col+1, msb
+    /// 2. Only row diacritic + same row/fg/underline as previous → inherit col+1, msb
+    /// 3. Row+col diacritics + previous has same row, fg, underline and col=current-1 → inherit msb
+    fn resolve_placeholder_diacritics(
+        &self,
+        diacritics: freminal_common::buffer_states::unicode_placeholder::PlaceholderDiacritics,
+        image_id: u32,
+        placement_id: u32,
+        fg: TerminalColor,
+        ul: TerminalColor,
+    ) -> (u16, u16, u16) {
+        let prev = match &self.prev_placeholder {
+            Some(p)
+                if p.image_id == image_id
+                    && p.placement_id == placement_id
+                    && p.fg_color == fg
+                    && p.underline_color == ul =>
+            {
+                Some(p)
+            }
+            _ => None,
+        };
+
+        match diacritics.diacritic_count {
+            0 => {
+                // Rule 1: inherit everything, col increments by 1.
+                prev.map_or((0, 0, 0), |p| (p.row, p.col.saturating_add(1), p.id_msb))
+            }
+            1 => {
+                // Rule 2: row is explicit; if same row as prev, col = prev.col+1.
+                prev.map_or((diacritics.row, 0, 0), |p| {
+                    if p.row == diacritics.row {
+                        (diacritics.row, p.col.saturating_add(1), p.id_msb)
+                    } else {
+                        (diacritics.row, 0, p.id_msb)
+                    }
+                })
+            }
+            2 => {
+                // Rule 3: row+col explicit; inherit msb if prev matches.
+                prev.map_or((diacritics.row, diacritics.col, 0), |p| {
+                    if p.row == diacritics.row && p.col.saturating_add(1) == diacritics.col {
+                        (diacritics.row, diacritics.col, p.id_msb)
+                    } else {
+                        (diacritics.row, diacritics.col, 0)
+                    }
+                })
+            }
+            _ => {
+                // All three diacritics present — no inheritance needed.
+                (diacritics.row, diacritics.col, diacritics.id_msb)
+            }
         }
     }
 
@@ -1218,9 +1455,23 @@ impl TerminalHandler {
 
         self.buffer.image_store_mut().insert(inline_image.clone());
 
-        let should_display = matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
-        if should_display {
-            let _new_offset = self.buffer.place_image(inline_image, 0);
+        // If this is a virtual (Unicode placeholder) placement, store it in
+        // the virtual_placements table instead of placing cells in the buffer.
+        if control.unicode_placeholder {
+            let pid = control.placement_id.unwrap_or(0);
+            let vp = VirtualPlacement {
+                image_id: assigned_id,
+                placement_id: pid,
+                cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
+                rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
+            };
+            self.virtual_placements.insert((assigned_id, pid), vp);
+        } else {
+            let should_display =
+                matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
+            if should_display {
+                let _new_offset = self.buffer.place_image(inline_image, 0);
+            }
         }
 
         // Send OK response unless suppressed.
@@ -1259,6 +1510,8 @@ impl TerminalHandler {
                 self.buffer.clear_all_image_placements();
                 // Clear the image store.
                 self.buffer.image_store_mut().clear();
+                // Clear all virtual placements.
+                self.virtual_placements.clear();
             }
             KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter => {
                 if let Some(image_id) = cmd.control.image_id {
@@ -1266,6 +1519,9 @@ impl TerminalHandler {
                     tracing::debug!("Kitty graphics: deleting image id={id}");
                     self.buffer.clear_image_placements_by_id(id);
                     self.buffer.image_store_mut().remove(id);
+                    // Remove virtual placements with matching image ID.
+                    self.virtual_placements
+                        .retain(|&(img_id, _), _| img_id != id);
                 }
             }
             other => {
@@ -5460,5 +5716,350 @@ mod tests {
             .iter()
             .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
         assert!(has_image, "Chunked TransmitAndDisplay should place image");
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty Unicode placeholder tests
+    // ------------------------------------------------------------------
+
+    /// Helper: create a Kitty command with `unicode_placeholder = true` for a 2×2 RGBA image.
+    fn kitty_virtual_2x2_cmd() -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        let rgba_data: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ];
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(42),
+                placement_id: Some(0),
+                unicode_placeholder: true,
+                ..KittyControlData::default()
+            },
+            payload: rgba_data,
+        }
+    }
+
+    /// Helper: build a `FormatTag` whose foreground encodes an image ID and
+    /// whose underline color encodes a placement ID using 24-bit RGB.
+    fn format_for_placeholder(image_id: u32, placement_id: u32) -> FormatTag {
+        use freminal_common::buffer_states::cursor::StateColors;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let fg = TerminalColor::Custom(
+            (image_id >> 16) as u8,
+            (image_id >> 8) as u8,
+            image_id as u8,
+        );
+
+        #[allow(clippy::cast_possible_truncation)]
+        let ul = TerminalColor::Custom(
+            (placement_id >> 16) as u8,
+            (placement_id >> 8) as u8,
+            placement_id as u8,
+        );
+
+        let mut tag = FormatTag::default();
+        tag.colors = StateColors {
+            color: fg,
+            underline_color: ul,
+            ..tag.colors
+        };
+        tag
+    }
+
+    /// U+10EEEE without any diacritics (bare placeholder char).
+    const PLACEHOLDER_BYTES: &[u8] = &[0xF4, 0x8E, 0xBB, 0xAE];
+
+    /// U+10EEEE followed by one diacritic (row=0 → U+0305).
+    fn placeholder_with_row(row_idx: usize) -> Vec<u8> {
+        let mut bytes = PLACEHOLDER_BYTES.to_vec();
+        let diacritic =
+            char::from_u32(DIACRITICS_FOR_TESTS[row_idx]).expect("valid diacritic codepoint");
+        let mut buf = [0u8; 4];
+        let encoded = diacritic.encode_utf8(&mut buf);
+        bytes.extend_from_slice(encoded.as_bytes());
+        bytes
+    }
+
+    /// U+10EEEE followed by two diacritics (row + col).
+    fn placeholder_with_row_col(row_idx: usize, col_idx: usize) -> Vec<u8> {
+        let mut bytes = PLACEHOLDER_BYTES.to_vec();
+        for &idx in &[row_idx, col_idx] {
+            let diacritic =
+                char::from_u32(DIACRITICS_FOR_TESTS[idx]).expect("valid diacritic codepoint");
+            let mut buf = [0u8; 4];
+            let encoded = diacritic.encode_utf8(&mut buf);
+            bytes.extend_from_slice(encoded.as_bytes());
+        }
+        bytes
+    }
+
+    /// A few diacritics from the table for test convenience.
+    /// Index 0 = U+0305, index 1 = U+030D, index 2 = U+030E, etc.
+    const DIACRITICS_FOR_TESTS: &[u32] = &[0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D];
+
+    #[test]
+    fn kitty_virtual_placement_stores_but_does_not_place_cells() {
+        let (mut handler, _rx) = kitty_handler();
+        let cmd = kitty_virtual_2x2_cmd();
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be in the store.
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "Image id=42 should be in the image store"
+        );
+
+        // But NO image cells should be placed in the buffer.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Virtual placement should NOT place image cells directly"
+        );
+
+        // Virtual placement should be stored.
+        assert!(
+            !handler.virtual_placements.is_empty(),
+            "Virtual placements table should have an entry"
+        );
+        assert!(
+            handler.virtual_placements.contains_key(&(42, 0)),
+            "Should have virtual placement for (image_id=42, placement_id=0)"
+        );
+    }
+
+    #[test]
+    fn kitty_placeholder_chars_create_image_cells() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Step 1: Create a virtual placement with U=1.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        // Step 2: Set foreground to encode image_id=42, underline to placement_id=0.
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // Step 3: Send two placeholder chars (row=0, col=0) and (row=0, col=1)
+        // with explicit row+col diacritics.
+        let mut data = placeholder_with_row_col(0, 0);
+        data.extend_from_slice(&placeholder_with_row_col(0, 1));
+        handler.handle_data(&data);
+
+        // Step 4: Verify image cells were placed.
+        let row0 = &handler.buffer().get_rows()[0];
+        assert!(
+            row0.cells()[0].has_image(),
+            "Cell (0,0) should have an image placement"
+        );
+        assert!(
+            row0.cells()[1].has_image(),
+            "Cell (0,1) should have an image placement"
+        );
+
+        // Verify the image placements reference the correct image and positions.
+        let p0 = row0.cells()[0].image_placement().unwrap();
+        assert_eq!(p0.image_id, 42, "Cell (0,0) should reference image_id=42");
+        assert_eq!(p0.row_in_image, 0);
+        assert_eq!(p0.col_in_image, 0);
+
+        let p1 = row0.cells()[1].image_placement().unwrap();
+        assert_eq!(p1.image_id, 42, "Cell (0,1) should reference image_id=42");
+        assert_eq!(p1.row_in_image, 0);
+        assert_eq!(p1.col_in_image, 1);
+    }
+
+    #[test]
+    fn kitty_placeholder_inheritance_no_diacritics() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        // Set foreground = image_id=42, underline = placement_id=0.
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // Send first placeholder with explicit row=0, col=0.
+        let first = placeholder_with_row_col(0, 0);
+        handler.handle_data(&first);
+
+        // Send second placeholder with NO diacritics — should inherit row=0, col=1.
+        handler.handle_data(PLACEHOLDER_BYTES);
+
+        let row0 = &handler.buffer().get_rows()[0];
+        let p0 = row0.cells()[0].image_placement().unwrap();
+        assert_eq!(p0.row_in_image, 0);
+        assert_eq!(p0.col_in_image, 0);
+
+        let p1 = row0.cells()[1].image_placement().unwrap();
+        assert_eq!(p1.row_in_image, 0);
+        assert_eq!(p1.col_in_image, 1, "Inherited col should be prev_col + 1");
+    }
+
+    #[test]
+    fn kitty_placeholder_inheritance_row_only_diacritic() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // First cell: row=0, col=0 (explicit).
+        let first = placeholder_with_row_col(0, 0);
+        handler.handle_data(&first);
+
+        // Second cell: row=0 only (one diacritic) — should inherit col=1 from prev.
+        let second = placeholder_with_row(0);
+        handler.handle_data(&second);
+
+        let row0 = &handler.buffer().get_rows()[0];
+        let p1 = row0.cells()[1].image_placement().unwrap();
+        assert_eq!(p1.row_in_image, 0);
+        assert_eq!(p1.col_in_image, 1, "Should inherit col+1 from previous");
+    }
+
+    #[test]
+    fn kitty_placeholder_new_row_resets_col() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // Row 0, col 0 (explicit).
+        handler.handle_data(&placeholder_with_row_col(0, 0));
+
+        // Row 0, col 1 (inherited via bare placeholder).
+        handler.handle_data(PLACEHOLDER_BYTES);
+
+        // Now move to next line (simulate \r\n or newline).
+        handler.handle_newline();
+        handler.handle_carriage_return();
+
+        // Row 1, col 0 with row-only diacritic — different row, so col resets to 0.
+        handler.handle_data(&placeholder_with_row(1));
+
+        let row1 = &handler.buffer().get_rows()[1];
+        let p = row1.cells()[0].image_placement().unwrap();
+        assert_eq!(p.row_in_image, 1, "Should be row 1");
+        assert_eq!(p.col_in_image, 0, "New row should start at col 0");
+    }
+
+    #[test]
+    fn kitty_placeholder_no_virtual_placement_inserts_space() {
+        let (mut handler, _rx) = kitty_handler();
+        // Do NOT create any virtual placement.
+
+        // Set foreground to encode image_id=99.
+        let fmt = format_for_placeholder(99, 0);
+        handler.set_format(fmt);
+
+        // Send a placeholder char with row=0, col=0.
+        let data = placeholder_with_row_col(0, 0);
+
+        // But wait — the fast path skips placeholder processing when
+        // virtual_placements is empty. The char goes through as normal text.
+        handler.handle_data(&data);
+
+        // The cell should NOT have an image placement.
+        let row0 = &handler.buffer().get_rows()[0];
+        assert!(
+            !row0.cells()[0].has_image(),
+            "Without virtual placements, placeholder should not create image cells"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_all_clears_virtual_placements() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyDeleteTarget};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create a virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+        assert!(!handler.virtual_placements.is_empty());
+
+        // Delete all.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::All),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.virtual_placements.is_empty(),
+            "Delete all should clear virtual placements"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_by_id_clears_matching_virtual_placements() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyDeleteTarget};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create a virtual placement for image_id=42.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.virtual_placements.contains_key(&(42, 0)));
+
+        // Delete by ID = 42.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.virtual_placements.is_empty(),
+            "Delete by ID=42 should clear the virtual placement"
+        );
+    }
+
+    #[test]
+    fn kitty_placeholder_fast_path_with_no_virtual_placements() {
+        let (mut handler, _rx) = kitty_handler();
+        // No virtual placements — fast path should just insert text normally.
+
+        handler.handle_data(b"Hello World");
+
+        // Cursor should have advanced.
+        let cursor = handler.buffer().get_cursor();
+        assert_eq!(
+            cursor.pos.x, 11,
+            "Cursor should be at column 11 after 'Hello World'"
+        );
     }
 }

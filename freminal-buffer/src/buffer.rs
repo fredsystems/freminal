@@ -313,6 +313,36 @@ impl Buffer {
         &self.cursor
     }
 
+    /// Advance the cursor by one column, wrapping to the next line if needed.
+    ///
+    /// Used after inserting a placeholder image cell that occupies one column.
+    pub const fn advance_cursor_one(&mut self) {
+        if self.cursor.pos.x + 1 < self.width {
+            self.cursor.pos.x += 1;
+        }
+        // If at the rightmost column, don't wrap automatically — let the
+        // next character insertion handle wrap/scroll as normal.
+    }
+
+    /// Set an image cell at a specific (row, col) position in the buffer.
+    ///
+    /// Also invalidates the corresponding row cache entry.  Used by
+    /// `TerminalHandler` for Kitty Unicode placeholder cells.
+    pub fn set_image_cell_at(
+        &mut self,
+        row_idx: usize,
+        col_idx: usize,
+        placement: ImagePlacement,
+        tag: FormatTag,
+    ) {
+        if row_idx < self.rows.len() {
+            self.rows[row_idx].set_image_cell(col_idx, placement, tag);
+            if row_idx < self.row_cache.len() {
+                self.row_cache[row_idx] = None;
+            }
+        }
+    }
+
     /// Return the cursor position in **screen coordinates** (0-indexed, relative
     /// to the top of the visible window).
     ///
