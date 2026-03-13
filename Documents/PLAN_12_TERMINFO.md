@@ -146,13 +146,12 @@ directory (some programs check `TERMINFO` exists even with a standard TERM value
 
 ---
 
-- [ ] **12.4 — Document the terminfo strategy**
-  - Add a section to `Documents/` (or a comment block in `pty.rs`) explaining the TERM strategy:
-    - Why we use xterm-256color.
-    - What XTGETTCAP does for us.
-    - When/why someone might want the custom terminfo entry.
-  - Update this plan document with completion notes.
-  - **Verify:** Documentation is clear and accurate.
+- [x] **12.4 — Document the terminfo strategy**
+  - Replaced the informal TERM comment in `pty.rs` with a detailed documentation block
+    explaining: why we use xterm-256color, how XTGETTCAP fills the capability gap, and
+    the role of the custom freminal.ti entry.
+  - Updated this plan document with completion notes for all subtasks.
+  - **Verified:** Documentation is clear and accurate.
 
 ---
 
