@@ -12,6 +12,7 @@ use freminal_common::buffer_states::{
 
 use crate::{
     cell::Cell,
+    image_store::{ImagePlacement, ImageStore, InlineImage},
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
 };
@@ -91,6 +92,12 @@ pub struct Buffer {
     /// DECOM (Origin Mode) — when enabled, cursor addressing is relative
     /// to the scroll region top/bottom instead of the full screen.
     decom_enabled: bool,
+
+    /// Central storage for inline images.
+    ///
+    /// Cells reference images by ID via `ImagePlacement`; the actual pixel
+    /// data lives here behind `Arc`s so snapshots can share it cheaply.
+    image_store: ImageStore,
 }
 
 /// Everything we need to restore when leaving alternate buffer.
@@ -105,6 +112,8 @@ pub struct SavedPrimaryState {
     pub scroll_region_bottom: usize,
     /// Saved DECSC cursor carried across alternate-screen round-trips.
     pub saved_cursor: Option<CursorState>,
+    /// Saved image store from the primary buffer.
+    pub image_store: ImageStore,
 }
 
 impl Buffer {
@@ -146,6 +155,7 @@ impl Buffer {
             scroll_region_bottom: height.saturating_sub(1),
             tab_stops: Self::default_tab_stops(width),
             decom_enabled: false,
+            image_store: ImageStore::new(),
         }
     }
 
@@ -185,6 +195,7 @@ impl Buffer {
         self.scroll_region_bottom = self.height.saturating_sub(1);
         self.tab_stops = Self::default_tab_stops(self.width);
         self.decom_enabled = false;
+        self.image_store.clear();
     }
 
     /// The maximum number of off-screen rows retained above the visible area.
@@ -806,6 +817,12 @@ impl Buffer {
         // --- Drop the oldest rows (and their cache entries) ---
         self.rows.drain(0..overflow);
         self.row_cache.drain(0..overflow);
+
+        // --- Garbage-collect images no longer referenced by any row ---
+        if !self.image_store.is_empty() {
+            self.image_store
+                .retain_referenced(self.rows.iter().map(Row::cells));
+        }
 
         // --- Adjust cursor row index ---
         //
@@ -2186,6 +2203,7 @@ impl Buffer {
             scroll_region_top: self.scroll_region_top,
             scroll_region_bottom: self.scroll_region_bottom,
             saved_cursor: self.saved_cursor.clone(),
+            image_store: self.image_store.clone(),
         };
         self.saved_primary = Some(saved);
 
@@ -2195,6 +2213,9 @@ impl Buffer {
         // Fresh screen: exactly `height` empty rows, all dirty (None cache entries).
         self.rows = vec![Row::new(self.width); self.height];
         self.row_cache = vec![None; self.height];
+
+        // Alternate screen has no images.
+        self.image_store.clear();
 
         // Reset cursor for the alternate screen.
         self.cursor = CursorState::default();
@@ -2228,6 +2249,7 @@ impl Buffer {
             self.scroll_region_top = saved.scroll_region_top;
             self.scroll_region_bottom = saved.scroll_region_bottom;
             self.saved_cursor = saved.saved_cursor;
+            self.image_store = saved.image_store;
 
             self.debug_assert_invariants();
             restored_offset
@@ -2235,6 +2257,113 @@ impl Buffer {
             self.debug_assert_invariants();
             0
         }
+    }
+
+    // ========================================================================
+    // Inline image support
+    // ========================================================================
+
+    /// Access the image store (read-only).
+    #[must_use]
+    pub const fn image_store(&self) -> &ImageStore {
+        &self.image_store
+    }
+
+    /// Access the image store (mutable).
+    pub const fn image_store_mut(&mut self) -> &mut ImageStore {
+        &mut self.image_store
+    }
+
+    /// Place an inline image at the current cursor position.
+    ///
+    /// The image is stored in the central `ImageStore` and cells in the
+    /// rectangular region `[cursor_y .. cursor_y + display_rows) ×
+    /// [cursor_x .. cursor_x + display_cols)` are filled with
+    /// `ImagePlacement` references.
+    ///
+    /// After placement the cursor is moved to the row immediately below
+    /// the image (or the last visible row if the image extends to the
+    /// bottom), at column 0 — matching iTerm2 behaviour.
+    ///
+    /// If the image extends beyond the right edge of the terminal, it is
+    /// clipped to the terminal width (cells beyond the edge are not placed).
+    /// If the image extends below the visible area, new rows are created
+    /// (scrolling if necessary in the primary buffer).
+    pub fn place_image(&mut self, image: InlineImage, scroll_offset: usize) -> usize {
+        let image_id = image.id;
+        let display_cols = image.display_cols;
+        let display_rows = image.display_rows;
+
+        // Store the image centrally.
+        self.image_store.insert(image);
+
+        let start_col = self.cursor.pos.x;
+
+        // Clamp display_cols to not exceed terminal width.
+        let effective_cols = display_cols.min(self.width.saturating_sub(start_col));
+
+        let mut current_offset = scroll_offset;
+
+        // Place image cells row by row.
+        //
+        // We track `base_row` which starts at the cursor's current row and
+        // shifts downward as rows are created.  Unlike `scroll_up()`, we
+        // grow the buffer by pushing new rows and then let
+        // `enforce_scrollback_limit` trim excess from the top — this avoids
+        // the infinite-loop problem where `scroll_up()` keeps rows.len()
+        // constant.
+        let mut base_row = self.cursor.pos.y;
+
+        for img_row in 0..display_rows {
+            let target_row = base_row + img_row;
+
+            // Ensure the target row exists.
+            while target_row >= self.rows.len() {
+                self.push_row(RowOrigin::HardBreak, RowJoin::NewLogicalLine);
+            }
+
+            let row = &mut self.rows[target_row];
+            row.dirty = true;
+
+            // Invalidate the row cache for this row.
+            if target_row < self.row_cache.len() {
+                self.row_cache[target_row] = None;
+            }
+
+            for img_col in 0..effective_cols {
+                let col = start_col + img_col;
+                if col >= self.width {
+                    break;
+                }
+                let placement = ImagePlacement {
+                    image_id,
+                    col_in_image: img_col,
+                    row_in_image: img_row,
+                };
+                row.set_image_cell(col, placement, self.current_tag.clone());
+            }
+        }
+
+        // Enforce scrollback limit — this may drain rows from the top.
+        if self.kind == BufferType::Primary {
+            let rows_before = self.rows.len();
+            current_offset = self.enforce_scrollback_limit(current_offset);
+            let drained = rows_before - self.rows.len();
+            // Adjust base_row for the drained rows.
+            base_row = base_row.saturating_sub(drained);
+        }
+
+        // Move cursor below the image, column 0 (iTerm2 behaviour).
+        let final_row = base_row + display_rows;
+        if final_row < self.rows.len() {
+            self.cursor.pos.y = final_row;
+        } else {
+            self.cursor.pos.y = self.rows.len().saturating_sub(1);
+        }
+        self.cursor.pos.x = 0;
+
+        self.debug_assert_invariants();
+        current_offset
     }
 }
 
@@ -4452,5 +4581,432 @@ mod scrollback_limit_tests {
         // Zero is an unusual limit but should not panic.
         let buf = Buffer::new(10, 5).with_scrollback_limit(0);
         assert_eq!(buf.scrollback_limit(), 0);
+    }
+}
+
+// ============================================================================
+// Image Store Integration Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_tests {
+    use super::*;
+    use crate::image_store::{ImagePlacement, InlineImage, next_image_id};
+    use std::sync::Arc;
+
+    /// Create a test image with the given grid dimensions.
+    fn make_image(cols: usize, rows: usize) -> InlineImage {
+        let id = next_image_id();
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; cols * rows * 4]),
+            width_px: u32::try_from(cols * 8).unwrap(),
+            height_px: u32::try_from(rows * 16).unwrap(),
+            display_cols: cols,
+            display_rows: rows,
+        }
+    }
+
+    // ── place_image: basic placement ─────────────────────────────────
+
+    #[test]
+    fn place_image_fills_cells_with_placements() {
+        let mut buf = Buffer::new(20, 10);
+        let img = make_image(3, 2);
+        let img_id = img.id;
+
+        // Cursor starts at (0,0).
+        buf.place_image(img, 0);
+
+        // Rows 0 and 1 should have image cells at columns 0, 1, 2.
+        for img_row in 0..2_usize {
+            let row = &buf.rows[img_row];
+            for img_col in 0..3_usize {
+                let cell = &row.cells()[img_col];
+                assert!(
+                    cell.has_image(),
+                    "row={img_row} col={img_col} should have image"
+                );
+                let p = cell.image_placement().unwrap();
+                assert_eq!(p.image_id, img_id);
+                assert_eq!(p.col_in_image, img_col);
+                assert_eq!(p.row_in_image, img_row);
+            }
+        }
+
+        // Image store should contain the image.
+        assert!(buf.image_store().contains(img_id));
+    }
+
+    #[test]
+    fn place_image_moves_cursor_below_image() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Pre-populate enough rows so that the row below the image exists.
+        for _ in 0..4 {
+            buf.handle_lf();
+        }
+        // Move cursor back to (0, 0) for the image placement.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+
+        let img = make_image(3, 2);
+        buf.place_image(img, 0);
+
+        // Cursor should be at row 2 (below the 2-row image), column 0.
+        assert_eq!(buf.cursor.pos.y, 2);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    #[test]
+    fn place_image_clips_to_terminal_width() {
+        // Terminal is 5 columns wide; image wants 10 columns.
+        let mut buf = Buffer::new(5, 10);
+        let img = make_image(10, 1);
+        let img_id = img.id;
+
+        buf.place_image(img, 0);
+
+        // Only columns 0..5 should have image cells.
+        let row = &buf.rows[0];
+        for col in 0..5_usize {
+            let cell = &row.cells()[col];
+            assert!(cell.has_image(), "col={col} should have image");
+            let p = cell.image_placement().unwrap();
+            assert_eq!(p.col_in_image, col);
+        }
+
+        // Image store should still have the image.
+        assert!(buf.image_store().contains(img_id));
+    }
+
+    #[test]
+    fn place_image_at_nonzero_cursor_col() {
+        let mut buf = Buffer::new(20, 10);
+        // Move cursor to column 5.
+        buf.cursor.pos.x = 5;
+        let img = make_image(3, 1);
+        let img_id = img.id;
+
+        buf.place_image(img, 0);
+
+        // Image cells should be at columns 5, 6, 7.
+        let row = &buf.rows[0];
+        for img_col in 0..3_usize {
+            let col = 5 + img_col;
+            let cell = &row.cells()[col];
+            assert!(cell.has_image(), "col={col} should have image");
+            let p = cell.image_placement().unwrap();
+            assert_eq!(p.image_id, img_id);
+            assert_eq!(p.col_in_image, img_col);
+        }
+    }
+
+    // ── place_image: scrolling ───────────────────────────────────────
+
+    #[test]
+    fn place_image_scrolls_when_image_exceeds_visible_area() {
+        // Terminal is 10 wide, 3 tall.  Cursor is at the last visible row.
+        let mut buf = Buffer::new(10, 3);
+        // Push cursor to the bottom row.
+        buf.handle_lf();
+        buf.handle_lf();
+        assert_eq!(buf.cursor.pos.y, 2);
+
+        // Place a 2-row image — there's only 1 row left, so it must scroll.
+        let img = make_image(3, 2);
+        let img_id = img.id;
+
+        buf.place_image(img, 0);
+
+        // The image should exist in the store.
+        assert!(buf.image_store().contains(img_id));
+
+        // Verify image cells are present somewhere in the buffer.
+        let mut found_placements = 0;
+        for row in &buf.rows {
+            for cell in row.cells() {
+                if let Some(p) = cell.image_placement()
+                    && p.image_id == img_id
+                {
+                    found_placements += 1;
+                }
+            }
+        }
+        // 2 rows × 3 cols = 6 placements.
+        assert_eq!(
+            found_placements, 6,
+            "expected 6 image placements after scroll"
+        );
+    }
+
+    // ── Image GC after scrollback eviction ───────────────────────────
+
+    #[test]
+    fn image_gc_removes_unreferenced_images() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(2);
+
+        // Place an image at cursor (0,0).
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+
+        // The image should be in the store.
+        assert!(buf.image_store().contains(img_id));
+
+        // Now push enough lines to evict the image row from scrollback.
+        // scrollback_limit=2, height=3, so max rows = 5.
+        // We need the image row (row 0) to be drained.
+        for _ in 0..10 {
+            buf.handle_lf();
+        }
+
+        // After scrollback eviction + GC, the image should be gone
+        // because no remaining cell references it.
+        assert!(
+            !buf.image_store().contains(img_id),
+            "image should be GC'd after its row scrolled off"
+        );
+    }
+
+    #[test]
+    fn image_gc_retains_referenced_images() {
+        let mut buf = Buffer::new(10, 5).with_scrollback_limit(10);
+
+        // Place an image on the 2nd row (row 1).
+        buf.handle_lf();
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+
+        // Push a few lines, but not enough to evict the image row.
+        for _ in 0..3 {
+            buf.handle_lf();
+        }
+
+        // The image should still be in the store since its row is still present.
+        assert!(
+            buf.image_store().contains(img_id),
+            "image should be retained while its row is still in the buffer"
+        );
+    }
+
+    // ── Alternate screen save/restore ────────────────────────────────
+
+    #[test]
+    fn image_store_saved_and_restored_across_alternate_screen() {
+        let mut buf = Buffer::new(10, 5);
+
+        // Place an image in the primary buffer.
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert!(buf.image_store().contains(img_id));
+
+        // Enter alternate screen — primary images should be saved.
+        buf.enter_alternate(0);
+        assert!(
+            buf.image_store().is_empty(),
+            "alternate screen should have no images"
+        );
+
+        // Leave alternate screen — primary images should be restored.
+        buf.leave_alternate();
+        assert!(
+            buf.image_store().contains(img_id),
+            "image should be restored after leaving alternate screen"
+        );
+    }
+
+    #[test]
+    fn image_cells_restored_after_alternate_screen() {
+        let mut buf = Buffer::new(10, 5);
+
+        // Place image and remember the cell content.
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+
+        // Verify cell has image before alternate screen.
+        assert!(buf.rows[0].cells()[0].has_image());
+
+        // Round-trip through alternate screen.
+        buf.enter_alternate(0);
+        buf.leave_alternate();
+
+        // Cell should still have the image placement.
+        let cell = &buf.rows[0].cells()[0];
+        assert!(cell.has_image());
+        let p = cell.image_placement().unwrap();
+        assert_eq!(p.image_id, img_id);
+        assert_eq!(p.col_in_image, 0);
+        assert_eq!(p.row_in_image, 0);
+    }
+
+    // ── full_reset clears images ─────────────────────────────────────
+
+    #[test]
+    fn full_reset_clears_image_store() {
+        let mut buf = Buffer::new(10, 5);
+
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert!(buf.image_store().contains(img_id));
+
+        buf.full_reset();
+        assert!(
+            buf.image_store().is_empty(),
+            "full_reset should clear all images"
+        );
+    }
+
+    // ── Multiple images ──────────────────────────────────────────────
+
+    #[test]
+    fn multiple_images_coexist_in_store() {
+        let mut buf = Buffer::new(20, 10);
+
+        let img1 = make_image(2, 1);
+        let id1 = img1.id;
+        buf.place_image(img1, 0);
+
+        let img2 = make_image(3, 1);
+        let id2 = img2.id;
+        buf.place_image(img2, 0);
+
+        assert!(buf.image_store().contains(id1));
+        assert!(buf.image_store().contains(id2));
+        assert_eq!(buf.image_store().len(), 2);
+    }
+
+    #[test]
+    fn gc_only_removes_evicted_images() {
+        // Two images: one near the top (will be evicted), one near the bottom (will stay).
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(3);
+
+        // Image 1 on row 0.
+        let img1 = make_image(2, 1);
+        let id1 = img1.id;
+        buf.place_image(img1, 0);
+
+        // Move cursor down and place image 2.
+        for _ in 0..4 {
+            buf.handle_lf();
+        }
+        let img2 = make_image(2, 1);
+        let id2 = img2.id;
+        buf.place_image(img2, 0);
+
+        // Push many more lines to evict the first image's row.
+        for _ in 0..10 {
+            buf.handle_lf();
+        }
+
+        // Image 1 should be GC'd; image 2 may or may not be depending on how
+        // far its row scrolled.  At minimum, verify the store doesn't contain
+        // both if one's row is gone.
+        if buf.image_store().contains(id2) {
+            // If image 2 survived, its cells should still be present.
+            let mut found = false;
+            for row in &buf.rows {
+                for cell in row.cells() {
+                    if let Some(p) = cell.image_placement()
+                        && p.image_id == id2
+                    {
+                        found = true;
+                    }
+                }
+            }
+            assert!(found, "if image 2 is in the store, cells must reference it");
+        }
+
+        // Image 1's row should be gone — verify no cell references it.
+        let mut id1_found = false;
+        for row in &buf.rows {
+            for cell in row.cells() {
+                if let Some(p) = cell.image_placement()
+                    && p.image_id == id1
+                {
+                    id1_found = true;
+                }
+            }
+        }
+        if !id1_found {
+            assert!(
+                !buf.image_store().contains(id1),
+                "no cell references image 1, so it should be GC'd"
+            );
+        }
+    }
+
+    // ── Row::set_image_cell ──────────────────────────────────────────
+
+    #[test]
+    fn set_image_cell_extends_row_if_needed() {
+        let mut row = Row::new(10);
+        assert!(row.cells().is_empty());
+
+        let placement = ImagePlacement {
+            image_id: 42,
+            col_in_image: 0,
+            row_in_image: 0,
+        };
+        row.set_image_cell(5, placement.clone(), FormatTag::default());
+
+        // Row should have been extended to at least 6 cells.
+        assert!(row.cells().len() >= 6);
+        let cell = &row.cells()[5];
+        assert!(cell.has_image());
+        assert_eq!(cell.image_placement().unwrap(), &placement);
+    }
+
+    #[test]
+    fn set_image_cell_beyond_width_is_noop() {
+        let mut row = Row::new(5);
+        let placement = ImagePlacement {
+            image_id: 42,
+            col_in_image: 0,
+            row_in_image: 0,
+        };
+        // Column 10 is beyond width 5 — should be a no-op.
+        row.set_image_cell(10, placement, FormatTag::default());
+        assert!(row.cells().is_empty());
+    }
+
+    // ── Cell image accessors ─────────────────────────────────────────
+
+    #[test]
+    fn cell_image_accessors() {
+        // Normal cell has no image.
+        let cell = Cell::new(TChar::Ascii(b'A'), FormatTag::default());
+        assert!(!cell.has_image());
+        assert!(cell.image_placement().is_none());
+
+        // Image cell has a placement.
+        let placement = ImagePlacement {
+            image_id: 99,
+            col_in_image: 1,
+            row_in_image: 2,
+        };
+        let img_cell = Cell::image_cell(placement.clone(), FormatTag::default());
+        assert!(img_cell.has_image());
+        assert_eq!(img_cell.image_placement().unwrap(), &placement);
+    }
+
+    #[test]
+    fn cell_clear_image() {
+        let placement = ImagePlacement {
+            image_id: 99,
+            col_in_image: 0,
+            row_in_image: 0,
+        };
+        let mut cell = Cell::image_cell(placement, FormatTag::default());
+        assert!(cell.has_image());
+
+        cell.clear_image();
+        assert!(!cell.has_image());
+        assert!(cell.image_placement().is_none());
     }
 }

@@ -5,12 +5,18 @@
 
 use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
 
+use crate::image_store::ImagePlacement;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     value: TChar,
     format: FormatTag,
     is_wide_head: bool,
     is_wide_continuation: bool,
+    /// If this cell is part of an inline image, the placement reference.
+    /// `None` for normal text cells (the overwhelming majority).
+    /// Boxed to keep the common case at 8 bytes (a null pointer).
+    image: Option<Box<ImagePlacement>>,
 }
 
 impl Cell {
@@ -23,6 +29,7 @@ impl Cell {
             format,
             is_wide_head: width > 1,
             is_wide_continuation: false,
+            image: None,
         }
     }
 
@@ -33,6 +40,7 @@ impl Cell {
             format,
             is_wide_head: false,
             is_wide_continuation: false,
+            image: None,
         }
     }
 
@@ -43,6 +51,7 @@ impl Cell {
             format: FormatTag::default(),
             is_wide_continuation: true,
             is_wide_head: false,
+            image: None,
         }
     }
 
@@ -79,6 +88,35 @@ impl Cell {
     #[must_use]
     pub const fn is_continuation(&self) -> bool {
         self.is_wide_continuation
+    }
+
+    /// Create a cell that represents a portion of an inline image.
+    #[must_use]
+    pub fn image_cell(placement: ImagePlacement, format: FormatTag) -> Self {
+        Self {
+            value: TChar::Space,
+            format,
+            is_wide_head: false,
+            is_wide_continuation: false,
+            image: Some(Box::new(placement)),
+        }
+    }
+
+    /// Returns the image placement for this cell, if any.
+    #[must_use]
+    pub fn image_placement(&self) -> Option<&ImagePlacement> {
+        self.image.as_deref()
+    }
+
+    /// Returns `true` if this cell is part of an inline image.
+    #[must_use]
+    pub const fn has_image(&self) -> bool {
+        self.image.is_some()
+    }
+
+    /// Clear any image placement from this cell.
+    pub fn clear_image(&mut self) {
+        self.image = None;
     }
 }
 
