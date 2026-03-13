@@ -311,7 +311,7 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.6 — Parse Kitty APC graphics sequences**
+- [x] **13.6 — Parse Kitty APC graphics sequences**
   - Add APC sequence handler to the parser.
   - Parse `_G` control data: `a` (action), `f` (format), `t` (transmission), `s`/`v` (size),
     `i` (image ID), `p` (placement ID), `m` (more data flag), `q` (quiet mode).
@@ -319,6 +319,18 @@ quads for image regions is straightforward:
   - Handle `a=q` (query) — respond with OK/error.
   - Add tests for APC parsing and chunked reassembly.
   - **Verify:** `cargo test --all` passes.
+  - ✅ **Completed 2026-03-13.** Created `freminal-common/src/buffer_states/kitty_graphics.rs`
+    with comprehensive Kitty graphics protocol types and parser: `KittyAction`,
+    `KittyFormat`, `KittyTransmission`, `KittyCompression`, `KittyDeleteTarget` enums;
+    `KittyControlData` and `KittyGraphicsCommand` structs; `parse_kitty_graphics()`,
+    `format_kitty_response()`, `strip_apc_envelope()` functions; 35+ tests covering all
+    actions, formats, transmissions, delete targets, error cases, and edge cases.
+    Integrated Kitty APC dispatch into `terminal_handler.rs`: `KittyImageState` struct
+    for chunked transfer accumulation; `handle_application_program_command()` now tries
+    Kitty parse first; `handle_kitty_query()` responds OK for RGBA/PNG formats and
+    respects quiet mode; `handle_kitty_chunk_start()`/`handle_kitty_chunk()` for m=1/m=0
+    chunked protocol; `handle_kitty_single()` and `handle_kitty_delete()` stubs for 13.7.
+    Committed as `9bd2fa4`. All tests pass, clippy clean, machete clean.
 
 ---
 
