@@ -53,7 +53,7 @@ fn v1_config_without_new_sections_loads_with_defaults() {
         blink = false
 
         [theme]
-        name = "gruvbox"
+        name = "gruvbox-dark"
     "#;
 
     let cfg = load_from_toml(toml).expect("should parse v1 config");
@@ -61,7 +61,7 @@ fn v1_config_without_new_sections_loads_with_defaults() {
     assert_eq!(cfg.font.family.as_deref(), Some("Fira Code"));
     assert!((cfg.font.size - 14.0).abs() < f32::EPSILON);
     assert!(!cfg.cursor.blink);
-    assert_eq!(cfg.theme.name, "gruvbox");
+    assert_eq!(cfg.theme.name, "gruvbox-dark");
 
     // New sections should fall back to defaults
     assert!(cfg.shell.path.is_none());

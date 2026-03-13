@@ -43,8 +43,18 @@ blink = true
 # THEME SETTINGS
 ################################################################################
 [theme]
-# Name of your color scheme
-# You can later support built-in themes or custom theme files
+# Name of your color scheme (must be a recognized built-in slug).
+#
+# Available themes:
+#   catppuccin-mocha      catppuccin-macchiato   catppuccin-frappe
+#   catppuccin-latte      dracula                nord
+#   solarized-dark        solarized-light        gruvbox-dark
+#   gruvbox-light         one-dark               one-light
+#   tokyo-night           tokyo-night-storm      kanagawa
+#   rose-pine             rose-pine-moon         rose-pine-dawn
+#   monokai-pro           ayu-dark               ayu-light
+#   everforest-dark       everforest-light        material-dark
+#   xterm-default
 name = "catppuccin-mocha"
 
 ################################################################################

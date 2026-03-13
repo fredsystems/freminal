@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::themes;
 use directories::BaseDirs;
 
 /// ---------------------------------------------------------------------------------------------
@@ -242,6 +243,13 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "scrollback.limit={} out of allowed range (1–100000)",
                 self.scrollback.limit
+            )));
+        }
+
+        if themes::by_slug(&self.theme.name).is_none() {
+            return Err(ConfigError::Validation(format!(
+                "theme.name=\"{}\" is not a recognized theme slug",
+                self.theme.name
             )));
         }
 
@@ -562,5 +570,27 @@ size = 14.0
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(!deserialized.font.ligatures);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_theme_slug() {
+        let mut cfg = Config::default();
+        cfg.theme.name = "nonexistent-theme".to_string();
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nonexistent-theme"),
+            "error should mention the bad slug: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_all_builtin_themes() {
+        for theme in themes::all_themes() {
+            let mut cfg = Config::default();
+            cfg.theme.name = theme.slug.to_string();
+            cfg.validate()
+                .unwrap_or_else(|e| panic!("theme '{}' should be valid: {e}", theme.slug));
+        }
     }
 }
