@@ -250,6 +250,9 @@ fn main() {
                                 Ok(InputEvent::ScrollOffset(offset)) => {
                                     emulator.set_gui_scroll_offset(offset);
                                 }
+                                Ok(InputEvent::ThemeChange(theme)) => {
+                                    emulator.internal.handler.set_theme(theme);
+                                }
                                 Err(_) => {
                                     // GUI closed the sender — time to stop.
                                     info!("Input channel closed; consumer thread exiting");

@@ -10,6 +10,8 @@ pub use pty::FreminalPtyInputOutput;
 // can use the same definitions without creating a circular dependency.
 pub use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 
+use freminal_common::themes::ThemePalette;
+
 pub struct PtyRead {
     pub buf: Vec<u8>,
     pub read_amount: usize,
@@ -19,8 +21,6 @@ pub struct PtyRead {
 ///
 /// The GUI sends these through a `crossbeam_channel::Sender<InputEvent>`.
 /// The PTY thread receives them in its `select!` loop alongside `PtyRead`.
-///
-/// No call sites are wired up yet — this is a type definition only.
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     /// Raw bytes to write to the PTY (keyboard input).
@@ -39,6 +39,12 @@ pub enum InputEvent {
     /// The PTY thread stores this and uses it when building the next snapshot
     /// so `visible_as_tchars_and_tags(offset)` renders the correct window.
     ScrollOffset(usize),
+    /// The user selected a new color theme in the Settings Modal.
+    ///
+    /// The PTY thread updates `handler.set_theme()` so subsequent snapshots
+    /// carry the new palette. All embedded themes are `'static` so this is
+    /// a zero-cost pointer update.
+    ThemeChange(&'static ThemePalette),
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

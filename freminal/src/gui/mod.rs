@@ -49,6 +49,22 @@ fn set_egui_options(ctx: &egui::Context) {
     });
 }
 
+/// Update egui chrome colors (window/panel fill) to match a new theme.
+fn update_egui_theme(ctx: &egui::Context, theme: &freminal_common::themes::ThemePalette) {
+    ctx.style_mut(|style| {
+        style.visuals.window_fill = internal_color_to_egui(
+            freminal_common::colors::TerminalColor::DefaultBackground,
+            false,
+            theme,
+        );
+        style.visuals.panel_fill = internal_color_to_egui(
+            freminal_common::colors::TerminalColor::DefaultBackground,
+            false,
+            theme,
+        );
+    });
+}
+
 struct FreminalGui {
     /// The latest terminal snapshot published by the PTY consumer thread.
     /// Loaded lock-free via a single atomic pointer swap.
@@ -529,6 +545,19 @@ impl eframe::App for FreminalGui {
         let settings_action = self.settings_modal.show(ctx);
         if settings_action == SettingsAction::Applied {
             let new_cfg = self.settings_modal.applied_config().clone();
+
+            // If the theme slug changed, look it up and notify the PTY thread
+            // so the next snapshot carries the new palette.
+            if new_cfg.theme.name != self.config.theme.name
+                && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
+            {
+                if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    error!("Failed to send ThemeChange to PTY thread: {e}");
+                }
+                // Update egui chrome colors immediately.
+                update_egui_theme(ctx, theme);
+            }
+
             self.terminal_widget
                 .apply_config_changes(ctx, &self.config, &new_cfg, &self.input_tx);
             self.config = new_cfg;
