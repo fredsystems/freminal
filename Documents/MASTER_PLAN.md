@@ -29,7 +29,7 @@ and plan document maintenance rules.
 | 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`              | Complete    | None         |
 | 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`          | Complete    | Task 2       |
 | 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md`        | Not Started | Task 2       |
-| 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`          | Not Started | Task 1       |
+| 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`          | Complete    | Task 1       |
 | 6   | Test Gap Coverage         | `PLAN_06_TEST_GAPS.md`               | Not Started | None         |
 | 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md`        | Complete    | None         |
 | 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`              | Complete    | None         |
@@ -212,21 +212,21 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                                      |
-| ---- | ---------- | ---------- | ------------------------------------------ |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas           |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config            |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal           |
-| 4    | —          | —          | Unblocked (Task 2 complete)                |
-| 5    | —          | —          | Unblocked (Task 1 complete)                |
-| 6    | —          | —          |                                            |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                   |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                    |
-| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging |
-| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                      |
-| 11   | —          | —          | Plan created, unblocked (Tasks 2+3 done)   |
-| 12   | —          | —          | Plan created, independent                  |
-| 13   | —          | —          | Plan created, unblocked (Task 1 done)      |
+| Task | Started    | Completed  | Notes                                         |
+| ---- | ---------- | ---------- | --------------------------------------------- |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas              |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config               |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal              |
+| 4    | —          | —          | Unblocked (Task 2 complete)                   |
+| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4 |
+| 6    | —          | —          |                                               |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                      |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                       |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging    |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                         |
+| 11   | —          | —          | Plan created, unblocked (Tasks 2+3 done)      |
+| 12   | —          | —          | Plan created, independent                     |
+| 13   | —          | —          | Plan created, unblocked (Task 1 done)         |
 
 ---
 

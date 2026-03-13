@@ -101,7 +101,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.1 — Add ligature configuration option
 
-- **Status:** Not Started
+- **Status:** Complete (commit 7b5527e)
 - **Scope:** `freminal-common/src/config.rs`, `config_example.toml`
 - **Details:**
   - Add to FontConfig: `ligatures: bool` (default: `true`)
@@ -126,7 +126,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.2 — Enable ligature OpenType features in shaping
 
-- **Status:** Not Started
+- **Status:** Complete (commit 2cc3fd4)
 - **Scope:** `freminal/src/gui/shaping.rs`
 - **Details:**
   - When ligatures are enabled, pass OpenType features to rustybuzz:
@@ -146,7 +146,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.3 — Handle ligature glyph metrics and positioning
 
-- **Status:** Not Started
+- **Status:** Complete (commit d0e3c4e)
 - **Scope:** `freminal/src/gui/shaping.rs`, `freminal/src/gui/atlas.rs`
 - **Details:**
   - When rustybuzz produces a ligature glyph spanning N characters:
@@ -168,7 +168,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.4 — Handle cursor within ligatures
 
-- **Status:** Not Started
+- **Status:** Complete — no changes needed (commit d0e3c4e)
 - **Scope:** `freminal/src/gui/terminal.rs` (cursor rendering)
 - **Details:**
   - Cursor must be drawable at any character position within a ligature
@@ -186,7 +186,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.5 — Handle selection within ligatures
 
-- **Status:** Not Started
+- **Status:** Complete — no changes needed (commit d0e3c4e)
 - **Scope:** `freminal/src/gui/terminal.rs` (selection rendering)
 - **Details:**
   - Selection highlighting must work at character granularity within ligatures
@@ -201,7 +201,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.6 — Handle ligature-breaking conditions
 
-- **Status:** Not Started
+- **Status:** Complete (commit d0e3c4e)
 - **Scope:** `freminal/src/gui/shaping.rs`
 - **Details:**
   - Ligatures must NOT form across:
@@ -224,7 +224,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.7 — Performance optimization
 
-- **Status:** Not Started
+- **Status:** Complete (commit d0e3c4e)
 - **Scope:** `freminal/src/gui/shaping.rs`, `freminal/src/gui/atlas.rs`
 - **Details:**
   - Ligature shaping should not significantly impact frame time
@@ -241,7 +241,7 @@ When rustybuzz produces a ligature glyph that spans N input characters:
 
 ### 5.8 — Integration testing and cleanup
 
-- **Status:** Not Started
+- **Status:** Complete (commit d0e3c4e)
 - **Scope:** All modified files
 - **Details:**
   - Test with multiple ligature-supporting fonts:
@@ -314,6 +314,9 @@ Record before/after numbers here as subtasks complete:
 
 | Metric                        | Without Ligatures | With Ligatures | Subtask |
 | ----------------------------- | ----------------- | -------------- | ------- |
-| Shaping throughput (runs/sec) | —                 | —              | 5.7     |
-| Full render cycle (80×50)     | —                 | —              | 5.7     |
-| Atlas memory usage            | —                 | —              | 5.7     |
+| Shaping throughput (runs/sec) | ~3.6 Melem/s      | ~3.3 Melem/s   | 5.7     |
+| Shaping cache hit             | ~146 Melem/s      | —              | 5.7     |
+| Shaping time (80×50)          | ~1.12 ms          | ~1.20 ms       | 5.7     |
+
+Ligatures on is ~7% slower than off (expected — more OpenType feature lookups).
+Cache hits are ~43× faster than cold shaping.
