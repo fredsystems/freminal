@@ -28,6 +28,9 @@
 //! in Section 8.5 of the performance plan.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use freminal::gui::font_manager::FontManager;
+use freminal::gui::shaping::ShapingCache;
+use freminal_common::config::Config;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::sync::Arc;
@@ -272,6 +275,112 @@ fn bench_arcswap_roundtrip(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_shaping_ligatures
+// ---------------------------------------------------------------
+
+/// Build a ligature-heavy payload: lines containing `->`, `=>`, `!=`, `==`,
+/// `<=`, `>=`, `::`, `//`, `&&`, `||` interspersed with regular text.
+fn ligature_heavy_visible_chars(
+    width: usize,
+    height: usize,
+) -> (
+    Vec<freminal_common::buffer_states::tchar::TChar>,
+    Vec<freminal_common::buffer_states::format_tag::FormatTag>,
+) {
+    use freminal_common::buffer_states::format_tag::FormatTag;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let ligature_sequences = ["->", "=>", "!=", "==", "<=", ">=", "::", "//", "&&", "||"];
+    let mut chars = Vec::with_capacity(width * height + height);
+    let mut col = 0;
+    let mut line = 0;
+
+    while line < height {
+        if col + 4 <= width {
+            // Insert "a" + ligature_seq + "b" pattern
+            let seq = ligature_sequences[(col / 4 + line) % ligature_sequences.len()];
+            chars.push(TChar::Ascii(b'a'));
+            for b in seq.bytes() {
+                chars.push(TChar::Ascii(b));
+            }
+            chars.push(TChar::Ascii(b'b'));
+            col += 2 + seq.len();
+        } else {
+            // Fill remaining with ASCII
+            while col < width {
+                chars.push(TChar::Ascii(b'x'));
+                col += 1;
+            }
+        }
+
+        if col >= width {
+            chars.push(TChar::NewLine);
+            col = 0;
+            line += 1;
+        }
+    }
+
+    let tags = vec![FormatTag {
+        start: 0,
+        end: chars.len(),
+        ..FormatTag::default()
+    }];
+
+    (chars, tags)
+}
+
+fn bench_shaping_ligatures(c: &mut Criterion) {
+    let width = 80;
+    let height = 50;
+    let (chars, tags) = ligature_heavy_visible_chars(width, height);
+    let total_chars = (width * height) as u64;
+
+    let mut group = c.benchmark_group("shaping_ligatures");
+    group.throughput(Throughput::Elements(total_chars));
+
+    for ligatures in [false, true] {
+        let label = if ligatures {
+            "ligatures_on"
+        } else {
+            "ligatures_off"
+        };
+        group.bench_function(BenchmarkId::new("shape_visible", label), |b| {
+            b.iter_batched(
+                || {
+                    let fm = FontManager::new(&Config::default());
+                    let cache = ShapingCache::new();
+                    (fm, cache)
+                },
+                |(mut fm, mut cache)| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let cell_w = fm.cell_width() as f32;
+                    std::hint::black_box(
+                        cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, ligatures),
+                    );
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    // Also benchmark cache hit path (second call with same data).
+    group.bench_function("shape_visible_cache_hit", |b| {
+        let mut fm = FontManager::new(&Config::default());
+        let mut cache = ShapingCache::new();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_w = fm.cell_width() as f32;
+        // Prime the cache.
+        let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false);
+
+        b.iter(|| {
+            std::hint::black_box(cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false));
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -283,6 +392,7 @@ criterion_group!(
         bench_feed_data_bursty,
         bench_build_snapshot_after_feed,
         bench_arcswap_roundtrip,
+        bench_shaping_ligatures,
 );
 
 criterion_main!(benches);
