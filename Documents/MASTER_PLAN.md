@@ -37,7 +37,7 @@ and plan document maintenance rules.
 | 10  | vttest Cursor Movement    | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`  | Complete    | None         |
 | 11  | Theming                   | `PLAN_11_THEMING.md`                 | Complete    | Tasks 2, 3   |
 | 12  | Terminfo Audit            | `PLAN_12_TERMINFO.md`                | Complete    | None         |
-| 13  | Image Protocol Support    | `PLAN_13_IMAGE_PROTOCOL.md`          | Not Started | Task 1       |
+| 13  | Image Protocol Support    | `PLAN_13_IMAGE_PROTOCOL.md`          | Complete    | Task 1       |
 
 ---
 
@@ -226,7 +226,7 @@ Update this section as tasks complete:
 | 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                         |
 | 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4 |
 | 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4 |
-| 13   | —          | —          | Plan created, unblocked (Task 1 done)         |
+| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4 |
 
 ---
 

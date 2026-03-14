@@ -372,11 +372,18 @@ quads for image regions is straightforward:
 
 ### Phase 3 — Sixel (Deferred)
 
-- [ ] **13.9 — Sixel parser and renderer**
+- [x] **13.9 — Sixel parser and renderer**
   - DCS sequence handler for sixel data.
   - Sixel pixel decoder (palette management, 6-pixel column strips).
   - Texture upload and rendering.
-  - Deferred until demand exists. Not blocking any current use case.
+  - ✅ **Completed 2026-03-14.** Full Sixel parser and pixel decoder implemented in
+    `freminal-common/src/buffer_states/sixel.rs` (826 lines, 20 unit tests). Handles DCS
+    parameters (P1/P2/P3), color definitions (RGB percentage and HLS), raster attributes,
+    repeat compression (`!n<char>`), carriage return (`$`), and newline (`-`). Decoder
+    produces RGBA pixel buffers fed into the existing image placement pipeline via
+    `handle_sixel()` in terminal_handler.rs. Also fixed hardcoded 8×16 cell pixel dimensions
+    by threading actual cell size through resize events, and fixed SGR mouse zero-delta
+    scroll encoding and atomic multi-byte mouse sequence sending.
 
 ---
 
