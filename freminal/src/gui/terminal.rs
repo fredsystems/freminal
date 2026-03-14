@@ -139,7 +139,11 @@ fn handle_scroll_fallback(
             TerminalInput::ArrowDown(KeyModifiers::NONE)
         };
         for _ in 0..count {
-            send_terminal_input(&key, input_tx, snap.cursor_key_app_mode);
+            send_terminal_inputs(
+                std::slice::from_ref(&key),
+                input_tx,
+                snap.cursor_key_app_mode,
+            );
         }
     } else {
         // Primary screen: adjust scroll offset and send to PTY thread.
@@ -168,21 +172,33 @@ fn handle_scroll_fallback(
     }
 }
 
-/// Convert a `TerminalInput` value to raw bytes and send them to the PTY
-/// consumer thread via `InputEvent::Key`.
+/// Collect all bytes from a slice of `TerminalInput` values into a single
+/// `Vec<u8>` and send them as one atomic `InputEvent::Key` to the PTY
+/// consumer thread.
+///
+/// Sending all bytes in a single message is critical for multi-byte
+/// sequences such as mouse reports (`\x1b[<0;5;3M`) — if each byte were
+/// sent as a separate `InputEvent` the PTY application would receive them
+/// as individual characters rather than as one escape sequence, causing
+/// them to be interpreted as literal typed text.
 ///
 /// The `cursor_key_app_mode` flag from the snapshot drives `DECCKM`-sensitive
 /// key encoding (arrow keys, home, end).
-fn send_terminal_input(
-    input: &TerminalInput,
+fn send_terminal_inputs(
+    inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
     cursor_key_app_mode: bool,
 ) {
-    let bytes = match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
-        TerminalInputPayload::Single(b) => vec![b],
-        TerminalInputPayload::Many(bs) => bs.to_vec(),
-        TerminalInputPayload::Owned(bs) => bs,
-    };
+    let bytes: Vec<u8> = inputs
+        .iter()
+        .flat_map(
+            |input| match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
+                TerminalInputPayload::Single(b) => vec![b],
+                TerminalInputPayload::Many(bs) => bs.to_vec(),
+                TerminalInputPayload::Owned(bs) => bs,
+            },
+        )
+        .collect();
     if bytes.is_empty() {
         return;
     }
@@ -754,9 +770,9 @@ fn write_input_to_terminal(
             }
         };
 
-        for input in inputs.as_ref() {
+        if !inputs.is_empty() {
             state_changed = true;
-            send_terminal_input(input, input_tx, snap.cursor_key_app_mode);
+            send_terminal_inputs(inputs.as_ref(), input_tx, snap.cursor_key_app_mode);
         }
     }
 

@@ -170,6 +170,18 @@ pub struct TerminalHandler {
     /// Reset to `None` on any non-placeholder text insertion, newline, or
     /// cursor movement.
     prev_placeholder: Option<PrevPlaceholder>,
+    /// Width of a single terminal cell in pixels (updated on resize).
+    ///
+    /// Used by image handlers (iTerm2, Kitty, Sixel) to convert pixel
+    /// dimensions to cell counts.  Defaults to 8 until the first resize
+    /// event provides real font metrics.
+    cell_pixel_width: u32,
+    /// Height of a single terminal cell in pixels (updated on resize).
+    ///
+    /// Used by image handlers (iTerm2, Kitty, Sixel) to convert pixel
+    /// dimensions to cell counts.  Defaults to 16 until the first resize
+    /// event provides real font metrics.
+    cell_pixel_height: u32,
 }
 
 impl TerminalHandler {
@@ -198,6 +210,8 @@ impl TerminalHandler {
             kitty_state: None,
             virtual_placements: HashMap::new(),
             prev_placeholder: None,
+            cell_pixel_width: 8,
+            cell_pixel_height: 16,
         }
     }
 
@@ -838,6 +852,8 @@ impl TerminalHandler {
             self.handle_decrqss(pt);
         } else if let Some(hex_payload) = inner.strip_prefix(b"+q") {
             self.handle_xtgettcap(hex_payload);
+        } else if Self::is_sixel_sequence(inner) {
+            self.handle_sixel(inner);
         } else {
             tracing::debug!(
                 "DCS sub-command not recognized (ignored): {}",
@@ -855,6 +871,65 @@ impl TerminalHandler {
             dcs.len()
         };
         if start <= end { &dcs[start..end] } else { &[] }
+    }
+
+    /// Check whether a DCS inner payload is a Sixel sequence.
+    ///
+    /// The format is `<optional digits and semicolons>q<sixel data>`.
+    /// This returns `true` when the data up to the first `q` consists only
+    /// of digits and semicolons (the P1;P2;P3 parameters).
+    fn is_sixel_sequence(inner: &[u8]) -> bool {
+        let Some(q_pos) = inner.iter().position(|&b| b == b'q') else {
+            return false;
+        };
+        // Everything before `q` must be digits or semicolons (DCS params).
+        inner[..q_pos]
+            .iter()
+            .all(|&b| b.is_ascii_digit() || b == b';')
+    }
+
+    /// Handle a Sixel graphics DCS sequence.
+    ///
+    /// `inner` is the stripped DCS payload: `<P1;P2;P3>q<sixel-data>`.
+    fn handle_sixel(&mut self, inner: &[u8]) {
+        use freminal_common::buffer_states::sixel::parse_sixel;
+
+        let Some(sixel_image) = parse_sixel(inner) else {
+            tracing::debug!("Sixel: failed to decode image from DCS payload");
+            return;
+        };
+
+        if sixel_image.width == 0 || sixel_image.height == 0 {
+            tracing::debug!("Sixel: decoded image has zero dimensions");
+            return;
+        }
+
+        let (term_width, term_height) = self.get_win_size();
+
+        // Compute display size in terminal cells using actual cell pixel dimensions.
+        #[allow(clippy::cast_possible_truncation)]
+        let display_cols = {
+            let cols = sixel_image.width.div_ceil(self.cell_pixel_width) as usize;
+            cols.min(term_width).max(1)
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let display_rows = {
+            let rows = sixel_image.height.div_ceil(self.cell_pixel_height) as usize;
+            rows.min(term_height).max(1)
+        };
+
+        let image_id = next_image_id();
+
+        let inline_image = InlineImage {
+            id: image_id,
+            pixels: std::sync::Arc::new(sixel_image.pixels),
+            width_px: sixel_image.width,
+            height_px: sixel_image.height,
+            display_cols,
+            display_rows,
+        };
+
+        let _new_offset = self.buffer.place_image(inline_image, 0);
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -1415,7 +1490,7 @@ impl TerminalHandler {
         let display_cols = control.display_cols.map_or_else(
             || {
                 #[allow(clippy::cast_possible_truncation)]
-                let cols = img_width_px.div_ceil(8) as usize;
+                let cols = img_width_px.div_ceil(self.cell_pixel_width) as usize;
                 cols.min(term_width).max(1)
             },
             |c| {
@@ -1428,7 +1503,7 @@ impl TerminalHandler {
         let display_rows = control.display_rows.map_or_else(
             || {
                 #[allow(clippy::cast_possible_truncation)]
-                let rows = img_height_px.div_ceil(16) as usize;
+                let rows = img_height_px.div_ceil(self.cell_pixel_height) as usize;
                 rows.min(term_height).max(1)
             },
             |r| {
@@ -1755,10 +1830,18 @@ impl TerminalHandler {
         let (term_width, term_height) = self.get_win_size();
 
         // Compute the display size in cells from the iTerm2 dimension specs.
-        let display_cols =
-            Self::resolve_image_dimension(data.width.as_ref(), img_width_px, term_width, true);
-        let display_rows =
-            Self::resolve_image_dimension(data.height.as_ref(), img_height_px, term_height, false);
+        let display_cols = Self::resolve_image_dimension(
+            data.width.as_ref(),
+            img_width_px,
+            term_width,
+            self.cell_pixel_width,
+        );
+        let display_rows = Self::resolve_image_dimension(
+            data.height.as_ref(),
+            img_height_px,
+            term_height,
+            self.cell_pixel_height,
+        );
 
         // Apply aspect-ratio preservation when only one dimension was
         // explicitly specified by the user.
@@ -1880,15 +1963,8 @@ impl TerminalHandler {
         spec: Option<&ImageDimension>,
         image_pixels: u32,
         term_cells: usize,
-        is_width: bool,
+        cell_pixels: u32,
     ) -> usize {
-        // For Auto/None we assume each terminal cell is roughly square. Without
-        // access to the pixel size of each cell we use the simple heuristic of
-        // 1 cell ≈ 8px wide, 16px tall (common default for monospace fonts).
-        // This gives a reasonable approximation; the exact pixel sizes are only
-        // available on the GUI side.
-        let cell_pixels: u32 = if is_width { 8 } else { 16 };
-
         match spec {
             None | Some(ImageDimension::Auto) => {
                 // image_pixels / cell_pixels, rounded up, clamped to term size.
@@ -1965,7 +2041,19 @@ impl TerminalHandler {
     }
 
     /// Handle resize
-    pub fn handle_resize(&mut self, width: usize, height: usize) {
+    pub fn handle_resize(
+        &mut self,
+        width: usize,
+        height: usize,
+        cell_pixel_width: u32,
+        cell_pixel_height: u32,
+    ) {
+        if cell_pixel_width > 0 {
+            self.cell_pixel_width = cell_pixel_width;
+        }
+        if cell_pixel_height > 0 {
+            self.cell_pixel_height = cell_pixel_height;
+        }
         // scroll_offset lives in `ViewState` (Task 4). Pass 0 temporarily;
         // correct wiring happens in Task 7/8.
         let _new_offset = self.buffer.set_size(width, height, 0);
@@ -4621,81 +4709,65 @@ mod tests {
     #[test]
     fn resolve_auto_uses_image_pixels() {
         // 160px wide image, 8px per cell → 20 cells
-        let result = TerminalHandler::resolve_image_dimension(None, 160, 80, true);
+        let result = TerminalHandler::resolve_image_dimension(None, 160, 80, 8);
         assert_eq!(result, 20);
     }
 
     #[test]
     fn resolve_auto_explicit() {
         let result =
-            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Auto), 160, 80, true);
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Auto), 160, 80, 8);
         assert_eq!(result, 20);
     }
 
     #[test]
     fn resolve_auto_height() {
         // 320px tall image, 16px per cell → 20 rows
-        let result = TerminalHandler::resolve_image_dimension(None, 320, 24, false);
+        let result = TerminalHandler::resolve_image_dimension(None, 320, 24, 16);
         assert_eq!(result, 20);
     }
 
     #[test]
     fn resolve_auto_clamps_to_term_size() {
         // 10000px wide, 8px/cell = 1250 cells, but term is only 80
-        let result = TerminalHandler::resolve_image_dimension(None, 10000, 80, true);
+        let result = TerminalHandler::resolve_image_dimension(None, 10000, 80, 8);
         assert_eq!(result, 80);
     }
 
     #[test]
     fn resolve_auto_minimum_is_1() {
         // 0px image → would be 0 cells, but minimum is 1
-        let result = TerminalHandler::resolve_image_dimension(None, 0, 80, true);
+        let result = TerminalHandler::resolve_image_dimension(None, 0, 80, 8);
         assert_eq!(result, 1);
     }
 
     #[test]
     fn resolve_cells_direct() {
-        let result = TerminalHandler::resolve_image_dimension(
-            Some(&ImageDimension::Cells(10)),
-            999,
-            80,
-            true,
-        );
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Cells(10)), 999, 80, 8);
         assert_eq!(result, 10);
     }
 
     #[test]
     fn resolve_cells_clamped_to_term() {
-        let result = TerminalHandler::resolve_image_dimension(
-            Some(&ImageDimension::Cells(200)),
-            999,
-            80,
-            true,
-        );
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Cells(200)), 999, 80, 8);
         assert_eq!(result, 80);
     }
 
     #[test]
     fn resolve_pixels() {
         // 80px wide, 8px/cell → 10 cells
-        let result = TerminalHandler::resolve_image_dimension(
-            Some(&ImageDimension::Pixels(80)),
-            999,
-            80,
-            true,
-        );
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Pixels(80)), 999, 80, 8);
         assert_eq!(result, 10);
     }
 
     #[test]
     fn resolve_pixels_rounds_up() {
         // 81px wide, 8px/cell → ceil(81/8) = 11 cells
-        let result = TerminalHandler::resolve_image_dimension(
-            Some(&ImageDimension::Pixels(81)),
-            999,
-            80,
-            true,
-        );
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Pixels(81)), 999, 80, 8);
         assert_eq!(result, 11);
     }
 
@@ -4706,7 +4778,7 @@ mod tests {
             Some(&ImageDimension::Percent(50)),
             999,
             80,
-            true,
+            8,
         );
         assert_eq!(result, 40);
     }
@@ -4717,7 +4789,7 @@ mod tests {
             Some(&ImageDimension::Percent(100)),
             999,
             80,
-            true,
+            8,
         );
         assert_eq!(result, 80);
     }
@@ -6060,6 +6132,265 @@ mod tests {
         assert_eq!(
             cursor.pos.x, 11,
             "Cursor should be at column 11 after 'Hello World'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sixel integration tests
+    // -----------------------------------------------------------------------
+
+    /// Build a DCS Sixel payload with `P` prefix and `ESC \` suffix.
+    /// `params` is the "P1;P2;P3" part (may be empty), `sixel_body` is
+    /// everything after the `q` introducer.
+    fn build_sixel_dcs(params: &[u8], sixel_body: &[u8]) -> Vec<u8> {
+        // Format: P <params> q <sixel_body> ESC '\'
+        let mut v = vec![b'P'];
+        v.extend_from_slice(params);
+        v.push(b'q');
+        v.extend_from_slice(sixel_body);
+        v.extend_from_slice(b"\x1b\\");
+        v
+    }
+
+    #[test]
+    fn sixel_simple_red_pixel_places_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Define color 1 as red (RGB 100,0,0) and paint one sixel column.
+        // '#1;2;100;0;0' defines color 1, '#1' selects it, '~' = 0x7E = 0b111111
+        // encodes 6 pixels all set (1 column x 6 rows of red).
+        let sixel_body = b"#1;2;100;0;0#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Sixel DCS should place image cells in the buffer"
+        );
+    }
+
+    #[test]
+    fn sixel_image_stored_in_image_store() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let initial_len = handler.buffer().image_store().len();
+
+        let sixel_body = b"#1;2;100;0;0#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(
+            handler.buffer().image_store().len(),
+            initial_len + 1,
+            "Image store should contain one more image after Sixel"
+        );
+    }
+
+    #[test]
+    fn sixel_empty_body_no_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Just the `q` introducer with no sixel data at all → zero-dimension image.
+        let dcs = build_sixel_dcs(b"", b"");
+        handler.handle_device_control_string(&dcs);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Empty Sixel body should not produce image cells"
+        );
+    }
+
+    #[test]
+    fn sixel_with_repeat_expands_width() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Color 0 = red, then repeat '~' 16 times → 16 columns, 6 rows.
+        // At 8 px/col that is 2 cells wide; at 16 px/row that is 1 cell tall.
+        let sixel_body = b"#0;2;100;0;0#0!16~";
+        let dcs = build_sixel_dcs(b"", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Sixel with repeat operator should place image cells"
+        );
+
+        // The image should be 16 px wide, 6 px tall.
+        // Find it via the image store iterator (there should be exactly one).
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(img.width_px, 16, "Image width should be 16 pixels");
+        assert_eq!(img.height_px, 6, "Image height should be 6 pixels");
+    }
+
+    #[test]
+    fn sixel_multicolor_two_bands() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Define red and blue. Paint one column of red, newline, one column of blue.
+        // Total: 1 px wide, 12 px tall (2 bands of 6).
+        let sixel_body = b"#1;2;100;0;0#2;2;0;0;100#1~-#2~";
+        let dcs = build_sixel_dcs(b"", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(img.width_px, 1, "Image width should be 1 pixel");
+        assert_eq!(
+            img.height_px, 12,
+            "Image height should be 12 pixels (2 bands)"
+        );
+    }
+
+    #[test]
+    fn sixel_with_raster_attributes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Raster attributes: "1;1;8;12" = aspect 1:1, declared 8 wide x 12 tall.
+        // Then paint 2 bands of 8 columns each.
+        let sixel_body = b"\"1;1;8;12#1;2;0;100;0#1!8~-#1!8~";
+        let dcs = build_sixel_dcs(b"", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(img.width_px, 8, "Raster-declared width should be 8 pixels");
+        assert_eq!(
+            img.height_px, 12,
+            "Raster-declared height should be 12 pixels"
+        );
+    }
+
+    #[test]
+    fn sixel_transparent_background() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // P2=1 means transparent background.
+        // Paint only the top pixel of a single column (bit 0 set = '?' + 1 = '@').
+        // The remaining 5 pixels in the column should be transparent (alpha=0).
+        let sixel_body = b"#1;2;100;0;0#1@";
+        let dcs = build_sixel_dcs(b"0;1;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+
+        // 1 pixel wide, 6 pixels tall → 6 * 4 = 24 bytes RGBA.
+        assert_eq!(img.pixels.len(), 24);
+
+        // First pixel (row 0): red, fully opaque — '@' = 0x40 - 0x3F = 1 = bit 0 set.
+        assert_eq!(img.pixels[0], 255, "R channel of top pixel");
+        assert_eq!(img.pixels[1], 0, "G channel of top pixel");
+        assert_eq!(img.pixels[2], 0, "B channel of top pixel");
+        assert_eq!(img.pixels[3], 255, "A channel of top pixel (opaque)");
+
+        // Second pixel (row 1): transparent — bit 1 not set.
+        assert_eq!(img.pixels[7], 0, "A channel of second pixel (transparent)");
+    }
+
+    #[test]
+    fn sixel_carriage_return_overlays_same_band() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Paint red in column 0, then CR ('$'), then paint blue in column 0.
+        // Blue should overwrite red in the overlapping pixels.
+        // '~' = all 6 bits set.
+        let sixel_body = b"#1;2;100;0;0#1~$#2;2;0;0;100#2~";
+        let dcs = build_sixel_dcs(b"0;1;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+
+        // Column 0, all 6 pixels should be blue (last writer wins).
+        // First pixel: RGBA at offset 0..4.
+        assert_eq!(img.pixels[0], 0, "R of overwritten pixel");
+        assert_eq!(img.pixels[1], 0, "G of overwritten pixel");
+        assert_eq!(img.pixels[2], 255, "B of overwritten pixel");
+        assert_eq!(
+            img.pixels[3], 255,
+            "A of overwritten pixel (opaque, set by blue)"
+        );
+    }
+
+    #[test]
+    fn is_sixel_sequence_detection() {
+        // Valid sixel sequences.
+        assert!(
+            TerminalHandler::is_sixel_sequence(b"q~"),
+            "bare 'q' + data is sixel"
+        );
+        assert!(
+            TerminalHandler::is_sixel_sequence(b"0;0;0q~"),
+            "params before q is sixel"
+        );
+        assert!(
+            TerminalHandler::is_sixel_sequence(b"0q"),
+            "single param before q is sixel"
+        );
+
+        // Not sixel.
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"$qm"),
+            "DECRQSS ($q) is not sixel"
+        );
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"+qHEX"),
+            "XTGETTCAP (+q) is not sixel"
+        );
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"no_q_here"),
+            "no q at all is not sixel"
+        );
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"abcq~"),
+            "letters before q is not sixel"
         );
     }
 }

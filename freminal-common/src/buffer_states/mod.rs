@@ -15,6 +15,7 @@ pub mod line_wrap;
 pub mod mode;
 pub mod modes;
 pub mod osc;
+pub mod sixel;
 pub mod tchar;
 pub mod terminal_output;
 pub mod terminal_sections;

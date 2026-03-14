@@ -505,7 +505,13 @@ impl TerminalEmulator {
         font_pixel_height: usize,
     ) -> Result<()> {
         let (old_width, old_height) = self.internal.get_win_size();
-        self.internal.set_win_size(width_chars, height_chars);
+        #[allow(clippy::cast_possible_truncation)]
+        self.internal.set_win_size(
+            width_chars,
+            height_chars,
+            font_pixel_width as u32,
+            font_pixel_height as u32,
+        );
 
         if old_width != width_chars || old_height != height_chars {
             self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
@@ -537,7 +543,13 @@ impl TerminalEmulator {
         font_pixel_width: usize,
         font_pixel_height: usize,
     ) {
-        self.internal.set_win_size(width_chars, height_chars);
+        #[allow(clippy::cast_possible_truncation)]
+        self.internal.set_win_size(
+            width_chars,
+            height_chars,
+            font_pixel_width as u32,
+            font_pixel_height as u32,
+        );
 
         if let Err(e) = self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
             width: width_chars,

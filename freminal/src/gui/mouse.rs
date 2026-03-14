@@ -291,32 +291,39 @@ fn encode_x11_mouse_wheel(
     pos: &FreminalMousePosition,
     encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
-    let padding = if encoding == &MouseEncoding::X11 {
-        32
-    } else {
-        0
-    };
-
-    let mut cb = padding;
-
-    cb += encode_mouse_for_x11(&MouseEvent::Scroll(delta), true);
-    if cb == 32 {
+    // Guard: ignore zero-delta events before encoding.  This must be checked
+    // against the raw delta, not against the encoded `cb` value, because the
+    // zero-delta check `cb == 32` only works for X11 encoding (where the
+    // padding of 32 has already been added).  For SGR encoding (padding = 0),
+    // a zero-delta scroll would produce `cb = 0`, which is a valid left-button
+    // press in SGR format — silently emitting phantom clicks in yazi and
+    // similar apps that enable SGR mouse mode.
+    if delta.y == 0.0 && delta.x == 0.0 {
         return None;
     }
-    cb += encode_modifiers_for_x11(modifiers);
+
+    let button_code = encode_mouse_for_x11(&MouseEvent::Scroll(delta), true);
+    let modifiers_code = encode_modifiers_for_x11(modifiers);
 
     // Both X11 and SGR protocols use 1-based coordinates.
     // X11 additionally adds 32 as a "padding" offset to make the byte printable.
-    let x = pos.x_as_character_column + 1 + padding;
-    let y = pos.y_as_character_row + 1 + padding;
-    let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
-
     if encoding == &MouseEncoding::X11 {
+        let padding: usize = 32;
+        let cb = padding + button_code + modifiers_code;
+        let x = pos.x_as_character_column + 1 + padding;
+        let y = pos.y_as_character_row + 1 + padding;
+        let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
         Some(raw_ascii_bytes_to_terminal_input(&[
             b'\x1b', b'[', b'M', cb, x, y,
         ]))
     } else {
-        Some(collect_text(&format!("\x1b[<{cb};{x};{y}M",)))
+        // SGR encoding: coordinates are decimal text — do NOT truncate to u8.
+        // Terminals wider or taller than 255 columns/rows would produce wrong
+        // output if we truncated before formatting.
+        let cb = button_code + modifiers_code;
+        let x = pos.x_as_character_column + 1;
+        let y = pos.y_as_character_row + 1;
+        Some(collect_text(&format!("\x1b[<{cb};{x};{y}M")))
     }
 }
 
@@ -349,15 +356,149 @@ fn encode_x11_mouse_button(
 
     // Both X11 and SGR protocols use 1-based coordinates.
     // X11 additionally adds 32 as a "padding" offset to make the byte printable.
-    let x = pos.x_as_character_column + 1 + padding;
-    let y = pos.y_as_character_row + 1 + padding;
-    let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
     if encoding == &MouseEncoding::X11 {
+        // X11 binary encoding: add the printability padding (32) and encode as bytes.
+        let x = pos.x_as_character_column + 1 + padding;
+        let y = pos.y_as_character_row + 1 + padding;
+        let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
         raw_ascii_bytes_to_terminal_input(&[b'\x1b', b'[', b'M', cb, x, y])
     } else {
+        // SGR text encoding: coordinates are decimal — do NOT truncate to u8.
+        // Terminals wider or taller than 255 columns/rows would produce wrong
+        // output if we truncated before formatting.
+        let x = pos.x_as_character_column + 1;
+        let y = pos.y_as_character_row + 1;
         collect_text(&format!(
             "\x1b[<{cb};{x};{y}{}",
             if pressed { "M" } else { "m" }
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use eframe::egui::Vec2;
+
+    // Helper: extract the raw bytes from a Cow<[TerminalInput]> for comparison.
+    fn inputs_to_bytes(inputs: &[TerminalInput]) -> Vec<u8> {
+        inputs
+            .iter()
+            .map(|i| match i {
+                TerminalInput::Ascii(b) => *b,
+                other => panic!("unexpected TerminalInput variant: {other:?}"),
+            })
+            .collect()
+    }
+
+    // ---- Bug #1 regression (atomicity) -----------------------------------
+    // Verify that mouse escape sequences are encoded as a single contiguous
+    // Cow<[TerminalInput]> slice, not split across separate elements.
+    // The PTY consumer sends the whole slice as one InputEvent::Key, so all
+    // bytes must be present in one shot.
+
+    #[test]
+    fn sgr_button_press_is_single_contiguous_sequence() {
+        let pos = FreminalMousePosition::new(4, 2, 0.0, 0.0); // col=4, row=2
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
+        let result = handle_pointer_button(PointerButton::Primary, &state, &MouseTrack::XtMseSgr)
+            .expect("SGR button press should produce output");
+
+        // The whole sequence must arrive as a single Cow slice.
+        let bytes = inputs_to_bytes(result.as_ref());
+        // Expected: ESC [ < 0 ; 5 ; 3 M  (1-based, col+1=5, row+1=3)
+        let expected = b"\x1b[<0;5;3M";
+        assert_eq!(
+            bytes, expected,
+            "SGR button press sequence fragmented or wrong: got {bytes:?}"
+        );
+    }
+
+    // ---- Bug #2 fix (SGR coordinates not truncated to u8) -----------------
+
+    #[test]
+    fn sgr_button_press_wide_terminal_column_not_truncated() {
+        // Column 300 would wrap to 44 if truncated to u8 (300 % 256 = 44).
+        // With the fix, the decimal SGR string must contain "301" (1-based).
+        let pos = FreminalMousePosition::new(300, 10, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
+        let result = handle_pointer_button(PointerButton::Primary, &state, &MouseTrack::XtMseSgr)
+            .expect("wide-terminal SGR button press should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        assert!(
+            s.contains(";301;"),
+            "SGR sequence should contain ';301;' for column 300, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn sgr_scroll_wide_terminal_row_not_truncated() {
+        // Row 260 would wrap to 4 if truncated to u8 (260 % 256 = 4).
+        // With the fix, the decimal SGR string must contain "261" (1-based).
+        let pos = FreminalMousePosition::new(5, 260, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0), // scroll up
+            &state,
+            &MouseTrack::XtMseSgr,
+        )
+        .expect("wide-terminal SGR scroll should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        assert!(
+            s.ends_with(";261M"),
+            "SGR scroll sequence should end with ';261M' for row 260, got: {s:?}"
+        );
+    }
+
+    // ---- Bug #3 fix (zero-delta scroll guard) -----------------------------
+
+    #[test]
+    fn zero_delta_scroll_returns_none_for_sgr() {
+        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        // A zero-delta scroll event must produce None, not a phantom click.
+        let result = handle_pointer_scroll(Vec2::ZERO, &state, &MouseTrack::XtMseSgr);
+        assert!(
+            result.is_none(),
+            "zero-delta SGR scroll should return None to avoid phantom clicks, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn zero_delta_scroll_returns_none_for_x11() {
+        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::ZERO, &state, &MouseTrack::XtMseX11);
+        assert!(
+            result.is_none(),
+            "zero-delta X11 scroll should return None, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn nonzero_delta_scroll_produces_output_for_sgr() {
+        let pos = FreminalMousePosition::new(5, 5, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        // Scroll up (positive y delta) must produce a real mouse report.
+        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::XtMseSgr);
+        assert!(
+            result.is_some(),
+            "non-zero SGR scroll should produce output"
+        );
+        let bytes = inputs_to_bytes(result.unwrap().as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // Button code 64 for scroll-up, 1-based coords (5+1=6, 5+1=6)
+        assert_eq!(s, "\x1b[<64;6;6M", "SGR scroll-up sequence wrong: {s:?}");
     }
 }

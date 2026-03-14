@@ -323,7 +323,7 @@ fn test_resize_handling() {
     handler.handle_data(&text_to_bytes("Before resize"));
 
     // Resize terminal
-    handler.handle_resize(120, 30);
+    handler.handle_resize(120, 30, 8, 16);
 
     handler.handle_data(&text_to_bytes(" After resize"));
 

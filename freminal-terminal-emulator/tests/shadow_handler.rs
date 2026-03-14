@@ -104,7 +104,7 @@ fn shadow_handler_handles_resize() {
     state.handle_incoming_data(b"before resize\r\n");
 
     // Resize the terminal — both old buffer and shadow handler must resize.
-    state.set_win_size(100, 30);
+    state.set_win_size(100, 30, 8, 16);
 
     state.handle_incoming_data(b"after resize\r\n");
 
