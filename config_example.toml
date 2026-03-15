@@ -91,3 +91,43 @@ name = "catppuccin-mocha"
 # Maximum number of scrollback lines to keep in the buffer.
 # Must be between 1 and 100000.
 limit = 4000
+
+################################################################################
+# NIX / HOME-MANAGER USAGE
+################################################################################
+# If you use Nix with home-manager, Freminal can generate this config file
+# declaratively. Add the flake and enable the module:
+#
+#   # flake.nix
+#   {
+#     inputs.freminal.url = "github:FredSystems/freminal";
+#
+#     outputs = { nixpkgs, freminal, ... }: {
+#       # Option A: use the overlay so pkgs.freminal is available everywhere
+#       nixpkgs.overlays = [ freminal.overlays.default ];
+#
+#       # Option B: import the home-manager module directly
+#       homeConfigurations."user" = home-manager.lib.homeManagerConfiguration {
+#         modules = [
+#           freminal.homeManagerModules.default
+#           {
+#             programs.freminal = {
+#               enable = true;
+#               settings = {
+#                 font.family = "JetBrainsMono Nerd Font";
+#                 font.size = 14.0;
+#                 cursor.shape = "bar";
+#                 cursor.blink = false;
+#                 theme.name = "catppuccin-mocha";
+#                 scrollback.limit = 10000;
+#                 shell.path = "/run/current-system/sw/bin/zsh";
+#               };
+#             };
+#           }
+#         ];
+#       };
+#     };
+#   }
+#
+# This generates ~/.config/freminal/config.toml automatically.
+# Null/unset values are omitted; Freminal uses built-in defaults for them.

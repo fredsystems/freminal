@@ -28,7 +28,7 @@ and plan document maintenance rules.
 | 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`             | Complete    | None         |
 | 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`              | Complete    | None         |
 | 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`          | Complete    | Task 2       |
-| 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md`        | Not Started | Task 2       |
+| 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md`        | Complete    | Task 2       |
 | 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`          | Complete    | Task 1       |
 | 6   | Test Gap Coverage         | `PLAN_06_TEST_GAPS.md`               | Not Started | None         |
 | 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md`        | Complete    | None         |
@@ -217,7 +217,7 @@ Update this section as tasks complete:
 | 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas              |
 | 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config               |
 | 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal              |
-| 4    | —          | —          | Unblocked (Task 2 complete)                   |
+| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4          |
 | 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4 |
 | 6    | —          | —          |                                               |
 | 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                      |
