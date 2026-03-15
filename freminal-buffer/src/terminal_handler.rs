@@ -10,6 +10,10 @@ use freminal_common::{
         fonts::{FontDecorations, FontWeight},
         format_tag::FormatTag,
         ftcs::{FtcsMarker, FtcsState},
+        kitty_graphics::{
+            KittyAction, KittyControlData, KittyGraphicsCommand, KittyParseError,
+            format_kitty_response, parse_kitty_graphics,
+        },
         line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode},
         modes::ReportMode,
@@ -21,21 +25,77 @@ use freminal_common::{
         modes::lnm::Lnm,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
-        osc::{AnsiOscInternalType, AnsiOscType, UrlResponse},
+        osc::{
+            AnsiOscInternalType, AnsiOscType, ITerm2InlineImageData, ImageDimension, UrlResponse,
+        },
         tchar::TChar,
         terminal_output::TerminalOutput,
         terminal_sections::TerminalSections,
+        unicode_placeholder::{
+            VirtualPlacement, color_to_image_id, color_to_placement_id, is_placeholder,
+            parse_placeholder_diacritics,
+        },
         url::Url,
         window_manipulation::WindowManipulation,
     },
-    colors::{ColorPalette, TerminalColor},
+    colors::{ColorPalette, TerminalColor, parse_color_spec},
     cursor::CursorVisualStyle,
     pty_write::{FreminalTerminalSize, PtyWrite},
     sgr::SelectGraphicRendition,
+    themes::ThemePalette,
 };
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::buffer::Buffer;
+use crate::image_store::{ImagePlacement, InlineImage, next_image_id};
+
+/// In-progress state for an iTerm2 multipart file transfer.
+///
+/// Accumulates metadata from `MultipartFile=` and decoded byte chunks from `FilePart=`
+/// until `FileEnd` signals completion.
+#[derive(Debug)]
+struct MultipartImageState {
+    /// Metadata parsed from the `MultipartFile=` begin sequence.
+    metadata: ITerm2InlineImageData,
+    /// Accumulated decoded bytes from all `FilePart=` chunks so far.
+    accumulated_data: Vec<u8>,
+}
+
+/// In-progress state for a Kitty graphics chunked transfer.
+///
+/// Accumulates control data from the first chunk and decoded payload bytes from
+/// subsequent `m=1` chunks until a `m=0` final chunk arrives.
+#[derive(Debug)]
+struct KittyImageState {
+    /// Control data from the first chunk of the transfer.
+    control: KittyControlData,
+    /// Accumulated decoded payload bytes from all chunks so far.
+    accumulated_data: Vec<u8>,
+}
+
+/// Tracked state for diacritic inheritance between consecutive placeholder cells.
+///
+/// When a U+10EEEE placeholder character omits some or all diacritics, the
+/// missing values are inherited from the previous placeholder cell if the
+/// foreground and underline colors match.
+#[derive(Debug, Clone)]
+struct PrevPlaceholder {
+    /// Image ID extracted from the foreground color.
+    image_id: u32,
+    /// Placement ID extracted from the underline color.
+    placement_id: u32,
+    /// Row index within the image.
+    row: u16,
+    /// Column index within the image.
+    col: u16,
+    /// MSB of the image ID (from 3rd diacritic).
+    id_msb: u16,
+    /// The foreground color used for comparison.
+    fg_color: TerminalColor,
+    /// The underline color used for comparison.
+    underline_color: TerminalColor,
+}
 
 /// High-level handler that processes terminal output commands and applies them to a buffer.
 ///
@@ -77,6 +137,51 @@ pub struct TerminalHandler {
     /// (80-column reset) restores the actual GUI window width rather than
     /// hardcoding 80.  `None` means DECCOLM has not changed the width.
     pre_deccolm_width: Option<usize>,
+    /// Active color theme for default palette lookups.
+    theme: &'static ThemePalette,
+    /// Dynamic foreground color override (set via OSC 10; reset via OSC 110).
+    ///
+    /// When `Some`, responses to OSC 10 queries use this value instead of the
+    /// theme's `foreground` field.
+    fg_color_override: Option<(u8, u8, u8)>,
+    /// Dynamic background color override (set via OSC 11; reset via OSC 111).
+    ///
+    /// When `Some`, responses to OSC 11 queries use this value instead of the
+    /// theme's `background` field.
+    bg_color_override: Option<(u8, u8, u8)>,
+    /// In-progress iTerm2 multipart file transfer, if any.
+    ///
+    /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
+    /// and cleared by `ITerm2FileEnd`.
+    multipart_state: Option<MultipartImageState>,
+    /// In-progress Kitty graphics chunked transfer, if any.
+    ///
+    /// Set by a Kitty graphics command with `m=1`, appended by subsequent
+    /// `m=1` chunks, consumed and cleared by a final `m=0` chunk.
+    kitty_state: Option<KittyImageState>,
+    /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands.
+    ///
+    /// Keyed by `(image_id, placement_id)`.  When U+10EEEE placeholder characters
+    /// appear in the text stream, these are looked up to determine image tile
+    /// dimensions.
+    virtual_placements: HashMap<(u64, u32), VirtualPlacement>,
+    /// State of the most recent placeholder cell, for diacritic inheritance.
+    ///
+    /// Reset to `None` on any non-placeholder text insertion, newline, or
+    /// cursor movement.
+    prev_placeholder: Option<PrevPlaceholder>,
+    /// Width of a single terminal cell in pixels (updated on resize).
+    ///
+    /// Used by image handlers (iTerm2, Kitty, Sixel) to convert pixel
+    /// dimensions to cell counts.  Defaults to 8 until the first resize
+    /// event provides real font metrics.
+    cell_pixel_width: u32,
+    /// Height of a single terminal cell in pixels (updated on resize).
+    ///
+    /// Used by image handlers (iTerm2, Kitty, Sixel) to convert pixel
+    /// dimensions to cell counts.  Defaults to 16 until the first resize
+    /// event provides real font metrics.
+    cell_pixel_height: u32,
 }
 
 impl TerminalHandler {
@@ -98,6 +203,15 @@ impl TerminalHandler {
             palette: ColorPalette::default(),
             allow_column_mode_switch: true,
             pre_deccolm_width: None,
+            theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            fg_color_override: None,
+            bg_color_override: None,
+            multipart_state: None,
+            kitty_state: None,
+            virtual_placements: HashMap::new(),
+            prev_placeholder: None,
+            cell_pixel_width: 8,
+            cell_pixel_height: 16,
         }
     }
 
@@ -107,6 +221,17 @@ impl TerminalHandler {
     pub fn with_scrollback_limit(mut self, limit: usize) -> Self {
         self.buffer = self.buffer.with_scrollback_limit(limit);
         self
+    }
+
+    /// Get the active theme palette.
+    #[must_use]
+    pub const fn theme(&self) -> &'static ThemePalette {
+        self.theme
+    }
+
+    /// Set the active theme palette.
+    pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
+        self.theme = theme;
     }
 
     /// Full terminal reset (RIS — Reset to Initial State).
@@ -136,7 +261,11 @@ impl TerminalHandler {
         self.ftcs_state = FtcsState::default();
         self.last_exit_code = None;
         self.palette.reset_all();
+        self.fg_color_override = None;
+        self.bg_color_override = None;
         self.allow_column_mode_switch = true;
+        self.virtual_placements.clear();
+        self.prev_placeholder = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -165,18 +294,212 @@ impl TerminalHandler {
     /// Handle raw data bytes - convert to `TChar` and insert.
     /// When DEC Special Graphics mode is active, bytes 0x5F–0x7E are remapped
     /// to their Unicode box-drawing equivalents before conversion.
+    ///
+    /// If any grapheme cluster begins with U+10EEEE (the Kitty Unicode
+    /// placeholder character), it is intercepted and converted into an image
+    /// cell referencing the appropriate virtual placement.
     pub fn handle_data(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
         }
 
         let remapped: Cow<[u8]> = apply_dec_special(data, &self.character_replace);
-        if let Ok(text) = TChar::from_vec(&remapped) {
-            // Track the last graphic character for REP (CSI b)
+        let Ok(text) = TChar::from_vec(&remapped) else {
+            return;
+        };
+
+        // Fast path: if no virtual placements exist, no placeholder can resolve.
+        if self.virtual_placements.is_empty() {
             if let Some(last) = text.last() {
                 self.last_graphic_char = Some(last.clone());
             }
+            self.prev_placeholder = None;
             self.buffer.insert_text(&text);
+            return;
+        }
+
+        self.handle_data_with_placeholders(&text);
+    }
+
+    /// Slow path for `handle_data` when virtual placements exist.
+    ///
+    /// Scans the parsed `TChar` sequence for U+10EEEE placeholder graphemes,
+    /// batching normal text for bulk insertion and converting placeholders
+    /// into image cells individually.
+    fn handle_data_with_placeholders(&mut self, text: &[TChar]) {
+        let mut batch_start: usize = 0;
+
+        for (i, tch) in text.iter().enumerate() {
+            let is_ph = matches!(tch, TChar::Utf8(b) if is_placeholder(b));
+
+            if is_ph {
+                // Flush any pending normal text batch.
+                if batch_start < i {
+                    let batch = &text[batch_start..i];
+                    if let Some(last) = batch.last() {
+                        self.last_graphic_char = Some(last.clone());
+                    }
+                    self.prev_placeholder = None;
+                    self.buffer.insert_text(batch);
+                }
+                batch_start = i + 1;
+
+                // Process the placeholder character.
+                if let TChar::Utf8(bytes) = tch {
+                    self.handle_placeholder_char(bytes);
+                }
+            }
+        }
+
+        // Flush remaining normal text.
+        if batch_start < text.len() {
+            let batch = &text[batch_start..];
+            if let Some(last) = batch.last() {
+                self.last_graphic_char = Some(last.clone());
+            }
+            self.prev_placeholder = None;
+            self.buffer.insert_text(batch);
+        }
+    }
+
+    /// Process a single U+10EEEE placeholder character and insert an image cell.
+    ///
+    /// Extracts the image ID from the current foreground color, the placement
+    /// ID from the underline color, and row/col indices from combining
+    /// diacritics.  Applies the Kitty diacritic inheritance rules when
+    /// diacritics are omitted.
+    fn handle_placeholder_char(&mut self, bytes: &[u8]) {
+        let Some(diacritics) = parse_placeholder_diacritics(bytes) else {
+            return;
+        };
+
+        let fg = self.current_format.colors.color;
+        let ul = self.current_format.colors.underline_color;
+        let image_id_24 = color_to_image_id(&fg);
+        let placement_id = color_to_placement_id(&ul);
+
+        // Apply diacritic inheritance rules from the Kitty spec.
+        let (row, col, id_msb) =
+            self.resolve_placeholder_diacritics(diacritics, image_id_24, placement_id, fg, ul);
+
+        // Combine image ID with MSB from the 3rd diacritic.
+        let full_image_id = u64::from(image_id_24) | (u64::from(id_msb) << 24);
+
+        // Look up a matching virtual placement.
+        let vp = self
+            .virtual_placements
+            .get(&(full_image_id, placement_id))
+            .or_else(|| {
+                // Fall back to placement_id=0 (any virtual placement for this image).
+                if placement_id != 0 {
+                    self.virtual_placements.get(&(full_image_id, 0))
+                } else {
+                    None
+                }
+            });
+
+        let Some(_vp) = vp else {
+            tracing::debug!(
+                "Kitty placeholder: no virtual placement for image_id={full_image_id}, \
+                 placement_id={placement_id}; inserting space"
+            );
+            // No matching virtual placement — insert a space and move on.
+            self.buffer.insert_text(&[TChar::Space]);
+            self.prev_placeholder = None;
+            return;
+        };
+
+        // Insert an image cell at the current cursor position.
+        let placement = ImagePlacement {
+            image_id: full_image_id,
+            col_in_image: usize::from(col),
+            row_in_image: usize::from(row),
+        };
+
+        let cursor_pos = self.buffer.get_cursor().pos;
+        let row_idx = cursor_pos.y;
+        let col_idx = cursor_pos.x;
+
+        // Ensure the row exists.
+        while row_idx >= self.buffer.get_rows().len() {
+            self.buffer.handle_lf();
+        }
+
+        self.buffer
+            .set_image_cell_at(row_idx, col_idx, placement, self.current_format.clone());
+
+        // Advance cursor by one column (placeholder occupies one cell).
+        self.buffer.advance_cursor_one();
+
+        // Update the inheritance tracker.
+        self.prev_placeholder = Some(PrevPlaceholder {
+            image_id: image_id_24,
+            placement_id,
+            row,
+            col,
+            id_msb,
+            fg_color: fg,
+            underline_color: ul,
+        });
+    }
+
+    /// Resolve diacritics for a placeholder, applying inheritance from the
+    /// previous placeholder cell when diacritics are omitted.
+    ///
+    /// Returns `(row, col, id_msb)` after applying the Kitty spec rules:
+    ///
+    /// 1. No diacritics + same fg/underline as previous → inherit row, col+1, msb
+    /// 2. Only row diacritic + same row/fg/underline as previous → inherit col+1, msb
+    /// 3. Row+col diacritics + previous has same row, fg, underline and col=current-1 → inherit msb
+    fn resolve_placeholder_diacritics(
+        &self,
+        diacritics: freminal_common::buffer_states::unicode_placeholder::PlaceholderDiacritics,
+        image_id: u32,
+        placement_id: u32,
+        fg: TerminalColor,
+        ul: TerminalColor,
+    ) -> (u16, u16, u16) {
+        let prev = match &self.prev_placeholder {
+            Some(p)
+                if p.image_id == image_id
+                    && p.placement_id == placement_id
+                    && p.fg_color == fg
+                    && p.underline_color == ul =>
+            {
+                Some(p)
+            }
+            _ => None,
+        };
+
+        match diacritics.diacritic_count {
+            0 => {
+                // Rule 1: inherit everything, col increments by 1.
+                prev.map_or((0, 0, 0), |p| (p.row, p.col.saturating_add(1), p.id_msb))
+            }
+            1 => {
+                // Rule 2: row is explicit; if same row as prev, col = prev.col+1.
+                prev.map_or((diacritics.row, 0, 0), |p| {
+                    if p.row == diacritics.row {
+                        (diacritics.row, p.col.saturating_add(1), p.id_msb)
+                    } else {
+                        (diacritics.row, 0, p.id_msb)
+                    }
+                })
+            }
+            2 => {
+                // Rule 3: row+col explicit; inherit msb if prev matches.
+                prev.map_or((diacritics.row, diacritics.col, 0), |p| {
+                    if p.row == diacritics.row && p.col.saturating_add(1) == diacritics.col {
+                        (diacritics.row, diacritics.col, p.id_msb)
+                    } else {
+                        (diacritics.row, diacritics.col, 0)
+                    }
+                })
+            }
+            _ => {
+                // All three diacritics present — no inheritance needed.
+                (diacritics.row, diacritics.col, diacritics.id_msb)
+            }
         }
     }
 
@@ -342,13 +665,19 @@ impl TerminalHandler {
         // Resolve PaletteIndex colors against the mutable palette before applying.
         let resolved = match sgr {
             SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Foreground(self.palette.lookup(usize::from(*idx)))
+                SelectGraphicRendition::Foreground(
+                    self.palette.lookup(usize::from(*idx), self.theme),
+                )
             }
             SelectGraphicRendition::Background(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Background(self.palette.lookup(usize::from(*idx)))
+                SelectGraphicRendition::Background(
+                    self.palette.lookup(usize::from(*idx), self.theme),
+                )
             }
             SelectGraphicRendition::UnderlineColor(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::UnderlineColor(self.palette.lookup(usize::from(*idx)))
+                SelectGraphicRendition::UnderlineColor(
+                    self.palette.lookup(usize::from(*idx), self.theme),
+                )
             }
             _ => *sgr,
         };
@@ -523,6 +852,8 @@ impl TerminalHandler {
             self.handle_decrqss(pt);
         } else if let Some(hex_payload) = inner.strip_prefix(b"+q") {
             self.handle_xtgettcap(hex_payload);
+        } else if Self::is_sixel_sequence(inner) {
+            self.handle_sixel(inner);
         } else {
             tracing::debug!(
                 "DCS sub-command not recognized (ignored): {}",
@@ -540,6 +871,65 @@ impl TerminalHandler {
             dcs.len()
         };
         if start <= end { &dcs[start..end] } else { &[] }
+    }
+
+    /// Check whether a DCS inner payload is a Sixel sequence.
+    ///
+    /// The format is `<optional digits and semicolons>q<sixel data>`.
+    /// This returns `true` when the data up to the first `q` consists only
+    /// of digits and semicolons (the P1;P2;P3 parameters).
+    fn is_sixel_sequence(inner: &[u8]) -> bool {
+        let Some(q_pos) = inner.iter().position(|&b| b == b'q') else {
+            return false;
+        };
+        // Everything before `q` must be digits or semicolons (DCS params).
+        inner[..q_pos]
+            .iter()
+            .all(|&b| b.is_ascii_digit() || b == b';')
+    }
+
+    /// Handle a Sixel graphics DCS sequence.
+    ///
+    /// `inner` is the stripped DCS payload: `<P1;P2;P3>q<sixel-data>`.
+    fn handle_sixel(&mut self, inner: &[u8]) {
+        use freminal_common::buffer_states::sixel::parse_sixel;
+
+        let Some(sixel_image) = parse_sixel(inner) else {
+            tracing::debug!("Sixel: failed to decode image from DCS payload");
+            return;
+        };
+
+        if sixel_image.width == 0 || sixel_image.height == 0 {
+            tracing::debug!("Sixel: decoded image has zero dimensions");
+            return;
+        }
+
+        let (term_width, term_height) = self.get_win_size();
+
+        // Compute display size in terminal cells using actual cell pixel dimensions.
+        #[allow(clippy::cast_possible_truncation)]
+        let display_cols = {
+            let cols = sixel_image.width.div_ceil(self.cell_pixel_width) as usize;
+            cols.min(term_width).max(1)
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let display_rows = {
+            let rows = sixel_image.height.div_ceil(self.cell_pixel_height) as usize;
+            rows.min(term_height).max(1)
+        };
+
+        let image_id = next_image_id();
+
+        let inline_image = InlineImage {
+            id: image_id,
+            pixels: std::sync::Arc::new(sixel_image.pixels),
+            width_px: sixel_image.width,
+            height_px: sixel_image.height,
+            display_cols,
+            display_rows,
+        };
+
+        let _new_offset = self.buffer.place_image(inline_image, 0);
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -803,10 +1193,426 @@ impl TerminalHandler {
 
     /// Handle an APC (Application Program Command) sequence.
     ///
-    /// APC sequences are application-defined and rarely require a response.
-    /// Silently log and ignore.
-    pub fn handle_application_program_command(&self, apc: &[u8]) {
-        tracing::debug!("APC received (ignored): {}", String::from_utf8_lossy(apc));
+    /// Attempts to parse the data as a Kitty graphics command (`_G...`).
+    /// If it is not a Kitty graphics command, logs and ignores.
+    pub fn handle_application_program_command(&mut self, apc: &[u8]) {
+        match parse_kitty_graphics(apc) {
+            Ok(cmd) => self.handle_kitty_graphics(cmd),
+            Err(KittyParseError::NotKittyGraphics) => {
+                tracing::debug!(
+                    "APC received (not Kitty graphics, ignored): {}",
+                    String::from_utf8_lossy(apc)
+                );
+            }
+            Err(e) => {
+                tracing::debug!("Kitty graphics parse error: {e}");
+            }
+        }
+    }
+
+    /// Dispatch a parsed Kitty graphics command.
+    fn handle_kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {
+        let action = cmd.control.action.unwrap_or(KittyAction::Transmit);
+
+        // If this is a continuation chunk for an in-progress chunked transfer,
+        // append the payload regardless of the action field.
+        if self.kitty_state.is_some() && action != KittyAction::Query {
+            self.handle_kitty_chunk(&cmd);
+            return;
+        }
+
+        match action {
+            KittyAction::Query => self.handle_kitty_query(&cmd),
+            KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::Put => {
+                if cmd.control.more_data {
+                    // First chunk of a chunked transfer — start accumulating.
+                    self.handle_kitty_chunk_start(cmd);
+                } else {
+                    // Single-chunk command (or final chunk with no prior state).
+                    self.handle_kitty_single(&cmd, action);
+                }
+            }
+            KittyAction::Delete => {
+                self.handle_kitty_delete(&cmd);
+            }
+            KittyAction::AnimationFrame
+            | KittyAction::AnimationControl
+            | KittyAction::AnimationCompose => {
+                tracing::debug!(
+                    "Kitty graphics: animation commands not yet supported (a={action:?})"
+                );
+            }
+        }
+    }
+
+    /// Handle `a=q` — query whether the terminal supports the Kitty graphics protocol.
+    ///
+    /// Responds with OK for formats 24 (RGB), 32 (RGBA), and 100 (PNG).
+    /// Other formats get an error response.
+    fn handle_kitty_query(&self, cmd: &KittyGraphicsCommand) {
+        let image_id = cmd.control.image_id.unwrap_or(0);
+        let quiet = cmd.control.quiet;
+
+        // We support RGB (f=24), RGBA (f=32), and PNG (f=100).
+        let supported = cmd.control.format.is_none_or(|f| {
+            matches!(
+                f,
+                freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgb
+                    | freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgba
+                    | freminal_common::buffer_states::kitty_graphics::KittyFormat::Png
+            )
+        });
+
+        // quiet=1 suppresses OK responses; quiet=2 suppresses all responses.
+        if quiet >= 2 || (quiet >= 1 && supported) {
+            return;
+        }
+
+        let response = if supported {
+            format_kitty_response(image_id, true, "")
+        } else {
+            format_kitty_response(image_id, false, "ENOTSUP:unsupported format")
+        };
+
+        self.write_to_pty(&response);
+    }
+
+    /// Start a chunked Kitty graphics transfer (first chunk, `m=1`).
+    fn handle_kitty_chunk_start(&mut self, cmd: KittyGraphicsCommand) {
+        if self.kitty_state.is_some() {
+            tracing::warn!(
+                "Kitty graphics: new chunked transfer started while previous was in progress; \
+                 discarding incomplete transfer"
+            );
+        }
+
+        let capacity = cmd.control.data_size.unwrap_or(0) as usize;
+        let mut accumulated_data = Vec::with_capacity(capacity);
+        accumulated_data.extend_from_slice(&cmd.payload);
+
+        self.kitty_state = Some(KittyImageState {
+            control: cmd.control,
+            accumulated_data,
+        });
+
+        tracing::debug!(
+            "Kitty graphics: started chunked transfer (id={:?})",
+            self.kitty_state.as_ref().map(|s| s.control.image_id),
+        );
+    }
+
+    /// Append a chunk to the in-progress Kitty graphics transfer.
+    ///
+    /// If `m=0` (final chunk), finalise the transfer and dispatch.
+    fn handle_kitty_chunk(&mut self, cmd: &KittyGraphicsCommand) {
+        let Some(state) = &mut self.kitty_state else {
+            tracing::warn!("Kitty graphics: chunk received with no active transfer; ignoring");
+            return;
+        };
+
+        state.accumulated_data.extend_from_slice(&cmd.payload);
+
+        if cmd.control.more_data {
+            // More chunks to come.
+            tracing::debug!(
+                "Kitty graphics: appended chunk ({} bytes total so far)",
+                state.accumulated_data.len(),
+            );
+        } else {
+            // Final chunk — take ownership and dispatch.
+            let final_state = self.kitty_state.take().unwrap_or_else(|| {
+                // This branch is unreachable because we checked `is_some` above,
+                // but we need to avoid `unwrap()` in production code.
+                KittyImageState {
+                    control: KittyControlData::default(),
+                    accumulated_data: Vec::new(),
+                }
+            });
+
+            tracing::debug!(
+                "Kitty graphics: chunked transfer complete ({} bytes)",
+                final_state.accumulated_data.len(),
+            );
+
+            let action = final_state.control.action.unwrap_or(KittyAction::Transmit);
+            let final_cmd = KittyGraphicsCommand {
+                control: final_state.control,
+                payload: final_state.accumulated_data,
+            };
+            self.handle_kitty_single(&final_cmd, action);
+        }
+    }
+
+    /// Handle a single (non-chunked) Kitty graphics command.
+    ///
+    /// Decodes the image payload according to the format (`f=24` RGB, `f=32`
+    /// RGBA, `f=100` PNG), computes display dimensions, stores as an
+    /// `InlineImage`, and places into the buffer.
+    fn handle_kitty_single(&mut self, cmd: &KittyGraphicsCommand, action: KittyAction) {
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let quiet = cmd.control.quiet;
+
+        if cmd.payload.is_empty() && action != KittyAction::Put {
+            tracing::debug!("Kitty graphics: empty payload for a={action:?}; ignoring");
+            self.send_kitty_error(image_id_hint, quiet, "ENODATA:no payload");
+            return;
+        }
+
+        // Decode payload into RGBA pixels + dimensions.
+        let Some((rgba_pixels, img_width_px, img_height_px)) =
+            self.decode_kitty_payload(cmd, image_id_hint, quiet)
+        else {
+            return; // Error already sent by decode_kitty_payload.
+        };
+
+        // Compute display size in cells and place the image.
+        self.place_kitty_image(
+            &cmd.control,
+            action,
+            rgba_pixels,
+            img_width_px,
+            img_height_px,
+            image_id_hint,
+            quiet,
+        );
+    }
+
+    /// Decode a Kitty graphics payload into RGBA pixel data.
+    ///
+    /// Returns `None` if decoding fails (an error response is sent to the PTY).
+    fn decode_kitty_payload(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        image_id_hint: u32,
+        quiet: u8,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        use freminal_common::buffer_states::kitty_graphics::KittyFormat;
+
+        let format = cmd.control.format.unwrap_or(KittyFormat::Rgba);
+
+        match format {
+            KittyFormat::Rgba => {
+                let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
+                let expected = (w as usize) * (h as usize) * 4;
+                if cmd.payload.len() != expected {
+                    tracing::debug!(
+                        "Kitty RGBA: expected {expected} bytes, got {}",
+                        cmd.payload.len()
+                    );
+                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
+                    return None;
+                }
+                Some((cmd.payload.clone(), w, h))
+            }
+            KittyFormat::Rgb => {
+                let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
+                let expected = (w as usize) * (h as usize) * 3;
+                if cmd.payload.len() != expected {
+                    tracing::debug!(
+                        "Kitty RGB: expected {expected} bytes, got {}",
+                        cmd.payload.len()
+                    );
+                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
+                    return None;
+                }
+                let pixel_count = (w as usize) * (h as usize);
+                let mut rgba = Vec::with_capacity(pixel_count * 4);
+                for chunk in cmd.payload.chunks_exact(3) {
+                    rgba.extend_from_slice(chunk);
+                    rgba.push(255);
+                }
+                Some((rgba, w, h))
+            }
+            KittyFormat::Png => match image::load_from_memory(&cmd.payload) {
+                Ok(img) => {
+                    let rgba_img = img.to_rgba8();
+                    let w = rgba_img.width();
+                    let h = rgba_img.height();
+                    if w == 0 || h == 0 {
+                        self.send_kitty_error(
+                            image_id_hint,
+                            quiet,
+                            "EINVAL:decoded image has zero dimensions",
+                        );
+                        return None;
+                    }
+                    Some((rgba_img.into_raw(), w, h))
+                }
+                Err(e) => {
+                    tracing::debug!("Kitty PNG decode failed: {e}");
+                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:PNG decode failed");
+                    None
+                }
+            },
+        }
+    }
+
+    /// Extract required `s` (width) and `v` (height) from Kitty control data.
+    ///
+    /// Returns `None` and sends an error if either is missing.
+    fn require_kitty_dimensions(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        image_id_hint: u32,
+        quiet: u8,
+    ) -> Option<(u32, u32)> {
+        let Some(w) = cmd.control.src_width else {
+            self.send_kitty_error(image_id_hint, quiet, "EINVAL:missing width (s)");
+            return None;
+        };
+        let Some(h) = cmd.control.src_height else {
+            self.send_kitty_error(image_id_hint, quiet, "EINVAL:missing height (v)");
+            return None;
+        };
+        Some((w, h))
+    }
+
+    /// Compute display dimensions, store an `InlineImage`, and optionally place
+    /// it into the buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn place_kitty_image(
+        &mut self,
+        control: &KittyControlData,
+        action: KittyAction,
+        rgba_pixels: Vec<u8>,
+        img_width_px: u32,
+        img_height_px: u32,
+        image_id_hint: u32,
+        quiet: u8,
+    ) {
+        if img_width_px == 0 || img_height_px == 0 {
+            self.send_kitty_error(image_id_hint, quiet, "EINVAL:zero dimension");
+            return;
+        }
+
+        let (term_width, term_height) = self.get_win_size();
+
+        let display_cols = control.display_cols.map_or_else(
+            || {
+                #[allow(clippy::cast_possible_truncation)]
+                let cols = img_width_px.div_ceil(self.cell_pixel_width) as usize;
+                cols.min(term_width).max(1)
+            },
+            |c| {
+                #[allow(clippy::cast_possible_truncation)]
+                let cols = c as usize;
+                cols.min(term_width).max(1)
+            },
+        );
+
+        let display_rows = control.display_rows.map_or_else(
+            || {
+                #[allow(clippy::cast_possible_truncation)]
+                let rows = img_height_px.div_ceil(self.cell_pixel_height) as usize;
+                rows.min(term_height).max(1)
+            },
+            |r| {
+                #[allow(clippy::cast_possible_truncation)]
+                let rows = r as usize;
+                rows.min(term_height).max(1)
+            },
+        );
+
+        let assigned_id = if image_id_hint > 0 {
+            u64::from(image_id_hint)
+        } else {
+            next_image_id()
+        };
+
+        let inline_image = InlineImage {
+            id: assigned_id,
+            pixels: std::sync::Arc::new(rgba_pixels),
+            width_px: img_width_px,
+            height_px: img_height_px,
+            display_cols,
+            display_rows,
+        };
+
+        self.buffer.image_store_mut().insert(inline_image.clone());
+
+        // If this is a virtual (Unicode placeholder) placement, store it in
+        // the virtual_placements table instead of placing cells in the buffer.
+        if control.unicode_placeholder {
+            let pid = control.placement_id.unwrap_or(0);
+            let vp = VirtualPlacement {
+                image_id: assigned_id,
+                placement_id: pid,
+                cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
+                rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
+            };
+            self.virtual_placements.insert((assigned_id, pid), vp);
+        } else {
+            let should_display =
+                matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
+            if should_display {
+                let _new_offset = self.buffer.place_image(inline_image, 0);
+            }
+        }
+
+        // Send OK response unless suppressed.
+        if quiet < 1 && assigned_id > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let response_id = assigned_id as u32;
+            let response = format_kitty_response(response_id, true, "");
+            self.write_to_pty(&response);
+        }
+    }
+
+    /// Send a Kitty graphics error response, respecting quiet mode.
+    fn send_kitty_error(&self, image_id: u32, quiet: u8, message: &str) {
+        // quiet=2 suppresses all responses (including errors).
+        if quiet >= 2 {
+            return;
+        }
+        let response = format_kitty_response(image_id, false, message);
+        self.write_to_pty(&response);
+    }
+
+    /// Handle `a=d` — delete images.
+    ///
+    /// Supports the most common delete targets: delete all (`d=a`/`d=A`),
+    /// delete by ID (`d=i`/`d=I`), and delete at cursor (`d=c`/`d=C`).
+    /// Unsupported targets are logged and ignored.
+    fn handle_kitty_delete(&mut self, cmd: &KittyGraphicsCommand) {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
+
+        let target = cmd.control.delete_target.unwrap_or(KittyDeleteTarget::All);
+
+        match target {
+            KittyDeleteTarget::All | KittyDeleteTarget::AllIncludingNonVisible => {
+                tracing::debug!("Kitty graphics: deleting all images");
+                // Clear all image placements from cells.
+                self.buffer.clear_all_image_placements();
+                // Clear the image store.
+                self.buffer.image_store_mut().clear();
+                // Clear all virtual placements.
+                self.virtual_placements.clear();
+            }
+            KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter => {
+                if let Some(image_id) = cmd.control.image_id {
+                    let id = u64::from(image_id);
+                    tracing::debug!("Kitty graphics: deleting image id={id}");
+                    self.buffer.clear_image_placements_by_id(id);
+                    self.buffer.image_store_mut().remove(id);
+                    // Remove virtual placements with matching image ID.
+                    self.virtual_placements
+                        .retain(|&(img_id, _), _| img_id != id);
+                }
+            }
+            KittyDeleteTarget::AtCursor => {
+                tracing::debug!("Kitty graphics: deleting images at cursor");
+                self.buffer.clear_image_placements_at_cursor();
+            }
+            KittyDeleteTarget::AtCursorAndAfter => {
+                tracing::debug!("Kitty graphics: deleting images at cursor and after");
+                self.buffer.clear_image_placements_at_cursor_and_after();
+            }
+            other => {
+                tracing::debug!(
+                    "Kitty graphics: delete target {other:?} not yet implemented; ignoring"
+                );
+            }
+        }
     }
 
     /// Handle CPR — Cursor Position Report.
@@ -838,6 +1644,38 @@ impl TerminalHandler {
         self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
     }
 
+    /// Handle a `WindowManipulation` command.
+    ///
+    /// Report variants that can be answered from terminal state are handled
+    /// synchronously here via `write_to_pty` so the response reaches the PTY
+    /// in the same processing batch as DA1 and other inline responses.  This
+    /// is critical for applications (e.g. yazi) that use DA1 as a "fence" to
+    /// detect when all prior query responses have arrived.
+    ///
+    /// Variants that require GUI-side data (viewport position, window title,
+    /// clipboard, etc.) are deferred to `self.window_commands` for the GUI
+    /// thread to handle asynchronously.
+    fn handle_window_manipulation(&mut self, wm: &WindowManipulation) {
+        match wm {
+            WindowManipulation::ReportCharacterSizeInPixels => {
+                let w = self.cell_pixel_width;
+                let h = self.cell_pixel_height;
+                self.write_to_pty(&format!("\x1b[6;{h};{w}t"));
+            }
+            WindowManipulation::ReportTerminalSizeInCharacters => {
+                let (width, height) = self.get_win_size();
+                self.write_to_pty(&format!("\x1b[8;{height};{width}t"));
+            }
+            WindowManipulation::ReportRootWindowSizeInCharacters => {
+                let (width, height) = self.get_win_size();
+                self.write_to_pty(&format!("\x1b[9;{height};{width}t"));
+            }
+            other => {
+                self.window_commands.push(other.clone());
+            }
+        }
+    }
+
     /// Handle an OSC (Operating System Command) sequence.
     ///
     /// Ports the logic from `TerminalState::osc_response` in the old buffer.
@@ -862,16 +1700,14 @@ impl TerminalHandler {
                     .push(WindowManipulation::SetTitleBarText(title.clone()));
             }
 
-            // Color queries — respond with hardcoded defaults matching the old buffer.
-            // TODO: make these configurable once a theme/color API exists.
-            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
-                // Hardcoded Catppuccin Mocha base: #45475a
-                self.write_to_pty("\x1b]11;rgb:45/47/5a\x1b\\");
+            // OSC 10/11 foreground/background color query, set, and reset.
+            AnsiOscType::RequestColorQueryBackground(_)
+            | AnsiOscType::RequestColorQueryForeground(_)
+            | AnsiOscType::ResetForegroundColor
+            | AnsiOscType::ResetBackgroundColor => {
+                self.handle_osc_fg_bg_color(osc);
             }
-            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
-                // Hardcoded white foreground: #ffffff
-                self.write_to_pty("\x1b]10;rgb:ff/ff/ff\x1b\\");
-            }
+
             // Remote host / CWD: OSC 7 ; file://hostname/path ST
             AnsiOscType::RemoteHost(value) => {
                 self.current_working_directory = parse_osc7_uri(value);
@@ -895,15 +1731,24 @@ impl TerminalHandler {
                     }
                     FtcsMarker::CommandFinished(exit_code) => {
                         self.last_exit_code = *exit_code;
-                        // After a command finishes we are back in no specific
-                        // region — the next marker will typically be `A`
-                        // (prompt start) again.
                         self.ftcs_state = FtcsState::None;
                     }
                 }
             }
-            AnsiOscType::ITerm2 => {
-                tracing::debug!("OSC iTerm2 (ignored)");
+            AnsiOscType::ITerm2FileInline(data) => {
+                self.handle_iterm2_inline_image(data);
+            }
+            AnsiOscType::ITerm2MultipartBegin(data) => {
+                self.handle_iterm2_multipart_begin(data);
+            }
+            AnsiOscType::ITerm2FilePart(bytes) => {
+                self.handle_iterm2_file_part(bytes);
+            }
+            AnsiOscType::ITerm2FileEnd => {
+                self.handle_iterm2_file_end();
+            }
+            AnsiOscType::ITerm2Unknown => {
+                tracing::debug!("OSC 1337: unrecognised sub-command (ignored)");
             }
 
             // Clipboard: forward to GUI via window_commands
@@ -923,9 +1768,7 @@ impl TerminalHandler {
                 self.palette.set(*idx, *r, *g, *b);
             }
             AnsiOscType::QueryPaletteColor(idx) => {
-                let (r, g, b) = self.palette.get_rgb(*idx);
-                // Respond with 4-digit hex per channel (xterm convention):
-                // OSC 4 ; index ; rgb:RRRR/GGGG/BBBB ST
+                let (r, g, b) = self.palette.get_rgb(*idx, self.theme);
                 let response = format!(
                     "\x1b]4;{idx};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
                     u16::from(r) * 257,
@@ -941,16 +1784,334 @@ impl TerminalHandler {
                 self.palette.reset_all();
             }
 
-            // NoOp, non-Query color variants, cursor-color reset — nothing to do.
-            AnsiOscType::NoOp
-            | AnsiOscType::ResetCursorColor
-            | AnsiOscType::RequestColorQueryBackground(_)
-            | AnsiOscType::RequestColorQueryForeground(_) => {}
+            AnsiOscType::NoOp | AnsiOscType::ResetCursorColor => {}
+        }
+    }
+
+    /// Handle OSC 10/11 foreground/background color query, set, and reset.
+    ///
+    /// Extracted from `handle_osc` to keep that function within the 100-line clippy limit.
+    ///
+    /// - `RequestColorQueryBackground(Query)` / `RequestColorQueryForeground(Query)`:
+    ///   respond with the effective color (override or theme default).
+    /// - `RequestColorQueryBackground(String(spec))` / `RequestColorQueryForeground(String(spec))`:
+    ///   parse the X11 color spec and store as an override.
+    /// - `ResetForegroundColor` / `ResetBackgroundColor`:
+    ///   clear the corresponding override so subsequent queries return the theme color.
+    fn handle_osc_fg_bg_color(&mut self, osc: &AnsiOscType) {
+        match osc {
+            // OSC 11 query: respond with the effective background color.
+            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
+                let (r, g, b) = self.bg_color_override.unwrap_or(self.theme.background);
+                self.write_to_pty(&format!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+            }
+            // OSC 10 query: respond with the effective foreground color.
+            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
+                let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
+                self.write_to_pty(&format!("\x1b]10;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+            }
+            // OSC 11 set: store a dynamic background color override.
+            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
+                if let Some(rgb) = parse_color_spec(spec) {
+                    self.bg_color_override = Some(rgb);
+                } else {
+                    tracing::debug!("OSC 11: unrecognised color spec: {spec:?}");
+                }
+            }
+            // OSC 10 set: store a dynamic foreground color override.
+            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::String(spec)) => {
+                if let Some(rgb) = parse_color_spec(spec) {
+                    self.fg_color_override = Some(rgb);
+                } else {
+                    tracing::debug!("OSC 10: unrecognised color spec: {spec:?}");
+                }
+            }
+            // OSC 110: reset dynamic foreground color override.
+            AnsiOscType::ResetForegroundColor => {
+                self.fg_color_override = None;
+            }
+            // OSC 111: reset dynamic background color override.
+            AnsiOscType::ResetBackgroundColor => {
+                self.bg_color_override = None;
+            }
+            // Unknown internal-type variants and unreachable arms — silently ignore.
+            _ => {}
+        }
+    }
+
+    /// Handle an iTerm2 `OSC 1337 ; File=` inline image.
+    ///
+    /// Decodes the raw image bytes into RGBA pixels, computes the display size
+    /// in terminal cells from the dimension specs, and places the image into
+    /// the buffer at the cursor position.
+    fn handle_iterm2_inline_image(&mut self, data: &ITerm2InlineImageData) {
+        if !data.inline {
+            tracing::debug!("OSC 1337 File=: inline=0 (download), ignoring");
+            return;
+        }
+
+        // Decode the raw image bytes into RGBA pixels.
+        let img = match image::load_from_memory(&data.data) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                tracing::debug!("OSC 1337 File=: image decode failed: {e}");
+                return;
+            }
+        };
+
+        let img_width_px = img.width();
+        let img_height_px = img.height();
+
+        if img_width_px == 0 || img_height_px == 0 {
+            tracing::debug!("OSC 1337 File=: decoded image has zero dimensions");
+            return;
+        }
+
+        let (term_width, term_height) = self.get_win_size();
+
+        // Compute the display size in cells from the iTerm2 dimension specs.
+        let display_cols = Self::resolve_image_dimension(
+            data.width.as_ref(),
+            img_width_px,
+            term_width,
+            self.cell_pixel_width,
+        );
+        let display_rows = Self::resolve_image_dimension(
+            data.height.as_ref(),
+            img_height_px,
+            term_height,
+            self.cell_pixel_height,
+        );
+
+        // Apply aspect-ratio preservation when only one dimension was
+        // explicitly specified by the user.
+        let (display_cols, display_rows) = if data.preserve_aspect_ratio {
+            Self::apply_aspect_ratio(
+                data.width.as_ref(),
+                data.height.as_ref(),
+                display_cols,
+                display_rows,
+                img_width_px,
+                img_height_px,
+                term_width,
+                term_height,
+                self.cell_pixel_width,
+                self.cell_pixel_height,
+            )
+        } else {
+            (display_cols, display_rows)
+        };
+
+        if display_cols == 0 || display_rows == 0 {
+            tracing::debug!("OSC 1337 File=: computed display size is 0x0");
+            return;
+        }
+
+        let pixels = img.into_raw();
+        let inline_image = InlineImage {
+            id: next_image_id(),
+            pixels: std::sync::Arc::new(pixels),
+            width_px: img_width_px,
+            height_px: img_height_px,
+            display_cols,
+            display_rows,
+        };
+
+        // Save cursor position if doNotMoveCursor is set — iTerm2 protocol
+        // specifies that the cursor should remain at its pre-image position.
+        let saved_cursor = if data.do_not_move_cursor {
+            Some(self.buffer.get_cursor().pos)
+        } else {
+            None
+        };
+
+        // Place the image into the buffer. Pass 0 for scroll_offset — the
+        // PTY thread always operates at the live bottom.
+        let _new_offset = self.buffer.place_image(inline_image, 0);
+
+        // Restore cursor position if doNotMoveCursor was requested.
+        if let Some(pos) = saved_cursor {
+            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        }
+    }
+
+    /// Handle `OSC 1337 ; MultipartFile = [args]` — begin a multipart transfer.
+    ///
+    /// Stores the metadata and initialises an accumulator for incoming `FilePart`
+    /// chunks.  If a previous multipart transfer was in progress, it is discarded
+    /// with a warning.
+    fn handle_iterm2_multipart_begin(&mut self, data: &ITerm2InlineImageData) {
+        if self.multipart_state.is_some() {
+            tracing::warn!(
+                "OSC 1337 MultipartFile=: new transfer started while previous was in progress; \
+                 discarding incomplete transfer"
+            );
+        }
+
+        // Pre-allocate the accumulator to the declared size if available,
+        // otherwise start with an empty vec.
+        let capacity = data.size.unwrap_or(0);
+
+        self.multipart_state = Some(MultipartImageState {
+            metadata: data.clone(),
+            accumulated_data: Vec::with_capacity(capacity),
+        });
+
+        tracing::debug!(
+            "OSC 1337 MultipartFile=: started transfer (name={:?}, size={:?})",
+            data.name,
+            data.size,
+        );
+    }
+
+    /// Handle `OSC 1337 ; FilePart = [base64]` — append a chunk to the active
+    /// multipart transfer.
+    fn handle_iterm2_file_part(&mut self, bytes: &[u8]) {
+        let Some(state) = &mut self.multipart_state else {
+            tracing::warn!("OSC 1337 FilePart=: no active multipart transfer; ignoring chunk");
+            return;
+        };
+
+        state.accumulated_data.extend_from_slice(bytes);
+        tracing::debug!(
+            "OSC 1337 FilePart=: appended {} bytes (total so far: {})",
+            bytes.len(),
+            state.accumulated_data.len(),
+        );
+    }
+
+    /// Handle `OSC 1337 ; FileEnd` — complete the active multipart transfer.
+    ///
+    /// Assembles the final `ITerm2InlineImageData` from the accumulated chunks
+    /// and delegates to `handle_iterm2_inline_image` for decoding and placement.
+    fn handle_iterm2_file_end(&mut self) {
+        let Some(state) = self.multipart_state.take() else {
+            tracing::warn!("OSC 1337 FileEnd: no active multipart transfer; ignoring");
+            return;
+        };
+
+        if state.accumulated_data.is_empty() {
+            tracing::debug!("OSC 1337 FileEnd: transfer completed with empty payload; ignoring");
+            return;
+        }
+
+        tracing::debug!(
+            "OSC 1337 FileEnd: transfer complete ({} bytes)",
+            state.accumulated_data.len(),
+        );
+
+        // Assemble the final image data from metadata + accumulated bytes.
+        let final_data = ITerm2InlineImageData {
+            data: state.accumulated_data,
+            ..state.metadata
+        };
+
+        self.handle_iterm2_inline_image(&final_data);
+    }
+
+    /// Resolve an iTerm2 image dimension spec to a cell count.
+    ///
+    /// `is_width` indicates whether we are computing columns (true) or rows (false).
+    /// When the spec is `Auto` or `None`, the full image pixel size is used,
+    /// divided by the terminal dimension to get a proportional cell count.
+    fn resolve_image_dimension(
+        spec: Option<&ImageDimension>,
+        image_pixels: u32,
+        term_cells: usize,
+        cell_pixels: u32,
+    ) -> usize {
+        match spec {
+            None | Some(ImageDimension::Auto) => {
+                // image_pixels / cell_pixels, rounded up, clamped to term size.
+                let cells = image_pixels.saturating_add(cell_pixels - 1) / cell_pixels;
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (cells as usize).min(term_cells).max(1);
+                result
+            }
+            Some(ImageDimension::Cells(n)) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (*n as usize).min(term_cells).max(1);
+                result
+            }
+            Some(ImageDimension::Pixels(px)) => {
+                let cells = px.saturating_add(cell_pixels - 1) / cell_pixels;
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (cells as usize).min(term_cells).max(1);
+                result
+            }
+            Some(ImageDimension::Percent(pct)) => {
+                let cells = (u64::from(*pct) * term_cells as u64) / 100;
+                // Safe: cells is bounded by term_cells which fits in usize.
+                #[allow(clippy::cast_possible_truncation)]
+                let result = (cells as usize).min(term_cells).max(1);
+                result
+            }
+        }
+    }
+
+    /// Adjust display dimensions to preserve aspect ratio.
+    ///
+    /// When `preserve_aspect_ratio` is true and one dimension is auto/unspecified,
+    /// scale the auto dimension to match the other using real cell pixel
+    /// dimensions for correct terminal-cell aspect-ratio compensation.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_aspect_ratio(
+        width_spec: Option<&ImageDimension>,
+        height_spec: Option<&ImageDimension>,
+        display_cols: usize,
+        display_rows: usize,
+        img_width_px: u32,
+        img_height_px: u32,
+        term_width: usize,
+        term_height: usize,
+        cell_pixel_width: u32,
+        cell_pixel_height: u32,
+    ) -> (usize, usize) {
+        let width_is_auto = matches!(width_spec, None | Some(ImageDimension::Auto));
+        let height_is_auto = matches!(height_spec, None | Some(ImageDimension::Auto));
+
+        // Use actual cell pixel dimensions for aspect-ratio compensation.
+        let cpw = u64::from(cell_pixel_width.max(1));
+        let cph = u64::from(cell_pixel_height.max(1));
+
+        if width_is_auto && !height_is_auto {
+            // Height was explicitly set; scale width to preserve aspect ratio.
+            // scaled_cols = display_rows * (img_w / img_h) * (cell_h / cell_w)
+            let scaled = (u64::from(img_width_px) * display_rows as u64 * cph)
+                / (u64::from(img_height_px).max(1) * cpw);
+            // Safe: scaled is bounded by term_width which fits in usize.
+            #[allow(clippy::cast_possible_truncation)]
+            let cols = (scaled as usize).min(term_width).max(1);
+            (cols, display_rows)
+        } else if !width_is_auto && height_is_auto {
+            // Width was explicitly set; scale height to preserve aspect ratio.
+            // scaled_rows = display_cols * (img_h / img_w) * (cell_w / cell_h)
+            let scaled = (u64::from(img_height_px) * display_cols as u64 * cpw)
+                / (u64::from(img_width_px).max(1) * cph);
+            // Safe: scaled is bounded by term_height which fits in usize.
+            #[allow(clippy::cast_possible_truncation)]
+            let rows = (scaled as usize).min(term_height).max(1);
+            (display_cols, rows)
+        } else {
+            // Both auto or both explicit — no adjustment needed.
+            (display_cols, display_rows)
         }
     }
 
     /// Handle resize
-    pub fn handle_resize(&mut self, width: usize, height: usize) {
+    pub fn handle_resize(
+        &mut self,
+        width: usize,
+        height: usize,
+        cell_pixel_width: u32,
+        cell_pixel_height: u32,
+    ) {
+        if cell_pixel_width > 0 {
+            self.cell_pixel_width = cell_pixel_width;
+        }
+        if cell_pixel_height > 0 {
+            self.cell_pixel_height = cell_pixel_height;
+        }
         // scroll_offset lives in `ViewState` (Task 4). Pass 0 temporarily;
         // correct wiring happens in Task 7/8.
         let _new_offset = self.buffer.set_size(width, height, 0);
@@ -1050,6 +2211,24 @@ impl TerminalHandler {
     #[must_use]
     pub fn any_visible_dirty(&self, scroll_offset: usize) -> bool {
         self.buffer.any_visible_dirty(scroll_offset)
+    }
+
+    /// Extract image placements for all cells in the visible window.
+    ///
+    /// Returns a flat `Vec` of `Option<ImagePlacement>`, one entry per cell
+    /// in row-major order, matching the layout of `visible_chars`.
+    #[must_use]
+    pub fn visible_image_placements(
+        &self,
+        scroll_offset: usize,
+    ) -> Vec<Option<crate::image_store::ImagePlacement>> {
+        self.buffer.visible_image_placements(scroll_offset)
+    }
+
+    /// Returns `true` if any cell in the visible window carries an image placement.
+    #[must_use]
+    pub fn has_visible_images(&self, scroll_offset: usize) -> bool {
+        self.buffer.has_visible_images(scroll_offset)
     }
 
     /// Process an array of `TerminalOutput` commands
@@ -1343,7 +2522,7 @@ impl TerminalHandler {
                 self.cursor_visual_style = style.clone();
             }
             TerminalOutput::WindowManipulation(wm) => {
-                self.window_commands.push(wm.clone());
+                self.handle_window_manipulation(wm);
             }
             TerminalOutput::RequestDeviceAttributes => {
                 self.handle_request_device_attributes();
@@ -1694,6 +2873,7 @@ const fn hex_val(b: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::{
         buffer_states::{
@@ -2647,7 +3827,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xAA, 0xBB, 0xCC));
 
-        let (r, g, b) = handler.palette().get_rgb(42);
+        let (r, g, b) = handler.palette().get_rgb(42, handler.theme());
         assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
     }
 
@@ -2699,14 +3879,17 @@ mod tests {
 
         // Set index 5 to a custom value.
         handler.handle_osc(&AnsiOscType::SetPaletteColor(5, 0x11, 0x22, 0x33));
-        assert_eq!(handler.palette().get_rgb(5), (0x11, 0x22, 0x33));
+        assert_eq!(
+            handler.palette().get_rgb(5, handler.theme()),
+            (0x11, 0x22, 0x33)
+        );
 
         // Reset just index 5.
         handler.handle_osc(&AnsiOscType::ResetPaletteColor(Some(5)));
 
         // Should revert to the default for index 5.
-        let default_rgb = freminal_common::colors::default_index_to_rgb(5);
-        assert_eq!(handler.palette().get_rgb(5), default_rgb);
+        let default_rgb = freminal_common::colors::default_index_to_rgb(5, handler.theme());
+        assert_eq!(handler.palette().get_rgb(5, handler.theme()), default_rgb);
     }
 
     #[test]
@@ -2783,7 +3966,7 @@ mod tests {
             TerminalColor::PaletteIndex(1),
         ));
 
-        let expected = handler.palette().lookup(1);
+        let expected = handler.palette().lookup(1, handler.theme());
         assert_eq!(
             handler.current_format().colors.color,
             expected,
@@ -3026,12 +4209,14 @@ mod tests {
 
     #[test]
     fn xtgettcap_hex_decode_lowercase() {
-        // "RGB" in lowercase hex
-        let decoded = TerminalHandler::hex_decode("524742");
-        assert_eq!(decoded.as_deref(), Some("RGB"));
+        // "Ms" = 0x4D 0x73 → uppercase hex "4D73", lowercase "4d73"
+        // 'd' is a hex letter that differs between cases — a good test for
+        // case-insensitive parsing.
+        let decoded_upper = TerminalHandler::hex_decode("4D73");
+        assert_eq!(decoded_upper.as_deref(), Some("Ms"));
 
-        let decoded_lower = TerminalHandler::hex_decode("524742");
-        assert_eq!(decoded_lower.as_deref(), Some("RGB"));
+        let decoded_lower = TerminalHandler::hex_decode("4d73");
+        assert_eq!(decoded_lower.as_deref(), Some("Ms"));
     }
 
     #[test]
@@ -3179,6 +4364,2271 @@ mod tests {
         assert_eq!(
             response,
             format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_setrgbb() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("setrgbb");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[48;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_co_alias() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "Co" is an alias for "colors"; both should return "256"
+        // "Co" = 0x43 0x6F → hex "436F"
+        let dcs = build_dcs_payload(b"+q436F");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // "256" → hex "323536"
+        assert_eq!(response, "\x1bP1+r436F=323536\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_ms() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Ms");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b]52;%p1%s;%p2%s\x1b\\");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_ss() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Ss");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[%p1%d q");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_smulx() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Smulx");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[4:%p1%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_setulc() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Setulc");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[58;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 10/11/110/111 foreground/background color tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc11_query_returns_theme_background_by_default() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // OSC 11 query — no override set, should return CATPPUCCIN_MOCHA background.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 11 query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA background = (0x1e, 0x1e, 0x2e)
+        assert_eq!(response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
+    }
+
+    #[test]
+    fn osc10_query_returns_theme_foreground_by_default() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // OSC 10 query — no override set, should return CATPPUCCIN_MOCHA foreground.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 10 query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA foreground = (0xcd, 0xd6, 0xf4)
+        assert_eq!(response, "\x1b]10;rgb:cd/d6/f4\x1b\\");
+    }
+
+    #[test]
+    fn osc11_set_stores_override_and_query_returns_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set background override to #ff0080.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::String("#ff0080".to_string()),
+        ));
+
+        // Query — should return the override, not the theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 11 set + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        assert_eq!(response, "\x1b]11;rgb:ff/00/80\x1b\\");
+    }
+
+    #[test]
+    fn osc10_set_stores_override_and_query_returns_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set foreground override via rgb: format.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("rgb:aa/bb/cc".to_string()),
+        ));
+
+        // Query — should return the override.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 10 set + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        assert_eq!(response, "\x1b]10;rgb:aa/bb/cc\x1b\\");
+    }
+
+    #[test]
+    fn osc111_resets_bg_override_and_query_returns_theme() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set override first.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::String("#112233".to_string()),
+        ));
+
+        // Reset via OSC 111.
+        handler.handle_osc(&AnsiOscType::ResetBackgroundColor);
+
+        // Query — should return theme background again.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 111 reset + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA background = (0x1e, 0x1e, 0x2e)
+        assert_eq!(response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
+    }
+
+    #[test]
+    fn osc110_resets_fg_override_and_query_returns_theme() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set override first.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("rgb:ff/00/00".to_string()),
+        ));
+
+        // Reset via OSC 110.
+        handler.handle_osc(&AnsiOscType::ResetForegroundColor);
+
+        // Query — should return theme foreground again.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 110 reset + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA foreground = (0xcd, 0xd6, 0xf4)
+        assert_eq!(response, "\x1b]10;rgb:cd/d6/f4\x1b\\");
+    }
+
+    #[test]
+    fn full_reset_clears_fg_bg_color_overrides() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set both overrides.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("#ff0000".to_string()),
+        ));
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::String("#0000ff".to_string()),
+        ));
+
+        // full_reset should clear both.
+        handler.full_reset();
+
+        // Foreground query should return theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(fg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for fg query after full_reset");
+        };
+        let Ok(fg_response) = String::from_utf8(fg_bytes) else {
+            panic!("fg OSC response should be valid UTF-8");
+        };
+        assert_eq!(fg_response, "\x1b]10;rgb:cd/d6/f4\x1b\\");
+
+        // Background query should return theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(bg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for bg query after full_reset");
+        };
+        let Ok(bg_response) = String::from_utf8(bg_bytes) else {
+            panic!("bg OSC response should be valid UTF-8");
+        };
+        assert_eq!(bg_response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
+    }
+
+    #[test]
+    fn theme_switch_changes_osc10_osc11_responses() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Switch from default CATPPUCCIN_MOCHA to DRACULA.
+        handler.set_theme(&freminal_common::themes::DRACULA);
+
+        // OSC 10 query — should return DRACULA foreground (0xf8, 0xf8, 0xf2).
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(fg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 10 query after theme switch");
+        };
+        let Ok(fg_response) = String::from_utf8(fg_bytes) else {
+            panic!("OSC 10 response should be valid UTF-8");
+        };
+        assert_eq!(fg_response, "\x1b]10;rgb:f8/f8/f2\x1b\\");
+
+        // OSC 11 query — should return DRACULA background (0x28, 0x2a, 0x36).
+        handler.handle_osc(&AnsiOscType::RequestColorQueryBackground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(bg_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 11 query after theme switch");
+        };
+        let Ok(bg_response) = String::from_utf8(bg_bytes) else {
+            panic!("OSC 11 response should be valid UTF-8");
+        };
+        assert_eq!(bg_response, "\x1b]11;rgb:28/2a/36\x1b\\");
+    }
+
+    #[test]
+    fn osc10_override_persists_across_theme_switch() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set foreground override to #ff0000.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::String("#ff0000".to_string()),
+        ));
+
+        // Switch theme to DRACULA — override should survive.
+        handler.set_theme(&freminal_common::themes::DRACULA);
+
+        // OSC 10 query — override (#ff0000) takes precedence over the new theme.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(override_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for OSC 10 query while override is active");
+        };
+        let Ok(override_response) = String::from_utf8(override_bytes) else {
+            panic!("OSC 10 response should be valid UTF-8");
+        };
+        assert_eq!(override_response, "\x1b]10;rgb:ff/00/00\x1b\\");
+
+        // Reset the override via OSC 110.
+        handler.handle_osc(&AnsiOscType::ResetForegroundColor);
+
+        // OSC 10 query — should now return DRACULA foreground (0xf8, 0xf8, 0xf2).
+        handler.handle_osc(&AnsiOscType::RequestColorQueryForeground(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(theme_bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for OSC 10 query after OSC 110 reset");
+        };
+        let Ok(theme_response) = String::from_utf8(theme_bytes) else {
+            panic!("OSC 10 response should be valid UTF-8");
+        };
+        assert_eq!(theme_response, "\x1b]10;rgb:f8/f8/f2\x1b\\");
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_image_dimension tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn resolve_auto_uses_image_pixels() {
+        // 160px wide image, 8px per cell → 20 cells
+        let result = TerminalHandler::resolve_image_dimension(None, 160, 80, 8);
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn resolve_auto_explicit() {
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Auto), 160, 80, 8);
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn resolve_auto_height() {
+        // 320px tall image, 16px per cell → 20 rows
+        let result = TerminalHandler::resolve_image_dimension(None, 320, 24, 16);
+        assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn resolve_auto_clamps_to_term_size() {
+        // 10000px wide, 8px/cell = 1250 cells, but term is only 80
+        let result = TerminalHandler::resolve_image_dimension(None, 10000, 80, 8);
+        assert_eq!(result, 80);
+    }
+
+    #[test]
+    fn resolve_auto_minimum_is_1() {
+        // 0px image → would be 0 cells, but minimum is 1
+        let result = TerminalHandler::resolve_image_dimension(None, 0, 80, 8);
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn resolve_cells_direct() {
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Cells(10)), 999, 80, 8);
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn resolve_cells_clamped_to_term() {
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Cells(200)), 999, 80, 8);
+        assert_eq!(result, 80);
+    }
+
+    #[test]
+    fn resolve_pixels() {
+        // 80px wide, 8px/cell → 10 cells
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Pixels(80)), 999, 80, 8);
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn resolve_pixels_rounds_up() {
+        // 81px wide, 8px/cell → ceil(81/8) = 11 cells
+        let result =
+            TerminalHandler::resolve_image_dimension(Some(&ImageDimension::Pixels(81)), 999, 80, 8);
+        assert_eq!(result, 11);
+    }
+
+    #[test]
+    fn resolve_percent() {
+        // 50% of 80 cols = 40
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Percent(50)),
+            999,
+            80,
+            8,
+        );
+        assert_eq!(result, 40);
+    }
+
+    #[test]
+    fn resolve_percent_100() {
+        let result = TerminalHandler::resolve_image_dimension(
+            Some(&ImageDimension::Percent(100)),
+            999,
+            80,
+            8,
+        );
+        assert_eq!(result, 80);
+    }
+
+    // ------------------------------------------------------------------
+    // apply_aspect_ratio tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn aspect_ratio_both_auto_no_adjustment() {
+        let (cols, rows) =
+            TerminalHandler::apply_aspect_ratio(None, None, 20, 10, 160, 160, 80, 24, 8, 16);
+        // Both auto → no change
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn aspect_ratio_both_explicit_no_adjustment() {
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            Some(&ImageDimension::Cells(20)),
+            Some(&ImageDimension::Cells(10)),
+            20,
+            10,
+            160,
+            160,
+            80,
+            24,
+            8,
+            16,
+        );
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn aspect_ratio_width_auto_height_explicit() {
+        // height=10 rows, image is square (100x100), cell aspect 2:1 (8w x 16h)
+        // scaled_cols = 10 * 100 * 16 / (100 * 8) = 20
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            None,
+            Some(&ImageDimension::Cells(10)),
+            1, // initial cols (ignored, will be recomputed)
+            10,
+            100,
+            100,
+            80,
+            24,
+            8,
+            16,
+        );
+        assert_eq!(rows, 10);
+        assert_eq!(cols, 20);
+    }
+
+    #[test]
+    fn aspect_ratio_height_auto_width_explicit() {
+        // width=20 cols, image is square (100x100), cell aspect 2:1 (8w x 16h)
+        // scaled_rows = 20 * 100 * 8 / (100 * 16) = 10
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            Some(&ImageDimension::Cells(20)),
+            None,
+            20,
+            1, // initial rows (ignored, will be recomputed)
+            100,
+            100,
+            80,
+            24,
+            8,
+            16,
+        );
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+    }
+
+    #[test]
+    fn aspect_ratio_clamped_to_term_size() {
+        // width=80 cols, image is very tall (100w x 10000h)
+        // scaled_rows = 80 * 10000 * 8 / (100 * 16) = 4000, clamped to 24
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            Some(&ImageDimension::Cells(80)),
+            None,
+            80,
+            1,
+            100,
+            10000,
+            80,
+            24,
+            8,
+            16,
+        );
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 24);
+    }
+
+    #[test]
+    fn aspect_ratio_non_square_cells() {
+        // Verify the fix: non-2:1 cell aspect (e.g. 10w x 20h).
+        // height=10 rows, square image (200x200)
+        // scaled_cols = 10 * 200 * 20 / (200 * 10) = 20
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            None,
+            Some(&ImageDimension::Cells(10)),
+            1,
+            10,
+            200,
+            200,
+            80,
+            24,
+            10,
+            20,
+        );
+        assert_eq!(rows, 10);
+        assert_eq!(cols, 20);
+
+        // With 12w x 18h cells (1.5:1 ratio), square image
+        // scaled_cols = 10 * 200 * 18 / (200 * 12) = 15
+        let (cols2, rows2) = TerminalHandler::apply_aspect_ratio(
+            None,
+            Some(&ImageDimension::Cells(10)),
+            1,
+            10,
+            200,
+            200,
+            80,
+            24,
+            12,
+            18,
+        );
+        assert_eq!(rows2, 10);
+        assert_eq!(cols2, 15);
+    }
+
+    // ------------------------------------------------------------------
+    // handle_iterm2_inline_image integration test
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handle_iterm2_inline_image_places_image_in_buffer() {
+        use freminal_common::buffer_states::osc::ITerm2InlineImageData;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Create a minimal 2x2 red PNG image in memory.
+        let mut png_buf = Vec::new();
+        {
+            use image::ImageEncoder;
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            // 2x2 RGBA image: all red
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, // pixel (0,0)
+                255, 0, 0, 255, // pixel (1,0)
+                255, 0, 0, 255, // pixel (0,1)
+                255, 0, 0, 255, // pixel (1,1)
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        let image_data = ITerm2InlineImageData {
+            name: Some("red.png".to_string()),
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: false,
+            data: png_buf,
+        };
+
+        handler.handle_iterm2_inline_image(&image_data);
+
+        // After placement, cursor should have moved down by display_rows (2).
+        // The buffer should contain image cells.
+        let buf = handler.buffer();
+        let rows = buf.get_rows();
+
+        // Check that at least one cell has an image placement.
+        let has_image_cell = rows.iter().any(|row| {
+            let cells = row.cells();
+            cells.iter().any(crate::cell::Cell::has_image)
+        });
+        assert!(has_image_cell, "Expected at least one image cell in buffer");
+    }
+
+    #[test]
+    fn handle_iterm2_inline_image_non_inline_ignored() {
+        use freminal_common::buffer_states::osc::ITerm2InlineImageData;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let image_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: false, // not inline → should be ignored
+            do_not_move_cursor: false,
+            data: vec![0xFF; 100],
+        };
+
+        // Cursor should not move.
+        let cursor_before = handler.cursor_pos();
+        handler.handle_iterm2_inline_image(&image_data);
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(cursor_before, cursor_after);
+    }
+
+    #[test]
+    fn handle_iterm2_inline_image_do_not_move_cursor() {
+        use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
+        use image::ImageEncoder;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Create a minimal test PNG.
+        let mut png_buf = Vec::new();
+        {
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        // Position cursor at a known location.
+        handler.buffer_mut().set_cursor_pos(Some(5), Some(3));
+        let cursor_before = handler.cursor_pos();
+
+        let image_data = ITerm2InlineImageData {
+            name: None,
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: true,
+            data: png_buf,
+        };
+
+        handler.handle_iterm2_inline_image(&image_data);
+
+        // Cursor should NOT have moved because doNotMoveCursor=1.
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(
+            cursor_before, cursor_after,
+            "Cursor should be preserved when doNotMoveCursor=1"
+        );
+
+        // But the image should still have been placed.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image, "Image should still be placed");
+    }
+
+    // ------------------------------------------------------------------
+    // iTerm2 multipart file transfer integration tests
+    // ------------------------------------------------------------------
+
+    /// Create a minimal 2x2 red PNG image as raw bytes.
+    fn make_test_png() -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut png_buf = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+        // 2x2 RGBA image: all red
+        let rgba_data: [u8; 16] = [
+            255, 0, 0, 255, // pixel (0,0)
+            255, 0, 0, 255, // pixel (1,0)
+            255, 0, 0, 255, // pixel (0,1)
+            255, 0, 0, 255, // pixel (1,1)
+        ];
+        encoder
+            .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        png_buf
+    }
+
+    #[test]
+    fn multipart_begin_part_end_places_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        // Begin: metadata with no payload
+        let begin_data = ITerm2InlineImageData {
+            name: Some("red.png".to_string()),
+            size: Some(png_data.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+
+        // Verify no image placed yet
+        let has_image_before = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image_before,
+            "No image should be placed before FileEnd"
+        );
+
+        // Send data in two chunks
+        let mid = png_data.len() / 2;
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data[..mid].to_vec()));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data[mid..].to_vec()));
+
+        // End: assemble and place
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        // Verify image was placed
+        let has_image_after = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image_after, "Image should be placed after FileEnd");
+
+        // Verify multipart state was cleared
+        assert!(
+            handler.multipart_state.is_none(),
+            "multipart_state should be None after FileEnd"
+        );
+    }
+
+    #[test]
+    fn multipart_single_chunk_places_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        let begin_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Image should be placed after single-chunk transfer"
+        );
+    }
+
+    #[test]
+    fn multipart_file_part_without_begin_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // FilePart with no active transfer — should be silently ignored
+        let cursor_before = handler.cursor_pos();
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![1, 2, 3]));
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(cursor_before, cursor_after);
+
+        // Verify no multipart state was created
+        assert!(handler.multipart_state.is_none());
+    }
+
+    #[test]
+    fn multipart_file_end_without_begin_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // FileEnd with no active transfer — should be silently ignored
+        let cursor_before = handler.cursor_pos();
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(cursor_before, cursor_after);
+    }
+
+    #[test]
+    fn multipart_begin_resets_previous_incomplete_transfer() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        // Start first transfer (will be abandoned)
+        let begin1 = ITerm2InlineImageData {
+            name: Some("first.png".to_string()),
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin1));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![0xDE, 0xAD]));
+
+        // Start second transfer — should discard the first
+        let begin2 = ITerm2InlineImageData {
+            name: Some("second.png".to_string()),
+            size: Some(png_data.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin2));
+
+        // Verify state was replaced (accumulated data from first transfer is gone)
+        let state = handler.multipart_state.as_ref().unwrap();
+        assert_eq!(state.metadata.name, Some("second.png".to_string()));
+        assert!(
+            state.accumulated_data.is_empty(),
+            "accumulated data should be empty after new begin"
+        );
+
+        // Complete second transfer with real image data
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image, "Second transfer should produce an image");
+    }
+
+    #[test]
+    fn multipart_empty_payload_ignored_on_file_end() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Begin a transfer but send no FilePart chunks
+        let begin_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+
+        // No image should be placed (empty payload)
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Empty multipart transfer should not place an image"
+        );
+
+        // State should be cleared
+        assert!(handler.multipart_state.is_none());
+    }
+
+    #[test]
+    fn multipart_non_inline_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let png_data = make_test_png();
+
+        // Begin with inline=false (download, not display)
+        let begin_data = ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: false, // not inline
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        };
+        handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
+
+        let cursor_before = handler.cursor_pos();
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        let cursor_after = handler.cursor_pos();
+
+        // inline=false means the image is a download, not an inline display.
+        // handle_iterm2_inline_image returns early for non-inline, so no image placed.
+        assert_eq!(
+            cursor_before, cursor_after,
+            "Cursor should not move for non-inline"
+        );
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Non-inline multipart transfer should not place an image"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty graphics direct transfer tests
+    // ------------------------------------------------------------------
+
+    /// Helper: create a `TerminalHandler` with a write channel and return
+    /// `(handler, rx)` so tests can inspect PTY responses.
+    fn kitty_handler() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        (handler, rx)
+    }
+
+    /// Helper: build a `KittyGraphicsCommand` with the given control data and
+    /// raw RGBA payload for a 2x2 image.
+    fn kitty_rgba_2x2_cmd(action: KittyAction) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        // 2x2 RGBA = 16 bytes.
+        let rgba_data: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ];
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(action),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: rgba_data,
+        }
+    }
+
+    #[test]
+    fn kitty_single_rgba_transmit_and_display_places_image() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, _rx) = kitty_handler();
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be placed in the buffer.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Expected image cells after Kitty TransmitAndDisplay"
+        );
+
+        // Image should be in the store.
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "Expected image id=42 in the image store"
+        );
+    }
+
+    #[test]
+    fn kitty_single_rgba_transmit_only_stores_but_does_not_place() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, _rx) = kitty_handler();
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be in the store but NOT placed in cells.
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "Expected image id=42 in the store after Transmit"
+        );
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(!has_image, "Transmit-only should not place image cells");
+    }
+
+    #[test]
+    fn kitty_single_rgb_converts_to_rgba() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // 2x2 RGB = 12 bytes (no alpha channel).
+        let rgb_data: Vec<u8> = vec![
+            255, 0, 0, // red
+            0, 255, 0, // green
+            0, 0, 255, // blue
+            255, 255, 0, // yellow
+        ];
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgb),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                ..KittyControlData::default()
+            },
+            payload: rgb_data,
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // The stored image should have RGBA pixels (16 bytes for 2x2).
+        let img = handler.buffer().image_store().get(99).unwrap();
+        assert_eq!(
+            img.pixels.len(),
+            16,
+            "RGB should be converted to RGBA (4 bytes/pixel)"
+        );
+        // Verify alpha was inserted: first pixel should be [255, 0, 0, 255].
+        assert_eq!(&img.pixels[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn kitty_single_png_decodes_and_places() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let png_data = make_test_png(); // 2x2 red PNG.
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                image_id: Some(77),
+                // PNG does not require s/v — dimensions come from the image.
+                ..KittyControlData::default()
+            },
+            payload: png_data,
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler.buffer().image_store().get(77).unwrap();
+        assert_eq!(img.width_px, 2);
+        assert_eq!(img.height_px, 2);
+        // PNG decoded to RGBA: 2*2*4 = 16 bytes.
+        assert_eq!(img.pixels.len(), 16);
+    }
+
+    #[test]
+    fn kitty_single_rgba_missing_dimensions_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // RGBA payload but no s/v dimensions → should send error.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                image_id: Some(10),
+                // No src_width or src_height!
+                ..KittyControlData::default()
+            },
+            payload: vec![0; 16],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Should NOT be stored.
+        assert!(
+            handler.buffer().image_store().get(10).is_none(),
+            "Image should not be stored when dimensions are missing"
+        );
+
+        // Should have sent an error response.
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_rgba_payload_size_mismatch_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Says 2x2 RGBA (expects 16 bytes) but payload is only 8 bytes.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(11),
+                ..KittyControlData::default()
+            },
+            payload: vec![0; 8], // too small
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(handler.buffer().image_store().get(11).is_none());
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_empty_payload_sends_enodata() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(12),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(), // empty
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENODATA"), "Expected ENODATA error, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_ok_response_sent_for_verbose_mode() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, rx) = kitty_handler();
+
+        // quiet=0 (default) → should send OK.
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("OK"), "Expected OK response, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_single_quiet_1_suppresses_ok() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(50),
+                quiet: 1, // suppress OK but not errors
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should still be placed.
+        assert!(handler.buffer().image_store().get(50).is_some());
+
+        // But no OK response should be sent.
+        assert!(
+            rx.try_recv().is_err(),
+            "quiet=1 should suppress OK response"
+        );
+    }
+
+    #[test]
+    fn kitty_single_quiet_2_suppresses_all_responses() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // quiet=2 with a bad payload → error should be suppressed.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(51),
+                quiet: 2,
+                ..KittyControlData::default()
+            },
+            payload: vec![0; 8], // wrong size → EINVAL
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // No response at all.
+        assert!(
+            rx.try_recv().is_err(),
+            "quiet=2 should suppress all responses including errors"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_all_clears_images() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // First, place an image.
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.buffer().image_store().get(42).is_some());
+
+        // Now delete all.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::All),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        // Image should be gone from the store.
+        assert!(
+            handler.buffer().image_store().get(42).is_none(),
+            "Delete all should remove all images"
+        );
+
+        // No image cells should remain.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(!has_image, "Delete all should clear image cells");
+    }
+
+    #[test]
+    fn kitty_delete_by_id_removes_only_target() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place image id=42.
+        let cmd1 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd1);
+
+        // Place image id=99.
+        let cmd2 = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+        handler.handle_kitty_graphics(cmd2);
+
+        assert!(handler.buffer().image_store().get(42).is_some());
+        assert!(handler.buffer().image_store().get(99).is_some());
+
+        // Delete only id=42.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(42).is_none(),
+            "id=42 should be removed"
+        );
+        assert!(
+            handler.buffer().image_store().get(99).is_some(),
+            "id=99 should survive delete-by-id of 42"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_clears_images_at_cursor_row() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place an image (will be at row 0).
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        // Cursor should now be below the image. Move it back to row 0.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        // Delete at cursor (row 0 only).
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::AtCursor),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        // Row 0 should have no image cells.
+        let row0_has_image = handler.buffer().get_rows()[0]
+            .cells()
+            .iter()
+            .any(crate::cell::Cell::has_image);
+        assert!(!row0_has_image, "AtCursor delete should clear row 0 images");
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_and_after_clears_remaining_rows() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place an image at row 0 (2x2 px → 1x1 cell with 8x16 cell size).
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        // Move cursor to row 0.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        // Delete at cursor and after.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::AtCursorAndAfter),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        // All rows from cursor onward should have no image cells.
+        let any_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !any_image,
+            "AtCursorAndAfter should clear all image cells from cursor onward"
+        );
+    }
+
+    #[test]
+    fn kitty_display_cols_and_rows_override() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(55),
+                display_cols: Some(10),
+                display_rows: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler.buffer().image_store().get(55).unwrap();
+        assert_eq!(img.display_cols, 10);
+        assert_eq!(img.display_rows, 5);
+    }
+
+    #[test]
+    fn kitty_query_rgb_format_responds_ok() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Query),
+                format: Some(KittyFormat::Rgb),
+                image_id: Some(31),
+                ..KittyControlData::default()
+            },
+            payload: vec![0, 0, 0], // minimal payload for query
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().unwrap();
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(
+                    s.contains("OK"),
+                    "f=24 (RGB) query should succeed, got: {s}"
+                );
+                assert!(!s.contains("ENOTSUP"), "f=24 should NOT be unsupported");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_chunked_transfer_assembles_and_places() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Full RGBA payload for 2x2 = 16 bytes, split into two 8-byte chunks.
+        let full_payload: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+
+        // First chunk (more_data=true).
+        let chunk1 = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(88),
+                more_data: true,
+                ..KittyControlData::default()
+            },
+            payload: full_payload[..8].to_vec(),
+        };
+
+        // Last chunk (more_data=false / default).
+        let chunk2 = KittyGraphicsCommand {
+            control: KittyControlData {
+                more_data: false,
+                ..KittyControlData::default()
+            },
+            payload: full_payload[8..].to_vec(),
+        };
+
+        handler.handle_kitty_graphics(chunk1);
+        // After first chunk, image should NOT be in the store yet.
+        assert!(
+            handler.buffer().image_store().get(88).is_none(),
+            "Image should not appear until final chunk"
+        );
+
+        handler.handle_kitty_graphics(chunk2);
+        // After final chunk, image should be stored and placed.
+        assert!(
+            handler.buffer().image_store().get(88).is_some(),
+            "Image should appear after final chunk"
+        );
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image, "Chunked TransmitAndDisplay should place image");
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty Unicode placeholder tests
+    // ------------------------------------------------------------------
+
+    /// Helper: create a Kitty command with `unicode_placeholder = true` for a 2×2 RGBA image.
+    fn kitty_virtual_2x2_cmd() -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        let rgba_data: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ];
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(42),
+                placement_id: Some(0),
+                unicode_placeholder: true,
+                ..KittyControlData::default()
+            },
+            payload: rgba_data,
+        }
+    }
+
+    /// Helper: build a `FormatTag` whose foreground encodes an image ID and
+    /// whose underline color encodes a placement ID using 24-bit RGB.
+    fn format_for_placeholder(image_id: u32, placement_id: u32) -> FormatTag {
+        use freminal_common::buffer_states::cursor::StateColors;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let fg = TerminalColor::Custom(
+            (image_id >> 16) as u8,
+            (image_id >> 8) as u8,
+            image_id as u8,
+        );
+
+        #[allow(clippy::cast_possible_truncation)]
+        let ul = TerminalColor::Custom(
+            (placement_id >> 16) as u8,
+            (placement_id >> 8) as u8,
+            placement_id as u8,
+        );
+
+        let mut tag = FormatTag::default();
+        tag.colors = StateColors {
+            color: fg,
+            underline_color: ul,
+            ..tag.colors
+        };
+        tag
+    }
+
+    /// U+10EEEE without any diacritics (bare placeholder char).
+    const PLACEHOLDER_BYTES: &[u8] = &[0xF4, 0x8E, 0xBB, 0xAE];
+
+    /// U+10EEEE followed by one diacritic (row=0 → U+0305).
+    fn placeholder_with_row(row_idx: usize) -> Vec<u8> {
+        let mut bytes = PLACEHOLDER_BYTES.to_vec();
+        let diacritic =
+            char::from_u32(DIACRITICS_FOR_TESTS[row_idx]).expect("valid diacritic codepoint");
+        let mut buf = [0u8; 4];
+        let encoded = diacritic.encode_utf8(&mut buf);
+        bytes.extend_from_slice(encoded.as_bytes());
+        bytes
+    }
+
+    /// U+10EEEE followed by two diacritics (row + col).
+    fn placeholder_with_row_col(row_idx: usize, col_idx: usize) -> Vec<u8> {
+        let mut bytes = PLACEHOLDER_BYTES.to_vec();
+        for &idx in &[row_idx, col_idx] {
+            let diacritic =
+                char::from_u32(DIACRITICS_FOR_TESTS[idx]).expect("valid diacritic codepoint");
+            let mut buf = [0u8; 4];
+            let encoded = diacritic.encode_utf8(&mut buf);
+            bytes.extend_from_slice(encoded.as_bytes());
+        }
+        bytes
+    }
+
+    /// A few diacritics from the table for test convenience.
+    /// Index 0 = U+0305, index 1 = U+030D, index 2 = U+030E, etc.
+    const DIACRITICS_FOR_TESTS: &[u32] = &[0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D];
+
+    #[test]
+    fn kitty_virtual_placement_stores_but_does_not_place_cells() {
+        let (mut handler, _rx) = kitty_handler();
+        let cmd = kitty_virtual_2x2_cmd();
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be in the store.
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "Image id=42 should be in the image store"
+        );
+
+        // But NO image cells should be placed in the buffer.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Virtual placement should NOT place image cells directly"
+        );
+
+        // Virtual placement should be stored.
+        assert!(
+            !handler.virtual_placements.is_empty(),
+            "Virtual placements table should have an entry"
+        );
+        assert!(
+            handler.virtual_placements.contains_key(&(42, 0)),
+            "Should have virtual placement for (image_id=42, placement_id=0)"
+        );
+    }
+
+    #[test]
+    fn kitty_placeholder_chars_create_image_cells() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Step 1: Create a virtual placement with U=1.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        // Step 2: Set foreground to encode image_id=42, underline to placement_id=0.
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // Step 3: Send two placeholder chars (row=0, col=0) and (row=0, col=1)
+        // with explicit row+col diacritics.
+        let mut data = placeholder_with_row_col(0, 0);
+        data.extend_from_slice(&placeholder_with_row_col(0, 1));
+        handler.handle_data(&data);
+
+        // Step 4: Verify image cells were placed.
+        let row0 = &handler.buffer().get_rows()[0];
+        assert!(
+            row0.cells()[0].has_image(),
+            "Cell (0,0) should have an image placement"
+        );
+        assert!(
+            row0.cells()[1].has_image(),
+            "Cell (0,1) should have an image placement"
+        );
+
+        // Verify the image placements reference the correct image and positions.
+        let p0 = row0.cells()[0].image_placement().unwrap();
+        assert_eq!(p0.image_id, 42, "Cell (0,0) should reference image_id=42");
+        assert_eq!(p0.row_in_image, 0);
+        assert_eq!(p0.col_in_image, 0);
+
+        let p1 = row0.cells()[1].image_placement().unwrap();
+        assert_eq!(p1.image_id, 42, "Cell (0,1) should reference image_id=42");
+        assert_eq!(p1.row_in_image, 0);
+        assert_eq!(p1.col_in_image, 1);
+    }
+
+    #[test]
+    fn kitty_placeholder_inheritance_no_diacritics() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        // Set foreground = image_id=42, underline = placement_id=0.
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // Send first placeholder with explicit row=0, col=0.
+        let first = placeholder_with_row_col(0, 0);
+        handler.handle_data(&first);
+
+        // Send second placeholder with NO diacritics — should inherit row=0, col=1.
+        handler.handle_data(PLACEHOLDER_BYTES);
+
+        let row0 = &handler.buffer().get_rows()[0];
+        let p0 = row0.cells()[0].image_placement().unwrap();
+        assert_eq!(p0.row_in_image, 0);
+        assert_eq!(p0.col_in_image, 0);
+
+        let p1 = row0.cells()[1].image_placement().unwrap();
+        assert_eq!(p1.row_in_image, 0);
+        assert_eq!(p1.col_in_image, 1, "Inherited col should be prev_col + 1");
+    }
+
+    #[test]
+    fn kitty_placeholder_inheritance_row_only_diacritic() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // First cell: row=0, col=0 (explicit).
+        let first = placeholder_with_row_col(0, 0);
+        handler.handle_data(&first);
+
+        // Second cell: row=0 only (one diacritic) — should inherit col=1 from prev.
+        let second = placeholder_with_row(0);
+        handler.handle_data(&second);
+
+        let row0 = &handler.buffer().get_rows()[0];
+        let p1 = row0.cells()[1].image_placement().unwrap();
+        assert_eq!(p1.row_in_image, 0);
+        assert_eq!(p1.col_in_image, 1, "Should inherit col+1 from previous");
+    }
+
+    #[test]
+    fn kitty_placeholder_new_row_resets_col() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt);
+
+        // Row 0, col 0 (explicit).
+        handler.handle_data(&placeholder_with_row_col(0, 0));
+
+        // Row 0, col 1 (inherited via bare placeholder).
+        handler.handle_data(PLACEHOLDER_BYTES);
+
+        // Now move to next line (simulate \r\n or newline).
+        handler.handle_newline();
+        handler.handle_carriage_return();
+
+        // Row 1, col 0 with row-only diacritic — different row, so col resets to 0.
+        handler.handle_data(&placeholder_with_row(1));
+
+        let row1 = &handler.buffer().get_rows()[1];
+        let p = row1.cells()[0].image_placement().unwrap();
+        assert_eq!(p.row_in_image, 1, "Should be row 1");
+        assert_eq!(p.col_in_image, 0, "New row should start at col 0");
+    }
+
+    #[test]
+    fn kitty_placeholder_no_virtual_placement_inserts_space() {
+        let (mut handler, _rx) = kitty_handler();
+        // Do NOT create any virtual placement.
+
+        // Set foreground to encode image_id=99.
+        let fmt = format_for_placeholder(99, 0);
+        handler.set_format(fmt);
+
+        // Send a placeholder char with row=0, col=0.
+        let data = placeholder_with_row_col(0, 0);
+
+        // But wait — the fast path skips placeholder processing when
+        // virtual_placements is empty. The char goes through as normal text.
+        handler.handle_data(&data);
+
+        // The cell should NOT have an image placement.
+        let row0 = &handler.buffer().get_rows()[0];
+        assert!(
+            !row0.cells()[0].has_image(),
+            "Without virtual placements, placeholder should not create image cells"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_all_clears_virtual_placements() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyDeleteTarget};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create a virtual placement.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+        assert!(!handler.virtual_placements.is_empty());
+
+        // Delete all.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::All),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.virtual_placements.is_empty(),
+            "Delete all should clear virtual placements"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_by_id_clears_matching_virtual_placements() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyDeleteTarget};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Create a virtual placement for image_id=42.
+        let cmd = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.virtual_placements.contains_key(&(42, 0)));
+
+        // Delete by ID = 42.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.virtual_placements.is_empty(),
+            "Delete by ID=42 should clear the virtual placement"
+        );
+    }
+
+    #[test]
+    fn kitty_placeholder_fast_path_with_no_virtual_placements() {
+        let (mut handler, _rx) = kitty_handler();
+        // No virtual placements — fast path should just insert text normally.
+
+        handler.handle_data(b"Hello World");
+
+        // Cursor should have advanced.
+        let cursor = handler.buffer().get_cursor();
+        assert_eq!(
+            cursor.pos.x, 11,
+            "Cursor should be at column 11 after 'Hello World'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sixel integration tests
+    // -----------------------------------------------------------------------
+
+    /// Build a DCS Sixel payload with `P` prefix and `ESC \` suffix.
+    /// `params` is the "P1;P2;P3" part (may be empty), `sixel_body` is
+    /// everything after the `q` introducer.
+    fn build_sixel_dcs(params: &[u8], sixel_body: &[u8]) -> Vec<u8> {
+        // Format: P <params> q <sixel_body> ESC '\'
+        let mut v = vec![b'P'];
+        v.extend_from_slice(params);
+        v.push(b'q');
+        v.extend_from_slice(sixel_body);
+        v.extend_from_slice(b"\x1b\\");
+        v
+    }
+
+    #[test]
+    fn sixel_simple_red_pixel_places_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Define color 1 as red (RGB 100,0,0) and paint one sixel column.
+        // '#1;2;100;0;0' defines color 1, '#1' selects it, '~' = 0x7E = 0b111111
+        // encodes 6 pixels all set (1 column x 6 rows of red).
+        let sixel_body = b"#1;2;100;0;0#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Sixel DCS should place image cells in the buffer"
+        );
+    }
+
+    #[test]
+    fn sixel_image_stored_in_image_store() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let initial_len = handler.buffer().image_store().len();
+
+        let sixel_body = b"#1;2;100;0;0#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(
+            handler.buffer().image_store().len(),
+            initial_len + 1,
+            "Image store should contain one more image after Sixel"
+        );
+    }
+
+    #[test]
+    fn sixel_empty_body_no_image() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Just the `q` introducer with no sixel data at all → zero-dimension image.
+        let dcs = build_sixel_dcs(b"", b"");
+        handler.handle_device_control_string(&dcs);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Empty Sixel body should not produce image cells"
+        );
+    }
+
+    #[test]
+    fn sixel_with_repeat_expands_width() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Color 0 = red, then repeat '~' 16 times → 16 columns, 6 rows.
+        // At 8 px/col that is 2 cells wide; at 16 px/row that is 1 cell tall.
+        let sixel_body = b"#0;2;100;0;0#0!16~";
+        let dcs = build_sixel_dcs(b"", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            has_image,
+            "Sixel with repeat operator should place image cells"
+        );
+
+        // The image should be 16 px wide, 6 px tall.
+        // Find it via the image store iterator (there should be exactly one).
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(img.width_px, 16, "Image width should be 16 pixels");
+        assert_eq!(img.height_px, 6, "Image height should be 6 pixels");
+    }
+
+    #[test]
+    fn sixel_multicolor_two_bands() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Define red and blue. Paint one column of red, newline, one column of blue.
+        // Total: 1 px wide, 12 px tall (2 bands of 6).
+        let sixel_body = b"#1;2;100;0;0#2;2;0;0;100#1~-#2~";
+        let dcs = build_sixel_dcs(b"", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(img.width_px, 1, "Image width should be 1 pixel");
+        assert_eq!(
+            img.height_px, 12,
+            "Image height should be 12 pixels (2 bands)"
+        );
+    }
+
+    #[test]
+    fn sixel_with_raster_attributes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Raster attributes: "1;1;8;12" = aspect 1:1, declared 8 wide x 12 tall.
+        // Then paint 2 bands of 8 columns each.
+        let sixel_body = b"\"1;1;8;12#1;2;0;100;0#1!8~-#1!8~";
+        let dcs = build_sixel_dcs(b"", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(img.width_px, 8, "Raster-declared width should be 8 pixels");
+        assert_eq!(
+            img.height_px, 12,
+            "Raster-declared height should be 12 pixels"
+        );
+    }
+
+    #[test]
+    fn sixel_transparent_background() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // P2=1 means transparent background.
+        // Paint only the top pixel of a single column (bit 0 set = '?' + 1 = '@').
+        // The remaining 5 pixels in the column should be transparent (alpha=0).
+        let sixel_body = b"#1;2;100;0;0#1@";
+        let dcs = build_sixel_dcs(b"0;1;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+
+        // 1 pixel wide, 6 pixels tall → 6 * 4 = 24 bytes RGBA.
+        assert_eq!(img.pixels.len(), 24);
+
+        // First pixel (row 0): red, fully opaque — '@' = 0x40 - 0x3F = 1 = bit 0 set.
+        assert_eq!(img.pixels[0], 255, "R channel of top pixel");
+        assert_eq!(img.pixels[1], 0, "G channel of top pixel");
+        assert_eq!(img.pixels[2], 0, "B channel of top pixel");
+        assert_eq!(img.pixels[3], 255, "A channel of top pixel (opaque)");
+
+        // Second pixel (row 1): transparent — bit 1 not set.
+        assert_eq!(img.pixels[7], 0, "A channel of second pixel (transparent)");
+    }
+
+    #[test]
+    fn sixel_carriage_return_overlays_same_band() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Paint red in column 0, then CR ('$'), then paint blue in column 0.
+        // Blue should overwrite red in the overlapping pixels.
+        // '~' = all 6 bits set.
+        let sixel_body = b"#1;2;100;0;0#1~$#2;2;0;0;100#2~";
+        let dcs = build_sixel_dcs(b"0;1;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+
+        // Column 0, all 6 pixels should be blue (last writer wins).
+        // First pixel: RGBA at offset 0..4.
+        assert_eq!(img.pixels[0], 0, "R of overwritten pixel");
+        assert_eq!(img.pixels[1], 0, "G of overwritten pixel");
+        assert_eq!(img.pixels[2], 255, "B of overwritten pixel");
+        assert_eq!(
+            img.pixels[3], 255,
+            "A of overwritten pixel (opaque, set by blue)"
+        );
+    }
+
+    #[test]
+    fn is_sixel_sequence_detection() {
+        // Valid sixel sequences.
+        assert!(
+            TerminalHandler::is_sixel_sequence(b"q~"),
+            "bare 'q' + data is sixel"
+        );
+        assert!(
+            TerminalHandler::is_sixel_sequence(b"0;0;0q~"),
+            "params before q is sixel"
+        );
+        assert!(
+            TerminalHandler::is_sixel_sequence(b"0q"),
+            "single param before q is sixel"
+        );
+
+        // Not sixel.
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"$qm"),
+            "DECRQSS ($q) is not sixel"
+        );
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"+qHEX"),
+            "XTGETTCAP (+q) is not sixel"
+        );
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"no_q_here"),
+            "no q at all is not sixel"
+        );
+        assert!(
+            !TerminalHandler::is_sixel_sequence(b"abcq~"),
+            "letters before q is not sixel"
         );
     }
 }

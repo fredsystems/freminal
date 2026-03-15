@@ -20,6 +20,11 @@ family = "CaskaydiaCove Nerd Font"
 # Font size in points
 size = 12.0
 
+# Enable OpenType ligatures (liga, clig).
+# Programming fonts like JetBrains Mono, Fira Code, and Cascadia Code
+# contain ligatures for sequences like ->, =>, !=, >=, etc.
+ligatures = true
+
 ################################################################################
 # CURSOR SETTINGS
 ################################################################################
@@ -38,8 +43,18 @@ blink = true
 # THEME SETTINGS
 ################################################################################
 [theme]
-# Name of your color scheme
-# You can later support built-in themes or custom theme files
+# Name of your color scheme (must be a recognized built-in slug).
+#
+# Available themes:
+#   catppuccin-mocha      catppuccin-macchiato   catppuccin-frappe
+#   catppuccin-latte      dracula                nord
+#   solarized-dark        solarized-light        gruvbox-dark
+#   gruvbox-light         one-dark               one-light
+#   tokyo-night           tokyo-night-storm      kanagawa
+#   rose-pine             rose-pine-moon         rose-pine-dawn
+#   monokai-pro           ayu-dark               ayu-light
+#   everforest-dark       everforest-light        material-dark
+#   xterm-default
 name = "catppuccin-mocha"
 
 ################################################################################
@@ -76,3 +91,43 @@ name = "catppuccin-mocha"
 # Maximum number of scrollback lines to keep in the buffer.
 # Must be between 1 and 100000.
 limit = 4000
+
+################################################################################
+# NIX / HOME-MANAGER USAGE
+################################################################################
+# If you use Nix with home-manager, Freminal can generate this config file
+# declaratively. Add the flake and enable the module:
+#
+#   # flake.nix
+#   {
+#     inputs.freminal.url = "github:FredSystems/freminal";
+#
+#     outputs = { nixpkgs, freminal, ... }: {
+#       # Option A: use the overlay so pkgs.freminal is available everywhere
+#       nixpkgs.overlays = [ freminal.overlays.default ];
+#
+#       # Option B: import the home-manager module directly
+#       homeConfigurations."user" = home-manager.lib.homeManagerConfiguration {
+#         modules = [
+#           freminal.homeManagerModules.default
+#           {
+#             programs.freminal = {
+#               enable = true;
+#               settings = {
+#                 font.family = "JetBrainsMono Nerd Font";
+#                 font.size = 14.0;
+#                 cursor.shape = "bar";
+#                 cursor.blink = false;
+#                 theme.name = "catppuccin-mocha";
+#                 scrollback.limit = 10000;
+#                 shell.path = "/run/current-system/sw/bin/zsh";
+#               };
+#             };
+#           }
+#         ];
+#       };
+#     };
+#   }
+#
+# This generates ~/.config/freminal/config.toml automatically.
+# Null/unset values are omitted; Freminal uses built-in defaults for them.

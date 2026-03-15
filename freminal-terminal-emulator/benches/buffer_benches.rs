@@ -155,7 +155,7 @@ fn bench_parse_cup_writes(c: &mut Criterion) {
             || {
                 let mut state = TerminalState::default();
                 // Pre-resize to 80×24 so the handler dimensions match the payload.
-                state.set_win_size(80, 24);
+                state.set_win_size(80, 24, 8, 16);
                 state
             },
             |mut state| {
@@ -223,7 +223,7 @@ fn bench_handle_incoming_data(c: &mut Criterion) {
 fn bench_data_and_format_for_gui(c: &mut Criterion) {
     // Pre-populate with a full 80×24 screen of content.
     let mut state = TerminalState::default();
-    state.set_win_size(80, 24);
+    state.set_win_size(80, 24, 8, 16);
     let payload = cup_writes_payload(80, 24);
     let parsed = state.parser.push(&payload);
     state.handler.process_outputs(&parsed);
@@ -268,7 +268,7 @@ fn bench_build_snapshot(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut emulator = TerminalEmulator::dummy_for_bench();
-                emulator.internal.set_win_size(80, 24);
+                emulator.internal.set_win_size(80, 24, 8, 16);
                 let payload = cup_writes_payload(80, 24);
                 let parsed = emulator.internal.parser.push(&payload);
                 emulator.internal.handler.process_outputs(&parsed);
@@ -286,7 +286,7 @@ fn bench_build_snapshot(c: &mut Criterion) {
     // measure repeated calls where nothing has changed.
     {
         let mut emulator = TerminalEmulator::dummy_for_bench();
-        emulator.internal.set_win_size(80, 24);
+        emulator.internal.set_win_size(80, 24, 8, 16);
         let payload = cup_writes_payload(80, 24);
         let parsed = emulator.internal.parser.push(&payload);
         emulator.internal.handler.process_outputs(&parsed);

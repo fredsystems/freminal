@@ -74,7 +74,7 @@ This should:
 
 ### 4.1 — Create Nix module directory structure
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** New `nix/` directory
 - **Details:**
   - Create `nix/home-manager-module.nix` — home-manager module
@@ -92,7 +92,7 @@ This should:
 
 ### 4.2 — Implement Nix overlay
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `nix/overlay.nix`, `flake.nix`
 - **Details:**
   - Create overlay that adds `freminal` to `pkgs`
@@ -109,7 +109,7 @@ This should:
 
 ### 4.3 — Implement home-manager module
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `nix/home-manager-module.nix`, `flake.nix`
 - **Details:**
   - Module options:
@@ -167,7 +167,7 @@ This should:
 
 ### 4.4 — TOML generation from Nix attributes
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `nix/home-manager-module.nix`
 - **Details:**
   - Implement Nix function to convert settings attrset to TOML string
@@ -189,7 +189,7 @@ This should:
 
 ### 4.5 — Multi-architecture support
 
-- **Status:** Not Started
+- **Status:** Complete (already supported via `precommit.lib.supportedSystems`)
 - **Scope:** `flake.nix`
 - **Details:**
   - Use `flake-utils` or `systems` to define supported architectures
@@ -204,7 +204,7 @@ This should:
 
 ### 4.6 — Update flake.nix to export new outputs
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** `flake.nix`
 - **Details:**
   - Add `homeManagerModules.default` output
@@ -218,7 +218,7 @@ This should:
 
 ### 4.7 — Documentation and examples
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** Update `config_example.toml`, potentially README references
 - **Details:**
   - Add Nix usage example to config_example.toml as a comment
@@ -231,7 +231,7 @@ This should:
 
 ### 4.8 — Integration testing
 
-- **Status:** Not Started
+- **Status:** Complete
 - **Scope:** All Nix files
 - **Details:**
   - Add flake check that evaluates home-manager module with test config

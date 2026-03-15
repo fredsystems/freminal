@@ -203,8 +203,15 @@ impl TerminalState {
         self.handler.cursor_pos()
     }
 
-    pub fn set_win_size(&mut self, width: usize, height: usize) {
-        self.handler.handle_resize(width, height);
+    pub fn set_win_size(
+        &mut self,
+        width: usize,
+        height: usize,
+        cell_pixel_width: u32,
+        cell_pixel_height: u32,
+    ) {
+        self.handler
+            .handle_resize(width, height, cell_pixel_width, cell_pixel_height);
     }
 
     #[must_use]

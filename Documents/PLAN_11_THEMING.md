@@ -1,6 +1,6 @@
 # PLAN_11_THEMING.md — Embedded Color Themes
 
-## Status: Not Started
+## Status: Complete
 
 ---
 
@@ -460,12 +460,12 @@ The overall task is complete when:
 
 ## Overall Progress
 
-- [ ] 11.1 — Define `ThemePalette` struct and Catppuccin Mocha theme
-- [ ] 11.2 — Add all ~25 embedded theme definitions
-- [ ] 11.3 — Wire `default_index_to_rgb()` to accept `ThemePalette`
-- [ ] 11.4 — Wire `internal_color_to_egui/gl()` to `ThemePalette`
-- [ ] 11.5 — Thread theme through PTY side and snapshot
-- [ ] 11.6 — Wire Settings Modal theme picker
-- [ ] 11.7 — Live theme switching (hot-reload on Apply)
-- [ ] 11.8 — OSC 10/11 set path and OSC 110/111 reset
-- [ ] 11.9 — Tests and documentation
+- [x] 11.1 — Define `ThemePalette` struct and Catppuccin Mocha theme
+- [x] 11.2 — Add all ~25 embedded theme definitions
+- [x] 11.3 — Wire `default_index_to_rgb()` to accept `ThemePalette`
+- [x] 11.4 — Wire `internal_color_to_egui/gl()` to `ThemePalette`
+- [x] 11.5 — Thread theme through PTY side and snapshot
+- [x] 11.6 — Wire Settings Modal theme picker
+- [x] 11.7 — Live theme switching (hot-reload on Apply)
+- [x] 11.8 — OSC 10/11 set path and OSC 110/111 reset
+- [x] 11.9 — Tests and documentation

@@ -5,6 +5,7 @@
 
 use eframe::egui::{self, ComboBox, DragValue, Slider, Ui};
 use freminal_common::config::{self, Config, CursorShapeConfig};
+use freminal_common::themes;
 
 /// Which tab is currently active in the settings modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,18 +231,28 @@ impl SettingsModal {
     }
 
     fn show_theme_tab(&mut self, ui: &mut Ui) {
+        // Look up the display name for the currently selected slug.
+        let selected_display = themes::by_slug(&self.draft.theme.name)
+            .map_or_else(|| self.draft.theme.name.clone(), |t| t.name.to_string());
+
         ui.label("Theme:");
         ComboBox::from_id_salt("theme_name")
-            .selected_text(&self.draft.theme.name)
+            .selected_text(&selected_display)
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.draft.theme.name,
-                    "catppuccin-mocha".to_string(),
-                    "Catppuccin Mocha",
-                );
+                for theme in themes::all_themes() {
+                    ui.selectable_value(
+                        &mut self.draft.theme.name,
+                        theme.slug.to_string(),
+                        theme.name,
+                    );
+                }
             });
         ui.add_space(8.0);
-        ui.label("Custom themes are planned for a future release.");
+
+        // Color preview strip: show the selected theme's palette.
+        if let Some(theme) = themes::by_slug(&self.draft.theme.name) {
+            show_theme_preview(ui, theme);
+        }
     }
 
     fn show_shell_tab(&mut self, ui: &mut Ui) {
@@ -335,6 +346,44 @@ const fn cursor_shape_label(shape: &CursorShapeConfig) -> &'static str {
         CursorShapeConfig::Underline => "Underline",
         CursorShapeConfig::Bar => "Bar",
     }
+}
+
+/// Paint a small colored rectangle as an inline swatch.
+fn color_swatch(ui: &mut Ui, (r, g, b): (u8, u8, u8), size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
+}
+
+/// Render a compact color preview strip for the given theme.
+fn show_theme_preview(ui: &mut Ui, theme: &themes::ThemePalette) {
+    let swatch_size = egui::vec2(16.0, 16.0);
+
+    // Foreground / Background swatches.
+    ui.horizontal(|ui| {
+        ui.label("FG:");
+        color_swatch(ui, theme.foreground, swatch_size);
+        ui.add_space(4.0);
+        ui.label("BG:");
+        color_swatch(ui, theme.background, swatch_size);
+        ui.add_space(4.0);
+        ui.label("Cursor:");
+        color_swatch(ui, theme.cursor, swatch_size);
+    });
+    ui.add_space(4.0);
+
+    // 16 ANSI color swatches in two rows (normal + bright).
+    ui.label("ANSI Colors:");
+    ui.horizontal(|ui| {
+        for color in &theme.ansi[..8] {
+            color_swatch(ui, *color, swatch_size);
+        }
+    });
+    ui.horizontal(|ui| {
+        for color in &theme.ansi[8..] {
+            color_swatch(ui, *color, swatch_size);
+        }
+    });
 }
 
 #[cfg(test)]

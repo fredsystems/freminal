@@ -42,7 +42,7 @@ use tracing_subscriber::{
 
 pub mod gui;
 
-use freminal_common::{args::Args, config, config::load_config};
+use freminal_common::{args::Args, config, config::load_config, themes};
 
 use clap::Parser;
 
@@ -186,7 +186,12 @@ fn main() {
     }
 
     let res = match TerminalEmulator::new(&args, Some(cfg.scrollback.limit)) {
-        Ok((terminal, pty_read_rx)) => {
+        Ok((mut terminal, pty_read_rx)) => {
+            // Apply the configured theme to the emulator so all snapshots carry
+            // the correct palette from the start.
+            let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
+            terminal.internal.handler.set_theme(theme);
+
             // Shared snapshot published by the PTY thread, consumed lock-free by the GUI.
             let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
                 Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
@@ -245,6 +250,9 @@ fn main() {
                                 Ok(InputEvent::ScrollOffset(offset)) => {
                                     emulator.set_gui_scroll_offset(offset);
                                 }
+                                Ok(InputEvent::ThemeChange(theme)) => {
+                                    emulator.internal.handler.set_theme(theme);
+                                }
                                 Err(_) => {
                                     // GUI closed the sender — time to stop.
                                     info!("Input channel closed; consumer thread exiting");
@@ -266,9 +274,6 @@ fn main() {
                             | WindowManipulation::ReportWindowSizeInPixels
                             | WindowManipulation::ReportWindowTextAreaSizeInPixels
                             | WindowManipulation::ReportRootWindowSizeInPixels
-                            | WindowManipulation::ReportCharacterSizeInPixels
-                            | WindowManipulation::ReportTerminalSizeInCharacters
-                            | WindowManipulation::ReportRootWindowSizeInCharacters
                             | WindowManipulation::ReportIconLabel
                             | WindowManipulation::ReportTitle
                             | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),

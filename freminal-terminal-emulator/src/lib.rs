@@ -33,3 +33,7 @@ pub mod state;
 
 #[macro_use]
 extern crate tracing;
+
+// Re-export image types so the `freminal` binary crate can use them without
+// taking a direct dependency on `freminal-buffer`.
+pub use freminal_buffer::image_store::{ImagePlacement, InlineImage};

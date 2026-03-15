@@ -11,8 +11,9 @@
 //! thread loads the snapshot with a single atomic pointer load — no lock, no
 //! blocking.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -22,6 +23,7 @@ use freminal_common::{
         tchar::TChar,
     },
     cursor::CursorVisualStyle,
+    themes::ThemePalette,
 };
 
 /// A point-in-time snapshot of the terminal state, ready for the GUI to render.
@@ -138,6 +140,31 @@ pub struct TerminalSnapshot {
     ///
     /// The GUI can use this to display command success/failure indicators.
     pub last_exit_code: Option<i32>,
+
+    /// The active color theme palette.
+    ///
+    /// Carried in the snapshot so the GUI can render with the user's chosen
+    /// theme without holding any lock.
+    pub theme: &'static ThemePalette,
+
+    /// All inline images referenced by the visible window.
+    ///
+    /// The map contains only the images that appear in `visible_image_placements`
+    /// — images that have scrolled completely out of the visible window are not
+    /// included.  Wrapped in `Arc` so cloning a snapshot is a refcount bump, not
+    /// a deep copy of the pixel data.
+    pub images: Arc<HashMap<u64, InlineImage>>,
+
+    /// Per-cell image placement data for the visible window.
+    ///
+    /// One entry per cell, in row-major order (row 0 col 0, row 0 col 1, …,
+    /// row N-1 col W-1).  `None` means the cell carries no image; `Some`
+    /// means the cell is part of an inline image and identifies which portion.
+    ///
+    /// Parallel to `visible_chars` — the same cell index addresses both vectors.
+    ///
+    /// Wrapped in `Arc` so the clean-path snapshot reuse is cheap.
+    pub visible_image_placements: Arc<Vec<Option<ImagePlacement>>>,
 }
 
 impl TerminalSnapshot {
@@ -168,6 +195,9 @@ impl TerminalSnapshot {
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
+            theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            images: Arc::new(HashMap::new()),
+            visible_image_placements: Arc::new(Vec::new()),
         }
     }
 }

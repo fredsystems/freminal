@@ -65,10 +65,20 @@ pub fn run_terminal(
     let mut cmd = shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new);
 
     cmd.env("TERMINFO", termcaps);
-    // We're setting this to xterm-256color because it's the most compatible
-    // nvim, and probably others, lose their fucking mind and don't send all
-    // escapes we support if they don't know the terminal. Unless and until
-    // we go main stream this is the best bet
+    // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
+    // "xterm-freminal" for maximum compatibility. Programs like neovim, tmux, and
+    // many TUI apps have hardcoded behavior based on TERM — setting it to an
+    // unrecognized value causes them to fall back to minimal capabilities. This is
+    // the same approach used by WezTerm, Alacritty, and most modern terminals.
+    //
+    // For capabilities beyond what xterm-256color declares (e.g., true color, styled
+    // underlines, clipboard via OSC 52), we rely on XTGETTCAP (DCS +q) responses.
+    // Modern programs query these at startup to discover extra features. See
+    // `TerminalHandler::lookup_termcap` in freminal-buffer for the full list.
+    //
+    // The custom freminal.ti entry in res/ exists as a reference but is not used by
+    // child processes. The TERMINFO env var points to the extracted tarball so that
+    // programs that check for a valid TERMINFO directory find one.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 

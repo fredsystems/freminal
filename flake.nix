@@ -18,6 +18,16 @@
       systems = precommit.lib.supportedSystems;
     in
     {
+      ##########################################################################
+      ## OVERLAY — adds `pkgs.freminal` when applied
+      ##########################################################################
+      overlays.default = import ./nix/overlay.nix { freminal-flake = self; };
+
+      ##########################################################################
+      ## HOME-MANAGER MODULE — `programs.freminal` option set
+      ##########################################################################
+      homeManagerModules.default = import ./nix/home-manager-module.nix { freminal-flake = self; };
+
       packages = lib.genAttrs systems (
         system:
         let

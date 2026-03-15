@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::themes;
 use directories::BaseDirs;
 
 /// ---------------------------------------------------------------------------------------------
@@ -49,6 +50,8 @@ pub struct FontConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
     pub size: f32,
+    /// Enable OpenType ligatures (`liga`, `clig`).  Default: `true`.
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
@@ -56,6 +59,7 @@ impl Default for FontConfig {
         Self {
             family: None,
             size: 12.0,
+            ligatures: true,
         }
     }
 }
@@ -239,6 +243,13 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "scrollback.limit={} out of allowed range (1–100000)",
                 self.scrollback.limit
+            )));
+        }
+
+        if themes::by_slug(&self.theme.name).is_none() {
+            return Err(ConfigError::Validation(format!(
+                "theme.name=\"{}\" is not a recognized theme slug",
+                self.theme.name
             )));
         }
 
@@ -491,4 +502,95 @@ pub fn log_dir() -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_config_default_ligatures_true() {
+        let cfg = FontConfig::default();
+        assert!(cfg.ligatures, "ligatures should default to true");
+    }
+
+    #[test]
+    fn font_config_deserialize_ligatures_true() {
+        let toml_str = r"
+[font]
+size = 14.0
+ligatures = true
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(font.ligatures);
+    }
+
+    #[test]
+    fn font_config_deserialize_ligatures_false() {
+        let toml_str = r"
+[font]
+size = 14.0
+ligatures = false
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(!font.ligatures);
+    }
+
+    #[test]
+    fn font_config_missing_ligatures_defaults_true() {
+        // Backward compatibility: old config files without `ligatures` field
+        // should default to true.
+        let toml_str = r"
+[font]
+size = 14.0
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(
+            font.ligatures,
+            "missing ligatures field should default to true"
+        );
+    }
+
+    #[test]
+    fn full_config_default_has_ligatures_true() {
+        let cfg = Config::default();
+        assert!(cfg.font.ligatures);
+    }
+
+    #[test]
+    fn config_roundtrip_preserves_ligatures() {
+        let mut cfg = Config::default();
+        cfg.font.ligatures = false;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize to TOML");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(!deserialized.font.ligatures);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_theme_slug() {
+        let mut cfg = Config::default();
+        cfg.theme.name = "nonexistent-theme".to_string();
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nonexistent-theme"),
+            "error should mention the bad slug: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_all_builtin_themes() {
+        for theme in themes::all_themes() {
+            let mut cfg = Config::default();
+            cfg.theme.name = theme.slug.to_string();
+            cfg.validate()
+                .unwrap_or_else(|e| panic!("theme '{}' should be valid: {e}", theme.slug));
+        }
+    }
 }

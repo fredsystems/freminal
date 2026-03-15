@@ -36,14 +36,32 @@ fn set_egui_options(ctx: &egui::Context) {
         style.visuals.window_fill = internal_color_to_egui(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
+            &freminal_common::themes::CATPPUCCIN_MOCHA,
         );
         style.visuals.panel_fill = internal_color_to_egui(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
+            &freminal_common::themes::CATPPUCCIN_MOCHA,
         );
     });
     ctx.options_mut(|options| {
         options.zoom_with_keyboard = false;
+    });
+}
+
+/// Update egui chrome colors (window/panel fill) to match a new theme.
+fn update_egui_theme(ctx: &egui::Context, theme: &freminal_common::themes::ThemePalette) {
+    ctx.style_mut(|style| {
+        style.visuals.window_fill = internal_color_to_egui(
+            freminal_common::colors::TerminalColor::DefaultBackground,
+            false,
+            theme,
+        );
+        style.visuals.panel_fill = internal_color_to_egui(
+            freminal_common::colors::TerminalColor::DefaultBackground,
+            false,
+            theme,
+        );
     });
 }
 
@@ -136,7 +154,6 @@ fn handle_window_manipulation(
     font_height: usize,
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
-    snap: &TerminalSnapshot,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -316,17 +333,13 @@ fn handle_window_manipulation(
 
                 send_pty_response(pty_write_tx, &format!("\x1b[5;{height};{width}t"));
             }
-            WindowManipulation::ReportCharacterSizeInPixels => {
-                send_pty_response(pty_write_tx, &format!("\x1b[6;{font_height};{font_width}t"));
-            }
-            WindowManipulation::ReportTerminalSizeInCharacters => {
-                let (width, height) = (snap.term_width, snap.term_height);
-                send_pty_response(pty_write_tx, &format!("\x1b[8;{height};{width}t"));
-            }
-            WindowManipulation::ReportRootWindowSizeInCharacters => {
-                let (width, height) = (snap.term_width, snap.term_height);
-                send_pty_response(pty_write_tx, &format!("\x1b[9;{height};{width}t"));
-            }
+            // ReportCharacterSizeInPixels, ReportTerminalSizeInCharacters, and
+            // ReportRootWindowSizeInCharacters are handled synchronously by the
+            // PTY thread (TerminalHandler::handle_window_manipulation) so that
+            // responses arrive in the same batch as DA1.  They never reach here.
+            WindowManipulation::ReportCharacterSizeInPixels
+            | WindowManipulation::ReportTerminalSizeInCharacters
+            | WindowManipulation::ReportRootWindowSizeInCharacters => {}
             WindowManipulation::ReportIconLabel => {
                 let title = ui.ctx().input(|r| r.raw.viewport().title.clone());
                 let title = title.unwrap_or_else(|| {
@@ -463,7 +476,6 @@ impl eframe::App for FreminalGui {
                 font_height,
                 window_width,
                 &mut self.window_title_stack,
-                &snap,
             );
 
             // Update background color based on whether the terminal is in
@@ -473,10 +485,12 @@ impl eframe::App for FreminalGui {
                     style.visuals.window_fill = internal_color_to_egui(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
+                        snap.theme,
                     );
                     style.visuals.panel_fill = internal_color_to_egui(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
+                        snap.theme,
                     );
                 });
             } else {
@@ -525,6 +539,19 @@ impl eframe::App for FreminalGui {
         let settings_action = self.settings_modal.show(ctx);
         if settings_action == SettingsAction::Applied {
             let new_cfg = self.settings_modal.applied_config().clone();
+
+            // If the theme slug changed, look it up and notify the PTY thread
+            // so the next snapshot carries the new palette.
+            if new_cfg.theme.name != self.config.theme.name
+                && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
+            {
+                if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    error!("Failed to send ThemeChange to PTY thread: {e}");
+                }
+                // Update egui chrome colors immediately.
+                update_egui_theme(ctx, theme);
+            }
+
             self.terminal_widget
                 .apply_config_changes(ctx, &self.config, &new_cfg, &self.input_tx);
             self.config = new_cfg;

@@ -221,17 +221,26 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.1 — Add image storage types to freminal-buffer**
+- [x] **13.1 — Add image storage types to freminal-buffer**
   - Define `InlineImage`, `ImagePlacement`, and the image store (`HashMap<u64, InlineImage>`).
   - Add `Option<ImagePlacement>` to `Cell` (or a parallel structure to avoid bloating every
     cell — investigate the performance tradeoff).
   - Add methods to insert an image at a cursor position, spanning multiple cells.
   - Add tests for image insertion, scrolling, and reflow behavior.
   - **Verify:** `cargo test --all` passes. No existing test regressions.
+  - **Completed 2026-03-12.** Created `freminal-buffer/src/image_store.rs` with `InlineImage`
+    (Arc pixel data), `ImagePlacement`, `ImageStore` (HashMap + retain_referenced GC).
+    Added `Option<Box<ImagePlacement>>` to `Cell` (8 bytes null for non-image cells).
+    Added `place_image()` to `Buffer` with width clipping and scroll support.
+    Image store saved/restored across alternate screen, cleared on full_reset, GC'd
+    in `enforce_scrollback_limit()`. 23 unit tests covering placement, scrolling, GC,
+    alternate screen, cell accessors, and store operations. Fixed infinite loop bug
+    in place_image (now uses push_row + enforce_scrollback_limit matching handle_lf).
+    Commit: `4309da7`.
 
 ---
 
-- [ ] **13.2 — Parse iTerm2 OSC 1337 File sequences**
+- [x] **13.2 — Parse iTerm2 OSC 1337 File sequences**
   - Extend the OSC handler in `freminal-terminal-emulator` to recognize `1337;File=`.
   - Parse arguments: `name`, `size`, `width`, `height`, `preserveAspectRatio`, `inline`.
   - Accumulate base64 payload, decode on BEL/ST.
@@ -242,24 +251,50 @@ quads for image regions is straightforward:
   - Add tests with sample base64-encoded PNG/JPEG payloads.
   - **Verify:** `cargo test --all` passes. Parser correctly extracts image data from
     OSC 1337 sequences.
+  - ✅ **Completed 2026-03-12.** Added `ImageDimension` enum and `ITerm2InlineImageData`
+    struct to `freminal-common/src/buffer_states/osc.rs`. Replaced `AnsiOscType::ITerm2`
+    with `ITerm2FileInline(ITerm2InlineImageData)` and `ITerm2Unknown` variants. Implemented
+    `handle_osc_iterm2()` parser in `freminal-terminal-emulator/src/ansi_components/osc.rs`.
+    Added `image` crate dependency to `freminal-buffer`. Added `resolve_image_dimension()`,
+    `apply_aspect_ratio()`, and `handle_iterm2_inline_image()` to `TerminalHandler`. 43 new
+    tests across three crates. Committed as `40b2582`.
 
 ---
 
-- [ ] **13.3 — Add iTerm2 MultipartFile support**
+- [x] **13.3 — Add iTerm2 MultipartFile support**
   - Handle `1337;MultipartFile=`, `1337;FilePart=`, and `1337;FileEnd` sequences.
   - Accumulate parts into a single payload buffer, then decode as in 13.2.
   - Add tests for multi-part image transfer.
   - **Verify:** `cargo test --all` passes.
+  - ✅ **Completed 2026-03-13.** Added `ITerm2MultipartBegin`, `ITerm2FilePart`, `ITerm2FileEnd`
+    variants to `AnsiOscType`. Refactored `handle_osc_iterm2()` into a dispatcher with
+    sub-handlers and shared `parse_iterm2_file_args()`. Added `MultipartImageState` accumulator
+    to `TerminalHandler` with begin/part/end lifecycle methods. 9 parser tests and 7 integration
+    tests covering normal flow, edge cases (orphan part/end, begin-resets-previous, empty payload,
+    non-inline). Committed as `e132bef`.
 
 ---
 
-- [ ] **13.4 — Render inline images via GL textures**
+- [x] **13.4 — Render inline images via GL textures**
   - In `freminal/src/gui/renderer.rs`, add support for textured quads.
   - Upload `InlineImage` pixel data as GL textures (cached by image ID).
   - During the draw pass, emit textured quads for cells with `ImagePlacement`.
   - Handle image eviction when images scroll out of the scrollback limit.
   - Include image data in `TerminalSnapshot` (via `Arc` to avoid copies).
   - **Verify:** Manual test: `imgcat` displays an image inline. `cargo test --all` passes.
+  - ✅ **Completed 2026-03-13.** Full end-to-end image rendering pipeline implemented:
+    `TerminalSnapshot` carries `images: Arc<HashMap<u64, InlineImage>>` and
+    `visible_image_placements: Arc<Vec<Option<ImagePlacement>>>`. `build_snapshot()` populates
+    these via `has_visible_images()` / `visible_image_placements()` (extracted into
+    `collect_visible_images()` helper). `renderer.rs` has dedicated image shader program
+    (`IMG_VERT_SRC`/`IMG_FRAG_SRC`), `sync_image_textures()` (uploads new / evicts stale),
+    `draw_images()` (one textured quad per image), `build_image_verts()` (CPU vertex builder).
+    `terminal.rs` `RenderState` carries `image_verts` and `snap_images`; the paint callback
+    passes both to `draw_with_verts()`. Image pass initialisation extracted to
+    `init_image_pass()` to keep `init()` within the 100-line limit. Fixed clippy issues:
+    collapsible if-let chains, `entry` API, type alias for complex return, `clone_from`,
+    `implicit_hasher`, cast allows, doc backticks. All tests pass, clippy clean,
+    machete clean.
 
 ---
 
@@ -276,7 +311,7 @@ quads for image regions is straightforward:
 
 ---
 
-- [ ] **13.6 — Parse Kitty APC graphics sequences**
+- [x] **13.6 — Parse Kitty APC graphics sequences**
   - Add APC sequence handler to the parser.
   - Parse `_G` control data: `a` (action), `f` (format), `t` (transmission), `s`/`v` (size),
     `i` (image ID), `p` (placement ID), `m` (more data flag), `q` (quiet mode).
@@ -284,10 +319,22 @@ quads for image regions is straightforward:
   - Handle `a=q` (query) — respond with OK/error.
   - Add tests for APC parsing and chunked reassembly.
   - **Verify:** `cargo test --all` passes.
+  - ✅ **Completed 2026-03-13.** Created `freminal-common/src/buffer_states/kitty_graphics.rs`
+    with comprehensive Kitty graphics protocol types and parser: `KittyAction`,
+    `KittyFormat`, `KittyTransmission`, `KittyCompression`, `KittyDeleteTarget` enums;
+    `KittyControlData` and `KittyGraphicsCommand` structs; `parse_kitty_graphics()`,
+    `format_kitty_response()`, `strip_apc_envelope()` functions; 35+ tests covering all
+    actions, formats, transmissions, delete targets, error cases, and edge cases.
+    Integrated Kitty APC dispatch into `terminal_handler.rs`: `KittyImageState` struct
+    for chunked transfer accumulation; `handle_application_program_command()` now tries
+    Kitty parse first; `handle_kitty_query()` responds OK for RGBA/PNG formats and
+    respects quiet mode; `handle_kitty_chunk_start()`/`handle_kitty_chunk()` for m=1/m=0
+    chunked protocol; `handle_kitty_single()` and `handle_kitty_delete()` stubs for 13.7.
+    Committed as `9bd2fa4`. All tests pass, clippy clean, machete clean.
 
 ---
 
-- [ ] **13.7 — Implement Kitty direct transfer and display**
+- [x] **13.7 — Implement Kitty direct transfer and display**
   - Handle `a=t` (transmit) and `a=T` (transmit + display) actions.
   - Support `f=32` (RGBA), `f=24` (RGB), and `f=100` (PNG) formats.
   - Support `t=d` (direct/base64) transmission medium.
@@ -296,25 +343,47 @@ quads for image regions is straightforward:
   - Reuse the GL texture rendering from 13.4.
   - **Verify:** `cargo test --all` passes. `kitty icat` displays images (if testing against
     kitty tools).
+  - **Completed 2026-03-13.** Implemented `handle_kitty_single()` split into helper methods
+    (`decode_kitty_payload`, `require_kitty_dimensions`, `place_kitty_image`, `send_kitty_error`).
+    Supports `a=t` (transmit), `a=T` (transmit+display), `a=p` (place with stored image ID).
+    RGB (`f=24`) pixels converted to RGBA on the fly. PNG (`f=100`) decoded via `image` crate.
+    Chunked transfers (m=0/m=1) assemble multi-part payloads before decoding. Fixed
+    `handle_kitty_query()` to accept `f=24` (RGB) format. Implemented `handle_kitty_delete()`
+    with delete-all and delete-by-id support via new `Buffer::clear_all_image_placements()` and
+    `clear_image_placements_by_id()` methods. Added `Row::cells_mut()` accessor. 15 new tests
+    covering all transfer modes, formats, error cases, quiet modes, and delete operations.
+    Committed as `ecba3fd`. All tests pass, clippy clean, machete clean.
 
 ---
 
-- [ ] **13.8 — Implement Kitty Unicode placeholders**
+- [x] **13.8 — Implement Kitty Unicode placeholders**
   - Handle the Unicode placeholder virtual character (U+10EEEE) in the buffer.
   - Map placeholder characters to image placements.
   - Render placeholder cells as image texture quads.
   - This is required for yazi's preferred "Kgp" adapter and for tmux passthrough.
   - **Verify:** `cargo test --all` passes. yazi detects and uses the Kitty protocol.
+  - ✅ Completed. Added `unicode_placeholder` module with diacritics table (297 entries),
+    parsing helpers, and color-to-ID extraction (17 unit tests). Intercept U+10EEEE graphemes
+    in `handle_data()` with fast path when no virtual placements exist. Diacritic inheritance
+    rules fully implemented. Virtual placements stored on `a=T,U=1` / `a=p,U=1` and cleaned
+    on delete. 11 integration tests. Committed as `e02cf64`.
 
 ---
 
 ### Phase 3 — Sixel (Deferred)
 
-- [ ] **13.9 — Sixel parser and renderer**
+- [x] **13.9 — Sixel parser and renderer**
   - DCS sequence handler for sixel data.
   - Sixel pixel decoder (palette management, 6-pixel column strips).
   - Texture upload and rendering.
-  - Deferred until demand exists. Not blocking any current use case.
+  - ✅ **Completed 2026-03-14.** Full Sixel parser and pixel decoder implemented in
+    `freminal-common/src/buffer_states/sixel.rs` (826 lines, 20 unit tests). Handles DCS
+    parameters (P1/P2/P3), color definitions (RGB percentage and HLS), raster attributes,
+    repeat compression (`!n<char>`), carriage return (`$`), and newline (`-`). Decoder
+    produces RGBA pixel buffers fed into the existing image placement pipeline via
+    `handle_sixel()` in terminal_handler.rs. Also fixed hardcoded 8×16 cell pixel dimensions
+    by threading actual cell size through resize events, and fixed SGR mouse zero-delta
+    scroll encoding and atomic multi-byte mouse sequence sending.
 
 ---
 

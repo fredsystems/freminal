@@ -147,6 +147,7 @@ impl ShapingCache {
         term_width: usize,
         font_manager: &mut FontManager,
         cell_width: f32,
+        ligatures: bool,
     ) -> Vec<ShapedLine> {
         let lines = split_into_lines(visible_chars);
         let line_count = lines.len();
@@ -183,7 +184,7 @@ impl ShapingCache {
                     term_width,
                     font_manager,
                 );
-                let shaped_runs = shape_runs(&runs, font_manager, cell_width);
+                let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
                 let shaped_line = ShapedLine { runs: shaped_runs };
                 self.entries[line_idx] = Some((line_hash, shaped_line.clone()));
                 shaped_line
@@ -314,7 +315,7 @@ fn tag_at_position(tags: &[FormatTag], global_pos: usize) -> &FormatTag {
 fn same_format(a: &FormatTag, b: &FormatTag) -> bool {
     a.font_weight == b.font_weight
         && a.font_decorations == b.font_decorations
-        && format!("{:?}", a.colors) == format!("{:?}", b.colors)
+        && a.colors == b.colors
         && a.url == b.url
 }
 
@@ -434,24 +435,39 @@ fn push_char_to_run(text: &mut String, ch: char) {
 //  Shaping
 // ---------------------------------------------------------------------------
 
-/// Rustybuzz features: only `kern` initially.  Ligatures disabled.
-fn shaping_features() -> Vec<rustybuzz::Feature> {
+/// Build the rustybuzz OpenType feature list.
+///
+/// When `ligatures` is `true`, `liga` and `calt` are enabled (value 1) so the
+/// font's standard and contextual ligatures are applied during shaping.
+/// When `false`, all three ligature tags (`liga`, `calt`, `dlig`) are
+/// explicitly disabled (value 0) to prevent ligature formation even in fonts
+/// that enable them by default.
+///
+/// `kern` (kerning) is always enabled.
+fn shaping_features(ligatures: bool) -> Vec<rustybuzz::Feature> {
     use rustybuzz::ttf_parser::Tag;
+    let lig_value = u32::from(ligatures);
     vec![
         // Enable kerning.
         rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 1, ..),
-        // Disable standard ligatures.
-        rustybuzz::Feature::new(Tag::from_bytes(b"liga"), 0, ..),
-        // Disable contextual alternates.
-        rustybuzz::Feature::new(Tag::from_bytes(b"calt"), 0, ..),
-        // Disable discretionary ligatures.
+        // Standard ligatures — controlled by config.
+        rustybuzz::Feature::new(Tag::from_bytes(b"liga"), lig_value, ..),
+        // Contextual alternates — controlled by config.
+        rustybuzz::Feature::new(Tag::from_bytes(b"calt"), lig_value, ..),
+        // Discretionary ligatures — always disabled (too aggressive for
+        // terminal use; can be revisited later).
         rustybuzz::Feature::new(Tag::from_bytes(b"dlig"), 0, ..),
     ]
 }
 
 /// Shape a set of `TextRun`s into `ShapedRun`s.
-fn shape_runs(runs: &[TextRun], font_manager: &FontManager, cell_width: f32) -> Vec<ShapedRun> {
-    let features = shaping_features();
+fn shape_runs(
+    runs: &[TextRun],
+    font_manager: &FontManager,
+    cell_width: f32,
+    ligatures: bool,
+) -> Vec<ShapedRun> {
+    let features = shaping_features(ligatures);
 
     runs.iter()
         .map(|run| shape_single_run(run, font_manager, cell_width, &features))
@@ -486,6 +502,7 @@ fn shape_single_run(
             // Map shaped glyphs back to cell-grid positions.
             build_shaped_glyphs(
                 infos,
+                &run.text,
                 &run.char_widths,
                 run.col_start,
                 run.face_id,
@@ -508,10 +525,13 @@ fn shape_single_run(
 
 /// Build `ShapedGlyph`s from `rustybuzz` output, snapping to the cell grid.
 ///
-/// The cell grid is authoritative: glyph N maps to column N × `cell_width`.
-/// Wide characters (width 2) span two cells.
+/// The cell grid is authoritative: glyph positions are snapped to column
+/// boundaries.  When ligatures are active, a single glyph may cover multiple
+/// input characters.  Its `cell_width` is the sum of those characters'
+/// individual widths so it spans the correct number of terminal cells.
 fn build_shaped_glyphs(
     infos: &[rustybuzz::GlyphInfo],
+    run_text: &str,
     char_widths: &[usize],
     col_start: usize,
     face_id: FaceId,
@@ -520,16 +540,63 @@ fn build_shaped_glyphs(
 ) -> Vec<ShapedGlyph> {
     let mut glyphs = Vec::with_capacity(infos.len());
 
-    // Walk glyphs.  For monospace terminal text (no ligatures), each glyph maps
-    // 1:1 to a character.  We snap positions to the cell grid based on the
-    // character index rather than trusting the shaper's advance.
+    // Build a byte-offset → char-index lookup table.  `rustybuzz` cluster
+    // values are byte offsets into the UTF-8 input string.  We need char
+    // indices to index into `char_widths`.
+    let byte_to_char: Vec<(usize, usize)> = run_text
+        .char_indices()
+        .enumerate()
+        .map(|(ci, (bi, _))| (bi, ci))
+        .collect();
+    let num_chars = char_widths.len();
+
+    // Pre-compute cumulative column offsets so we can look up the column of
+    // any char index in O(1).  `cum_cols[i]` is the sum of `char_widths[0..i]`.
+    let mut cum_cols: Vec<usize> = Vec::with_capacity(num_chars + 1);
+    cum_cols.push(0);
+    for &w in char_widths {
+        cum_cols.push(cum_cols.last().copied().unwrap_or(0) + w);
+    }
+
+    // Helper: resolve a byte offset to a char index via the lookup table.
+    let resolve_cluster = |cluster_byte: usize, fallback: usize| -> usize {
+        byte_to_char
+            .binary_search_by_key(&cluster_byte, |&(b, _)| b)
+            .map_or_else(|_| fallback, |pos| byte_to_char[pos].1)
+    };
 
     for (glyph_idx, info) in infos.iter().enumerate() {
-        let char_index = byte_offset_to_char_index(infos, glyph_idx);
-        let cw = char_widths.get(char_index).copied().unwrap_or(1);
+        let cluster_byte = info.cluster as usize;
 
-        // Cell-grid x position: sum of column widths up to this character.
-        let col_for_glyph = col_start + char_widths.iter().take(char_index).sum::<usize>();
+        // Map byte offset → char index.  Fallback: glyph index clamped to
+        // range (should only trigger on malformed shaper output).
+        let char_idx = resolve_cluster(cluster_byte, glyph_idx.min(num_chars.saturating_sub(1)));
+
+        // Determine how many input characters this glyph covers.
+        // For LTR text, each glyph "owns" characters from `char_idx` up to
+        // (but not including) the char index of the next glyph.  The last
+        // glyph owns through the end of the run.
+        let next_char_idx = if glyph_idx + 1 < infos.len() {
+            let next_cluster_byte = infos[glyph_idx + 1].cluster as usize;
+            resolve_cluster(next_cluster_byte, (glyph_idx + 1).min(num_chars))
+        } else {
+            num_chars
+        };
+
+        // Total cell width = sum of char_widths for all characters in the cluster.
+        let cw = if next_char_idx > char_idx {
+            cum_cols
+                .get(next_char_idx)
+                .copied()
+                .unwrap_or(cum_cols[cum_cols.len() - 1])
+                - cum_cols.get(char_idx).copied().unwrap_or(0)
+        } else {
+            // Defensive: glyph covers zero characters (shouldn't happen).
+            char_widths.get(char_idx).copied().unwrap_or(1)
+        };
+
+        // Cell-grid x position from the cumulative column offset.
+        let col_for_glyph = col_start + cum_cols.get(char_idx).copied().unwrap_or(0);
 
         #[allow(clippy::cast_precision_loss)]
         let x_px = col_for_glyph as f32 * cell_width;
@@ -548,15 +615,6 @@ fn build_shaped_glyphs(
     }
 
     glyphs
-}
-
-/// Map a glyph's byte-offset cluster to a character index.
-const fn byte_offset_to_char_index(infos: &[rustybuzz::GlyphInfo], glyph_idx: usize) -> usize {
-    // In the simple case (1 glyph per char, LTR, no ligatures), glyph_idx
-    // is the character index.  For correctness we derive it from the cluster
-    // value, but for terminal monospace text the simple path dominates.
-    let _ = infos; // We'll use glyph_idx directly for now.
-    glyph_idx
 }
 
 /// Produce tofu (glyph 0) glyphs when no face is available.
@@ -617,6 +675,23 @@ mod tests {
             start,
             end,
             font_weight: FontWeight::Bold,
+            ..FormatTag::default()
+        }
+    }
+
+    /// Helper: create a tag with a custom foreground color covering a range.
+    fn make_colored_tag(
+        start: usize,
+        end: usize,
+        color: freminal_common::colors::TerminalColor,
+    ) -> FormatTag {
+        FormatTag {
+            start,
+            end,
+            colors: freminal_common::buffer_states::cursor::StateColors {
+                color,
+                ..Default::default()
+            },
             ..FormatTag::default()
         }
     }
@@ -691,7 +766,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs(&runs, &fm, cell_w);
+        let shaped = shape_runs(&runs, &fm, cell_w, false);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 3);
@@ -723,7 +798,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs(&runs, &fm, cell_w);
+        let shaped = shape_runs(&runs, &fm, cell_w, false);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 1);
@@ -746,7 +821,7 @@ mod tests {
 
         // The run should have face_id == FaceId::Emoji (if system has an emoji font)
         // or some system fallback.  Either way, shaping should succeed.
-        let shaped = shape_runs(&runs, &fm, cell_w);
+        let shaped = shape_runs(&runs, &fm, cell_w, false);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());
     }
@@ -781,11 +856,11 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         // First call — cache miss.
-        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
+        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
         assert_eq!(r1.len(), 1);
 
         // Second call with identical input — cache hit.
-        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w);
+        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
         assert_eq!(r2.len(), 1);
 
         // Results should be identical (same glyph count).
@@ -802,15 +877,323 @@ mod tests {
         let chars1 = vec![TChar::Ascii(b'X')];
         let tags = vec![make_tag(0, 10)];
 
-        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w);
+        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w, false);
 
         // Change content.
         let chars2 = vec![TChar::Ascii(b'Y')];
-        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w);
+        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w, false);
 
         // Should still produce valid output (cache miss, re-shaped).
         assert_eq!(r2.len(), 1);
         assert_eq!(r2[0].runs.len(), 1);
         assert_eq!(r2[0].runs[0].glyphs.len(), 1);
+    }
+
+    // -- Ligature-breaking conditions (Task 5.6) --
+
+    #[test]
+    fn color_change_mid_sequence_breaks_into_separate_runs() {
+        // "->" where '-' is red and '>' is default — must be two separate runs
+        // so no ligature can form across the color boundary.
+        let mut fm = test_font_manager();
+        let chars = vec![TChar::Ascii(b'-'), TChar::Ascii(b'>')];
+        let tags = vec![
+            make_colored_tag(0, 1, freminal_common::colors::TerminalColor::Red),
+            make_tag(1, 2),
+        ];
+
+        let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        assert_eq!(runs.len(), 2, "color change must break the run");
+        assert_eq!(runs[0].text, "-");
+        assert_eq!(runs[1].text, ">");
+    }
+
+    #[test]
+    fn style_change_mid_sequence_breaks_into_separate_runs() {
+        // "->" where '-' is bold and '>' is normal — two separate runs.
+        let mut fm = test_font_manager();
+        let chars = vec![TChar::Ascii(b'-'), TChar::Ascii(b'>')];
+        let tags = vec![make_bold_tag(0, 1), make_tag(1, 2)];
+
+        let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        assert_eq!(runs.len(), 2, "style change must break the run");
+        assert_eq!(runs[0].text, "-");
+        assert_eq!(runs[1].text, ">");
+    }
+
+    #[test]
+    fn line_boundary_prevents_cross_line_ligature() {
+        // "-\n>" — the '-' and '>' are on different lines so they cannot ligate.
+        let chars = vec![TChar::Ascii(b'-'), TChar::NewLine, TChar::Ascii(b'>')];
+        let lines = split_into_lines(&chars);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 1, "first line has just '-'");
+        assert_eq!(lines[1].len(), 1, "second line has just '>'");
+        // Each line is shaped independently, so no ligature can span them.
+    }
+
+    #[test]
+    fn same_format_sequence_stays_in_one_run() {
+        // "->" with same format — must stay in one run so ligature CAN form.
+        let mut fm = test_font_manager();
+        let chars = vec![TChar::Ascii(b'-'), TChar::Ascii(b'>')];
+        let tags = vec![make_tag(0, 10)];
+
+        let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        assert_eq!(runs.len(), 1, "same-format run should not be broken");
+        assert_eq!(runs[0].text, "->");
+    }
+
+    #[test]
+    fn background_color_change_breaks_run() {
+        // "->" where '-' has a colored background and '>' has default — two runs.
+        let mut fm = test_font_manager();
+        let chars = vec![TChar::Ascii(b'-'), TChar::Ascii(b'>')];
+        let tags = vec![
+            FormatTag {
+                start: 0,
+                end: 1,
+                colors: freminal_common::buffer_states::cursor::StateColors {
+                    background_color: freminal_common::colors::TerminalColor::Blue,
+                    ..Default::default()
+                },
+                ..FormatTag::default()
+            },
+            make_tag(1, 2),
+        ];
+
+        let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        assert_eq!(runs.len(), 2, "background color change must break the run");
+    }
+
+    // -- build_shaped_glyphs: ligature-aware cluster mapping --
+
+    /// Helper: construct a `GlyphInfo` with just the fields we need.
+    fn make_glyph_info(glyph_id: u32, cluster: u32) -> rustybuzz::GlyphInfo {
+        let mut info = rustybuzz::GlyphInfo::default();
+        info.glyph_id = glyph_id;
+        info.cluster = cluster;
+        info
+    }
+
+    #[test]
+    fn build_glyphs_no_ligature_ascii() {
+        // 3 ASCII chars "ABC", each 1 byte, no ligatures.
+        // Shaper output: 3 glyphs, clusters [0, 1, 2].
+        let infos = [
+            make_glyph_info(65, 0),
+            make_glyph_info(66, 1),
+            make_glyph_info(67, 2),
+        ];
+        let text = "ABC";
+        let char_widths = [1, 1, 1];
+        let cell_width = 10.0;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            0,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 3);
+        for (i, g) in glyphs.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let expected_x = i as f32 * cell_width;
+            assert!(
+                (g.x_px - expected_x).abs() < f32::EPSILON,
+                "glyph {i}: expected x={expected_x}, got x={}",
+                g.x_px
+            );
+            assert_eq!(g.cell_width, 1, "glyph {i} should be 1 cell wide");
+        }
+    }
+
+    #[test]
+    fn build_glyphs_two_char_ligature() {
+        // "->" (2 ASCII bytes) → shaper produces 1 ligature glyph.
+        // Cluster value = 0 (byte offset of '-').
+        let infos = [make_glyph_info(999, 0)]; // single ligature glyph
+        let text = "->";
+        let char_widths = [1, 1]; // each source char is 1 cell
+        let cell_width = 10.0;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            0,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(
+            glyphs[0].cell_width, 2,
+            "ligature glyph should span 2 cells"
+        );
+        assert!(
+            glyphs[0].x_px.abs() < f32::EPSILON,
+            "ligature should start at column 0"
+        );
+    }
+
+    #[test]
+    fn build_glyphs_three_char_ligature() {
+        // "===" (3 ASCII bytes) → shaper produces 1 ligature glyph.
+        let infos = [make_glyph_info(888, 0)];
+        let text = "===";
+        let char_widths = [1, 1, 1];
+        let cell_width = 10.0;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            0,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(
+            glyphs[0].cell_width, 3,
+            "3-char ligature should span 3 cells"
+        );
+    }
+
+    #[test]
+    fn build_glyphs_ligature_with_col_start_offset() {
+        // "->" ligature starting at column 5 (e.g., second run in a line).
+        let infos = [make_glyph_info(999, 0)];
+        let text = "->";
+        let char_widths = [1, 1];
+        let cell_width = 10.0;
+        let col_start = 5;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            col_start,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(glyphs[0].cell_width, 2);
+        #[allow(clippy::cast_precision_loss)]
+        let expected_x = col_start as f32 * cell_width;
+        assert!(
+            (glyphs[0].x_px - expected_x).abs() < f32::EPSILON,
+            "expected x={expected_x}, got x={}",
+            glyphs[0].x_px
+        );
+    }
+
+    #[test]
+    fn build_glyphs_mixed_ligature_and_normal() {
+        // "a->b" — 'a' is normal, "->" forms a ligature, 'b' is normal.
+        // Shaper produces 3 glyphs: glyph_a(cluster=0), glyph_lig(cluster=1),
+        // glyph_b(cluster=3).
+        let infos = [
+            make_glyph_info(97, 0),  // 'a' at byte 0
+            make_glyph_info(999, 1), // '->' ligature at byte 1
+            make_glyph_info(98, 3),  // 'b' at byte 3
+        ];
+        let text = "a->b";
+        let char_widths = [1, 1, 1, 1]; // a, -, >, b
+        let cell_width = 10.0;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            0,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 3);
+
+        // 'a' at column 0, width 1
+        assert!(glyphs[0].x_px.abs() < f32::EPSILON);
+        assert_eq!(glyphs[0].cell_width, 1);
+
+        // '->' ligature at column 1, width 2
+        assert!((glyphs[1].x_px - 10.0).abs() < f32::EPSILON);
+        assert_eq!(glyphs[1].cell_width, 2, "ligature should span 2 cells");
+
+        // 'b' at column 3, width 1
+        assert!((glyphs[2].x_px - 30.0).abs() < f32::EPSILON);
+        assert_eq!(glyphs[2].cell_width, 1);
+    }
+
+    #[test]
+    fn build_glyphs_ligature_with_multibyte_chars() {
+        // Mix of ASCII and multi-byte: "é->" where é is 2 bytes (U+00E9).
+        // byte offsets: é=0(2 bytes), '-'=2, '>'=3
+        // Shaper: glyph_e(cluster=0), glyph_lig(cluster=2)
+        let infos = [
+            make_glyph_info(200, 0), // 'é' at byte 0
+            make_glyph_info(999, 2), // '->' ligature at byte 2
+        ];
+        let text = "é->";
+        let char_widths = [1, 1, 1]; // é, -, >
+        let cell_width = 10.0;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            0,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 2);
+
+        // 'é' at column 0, width 1
+        assert!(glyphs[0].x_px.abs() < f32::EPSILON);
+        assert_eq!(glyphs[0].cell_width, 1);
+
+        // '->' ligature at column 1, width 2
+        assert!((glyphs[1].x_px - 10.0).abs() < f32::EPSILON);
+        assert_eq!(glyphs[1].cell_width, 2);
+    }
+
+    #[test]
+    fn build_glyphs_wide_char_not_confused_with_ligature() {
+        // A single wide CJK character — 1 glyph, 1 char, width 2.
+        // This is NOT a ligature; the single char just has display_width=2.
+        let infos = [make_glyph_info(500, 0)];
+        let text = "中"; // U+4E2D, 3 bytes in UTF-8
+        let char_widths = [2]; // wide char
+        let cell_width = 10.0;
+
+        let glyphs = build_shaped_glyphs(
+            &infos,
+            text,
+            &char_widths,
+            0,
+            FaceId::PrimaryRegular,
+            false,
+            cell_width,
+        );
+
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(
+            glyphs[0].cell_width, 2,
+            "wide char should span 2 cells (not a ligature)"
+        );
+        assert!(glyphs[0].x_px.abs() < f32::EPSILON);
     }
 }

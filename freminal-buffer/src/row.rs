@@ -132,6 +132,17 @@ impl Row {
         &self.cells
     }
 
+    /// Returns the cells in this row as a slice.
+    #[must_use]
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    /// Returns the cells in this row as a mutable slice.
+    pub fn cells_mut(&mut self) -> &mut [Cell] {
+        &mut self.cells
+    }
+
     /// Clean up when overwriting wide cells:
     /// - If overwriting a continuation, clear the head + all its continuations.
     /// - If overwriting a head, clear its continuations.
@@ -524,5 +535,33 @@ impl Row {
                 break;
             }
         }
+    }
+
+    /// Set a cell at the given column to an image placement.
+    ///
+    /// Extends the cell vector if `col` is beyond the current length,
+    /// filling gaps with blank cells.
+    pub fn set_image_cell(
+        &mut self,
+        col: usize,
+        placement: crate::image_store::ImagePlacement,
+        tag: FormatTag,
+    ) {
+        if col >= self.width {
+            return;
+        }
+        self.dirty = true;
+
+        // Extend cells to reach the target column if needed.
+        if col >= self.cells.len() {
+            let pad = col - self.cells.len() + 1;
+            self.cells
+                .extend(std::iter::repeat_n(Cell::blank_with_tag(tag.clone()), pad));
+        }
+
+        // Clean up any wide character at this position.
+        self.cleanup_wide_overwrite(col);
+
+        self.cells[col] = Cell::image_cell(placement, tag);
     }
 }

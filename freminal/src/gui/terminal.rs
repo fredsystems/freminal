@@ -19,6 +19,7 @@ use freminal_common::{
     pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
+    InlineImage,
     interface::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
     io::InputEvent,
     snapshot::TerminalSnapshot,
@@ -34,7 +35,7 @@ use super::{
     font_manager::FontManager,
     renderer::{
         CURSOR_QUAD_FLOATS, TerminalRenderer, build_background_verts, build_cursor_verts_only,
-        build_foreground_verts,
+        build_foreground_verts, build_image_verts,
     },
     shaping::ShapingCache,
 };
@@ -138,7 +139,11 @@ fn handle_scroll_fallback(
             TerminalInput::ArrowDown(KeyModifiers::NONE)
         };
         for _ in 0..count {
-            send_terminal_input(&key, input_tx, snap.cursor_key_app_mode);
+            send_terminal_inputs(
+                std::slice::from_ref(&key),
+                input_tx,
+                snap.cursor_key_app_mode,
+            );
         }
     } else {
         // Primary screen: adjust scroll offset and send to PTY thread.
@@ -167,21 +172,33 @@ fn handle_scroll_fallback(
     }
 }
 
-/// Convert a `TerminalInput` value to raw bytes and send them to the PTY
-/// consumer thread via `InputEvent::Key`.
+/// Collect all bytes from a slice of `TerminalInput` values into a single
+/// `Vec<u8>` and send them as one atomic `InputEvent::Key` to the PTY
+/// consumer thread.
+///
+/// Sending all bytes in a single message is critical for multi-byte
+/// sequences such as mouse reports (`\x1b[<0;5;3M`) — if each byte were
+/// sent as a separate `InputEvent` the PTY application would receive them
+/// as individual characters rather than as one escape sequence, causing
+/// them to be interpreted as literal typed text.
 ///
 /// The `cursor_key_app_mode` flag from the snapshot drives `DECCKM`-sensitive
 /// key encoding (arrow keys, home, end).
-fn send_terminal_input(
-    input: &TerminalInput,
+fn send_terminal_inputs(
+    inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
     cursor_key_app_mode: bool,
 ) {
-    let bytes = match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
-        TerminalInputPayload::Single(b) => vec![b],
-        TerminalInputPayload::Many(bs) => bs.to_vec(),
-        TerminalInputPayload::Owned(bs) => bs,
-    };
+    let bytes: Vec<u8> = inputs
+        .iter()
+        .flat_map(
+            |input| match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
+                TerminalInputPayload::Single(b) => vec![b],
+                TerminalInputPayload::Many(bs) => bs.to_vec(),
+                TerminalInputPayload::Owned(bs) => bs,
+            },
+        )
+        .collect();
     if bytes.is_empty() {
         return;
     }
@@ -753,9 +770,9 @@ fn write_input_to_terminal(
             }
         };
 
-        for input in inputs.as_ref() {
+        if !inputs.is_empty() {
             state_changed = true;
-            send_terminal_input(input, input_tx, snap.cursor_key_app_mode);
+            send_terminal_inputs(inputs.as_ref(), input_tx, snap.cursor_key_app_mode);
         }
     }
 
@@ -979,6 +996,11 @@ struct RenderState {
     atlas: GlyphAtlas,
     bg_verts: Vec<f32>,
     fg_verts: Vec<f32>,
+    /// Pre-built image vertex data (one quad per unique inline image).
+    image_verts: Vec<f32>,
+    /// Snapshot image map from the last full rebuild, cloned into `RenderState`
+    /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
+    snap_images: std::collections::HashMap<u64, InlineImage>,
     /// Float offset (not byte offset) into `bg_verts` where the cursor quad
     /// data begins.  Set after every full vertex rebuild so cursor-only frames
     /// can patch just this region.
@@ -1006,6 +1028,8 @@ pub struct FreminalTerminalWidget {
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild.
     previous_selection: Option<(CellCoord, CellCoord)>,
+    /// Whether OpenType ligatures are enabled for text shaping.
+    ligatures: bool,
 }
 
 impl FreminalTerminalWidget {
@@ -1026,6 +1050,8 @@ impl FreminalTerminalWidget {
                 atlas: GlyphAtlas::default(),
                 bg_verts: Vec::new(),
                 fg_verts: Vec::new(),
+                image_verts: Vec::new(),
+                snap_images: std::collections::HashMap::new(),
                 cursor_vert_float_offset: 0,
             })),
             previous_mouse_state: None,
@@ -1036,6 +1062,7 @@ impl FreminalTerminalWidget {
             previous_show_cursor: false,
             last_rendered_visible: None,
             previous_selection: None,
+            ligatures: config.font.ligatures,
         }
     }
 
@@ -1188,12 +1215,12 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
+                    snap.theme,
                 );
                 let mut rs = self
                     .render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // Patch the cursor region in bg_verts so the PaintCallback can
                 // detect the cursor-only mode via a separate flag.
                 // We overwrite the cursor quad data in the CPU copy so that if
                 // a full rebuild happens next frame it starts from correct state.
@@ -1226,6 +1253,7 @@ impl FreminalTerminalWidget {
                     snap.term_width,
                     &mut self.font_manager,
                     cell_w_f,
+                    self.ligatures,
                 );
 
                 let bg_verts = build_background_verts(
@@ -1240,6 +1268,7 @@ impl FreminalTerminalWidget {
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    snap.theme,
                 );
 
                 // Record where the cursor quad starts in the background VBO.
@@ -1264,9 +1293,21 @@ impl FreminalTerminalWidget {
                     cell_h,
                     self.font_manager.ascent(),
                     current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    snap.theme,
+                );
+                let image_verts = build_image_verts(
+                    &snap.visible_image_placements,
+                    &snap.images,
+                    snap.term_width,
+                    cell_w,
+                    cell_h,
                 );
                 rs.bg_verts = bg_verts;
                 rs.fg_verts = fg_verts;
+                rs.image_verts = image_verts;
+                // Clone the image map into RenderState so the PaintCallback
+                // (which must be Send+Sync+'static) can pass it to the renderer.
+                rs.snap_images.clone_from(snap.images.as_ref());
                 rs.cursor_vert_float_offset = cursor_vert_float_offset;
                 drop(rs);
 
@@ -1317,6 +1358,8 @@ impl FreminalTerminalWidget {
                 // Clone pre-built verts to avoid conflicting borrows of `rs`.
                 let bg = rs.bg_verts.clone();
                 let fg = rs.fg_verts.clone();
+                let img = rs.image_verts.clone();
+                let images = rs.snap_images.clone();
                 // Split borrow: get &mut RenderState so the borrow checker sees
                 // renderer and atlas as disjoint fields.
                 let rs_ref: &mut RenderState = &mut rs;
@@ -1327,6 +1370,8 @@ impl FreminalTerminalWidget {
                     atlas,
                     &bg,
                     &fg,
+                    &img,
+                    &images,
                     vp.width_px,
                     vp.height_px,
                     painter.intermediate_fbo(),
@@ -1364,7 +1409,8 @@ impl FreminalTerminalWidget {
         input_tx: &Sender<InputEvent>,
     ) {
         let rebuild_result = self.font_manager.rebuild(new_config);
-        if rebuild_result.font_changed() {
+        let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
+        if rebuild_result.font_changed() || ligatures_changed {
             let mut rs = self
                 .render_state
                 .lock()
@@ -1373,6 +1419,7 @@ impl FreminalTerminalWidget {
             drop(rs);
             self.shaping_cache.clear();
         }
+        self.ligatures = new_config.font.ligatures;
 
         // Keep egui font infrastructure updated for chrome (menu bar, settings
         // modal).  This is retained from the old pipeline; it will be cleaned
@@ -1426,6 +1473,8 @@ mod subtask_1_7_tests {
             bg_verts: Vec::new(),
             fg_verts: Vec::new(),
             cursor_vert_float_offset: 0,
+            image_verts: Vec::new(),
+            snap_images: std::collections::HashMap::new(),
         };
         assert!(rs.bg_verts.is_empty(), "bg_verts should be empty");
         assert!(rs.fg_verts.is_empty(), "fg_verts should be empty");

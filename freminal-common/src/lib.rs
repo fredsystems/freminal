@@ -32,6 +32,7 @@ pub mod scroll;
 pub mod sgr;
 pub mod terminal_size;
 pub mod terminfo;
+pub mod themes;
 
 #[macro_use]
 extern crate tracing;

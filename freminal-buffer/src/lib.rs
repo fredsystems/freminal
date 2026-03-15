@@ -21,6 +21,7 @@
 
 pub mod buffer;
 pub mod cell;
+pub mod image_store;
 pub mod response;
 pub mod row;
 pub mod terminal_handler;
