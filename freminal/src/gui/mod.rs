@@ -87,9 +87,13 @@ struct FreminalGui {
 
     /// Receiver for window manipulation commands produced by the PTY thread.
     window_cmd_rx: Receiver<WindowCommand>,
+
+    /// Receiver for clipboard text extraction responses from the PTY thread.
+    clipboard_rx: Receiver<String>,
 }
 
 impl FreminalGui {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
         arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
@@ -98,6 +102,7 @@ impl FreminalGui {
         input_tx: Sender<InputEvent>,
         pty_write_tx: Sender<PtyWrite>,
         window_cmd_rx: Receiver<WindowCommand>,
+        clipboard_rx: Receiver<String>,
     ) -> Self {
         set_egui_options(&cc.egui_ctx);
 
@@ -111,6 +116,7 @@ impl FreminalGui {
             input_tx,
             pty_write_tx,
             window_cmd_rx,
+            clipboard_rx,
         }
     }
 
@@ -505,7 +511,7 @@ impl eframe::App for FreminalGui {
                 &snap,
                 &mut self.view_state,
                 &self.input_tx,
-                &self.pty_write_tx,
+                &self.clipboard_rx,
                 self.settings_modal.is_open,
             );
 
@@ -572,6 +578,7 @@ impl eframe::App for FreminalGui {
 ///
 /// # Errors
 /// Will return an error if the GUI fails to run
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     config: Config,
@@ -579,6 +586,7 @@ pub fn run(
     input_tx: Sender<InputEvent>,
     pty_write_tx: Sender<PtyWrite>,
     window_cmd_rx: Receiver<WindowCommand>,
+    clipboard_rx: Receiver<String>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
 ) -> Result<()> {
     let native_options = eframe::NativeOptions::default();
@@ -599,6 +607,7 @@ pub fn run(
                 input_tx,
                 pty_write_tx,
                 window_cmd_rx,
+                clipboard_rx,
             )))
         }),
     ) {

@@ -470,6 +470,24 @@ impl TerminalEmulator {
         self.internal.skip_draw_always()
     }
 
+    /// Extract text from the full buffer for a selection range.
+    ///
+    /// Coordinates are buffer-absolute row indices and 0-indexed columns.
+    /// Delegates to `Buffer::extract_text`.
+    #[must_use]
+    pub fn extract_selection_text(
+        &self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> String {
+        self.internal
+            .handler
+            .buffer()
+            .extract_text(start_row, start_col, end_row, end_col)
+    }
+
     /// Process a chunk of raw PTY bytes.
     ///
     /// This wraps `TerminalState::handle_incoming_data` for the consumer thread.

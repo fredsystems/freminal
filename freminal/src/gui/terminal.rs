@@ -12,11 +12,10 @@ use crate::gui::{
     view_state::{CellCoord, ViewState},
 };
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{modes::mouse::MouseTrack, modes::rl_bracket::RlBracket, tchar::TChar},
     config::Config,
-    pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
     InlineImage,
@@ -239,20 +238,14 @@ fn write_input_to_terminal(
     repeat_characters: bool,
     previous_key: Option<Key>,
     scroll_amount: f32,
-) -> (
-    bool,
-    Option<PreviousMouseState>,
-    Option<Key>,
-    f32,
-    Option<String>,
-) {
+) -> (bool, Option<PreviousMouseState>, Option<Key>, f32, bool) {
     if input.raw.events.is_empty() {
         return (
             false,
             last_reported_mouse_pos,
             previous_key,
             scroll_amount,
-            None,
+            false,
         );
     }
 
@@ -261,7 +254,7 @@ fn write_input_to_terminal(
     let mut last_reported_mouse_pos = last_reported_mouse_pos;
     let mut left_mouse_button_pressed = false;
     let mut scroll_amount = scroll_amount;
-    let mut clipboard_text: Option<String> = None;
+    let mut clipboard_pending = false;
 
     // When the user is scrolled back into history, suppress mouse forwarding
     // to the PTY — the visible content is historical, not the live terminal
@@ -317,19 +310,17 @@ fn write_input_to_terminal(
             Event::Copy => {
                 if input.modifiers.shift {
                     // Ctrl+Shift+C: copy selection text to clipboard.
-                    // The actual copy_text() call is deferred until after the
-                    // ui.input() closure returns, because copy_text() needs a
-                    // write lock on the Context and we are inside a read lock.
-                    if view_state.selection.has_selection() {
-                        let text = extract_selected_text(
-                            &snap.visible_chars,
-                            snap.term_width,
-                            &view_state.selection,
-                            snap,
-                        );
-                        if !text.is_empty() {
-                            clipboard_text = Some(text);
-                        }
+                    // Send an ExtractSelection request to the PTY thread which
+                    // owns the full buffer.  The response arrives on clipboard_rx
+                    // and is consumed after the ui.input() closure returns.
+                    if let Some((start, end)) = view_state.selection.normalised() {
+                        let _ = input_tx.send(InputEvent::ExtractSelection {
+                            start_row: start.row,
+                            start_col: start.col,
+                            end_row: end.row,
+                            end_col: end.col,
+                        });
+                        clipboard_pending = true;
                     }
                     continue;
                 }
@@ -815,7 +806,7 @@ fn write_input_to_terminal(
         last_reported_mouse_pos,
         previous_key,
         scroll_amount,
-        clipboard_text,
+        clipboard_pending,
     )
 }
 
@@ -855,134 +846,6 @@ fn encode_egui_mouse_pos_as_usize(
     (x, y)
 }
 
-/// Extract the text covered by the current selection from `visible_chars`.
-///
-/// `visible_chars` is a flat `Vec<TChar>` where rows are separated by
-/// `TChar::NewLine`.  `term_width` is the terminal width in columns.
-///
-/// The selection is defined by the normalised `(start, end)` `CellCoord`s from
-/// `SelectionState`.  Coordinates are **buffer-absolute** row indices and are
-/// converted to screen-relative using the snapshot's `total_rows`,
-/// `term_height`, and `scroll_offset`.
-///
-/// For multi-line selections, trailing whitespace on each line is trimmed and a
-/// newline is inserted between rows.
-fn extract_selected_text(
-    visible_chars: &[TChar],
-    _term_width: usize,
-    selection: &super::view_state::SelectionState,
-    snap: &TerminalSnapshot,
-) -> String {
-    use std::fmt::Write as _;
-
-    let Some((start, end)) = selection.normalised() else {
-        return String::new();
-    };
-
-    // Convert buffer-absolute row indices to screen-relative so we can index
-    // into the per-visible-row `lines` slices.
-    let win_start = visible_window_start(snap);
-    let win_end = win_start + snap.term_height;
-
-    // If the entire selection is outside the visible window, nothing to copy.
-    if end.row < win_start || start.row >= win_end {
-        return String::new();
-    }
-
-    let scr_start_row = start.row.saturating_sub(win_start);
-    let scr_end_row = end
-        .row
-        .saturating_sub(win_start)
-        .min(snap.term_height.saturating_sub(1));
-
-    // Column clamping: if the selection starts above the visible window, begin
-    // at column 0; if it ends below, extend to the last column.
-    let scr_start_col = if start.row < win_start { 0 } else { start.col };
-    let scr_end_col = if end.row >= win_end {
-        snap.term_width.saturating_sub(1)
-    } else {
-        end.col
-    };
-
-    // Split the flat visible_chars on NewLine boundaries to get per-row slices.
-    // Each row in the flattened buffer has a *variable* number of TChars
-    // (empty rows have 0, rows with wide chars have fewer than term_width, etc.),
-    // so a fixed-stride approach does not work.
-    let lines = split_visible_into_lines(visible_chars);
-
-    let mut result = String::new();
-
-    for row in scr_start_row..=scr_end_row {
-        let line = if row < lines.len() {
-            lines[row]
-        } else {
-            &[] // row beyond available data — treat as empty
-        };
-
-        // Column range for this row within the selection.
-        let col_begin = if row == scr_start_row {
-            scr_start_col
-        } else {
-            0
-        };
-        let col_end = if row == scr_end_row {
-            scr_end_col
-        } else {
-            // Select to end of line content (not a fixed width).
-            line.len().saturating_sub(1)
-        };
-
-        // Collect characters for this row's selected range.
-        let mut row_text = String::new();
-        for col in col_begin..=col_end {
-            if col >= line.len() {
-                break;
-            }
-            match &line[col] {
-                TChar::NewLine => break,
-                tc => {
-                    write!(&mut row_text, "{tc}").unwrap_or_default();
-                }
-            }
-        }
-
-        // Trim trailing whitespace on each line (standard terminal behavior —
-        // empty cells at the end of a line are spaces, not meaningful content).
-        let trimmed = row_text.trim_end();
-        result.push_str(trimmed);
-
-        // Add newline between rows (but not after the last row).
-        if row < scr_end_row {
-            result.push('\n');
-        }
-    }
-
-    result
-}
-
-/// Split a flat `TChar` slice into per-line segments at `TChar::NewLine` boundaries.
-///
-/// The `NewLine` characters themselves are NOT included in the returned slices.
-/// This mirrors `shaping::split_into_lines` but is kept local to avoid a
-/// cross-module dependency for a trivial helper.
-fn split_visible_into_lines(chars: &[TChar]) -> Vec<&[TChar]> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-
-    for (i, ch) in chars.iter().enumerate() {
-        if matches!(ch, TChar::NewLine) {
-            lines.push(&chars[start..i]);
-            start = i + 1;
-        }
-    }
-
-    // Trailing content after the last NewLine (or the entire array if no NewLine).
-    if start <= chars.len() {
-        lines.push(&chars[start..]);
-    }
-
-    lines
-}
 ///
 /// The scrollbar is only shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
@@ -1145,7 +1008,7 @@ impl FreminalTerminalWidget {
         snap: &TerminalSnapshot,
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
-        _pty_write_tx: &Sender<PtyWrite>,
+        clipboard_rx: &Receiver<String>,
         modal_is_open: bool,
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
@@ -1176,7 +1039,7 @@ impl FreminalTerminalWidget {
                 new_mouse_pos,
                 previous_key,
                 scroll_amount,
-                clipboard_text,
+                clipboard_pending,
             ) = ui.input(|input_state| {
                 write_input_to_terminal(
                     input_state,
@@ -1200,7 +1063,13 @@ impl FreminalTerminalWidget {
             // copy_text() calls ctx.output_mut() which needs a write lock on
             // the Context, but ui.input() holds a read lock — calling
             // copy_text() inside the closure would deadlock.
-            if let Some(text) = clipboard_text {
+            //
+            // If we sent an ExtractSelection request, wait briefly for the
+            // PTY thread to respond with the extracted text.
+            if clipboard_pending
+                && let Ok(text) = clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                && !text.is_empty()
+            {
                 ctx.copy_text(text);
                 // Clear the selection highlight now that the text has been
                 // copied to the clipboard.

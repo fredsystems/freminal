@@ -2200,6 +2200,70 @@ impl Buffer {
         self.height
     }
 
+    /// Extract the text content of a selection range from the buffer.
+    ///
+    /// Coordinates are buffer-absolute row indices (0 = first row in the full
+    /// buffer including scrollback). Columns are 0-indexed cell positions.
+    /// The range is inclusive on both ends: `[start_row, start_col]` through
+    /// `[end_row, end_col]`.
+    ///
+    /// Trailing whitespace on each row is trimmed (standard terminal behaviour).
+    /// Rows are separated by `'\n'`.
+    #[must_use]
+    pub fn extract_text(
+        &self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> String {
+        use std::fmt::Write as _;
+
+        if start_row >= self.rows.len() {
+            return String::new();
+        }
+        let end_row = end_row.min(self.rows.len().saturating_sub(1));
+
+        let mut result = String::new();
+
+        for row_idx in start_row..=end_row {
+            let row = &self.rows[row_idx];
+            let cells = row.get_characters();
+
+            let col_begin = if row_idx == start_row { start_col } else { 0 };
+            let col_end = if row_idx == end_row {
+                end_col
+            } else {
+                cells.len().saturating_sub(1)
+            };
+
+            let mut row_text = String::new();
+            for col in col_begin..=col_end {
+                if col >= cells.len() {
+                    break;
+                }
+                let cell = &cells[col];
+                if cell.is_continuation() {
+                    continue;
+                }
+                let tc = cell.tchar();
+                if matches!(tc, TChar::NewLine) {
+                    break;
+                }
+                write!(&mut row_text, "{tc}").unwrap_or_default();
+            }
+
+            let trimmed = row_text.trim_end();
+            result.push_str(trimmed);
+
+            if row_idx < end_row {
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+
     /// Set the current format tag for subsequent text insertions
     pub fn set_format(&mut self, tag: FormatTag) {
         self.current_tag = tag;

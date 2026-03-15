@@ -208,6 +208,11 @@ fn main() {
             // Channel for PTY-consumer thread → GUI (window manipulation commands).
             let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
 
+            // Channel for clipboard text extraction responses (PTY → GUI).
+            // Bounded(1) acts as a oneshot: GUI sends ExtractSelection via
+            // input_tx, PTY thread sends the extracted text back here.
+            let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+
             // Shared egui context handle so the PTY consumer thread can request
             // repaints after publishing new snapshots.  The GUI sets it during
             // `FreminalGui::new()`; the PTY thread reads it after each store.
@@ -252,6 +257,12 @@ fn main() {
                                 }
                                 Ok(InputEvent::ThemeChange(theme)) => {
                                     emulator.internal.handler.set_theme(theme);
+                                }
+                                Ok(InputEvent::ExtractSelection { start_row, start_col, end_row, end_col }) => {
+                                    let text = emulator.extract_selection_text(
+                                        start_row, start_col, end_row, end_col,
+                                    );
+                                    let _ = clipboard_tx.send(text);
                                 }
                                 Err(_) => {
                                     // GUI closed the sender — time to stop.
@@ -305,6 +316,7 @@ fn main() {
                 input_tx,
                 pty_write_tx,
                 window_cmd_rx,
+                clipboard_rx,
                 egui_ctx,
             )
         }
