@@ -14,7 +14,7 @@ use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
 use freminal_common::pty_write::PtyWrite;
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::io::{InputEvent, PlaybackCommand, PlaybackMode, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use settings::{SettingsAction, SettingsModal};
 use terminal::FreminalTerminalWidget;
@@ -90,6 +90,13 @@ struct FreminalGui {
 
     /// Receiver for clipboard text extraction responses from the PTY thread.
     clipboard_rx: Receiver<String>,
+
+    /// Whether this instance is running in playback mode.
+    is_playback: bool,
+
+    /// The playback mode currently selected in the GUI dropdown.
+    /// Only meaningful when `is_playback` is true.
+    selected_playback_mode: Option<PlaybackMode>,
 }
 
 impl FreminalGui {
@@ -103,6 +110,7 @@ impl FreminalGui {
         pty_write_tx: Sender<PtyWrite>,
         window_cmd_rx: Receiver<WindowCommand>,
         clipboard_rx: Receiver<String>,
+        is_playback: bool,
     ) -> Self {
         set_egui_options(&cc.egui_ctx);
 
@@ -117,13 +125,16 @@ impl FreminalGui {
             pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
+            is_playback,
+            selected_playback_mode: None,
         }
     }
 
     /// Show the top menu bar.
     ///
-    /// Contains a "Terminal" menu with Settings and Quit entries.
-    fn show_menu_bar(&mut self, ui: &mut egui::Ui) {
+    /// Contains a "Terminal" menu with Settings and Quit entries, plus
+    /// playback controls when running in playback mode.
+    fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Terminal", |ui| {
                 if ui.button("Settings...").clicked() {
@@ -137,7 +148,116 @@ impl FreminalGui {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
             });
+
+            // Playback controls: only shown when running in playback mode.
+            if self.is_playback {
+                self.show_playback_controls(ui, snap);
+            }
         });
+    }
+
+    /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
+    fn show_playback_controls(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
+        let info = snap.playback_info.as_ref();
+
+        // Mode selector dropdown.
+        ui.menu_button(self.playback_mode_label(), |ui| {
+            let mut changed = false;
+
+            if ui
+                .selectable_label(
+                    self.selected_playback_mode == Some(PlaybackMode::Instant),
+                    "Instant",
+                )
+                .clicked()
+            {
+                self.selected_playback_mode = Some(PlaybackMode::Instant);
+                changed = true;
+                ui.close();
+            }
+
+            if ui
+                .selectable_label(
+                    self.selected_playback_mode == Some(PlaybackMode::RealTime),
+                    "Real-Time",
+                )
+                .clicked()
+            {
+                self.selected_playback_mode = Some(PlaybackMode::RealTime);
+                changed = true;
+                ui.close();
+            }
+
+            if ui
+                .selectable_label(
+                    self.selected_playback_mode == Some(PlaybackMode::FrameStepping),
+                    "Frame Stepping",
+                )
+                .clicked()
+            {
+                self.selected_playback_mode = Some(PlaybackMode::FrameStepping);
+                changed = true;
+                ui.close();
+            }
+
+            if changed && let Some(mode) = self.selected_playback_mode {
+                self.send_playback_cmd(PlaybackCommand::SetMode(mode));
+            }
+        });
+
+        ui.separator();
+
+        // Play / Pause toggle button.
+        let is_playing = info.is_some_and(|i| i.playing);
+        let is_complete = info.is_some_and(|i| i.current_frame >= i.total_frames);
+        let has_mode = self.selected_playback_mode.is_some();
+
+        if is_playing {
+            if ui.button("Pause").clicked() {
+                self.send_playback_cmd(PlaybackCommand::Pause);
+            }
+        } else {
+            let play_btn = ui.add_enabled(!is_complete && has_mode, egui::Button::new("Play"));
+            if play_btn.clicked() {
+                self.send_playback_cmd(PlaybackCommand::Play);
+            }
+        }
+
+        // Next button: only active in frame-stepping mode.
+        let is_frame_stepping = self.selected_playback_mode == Some(PlaybackMode::FrameStepping);
+        let next_btn = ui.add_enabled(is_frame_stepping && !is_complete, egui::Button::new("Next"));
+        if next_btn.clicked() {
+            self.send_playback_cmd(PlaybackCommand::NextFrame);
+        }
+
+        ui.separator();
+
+        // Frame counter label.
+        if let Some(info) = info {
+            ui.label(format!(
+                "Frame {}/{}",
+                info.current_frame, info.total_frames
+            ));
+        } else {
+            ui.label("Frame 0/0");
+        }
+    }
+
+    /// Human-readable label for the current playback mode selector button.
+    const fn playback_mode_label(&self) -> &'static str {
+        match self.selected_playback_mode {
+            None => "Mode",
+            Some(PlaybackMode::Instant) => "Instant",
+            Some(PlaybackMode::RealTime) => "Real-Time",
+            Some(PlaybackMode::FrameStepping) => "Frame Stepping",
+        }
+    }
+
+    /// Send a playback command to the consumer thread via the input channel.
+    fn send_playback_cmd(&self, cmd: PlaybackCommand) {
+        if let Err(e) = self.input_tx.send(InputEvent::PlaybackControl(cmd)) {
+            error!("Failed to send playback command: {e}");
+        }
     }
 }
 
@@ -424,7 +544,7 @@ impl eframe::App for FreminalGui {
 
         // Menu bar at the top of the window.
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            self.show_menu_bar(ui);
+            self.show_menu_bar(ui, &snap);
         });
 
         let _panel_response = CentralPanel::default().show(ctx, |ui| {
@@ -588,6 +708,7 @@ pub fn run(
     window_cmd_rx: Receiver<WindowCommand>,
     clipboard_rx: Receiver<String>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
+    is_playback: bool,
 ) -> Result<()> {
     let native_options = eframe::NativeOptions::default();
 
@@ -608,6 +729,7 @@ pub fn run(
                 pty_write_tx,
                 window_cmd_rx,
                 clipboard_rx,
+                is_playback,
             )))
         }),
     ) {
