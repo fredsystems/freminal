@@ -23,21 +23,22 @@ and plan document maintenance rules.
 
 ## Task Summary
 
-| #   | Task                      | Plan Document                        | Status      | Dependencies |
-| --- | ------------------------- | ------------------------------------ | ----------- | ------------ |
-| 1   | Custom Terminal Renderer  | `PLAN_01_GLYPH_ATLAS.md`             | Complete    | None         |
-| 2   | CLI Args + TOML Config    | `PLAN_02_CLI_CONFIG.md`              | Complete    | None         |
-| 3   | Settings Modal            | `PLAN_03_SETTINGS_MODAL.md`          | Complete    | Task 2       |
-| 4   | Deployment Flake          | `PLAN_04_DEPLOYMENT_FLAKE.md`        | Complete    | Task 2       |
-| 5   | Font Ligatures            | `PLAN_05_FONT_LIGATURES.md`          | Complete    | Task 1       |
-| 6   | Test Gap Coverage         | `PLAN_06_TEST_GAPS.md`               | Not Started | None         |
-| 7   | Escape Sequence Coverage  | `PLAN_07_ESCAPE_SEQUENCES.md`        | Complete    | None         |
-| 8   | Primary Screen Scrollback | `PLAN_08_SCROLLBACK.md`              | Complete    | None         |
-| 9   | tmux Compat + Logging     | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md` | Complete    | None         |
-| 10  | vttest Cursor Movement    | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`  | Complete    | None         |
-| 11  | Theming                   | `PLAN_11_THEMING.md`                 | Complete    | Tasks 2, 3   |
-| 12  | Terminfo Audit            | `PLAN_12_TERMINFO.md`                | Complete    | None         |
-| 13  | Image Protocol Support    | `PLAN_13_IMAGE_PROTOCOL.md`          | Complete    | Task 1       |
+| #   | Task                           | Plan Document                               | Status      | Dependencies |
+| --- | ------------------------------ | ------------------------------------------- | ----------- | ------------ |
+| 1   | Custom Terminal Renderer       | `PLAN_01_GLYPH_ATLAS.md`                    | Complete    | None         |
+| 2   | CLI Args + TOML Config         | `PLAN_02_CLI_CONFIG.md`                     | Complete    | None         |
+| 3   | Settings Modal                 | `PLAN_03_SETTINGS_MODAL.md`                 | Complete    | Task 2       |
+| 4   | Deployment Flake               | `PLAN_04_DEPLOYMENT_FLAKE.md`               | Complete    | Task 2       |
+| 5   | Font Ligatures                 | `PLAN_05_FONT_LIGATURES.md`                 | Complete    | Task 1       |
+| 6   | Test Gap Coverage              | `PLAN_06_TEST_GAPS.md`                      | Not Started | None         |
+| 7   | Escape Sequence Coverage       | `PLAN_07_ESCAPE_SEQUENCES.md`               | Complete    | None         |
+| 8   | Primary Screen Scrollback      | `PLAN_08_SCROLLBACK.md`                     | Complete    | None         |
+| 9   | tmux Compat + Logging          | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`        | Complete    | None         |
+| 10  | vttest Cursor Movement         | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`         | Complete    | None         |
+| 11  | Theming                        | `PLAN_11_THEMING.md`                        | Complete    | Tasks 2, 3   |
+| 12  | Terminfo Audit                 | `PLAN_12_TERMINFO.md`                       | Complete    | None         |
+| 13  | Image Protocol Support         | `PLAN_13_IMAGE_PROTOCOL.md`                 | Complete    | Task 1       |
+| 14  | Bug Fixes: Modes/URL/Selection | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | Complete    | None         |
 
 ---
 
@@ -227,6 +228,7 @@ Update this section as tasks complete:
 | 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4 |
 | 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4 |
 | 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4 |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection   |
 
 ---
 
@@ -242,4 +244,5 @@ Update this section as tasks complete:
 - `Documents/PLAN_11_THEMING.md` — Embedded color themes and theme picker
 - `Documents/PLAN_12_TERMINFO.md` — Terminfo audit, build.rs fix, XTGETTCAP audit
 - `Documents/PLAN_13_IMAGE_PROTOCOL.md` — Image protocol support (iTerm2, Kitty, Sixel)
+- `Documents/PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` — Mode noise, URL hover, scrollback selection
 - `config_example.toml` — Current config format

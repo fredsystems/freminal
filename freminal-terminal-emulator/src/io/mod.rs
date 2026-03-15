@@ -45,6 +45,17 @@ pub enum InputEvent {
     /// carry the new palette. All embedded themes are `'static` so this is
     /// a zero-cost pointer update.
     ThemeChange(&'static ThemePalette),
+    /// Request text extraction from the full buffer for clipboard copy.
+    ///
+    /// Coordinates are buffer-absolute row indices and 0-indexed columns.
+    /// The PTY thread extracts the text and sends it back through a dedicated
+    /// clipboard response channel.
+    ExtractSelection {
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    },
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

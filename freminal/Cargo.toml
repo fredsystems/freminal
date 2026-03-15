@@ -42,6 +42,7 @@ conv2.workspace = true
 anyhow.workspace = true
 fontdb.workspace = true
 glow.workspace = true
+open.workspace = true
 arc-swap.workspace = true
 crossbeam-channel.workspace = true
 rustybuzz.workspace = true

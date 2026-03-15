@@ -90,12 +90,29 @@ pub struct TerminalSnapshot {
     /// Terminal height in character rows.
     pub term_height: usize,
 
+    /// Total number of rows in the buffer (scrollback + visible).
+    ///
+    /// The GUI uses this together with `term_height` and `scroll_offset` to
+    /// compute the *visible window start* index, which is needed to convert
+    /// between screen-relative row indices and buffer-absolute row indices
+    /// used by `SelectionState`.
+    pub total_rows: usize,
+
     /// Set to `true` when the visible content changed since the previous
     /// snapshot.
     ///
     /// The GUI uses this flag to reset `ViewState::scroll_offset` to 0 when
     /// the user is scrolled back and new output arrives.
     pub content_changed: bool,
+
+    /// Set to `true` when the scroll offset changed since the previous
+    /// snapshot (the visible window moved, but the underlying text may not
+    /// have changed).
+    ///
+    /// The GUI uses this to distinguish a pure scroll event from actual
+    /// content mutation so that text selections are not spuriously cleared
+    /// when the user scrolls through history.
+    pub scroll_changed: bool,
 
     /// Current bracketed-paste mode setting.
     ///
@@ -186,7 +203,9 @@ impl TerminalSnapshot {
             is_normal_display: true,
             term_width: 0,
             term_height: 0,
+            total_rows: 0,
             content_changed: false,
+            scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
             repeat_keys: true,

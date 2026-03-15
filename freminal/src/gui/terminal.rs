@@ -12,11 +12,10 @@ use crate::gui::{
     view_state::{CellCoord, ViewState},
 };
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{modes::mouse::MouseTrack, modes::rl_bracket::RlBracket, tchar::TChar},
     config::Config,
-    pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
     InlineImage,
@@ -107,6 +106,69 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
 
         _ => None,
     }
+}
+
+/// Compute the buffer-absolute row index of the first visible row.
+///
+/// This is the inverse of screen-relative → buffer-absolute:
+///   `buffer_row = visible_window_start + screen_row`
+///   `screen_row = buffer_row - visible_window_start`
+///
+/// The formula mirrors `Buffer::visible_window_start`: the live bottom of the
+/// buffer is at `total_rows - term_height`, and scrolling *back* subtracts
+/// from that position.
+const fn visible_window_start(snap: &TerminalSnapshot) -> usize {
+    snap.total_rows
+        .saturating_sub(snap.term_height)
+        .saturating_sub(snap.scroll_offset)
+}
+
+/// Convert a screen-relative `(row, col)` — where `col` is a **display
+/// column** (a wide character occupies two columns) — to a flat index into
+/// the `visible_chars` slice.
+///
+/// `visible_chars` is produced by `Buffer::flatten_row`, which skips
+/// continuation cells.  A CJK character that occupies two display columns
+/// produces only one `TChar` entry.  The simple fixed-stride formula
+/// `row * (term_width + 1) + col` is therefore wrong whenever wide
+/// characters are present.  This function walks the flat vector to find the
+/// correct index.
+///
+/// Returns `None` if `row`/`col` are out of range.
+fn flat_index_for_cell(visible_chars: &[TChar], row: usize, col: usize) -> Option<usize> {
+    // Walk through visible_chars, splitting on TChar::NewLine to find the
+    // start of the target row.
+    let mut current_row: usize = 0;
+    let mut idx: usize = 0;
+
+    // Advance past preceding rows.
+    while current_row < row {
+        if idx >= visible_chars.len() {
+            return None; // row is beyond the data
+        }
+        if matches!(visible_chars[idx], TChar::NewLine) {
+            current_row += 1;
+        }
+        idx += 1;
+    }
+
+    // Now `idx` points to the first TChar of the target row (or past the end).
+    // Walk through the row's characters, accumulating display columns.
+    let mut display_col: usize = 0;
+    while idx < visible_chars.len() {
+        if matches!(visible_chars[idx], TChar::NewLine) {
+            break; // past end of this row
+        }
+        let w = visible_chars[idx].display_width();
+        // The mouse is within this character's display span.
+        if col < display_col + w {
+            return Some(idx);
+        }
+        display_col += w;
+        idx += 1;
+    }
+
+    None // col is beyond the row's content
 }
 
 /// Handle mouse scroll when mouse tracking is off.
@@ -224,20 +286,14 @@ fn write_input_to_terminal(
     repeat_characters: bool,
     previous_key: Option<Key>,
     scroll_amount: f32,
-) -> (
-    bool,
-    Option<PreviousMouseState>,
-    Option<Key>,
-    f32,
-    Option<String>,
-) {
+) -> (bool, Option<PreviousMouseState>, Option<Key>, f32, bool) {
     if input.raw.events.is_empty() {
         return (
             false,
             last_reported_mouse_pos,
             previous_key,
             scroll_amount,
-            None,
+            false,
         );
     }
 
@@ -246,7 +302,7 @@ fn write_input_to_terminal(
     let mut last_reported_mouse_pos = last_reported_mouse_pos;
     let mut left_mouse_button_pressed = false;
     let mut scroll_amount = scroll_amount;
-    let mut clipboard_text: Option<String> = None;
+    let mut clipboard_pending = false;
 
     // When the user is scrolled back into history, suppress mouse forwarding
     // to the PTY — the visible content is historical, not the live terminal
@@ -302,18 +358,17 @@ fn write_input_to_terminal(
             Event::Copy => {
                 if input.modifiers.shift {
                     // Ctrl+Shift+C: copy selection text to clipboard.
-                    // The actual copy_text() call is deferred until after the
-                    // ui.input() closure returns, because copy_text() needs a
-                    // write lock on the Context and we are inside a read lock.
-                    if view_state.selection.has_selection() {
-                        let text = extract_selected_text(
-                            &snap.visible_chars,
-                            snap.term_width,
-                            &view_state.selection,
-                        );
-                        if !text.is_empty() {
-                            clipboard_text = Some(text);
-                        }
+                    // Send an ExtractSelection request to the PTY thread which
+                    // owns the full buffer.  The response arrives on clipboard_rx
+                    // and is consumed after the ui.input() closure returns.
+                    if let Some((start, end)) = view_state.selection.normalised() {
+                        let _ = input_tx.send(InputEvent::ExtractSelection {
+                            start_row: start.row,
+                            start_col: start.col,
+                            end_row: end.row,
+                            end_col: end.col,
+                        });
+                        clipboard_pending = true;
                     }
                     continue;
                 }
@@ -646,7 +701,11 @@ fn write_input_to_terminal(
                     // Mouse tracking is off — update text selection if a drag
                     // is in progress.
                     if view_state.selection.is_selecting {
-                        view_state.selection.end = Some(CellCoord { col: x, row: y });
+                        let abs_row = visible_window_start(snap) + y;
+                        view_state.selection.end = Some(CellCoord {
+                            col: x,
+                            row: abs_row,
+                        });
                         state_changed = true;
                     }
                     continue;
@@ -684,13 +743,23 @@ fn write_input_to_terminal(
                     if *button == PointerButton::Primary {
                         if *pressed {
                             // Start a new selection at this cell.
-                            let coord = CellCoord { col: x, row: y };
+                            // Use buffer-absolute row so the selection
+                            // survives scroll offset changes.
+                            let abs_row = visible_window_start(snap) + y;
+                            let coord = CellCoord {
+                                col: x,
+                                row: abs_row,
+                            };
                             view_state.selection.anchor = Some(coord);
                             view_state.selection.end = Some(coord);
                             view_state.selection.is_selecting = true;
                         } else if view_state.selection.is_selecting {
                             // Mouse released — finalize the selection.
-                            view_state.selection.end = Some(CellCoord { col: x, row: y });
+                            let abs_row = visible_window_start(snap) + y;
+                            view_state.selection.end = Some(CellCoord {
+                                col: x,
+                                row: abs_row,
+                            });
                             view_state.selection.is_selecting = false;
                         }
                     }
@@ -785,7 +854,7 @@ fn write_input_to_terminal(
         last_reported_mouse_pos,
         previous_key,
         scroll_amount,
-        clipboard_text,
+        clipboard_pending,
     )
 }
 
@@ -825,100 +894,6 @@ fn encode_egui_mouse_pos_as_usize(
     (x, y)
 }
 
-/// Extract the text covered by the current selection from `visible_chars`.
-///
-/// `visible_chars` is a flat `Vec<TChar>` where rows are separated by
-/// `TChar::NewLine`.  `term_width` is the terminal width in columns.
-///
-/// The selection is defined by the normalised `(start, end)` `CellCoord`s from
-/// `SelectionState`.  For multi-line selections, trailing whitespace on each
-/// line is trimmed and a newline is inserted between rows.
-fn extract_selected_text(
-    visible_chars: &[TChar],
-    _term_width: usize,
-    selection: &super::view_state::SelectionState,
-) -> String {
-    use std::fmt::Write as _;
-
-    let Some((start, end)) = selection.normalised() else {
-        return String::new();
-    };
-
-    // Split the flat visible_chars on NewLine boundaries to get per-row slices.
-    // Each row in the flattened buffer has a *variable* number of TChars
-    // (empty rows have 0, rows with wide chars have fewer than term_width, etc.),
-    // so a fixed-stride approach does not work.
-    let lines = split_visible_into_lines(visible_chars);
-
-    let mut result = String::new();
-
-    for row in start.row..=end.row {
-        let line = if row < lines.len() {
-            lines[row]
-        } else {
-            &[] // row beyond available data — treat as empty
-        };
-
-        // Column range for this row within the selection.
-        let col_begin = if row == start.row { start.col } else { 0 };
-        let col_end = if row == end.row {
-            end.col
-        } else {
-            // Select to end of line content (not a fixed width).
-            line.len().saturating_sub(1)
-        };
-
-        // Collect characters for this row's selected range.
-        let mut row_text = String::new();
-        for col in col_begin..=col_end {
-            if col >= line.len() {
-                break;
-            }
-            match &line[col] {
-                TChar::NewLine => break,
-                tc => {
-                    write!(&mut row_text, "{tc}").unwrap_or_default();
-                }
-            }
-        }
-
-        // Trim trailing whitespace on each line (standard terminal behavior —
-        // empty cells at the end of a line are spaces, not meaningful content).
-        let trimmed = row_text.trim_end();
-        result.push_str(trimmed);
-
-        // Add newline between rows (but not after the last row).
-        if row < end.row {
-            result.push('\n');
-        }
-    }
-
-    result
-}
-
-/// Split a flat `TChar` slice into per-line segments at `TChar::NewLine` boundaries.
-///
-/// The `NewLine` characters themselves are NOT included in the returned slices.
-/// This mirrors `shaping::split_into_lines` but is kept local to avoid a
-/// cross-module dependency for a trivial helper.
-fn split_visible_into_lines(chars: &[TChar]) -> Vec<&[TChar]> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-
-    for (i, ch) in chars.iter().enumerate() {
-        if matches!(ch, TChar::NewLine) {
-            lines.push(&chars[start..i]);
-            start = i + 1;
-        }
-    }
-
-    // Trailing content after the last NewLine (or the entire array if no NewLine).
-    if start <= chars.len() {
-        lines.push(&chars[start..]);
-    }
-
-    lines
-}
 ///
 /// The scrollbar is only shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
@@ -1081,7 +1056,7 @@ impl FreminalTerminalWidget {
         snap: &TerminalSnapshot,
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
-        _pty_write_tx: &Sender<PtyWrite>,
+        clipboard_rx: &Receiver<String>,
         modal_is_open: bool,
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
@@ -1112,7 +1087,7 @@ impl FreminalTerminalWidget {
                 new_mouse_pos,
                 previous_key,
                 scroll_amount,
-                clipboard_text,
+                clipboard_pending,
             ) = ui.input(|input_state| {
                 write_input_to_terminal(
                     input_state,
@@ -1136,7 +1111,13 @@ impl FreminalTerminalWidget {
             // copy_text() calls ctx.output_mut() which needs a write lock on
             // the Context, but ui.input() holds a read lock — calling
             // copy_text() inside the closure would deadlock.
-            if let Some(text) = clipboard_text {
+            //
+            // If we sent an ExtractSelection request, wait briefly for the
+            // PTY thread to respond with the extracted text.
+            if clipboard_pending
+                && let Ok(text) = clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                && !text.is_empty()
+            {
                 ctx.copy_text(text);
                 // Clear the selection highlight now that the text has been
                 // copied to the clipboard.
@@ -1177,13 +1158,55 @@ impl FreminalTerminalWidget {
             // visible text is byte-identical.  Using the broader check would
             // clear the selection within ~500 ms of mouse release (on every
             // cursor blink), making copy impossible.
-            if snap.content_changed && !view_state.selection.is_selecting {
+            //
+            // We also exclude scroll events (`scroll_changed`) — when the
+            // visible window moves (user scrolling OR auto-scroll-to-bottom on
+            // new PTY output), the flat content changes but the underlying
+            // buffer text at the selected rows has not mutated.  Selection
+            // coordinates are buffer-absolute, so they remain valid across
+            // scroll offset changes.
+            //
+            // Edge case: if `enforce_scrollback_limit` evicts rows from the
+            // top of the buffer, all row indices shift and the selection may
+            // point to different text.  This is a pre-existing limitation
+            // shared by all finite-scrollback terminals; the proper fix is to
+            // adjust selection coordinates on eviction, not to clear here.
+            if snap.content_changed && !snap.scroll_changed && !view_state.selection.is_selecting {
                 view_state.selection.clear();
             }
 
             // Check whether the selection has changed since the last frame.
             let current_selection = view_state.selection.normalised();
             let selection_changed = current_selection != self.previous_selection;
+
+            // Convert buffer-absolute selection coordinates to screen-relative
+            // for the renderer (which iterates `shaped_lines` by screen row).
+            let win_start = visible_window_start(snap);
+            let screen_selection = current_selection.and_then(|(s, e)| {
+                // Clamp the selection to the visible window.  If both start
+                // and end are outside the visible range, there is nothing to
+                // highlight on screen.
+                let win_end = win_start + snap.term_height;
+                if e.row < win_start || s.row >= win_end {
+                    return None; // entirely outside visible window
+                }
+                let s_row = s.row.saturating_sub(win_start);
+                let e_row = e
+                    .row
+                    .saturating_sub(win_start)
+                    .min(snap.term_height.saturating_sub(1));
+                // If the start row is above the visible window, the selection
+                // begins at column 0 of the first visible row.
+                let s_col = if s.row < win_start { 0 } else { s.col };
+                // If the end row is below the visible window, the selection
+                // extends to the last column of the last visible row.
+                let e_col = if e.row >= win_end {
+                    snap.term_width.saturating_sub(1)
+                } else {
+                    e.col
+                };
+                Some((s_col, s_row, e_col, e_row))
+            });
 
             // Determine whether we can take the cursor-only fast path.
             //
@@ -1267,7 +1290,7 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
-                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    screen_selection,
                     snap.theme,
                 );
 
@@ -1292,7 +1315,7 @@ impl FreminalTerminalWidget {
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
-                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    screen_selection,
                     snap.theme,
                 );
                 let image_verts = build_image_verts(
@@ -1381,16 +1404,56 @@ impl FreminalTerminalWidget {
 
         paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
 
-        // URL hover detection is not yet ported to snapshots.
-        // TODO(task-9): implement URL hover via snapshot data.
+        // URL hover detection: convert mouse pixel position to a cell
+        // coordinate, find the FormatTag covering that cell in the snapshot,
+        // and check whether it carries a URL.
         if let Some(mouse_position) = view_state.mouse_position {
-            let _ = mouse_position; // suppress unused-variable lint
-            debug!("No URL hover detection in snapshot mode yet");
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = CursorIcon::Default;
+            let (col, row) = encode_egui_mouse_pos_as_usize(
+                mouse_position,
+                (cell_w_f, row_h_f),
+                terminal_origin,
+            );
+
+            // Convert the mouse's display-column position to a flat index
+            // into visible_chars.  This correctly handles wide characters
+            // (CJK, emoji) whose continuation cells are stripped during
+            // flattening, making the per-row TChar count smaller than
+            // term_width.
+            let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col);
+
+            let hovered_url = flat_idx.and_then(|idx| {
+                snap.visible_tags
+                    .iter()
+                    .find(|tag| tag.start <= idx && idx < tag.end)
+                    .and_then(|tag| tag.url.as_ref())
             });
+
+            if let Some(url) = hovered_url {
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = CursorIcon::PointingHand;
+                });
+
+                // Ctrl+click (Cmd+click on macOS) opens the URL.
+                let clicked = ui.input(|i| {
+                    i.pointer.button_clicked(PointerButton::Primary)
+                        && (i.modifiers.ctrl || i.modifiers.mac_cmd)
+                });
+                if clicked {
+                    let url_str = url.url.clone();
+                    // Spawn the open on a background thread to avoid blocking
+                    // the render loop on the system's URL handler.
+                    std::thread::spawn(move || {
+                        if let Err(e) = open::that(&url_str) {
+                            tracing::error!("Failed to open URL {url_str}: {e}");
+                        }
+                    });
+                }
+            } else {
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = CursorIcon::Default;
+                });
+            }
         } else {
-            debug!("No mouse position");
             ui.ctx().output_mut(|output| {
                 output.cursor_icon = CursorIcon::Default;
             });
@@ -1489,5 +1552,146 @@ mod subtask_1_7_tests {
         let (w, h) = fm.cell_size();
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");
+    }
+}
+
+#[cfg(test)]
+mod visible_window_start_tests {
+    use super::*;
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+
+    fn snap_with(total_rows: usize, term_height: usize, scroll_offset: usize) -> TerminalSnapshot {
+        let mut s = TerminalSnapshot::empty();
+        s.total_rows = total_rows;
+        s.term_height = term_height;
+        s.scroll_offset = scroll_offset;
+        s
+    }
+
+    #[test]
+    fn live_view_at_bottom() {
+        // 100 total rows, 24 visible, scrolled to live bottom.
+        let snap = snap_with(100, 24, 0);
+        assert_eq!(visible_window_start(&snap), 76);
+    }
+
+    #[test]
+    fn scrolled_back_fully() {
+        // 100 total rows, 24 visible, scrolled back 76 rows (to very top).
+        let snap = snap_with(100, 24, 76);
+        assert_eq!(visible_window_start(&snap), 0);
+    }
+
+    #[test]
+    fn scrolled_back_partially() {
+        let snap = snap_with(100, 24, 10);
+        assert_eq!(visible_window_start(&snap), 66);
+    }
+
+    #[test]
+    fn no_scrollback() {
+        // total_rows == term_height → no scrollback, always 0.
+        let snap = snap_with(24, 24, 0);
+        assert_eq!(visible_window_start(&snap), 0);
+    }
+
+    #[test]
+    fn fewer_rows_than_height() {
+        // Edge case: buffer has fewer rows than visible height.
+        let snap = snap_with(10, 24, 0);
+        assert_eq!(visible_window_start(&snap), 0);
+    }
+}
+
+#[cfg(test)]
+mod flat_index_for_cell_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Build a simple `visible_chars` vec: rows of ASCII chars separated by `NewLine`.
+    fn make_visible(rows: &[&str]) -> Vec<TChar> {
+        let mut chars = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for c in row.chars() {
+                chars.push(ascii(c));
+            }
+            if i + 1 < rows.len() {
+                chars.push(TChar::NewLine);
+            }
+        }
+        chars
+    }
+
+    #[test]
+    fn first_cell() {
+        let chars = make_visible(&["abcde", "fghij"]);
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0));
+    }
+
+    #[test]
+    fn middle_of_first_row() {
+        let chars = make_visible(&["abcde", "fghij"]);
+        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(2));
+    }
+
+    #[test]
+    fn start_of_second_row() {
+        let chars = make_visible(&["abcde", "fghij"]);
+        // Row 0 = 5 chars + 1 NewLine = indices 0..5, NL at 5.
+        // Row 1 starts at index 6.
+        assert_eq!(flat_index_for_cell(&chars, 1, 0), Some(6));
+    }
+
+    #[test]
+    fn col_beyond_row() {
+        let chars = make_visible(&["abc"]);
+        // Row has 3 chars (cols 0, 1, 2). Col 5 is out of range.
+        assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
+    }
+
+    #[test]
+    fn row_beyond_data() {
+        let chars = make_visible(&["abc"]);
+        assert_eq!(flat_index_for_cell(&chars, 5, 0), None);
+    }
+
+    #[test]
+    fn wide_character_handling() {
+        // Simulate a row with a wide character (display_width=2) followed by
+        // a narrow character.  In the flat vec, the wide char is one TChar
+        // entry but occupies 2 display columns.
+        let wide = TChar::Utf8("Ｗ".as_bytes().to_vec()); // fullwidth W, width=2
+        let chars = vec![wide, ascii('x')];
+
+        // Display columns: 0-1 = 'Ｗ', 2 = 'x'
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0)); // first col of wide char
+        assert_eq!(flat_index_for_cell(&chars, 0, 1), Some(0)); // second col of wide char
+        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(1)); // 'x'
+        assert_eq!(flat_index_for_cell(&chars, 0, 3), None); // beyond
+    }
+
+    #[test]
+    fn empty_visible_chars() {
+        let chars: Vec<TChar> = Vec::new();
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), None);
+    }
+
+    #[test]
+    fn multiple_wide_chars() {
+        let w1 = TChar::Utf8("Ｗ".as_bytes().to_vec()); // width 2
+        let w2 = TChar::Utf8("Ｘ".as_bytes().to_vec()); // width 2
+        let chars = vec![w1, w2, ascii('z')];
+
+        // Display layout: cols 0-1 = Ｗ, cols 2-3 = Ｘ, col 4 = z
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 1), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 0, 3), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 0, 4), Some(2));
+        assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
     }
 }

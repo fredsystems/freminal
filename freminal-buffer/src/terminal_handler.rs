@@ -2497,10 +2497,27 @@ impl TerminalHandler {
                         &AllowColumnModeSwitch::AllowColumnModeSwitch.report(Some(mode)),
                     );
                 }
-                other => {
-                    // Modes handled by TerminalState's mode-sync loop, or
-                    // modes not yet acted on.  Log for diagnostic visibility.
-                    tracing::debug!("Mode not handled by TerminalHandler: {other}");
+                // ── Modes handled by TerminalState's mode-sync loop ──
+                // These are GUI/input-concern modes tracked in
+                // TerminalState::modes.  TerminalHandler does not act on
+                // them; listing them explicitly silences spurious debug
+                // noise from the catch-all.
+                Mode::Decckm(_)
+                | Mode::BracketedPaste(_)
+                | Mode::MouseMode(_)
+                | Mode::XtMseWin(_)
+                | Mode::Decscnm(_)
+                | Mode::Decarm(_)
+                | Mode::ReverseWrapAround(_)
+                | Mode::SynchronizedUpdates(_) => {}
+
+                // ── Modes parsed but not yet acted on ─────────────────
+                Mode::NoOp
+                | Mode::Decsclm(_)
+                | Mode::GraphemeClustering(_)
+                | Mode::Theming(_)
+                | Mode::Unknown(_) => {
+                    tracing::debug!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },
             TerminalOutput::OscResponse(osc) => {

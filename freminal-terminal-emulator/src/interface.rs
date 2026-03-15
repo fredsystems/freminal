@@ -465,13 +465,27 @@ impl TerminalEmulator {
         self.internal.get_cursor_visual_style()
     }
 
-    pub const fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
-        self.internal.is_mouse_hovered_on_url(mouse_position)
-    }
-
     #[must_use]
     pub fn skip_draw_always(&self) -> bool {
         self.internal.skip_draw_always()
+    }
+
+    /// Extract text from the full buffer for a selection range.
+    ///
+    /// Coordinates are buffer-absolute row indices and 0-indexed columns.
+    /// Delegates to `Buffer::extract_text`.
+    #[must_use]
+    pub fn extract_selection_text(
+        &self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> String {
+        self.internal
+            .handler
+            .buffer()
+            .extract_text(start_row, start_col, end_row, end_col)
     }
 
     /// Process a chunk of raw PTY bytes.
@@ -665,7 +679,8 @@ impl TerminalEmulator {
         //
         // The visible window moved — the cached flat content is from a
         // different set of rows and must not be reused.
-        if scroll_offset != self.previous_scroll_offset {
+        let scroll_changed = scroll_offset != self.previous_scroll_offset;
+        if scroll_changed {
             self.previous_visible_snap = None;
             self.previous_scroll_offset = scroll_offset;
         }
@@ -736,6 +751,8 @@ impl TerminalEmulator {
         // ── Inline image data ────────────────────────────────────────────────
         let (images, visible_image_placements) = self.collect_visible_images(scroll_offset);
 
+        let total_rows = self.internal.handler.buffer().get_rows().len();
+
         TerminalSnapshot {
             visible_chars,
             visible_tags,
@@ -749,7 +766,9 @@ impl TerminalEmulator {
             is_normal_display,
             term_width,
             term_height,
+            total_rows,
             content_changed,
+            scroll_changed,
             bracketed_paste,
             mouse_tracking,
             repeat_keys,
