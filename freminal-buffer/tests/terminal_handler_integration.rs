@@ -1261,6 +1261,83 @@ fn window_manipulation_queued() {
 }
 
 #[test]
+fn report_character_size_in_pixels_is_synchronous() {
+    // ReportCharacterSizeInPixels must be handled synchronously via write_to_pty,
+    // not deferred to window_commands.  This ensures the response arrives in the
+    // same batch as DA1 so that applications using DA1 as a fence (e.g. yazi)
+    // receive it before the fence response.
+    use freminal_common::buffer_states::{
+        terminal_output::TerminalOutput, window_manipulation::WindowManipulation,
+    };
+
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Set non-default cell pixel dimensions to verify they appear in the response.
+    handler.handle_resize(80, 24, 9, 17);
+
+    handler.process_outputs(&[TerminalOutput::WindowManipulation(
+        WindowManipulation::ReportCharacterSizeInPixels,
+    )]);
+
+    // Must NOT be queued as a window command.
+    let commands = handler.take_window_commands();
+    assert!(
+        commands.is_empty(),
+        "ReportCharacterSizeInPixels must not be deferred to window_commands"
+    );
+
+    // Must appear immediately on the PTY write channel.
+    let msg = rx
+        .try_recv()
+        .expect("ReportCharacterSizeInPixels must produce a PTY response");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[6;17;9t",
+        "CSI 16t response must be ESC[6;height;widtht"
+    );
+}
+
+#[test]
+fn report_terminal_size_in_characters_is_synchronous() {
+    use freminal_common::buffer_states::{
+        terminal_output::TerminalOutput, window_manipulation::WindowManipulation,
+    };
+
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::WindowManipulation(
+        WindowManipulation::ReportTerminalSizeInCharacters,
+    )]);
+
+    let commands = handler.take_window_commands();
+    assert!(
+        commands.is_empty(),
+        "ReportTerminalSizeInCharacters must not be deferred to window_commands"
+    );
+
+    let msg = rx
+        .try_recv()
+        .expect("ReportTerminalSizeInCharacters must produce a PTY response");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[8;24;80t",
+        "CSI 18t response must be ESC[8;height;widtht"
+    );
+}
+
+#[test]
 fn no_write_tx_does_not_panic() {
     // CursorReport and RequestDeviceAttributes with no write_tx set must not panic.
     use freminal_common::buffer_states::terminal_output::TerminalOutput;

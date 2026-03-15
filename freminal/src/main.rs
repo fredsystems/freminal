@@ -274,9 +274,6 @@ fn main() {
                             | WindowManipulation::ReportWindowSizeInPixels
                             | WindowManipulation::ReportWindowTextAreaSizeInPixels
                             | WindowManipulation::ReportRootWindowSizeInPixels
-                            | WindowManipulation::ReportCharacterSizeInPixels
-                            | WindowManipulation::ReportTerminalSizeInCharacters
-                            | WindowManipulation::ReportRootWindowSizeInCharacters
                             | WindowManipulation::ReportIconLabel
                             | WindowManipulation::ReportTitle
                             | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),

@@ -471,6 +471,15 @@ impl Buffer {
             let tag = self.current_tag.clone();
 
             // ┌─────────────────────────────────────────────┐
+            // │ Before writing, check if any cells in the   │
+            // │ target range carry an image.  If so, clear  │
+            // │ ALL cells of that image across the entire   │
+            // │ buffer — images are atomic; overwriting any  │
+            // │ part destroys the whole image.               │
+            // └─────────────────────────────────────────────┘
+            self.clear_images_overwritten_by_text(row_idx, col, text.len() - start);
+
+            // ┌─────────────────────────────────────────────┐
             // │ Try to insert into this row.                │
             // └─────────────────────────────────────────────┘
             match self.rows[row_idx].insert_text(col, &text[start..], &tag) {
@@ -1388,6 +1397,9 @@ impl Buffer {
             return;
         }
 
+        // Sweep image cells that are about to be erased.
+        self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(col + n));
+
         let tag = self.current_tag.clone();
         self.rows[row].erase_cells_at(col, n, &tag);
 
@@ -1791,6 +1803,13 @@ impl Buffer {
         let cursor_y = self.cursor.pos.y;
         let cursor_x = self.cursor.pos.x;
 
+        // PTY always operates at live bottom (scroll_offset = 0)
+        let visible_start = self.visible_window_start(0);
+        let visible_end = visible_start + self.height;
+
+        // Sweep image cells that are about to be erased.
+        self.collect_and_clear_image_ids_in_rows(cursor_y, visible_end, Some(cursor_x), None);
+
         // Clear from cursor to end of current row
         if cursor_y < self.rows.len() {
             let tag = self.current_tag.clone();
@@ -1798,10 +1817,6 @@ impl Buffer {
         }
 
         // Clear all rows below cursor in the visible window
-        // PTY always operates at live bottom (scroll_offset = 0)
-        let visible_start = self.visible_window_start(0);
-        let visible_end = visible_start + self.height;
-
         for i in (cursor_y + 1)..visible_end.min(self.rows.len()) {
             let tag = self.current_tag.clone();
             self.rows[i].clear_with_tag(&tag);
@@ -1817,6 +1832,11 @@ impl Buffer {
 
         // PTY always operates at live bottom (scroll_offset = 0)
         let visible_start = self.visible_window_start(0);
+
+        // Sweep image cells that are about to be erased.
+        // First row being erased starts at col 0; the cursor row is erased
+        // from col 0..=cursor_x.  For simplicity, sweep the entire row range.
+        self.collect_and_clear_image_ids_in_rows(visible_start, cursor_y + 1, None, None);
 
         // Clear all rows above cursor in the visible window
         for i in visible_start..cursor_y.min(self.rows.len()) {
@@ -1838,6 +1858,9 @@ impl Buffer {
         // PTY always operates at live bottom (scroll_offset = 0)
         let visible_start = self.visible_window_start(0);
         let visible_end = visible_start + self.height;
+
+        // Sweep image cells that are about to be erased.
+        self.collect_and_clear_image_ids_in_rows(visible_start, visible_end, None, None);
 
         for i in visible_start..visible_end.min(self.rows.len()) {
             let tag = self.current_tag.clone();
@@ -1882,6 +1905,9 @@ impl Buffer {
         let cursor_x = self.cursor.pos.x;
 
         if cursor_y < self.rows.len() {
+            // Sweep image cells that are about to be erased.
+            self.collect_and_clear_image_ids_in_rows(cursor_y, cursor_y + 1, Some(cursor_x), None);
+
             let tag = self.current_tag.clone();
             self.rows[cursor_y].clear_from(cursor_x, &tag);
         }
@@ -1895,6 +1921,9 @@ impl Buffer {
         let cursor_x = self.cursor.pos.x;
 
         if cursor_y < self.rows.len() {
+            // Sweep image cells that are about to be erased.
+            self.collect_and_clear_image_ids_in_rows(cursor_y, cursor_y + 1, None, None);
+
             let tag = self.current_tag.clone();
             self.rows[cursor_y].clear_to(cursor_x + 1, &tag);
         }
@@ -1907,6 +1936,9 @@ impl Buffer {
         let cursor_y = self.cursor.pos.y;
 
         if cursor_y < self.rows.len() {
+            // Sweep image cells that are about to be erased.
+            self.collect_and_clear_image_ids_in_rows(cursor_y, cursor_y + 1, None, None);
+
             let tag = self.current_tag.clone();
             self.rows[cursor_y].clear_with_tag(&tag);
         }
@@ -2389,6 +2421,129 @@ impl Buffer {
         }
     }
 
+    /// Clear image placements at the current cursor row and all rows after.
+    ///
+    /// Used by Kitty `d=c` (at cursor) and `d=C` (at cursor and after) delete
+    /// targets. Clears every image cell from the cursor row to the end of
+    /// the buffer.
+    pub fn clear_image_placements_at_cursor_and_after(&mut self) {
+        let start_row = self.cursor.pos.y;
+        for i in start_row..self.rows.len() {
+            let row = &mut self.rows[i];
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell.has_image() {
+                    cell.clear_image();
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+    }
+
+    /// Clear image placements at the current cursor position only (single row).
+    pub fn clear_image_placements_at_cursor(&mut self) {
+        let row_idx = self.cursor.pos.y;
+        if row_idx >= self.rows.len() {
+            return;
+        }
+        let row = &mut self.rows[row_idx];
+        let mut changed = false;
+        for cell in row.cells_mut() {
+            if cell.has_image() {
+                cell.clear_image();
+                changed = true;
+            }
+        }
+        if changed {
+            row.dirty = true;
+            if row_idx < self.row_cache.len() {
+                self.row_cache[row_idx] = None;
+            }
+        }
+    }
+
+    /// Check whether inserting `text_len` characters at `(row_idx, col)`
+    /// would overwrite any image cells.  If so, clear **all** cells of each
+    /// affected image across the entire buffer.
+    ///
+    /// Only the cells in `[col .. col + text_len)` are inspected — images
+    /// outside this range on the same row are not affected.
+    ///
+    /// Images are treated as atomic: overwriting even a single cell of an
+    /// image invalidates the whole image.  This matches the behaviour of
+    /// other terminal emulators (`iTerm2`, `WezTerm`, Kitty).
+    fn clear_images_overwritten_by_text(&mut self, row_idx: usize, col: usize, text_len: usize) {
+        self.collect_and_clear_image_ids_in_rows(
+            row_idx,
+            row_idx + 1,
+            Some(col),
+            Some(col + text_len),
+        );
+    }
+
+    /// Scan rows in `[row_start..row_end)` for image cells and clear every
+    /// cell of each found image across the entire buffer.
+    ///
+    /// If `start_col` is `Some(col)`, only cells from `col..` on the first
+    /// row (or single row) are scanned.  If `end_col` is `Some(ec)`, only
+    /// cells up to (exclusive) `ec` are scanned on the first row.  If
+    /// `None`, scanning goes to the end of the row.
+    ///
+    /// For rows after the first (when `row_end - row_start > 1`), all cells
+    /// are always scanned.
+    ///
+    /// This is a no-op when no image cells are present.
+    fn collect_and_clear_image_ids_in_rows(
+        &mut self,
+        row_start: usize,
+        row_end: usize,
+        start_col: Option<usize>,
+        end_col: Option<usize>,
+    ) {
+        let end = row_end.min(self.rows.len());
+        if row_start >= end {
+            return;
+        }
+
+        // Collect unique image IDs from the targeted cells.
+        let mut ids_to_clear: Vec<u64> = Vec::new();
+        for (idx, row) in self.rows[row_start..end].iter().enumerate() {
+            let cells = row.cells();
+            let skip = if idx == 0 {
+                start_col.unwrap_or(0).min(cells.len())
+            } else {
+                0
+            };
+            let limit = if idx == 0 {
+                end_col.unwrap_or(cells.len()).min(cells.len())
+            } else {
+                cells.len()
+            };
+            if skip >= limit {
+                continue;
+            }
+            for cell in &cells[skip..limit] {
+                if let Some(placement) = cell.image_placement() {
+                    let id = placement.image_id;
+                    if !ids_to_clear.contains(&id) {
+                        ids_to_clear.push(id);
+                    }
+                }
+            }
+        }
+
+        // Clear all cells of each affected image buffer-wide.
+        for id in ids_to_clear {
+            self.clear_image_placements_by_id(id);
+        }
+    }
+
     /// Place an inline image at the current cursor position.
     ///
     /// The image is stored in the central `ImageStore` and cells in the
@@ -2416,6 +2571,31 @@ impl Buffer {
 
         // Clamp display_cols to not exceed terminal width.
         let effective_cols = display_cols.min(self.width.saturating_sub(start_col));
+
+        // Before placing new image cells, clear any existing image cells in
+        // the column range from the cursor row downward.  This handles the
+        // common case where a new (possibly smaller) image replaces an old
+        // (possibly larger) one at the same position — without this, stale
+        // cells from the old image persist below the new one.
+        let clear_end_col = start_col + effective_cols;
+        for row_idx in self.cursor.pos.y..self.rows.len() {
+            let row = &mut self.rows[row_idx];
+            let mut changed = false;
+            for col in start_col..clear_end_col.min(row.max_width()) {
+                if let Some(cell) = row.cells_mut().get_mut(col)
+                    && cell.has_image()
+                {
+                    cell.clear_image();
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if row_idx < self.row_cache.len() {
+                    self.row_cache[row_idx] = None;
+                }
+            }
+        }
 
         let mut current_offset = scroll_offset;
 
@@ -5123,5 +5303,264 @@ mod image_tests {
         cell.clear_image();
         assert!(!cell.has_image());
         assert!(cell.image_placement().is_none());
+    }
+
+    // ── place_image pre-clear: replacing a larger image with a smaller one ──
+
+    #[test]
+    fn place_image_clears_stale_cells_below_smaller_replacement() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a tall image (3 cols × 5 rows) at cursor (0,0).
+        let big_img = make_image(3, 5);
+        let big_id = big_img.id;
+        buf.place_image(big_img, 0);
+
+        // Cursor is now below the image (row 5). Move back to (0,0).
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+
+        // Place a smaller image (3 cols × 2 rows) at the same position.
+        let small_img = make_image(3, 2);
+        let small_id = small_img.id;
+        buf.place_image(small_img, 0);
+
+        // Rows 0-1 should have the new image's cells.
+        for r in 0..2_usize {
+            for c in 0..3_usize {
+                let cell = &buf.rows[r].cells()[c];
+                assert!(cell.has_image(), "row={r} col={c} should have new image");
+                assert_eq!(cell.image_placement().unwrap().image_id, small_id);
+            }
+        }
+
+        // Rows 2-4 should have NO image cells (old image was cleared).
+        for r in 2..5_usize {
+            for c in 0..3_usize {
+                let cell = &buf.rows[r].cells()[c];
+                assert!(
+                    !cell.has_image(),
+                    "row={r} col={c} should not have stale image (old id={big_id})"
+                );
+            }
+        }
+    }
+
+    // ── Atomic image invalidation on text overwrite ─────────────────
+
+    /// Helper: count cells referencing a given image id across the buffer.
+    fn count_image_cells(buf: &Buffer, image_id: u64) -> usize {
+        let mut count = 0;
+        for row in &buf.rows {
+            for cell in row.cells() {
+                if cell
+                    .image_placement()
+                    .is_some_and(|p| p.image_id == image_id)
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn insert_text_over_image_clears_all_cells_of_that_image() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 5×3 image at (0,0).
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+
+        // Verify image cells are present (5 cols × 3 rows = 15).
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        // Move cursor to (0,0) and write text over just the first cell.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&[TChar::Ascii(b'X')]);
+
+        // ALL cells of the image across all rows should be cleared.
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells should be cleared after text overwrite"
+        );
+    }
+
+    #[test]
+    fn insert_text_over_one_image_does_not_clear_another() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place image A at columns 0-2, rows 0-1.
+        let img_a = make_image(3, 2);
+        let id_a = img_a.id;
+        buf.place_image(img_a, 0);
+        assert_eq!(count_image_cells(&buf, id_a), 6);
+
+        // place_image moved cursor below. Move cursor to row 0, col 10
+        // for image B placement.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 10;
+        let img_b = make_image(3, 2);
+        let id_b = img_b.id;
+        buf.place_image(img_b, 0);
+        assert_eq!(count_image_cells(&buf, id_b), 6);
+
+        // Write text over image A's first cell.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&[TChar::Ascii(b'Z')]);
+
+        // Image A should be entirely cleared.
+        assert_eq!(
+            count_image_cells(&buf, id_a),
+            0,
+            "image A cells should all be cleared"
+        );
+
+        // Image B should be untouched.
+        assert_eq!(
+            count_image_cells(&buf, id_b),
+            6,
+            "image B cells should survive"
+        );
+    }
+
+    // ── Atomic image invalidation on erase operations ────────────────
+
+    #[test]
+    fn erase_line_to_end_clears_entire_image() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 5×3 image at (0,0).
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        // Cursor at (0,0); erase from cursor to end of line.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        buf.erase_line_to_end();
+
+        // ALL cells of the image (rows 0-2, cols 0-4) should be gone
+        // because erasing row 0 hits the image and atomically clears all.
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells should be cleared after erase_line_to_end"
+        );
+    }
+
+    #[test]
+    fn erase_line_to_beginning_clears_entire_image() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 5×3 image at (0,0).
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        // Move cursor to the end of the image's first row.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 4;
+        buf.erase_line_to_beginning();
+
+        // ALL cells of the image should be cleared (atomic invalidation).
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells should be cleared after erase_line_to_beginning"
+        );
+    }
+
+    #[test]
+    fn erase_display_clears_all_image_cells() {
+        let mut buf = Buffer::new(20, 10);
+
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        buf.erase_display();
+
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells should be cleared after erase_display"
+        );
+    }
+
+    #[test]
+    fn erase_to_end_of_display_clears_image_atomically() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place image spanning rows 0-2, cols 0-4.
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        // Erase from row 1 onward — image has cells on row 1, so the
+        // whole image should be cleared atomically (including row 0).
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+        buf.erase_to_end_of_display();
+
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells (including row 0) should be cleared atomically"
+        );
+    }
+
+    #[test]
+    fn erase_chars_clears_entire_image() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 5×3 image at (0,0).
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        // Move cursor to col 2 of row 0 and erase 1 char — should trigger
+        // atomic invalidation of the entire image.
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 2;
+        buf.erase_chars(1);
+
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells should be cleared after erase_chars"
+        );
+    }
+
+    #[test]
+    fn erase_line_clears_entire_image() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 5×3 image at (0,0).
+        let img = make_image(5, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0);
+        assert_eq!(count_image_cells(&buf, img_id), 15);
+
+        // Erase the entire first line — should clear all image cells.
+        buf.cursor.pos.y = 0;
+        buf.erase_line();
+
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            0,
+            "all image cells should be cleared after erase_line"
+        );
     }
 }

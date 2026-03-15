@@ -1599,6 +1599,14 @@ impl TerminalHandler {
                         .retain(|&(img_id, _), _| img_id != id);
                 }
             }
+            KittyDeleteTarget::AtCursor => {
+                tracing::debug!("Kitty graphics: deleting images at cursor");
+                self.buffer.clear_image_placements_at_cursor();
+            }
+            KittyDeleteTarget::AtCursorAndAfter => {
+                tracing::debug!("Kitty graphics: deleting images at cursor and after");
+                self.buffer.clear_image_placements_at_cursor_and_after();
+            }
             other => {
                 tracing::debug!(
                     "Kitty graphics: delete target {other:?} not yet implemented; ignoring"
@@ -1634,6 +1642,38 @@ impl TerminalHandler {
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
         self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
+    }
+
+    /// Handle a `WindowManipulation` command.
+    ///
+    /// Report variants that can be answered from terminal state are handled
+    /// synchronously here via `write_to_pty` so the response reaches the PTY
+    /// in the same processing batch as DA1 and other inline responses.  This
+    /// is critical for applications (e.g. yazi) that use DA1 as a "fence" to
+    /// detect when all prior query responses have arrived.
+    ///
+    /// Variants that require GUI-side data (viewport position, window title,
+    /// clipboard, etc.) are deferred to `self.window_commands` for the GUI
+    /// thread to handle asynchronously.
+    fn handle_window_manipulation(&mut self, wm: &WindowManipulation) {
+        match wm {
+            WindowManipulation::ReportCharacterSizeInPixels => {
+                let w = self.cell_pixel_width;
+                let h = self.cell_pixel_height;
+                self.write_to_pty(&format!("\x1b[6;{h};{w}t"));
+            }
+            WindowManipulation::ReportTerminalSizeInCharacters => {
+                let (width, height) = self.get_win_size();
+                self.write_to_pty(&format!("\x1b[8;{height};{width}t"));
+            }
+            WindowManipulation::ReportRootWindowSizeInCharacters => {
+                let (width, height) = self.get_win_size();
+                self.write_to_pty(&format!("\x1b[9;{height};{width}t"));
+            }
+            other => {
+                self.window_commands.push(other.clone());
+            }
+        }
     }
 
     /// Handle an OSC (Operating System Command) sequence.
@@ -1855,6 +1895,8 @@ impl TerminalHandler {
                 img_height_px,
                 term_width,
                 term_height,
+                self.cell_pixel_width,
+                self.cell_pixel_height,
             )
         } else {
             (display_cols, display_rows)
@@ -1875,9 +1917,22 @@ impl TerminalHandler {
             display_rows,
         };
 
+        // Save cursor position if doNotMoveCursor is set — iTerm2 protocol
+        // specifies that the cursor should remain at its pre-image position.
+        let saved_cursor = if data.do_not_move_cursor {
+            Some(self.buffer.get_cursor().pos)
+        } else {
+            None
+        };
+
         // Place the image into the buffer. Pass 0 for scroll_offset — the
         // PTY thread always operates at the live bottom.
         let _new_offset = self.buffer.place_image(inline_image, 0);
+
+        // Restore cursor position if doNotMoveCursor was requested.
+        if let Some(pos) = saved_cursor {
+            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        }
     }
 
     /// Handle `OSC 1337 ; MultipartFile = [args]` — begin a multipart transfer.
@@ -1997,7 +2052,8 @@ impl TerminalHandler {
     /// Adjust display dimensions to preserve aspect ratio.
     ///
     /// When `preserve_aspect_ratio` is true and one dimension is auto/unspecified,
-    /// scale the auto dimension to match the other.
+    /// scale the auto dimension to match the other using real cell pixel
+    /// dimensions for correct terminal-cell aspect-ratio compensation.
     #[allow(clippy::too_many_arguments)]
     fn apply_aspect_ratio(
         width_spec: Option<&ImageDimension>,
@@ -2008,18 +2064,21 @@ impl TerminalHandler {
         img_height_px: u32,
         term_width: usize,
         term_height: usize,
+        cell_pixel_width: u32,
+        cell_pixel_height: u32,
     ) -> (usize, usize) {
         let width_is_auto = matches!(width_spec, None | Some(ImageDimension::Auto));
         let height_is_auto = matches!(height_spec, None | Some(ImageDimension::Auto));
 
+        // Use actual cell pixel dimensions for aspect-ratio compensation.
+        let cpw = u64::from(cell_pixel_width.max(1));
+        let cph = u64::from(cell_pixel_height.max(1));
+
         if width_is_auto && !height_is_auto {
             // Height was explicitly set; scale width to preserve aspect ratio.
-            // Approximate: each cell is ~8px wide, ~16px tall (2:1 aspect).
             // scaled_cols = display_rows * (img_w / img_h) * (cell_h / cell_w)
-            //             = display_rows * img_w * 16 / (img_h * 8)
-            //             = display_rows * img_w * 2 / img_h
-            let scaled = (u64::from(img_width_px) * display_rows as u64 * 2)
-                / u64::from(img_height_px).max(1);
+            let scaled = (u64::from(img_width_px) * display_rows as u64 * cph)
+                / (u64::from(img_height_px).max(1) * cpw);
             // Safe: scaled is bounded by term_width which fits in usize.
             #[allow(clippy::cast_possible_truncation)]
             let cols = (scaled as usize).min(term_width).max(1);
@@ -2027,9 +2086,8 @@ impl TerminalHandler {
         } else if !width_is_auto && height_is_auto {
             // Width was explicitly set; scale height to preserve aspect ratio.
             // scaled_rows = display_cols * (img_h / img_w) * (cell_w / cell_h)
-            //             = display_cols * img_h / (img_w * 2)
-            let scaled = (u64::from(img_height_px) * display_cols as u64)
-                / (u64::from(img_width_px).max(1) * 2);
+            let scaled = (u64::from(img_height_px) * display_cols as u64 * cpw)
+                / (u64::from(img_width_px).max(1) * cph);
             // Safe: scaled is bounded by term_height which fits in usize.
             #[allow(clippy::cast_possible_truncation)]
             let rows = (scaled as usize).min(term_height).max(1);
@@ -2464,7 +2522,7 @@ impl TerminalHandler {
                 self.cursor_visual_style = style.clone();
             }
             TerminalOutput::WindowManipulation(wm) => {
-                self.window_commands.push(wm.clone());
+                self.handle_window_manipulation(wm);
             }
             TerminalOutput::RequestDeviceAttributes => {
                 self.handle_request_device_attributes();
@@ -4801,7 +4859,7 @@ mod tests {
     #[test]
     fn aspect_ratio_both_auto_no_adjustment() {
         let (cols, rows) =
-            TerminalHandler::apply_aspect_ratio(None, None, 20, 10, 160, 160, 80, 24);
+            TerminalHandler::apply_aspect_ratio(None, None, 20, 10, 160, 160, 80, 24, 8, 16);
         // Both auto → no change
         assert_eq!(cols, 20);
         assert_eq!(rows, 10);
@@ -4818,6 +4876,8 @@ mod tests {
             160,
             80,
             24,
+            8,
+            16,
         );
         assert_eq!(cols, 20);
         assert_eq!(rows, 10);
@@ -4825,8 +4885,8 @@ mod tests {
 
     #[test]
     fn aspect_ratio_width_auto_height_explicit() {
-        // height=10 rows, image is square (100x100), cell aspect ~2:1 (8w x 16h)
-        // scaled_cols = 10 * 100 * 2 / 100 = 20
+        // height=10 rows, image is square (100x100), cell aspect 2:1 (8w x 16h)
+        // scaled_cols = 10 * 100 * 16 / (100 * 8) = 20
         let (cols, rows) = TerminalHandler::apply_aspect_ratio(
             None,
             Some(&ImageDimension::Cells(10)),
@@ -4836,6 +4896,8 @@ mod tests {
             100,
             80,
             24,
+            8,
+            16,
         );
         assert_eq!(rows, 10);
         assert_eq!(cols, 20);
@@ -4843,8 +4905,8 @@ mod tests {
 
     #[test]
     fn aspect_ratio_height_auto_width_explicit() {
-        // width=20 cols, image is square (100x100), cell aspect ~2:1
-        // scaled_rows = 20 * 100 / (100 * 2) = 10
+        // width=20 cols, image is square (100x100), cell aspect 2:1 (8w x 16h)
+        // scaled_rows = 20 * 100 * 8 / (100 * 16) = 10
         let (cols, rows) = TerminalHandler::apply_aspect_ratio(
             Some(&ImageDimension::Cells(20)),
             None,
@@ -4854,6 +4916,8 @@ mod tests {
             100,
             80,
             24,
+            8,
+            16,
         );
         assert_eq!(cols, 20);
         assert_eq!(rows, 10);
@@ -4862,7 +4926,7 @@ mod tests {
     #[test]
     fn aspect_ratio_clamped_to_term_size() {
         // width=80 cols, image is very tall (100w x 10000h)
-        // scaled_rows = 80 * 10000 / (100 * 2) = 4000, clamped to 24
+        // scaled_rows = 80 * 10000 * 8 / (100 * 16) = 4000, clamped to 24
         let (cols, rows) = TerminalHandler::apply_aspect_ratio(
             Some(&ImageDimension::Cells(80)),
             None,
@@ -4872,9 +4936,49 @@ mod tests {
             10000,
             80,
             24,
+            8,
+            16,
         );
         assert_eq!(cols, 80);
         assert_eq!(rows, 24);
+    }
+
+    #[test]
+    fn aspect_ratio_non_square_cells() {
+        // Verify the fix: non-2:1 cell aspect (e.g. 10w x 20h).
+        // height=10 rows, square image (200x200)
+        // scaled_cols = 10 * 200 * 20 / (200 * 10) = 20
+        let (cols, rows) = TerminalHandler::apply_aspect_ratio(
+            None,
+            Some(&ImageDimension::Cells(10)),
+            1,
+            10,
+            200,
+            200,
+            80,
+            24,
+            10,
+            20,
+        );
+        assert_eq!(rows, 10);
+        assert_eq!(cols, 20);
+
+        // With 12w x 18h cells (1.5:1 ratio), square image
+        // scaled_cols = 10 * 200 * 18 / (200 * 12) = 15
+        let (cols2, rows2) = TerminalHandler::apply_aspect_ratio(
+            None,
+            Some(&ImageDimension::Cells(10)),
+            1,
+            10,
+            200,
+            200,
+            80,
+            24,
+            12,
+            18,
+        );
+        assert_eq!(rows2, 10);
+        assert_eq!(cols2, 15);
     }
 
     // ------------------------------------------------------------------
@@ -4913,6 +5017,7 @@ mod tests {
             height: Some(ImageDimension::Cells(2)),
             preserve_aspect_ratio: false,
             inline: true,
+            do_not_move_cursor: false,
             data: png_buf,
         };
 
@@ -4946,6 +5051,7 @@ mod tests {
             height: None,
             preserve_aspect_ratio: true,
             inline: false, // not inline → should be ignored
+            do_not_move_cursor: false,
             data: vec![0xFF; 100],
         };
 
@@ -4954,6 +5060,60 @@ mod tests {
         handler.handle_iterm2_inline_image(&image_data);
         let cursor_after = handler.cursor_pos();
         assert_eq!(cursor_before, cursor_after);
+    }
+
+    #[test]
+    fn handle_iterm2_inline_image_do_not_move_cursor() {
+        use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
+        use image::ImageEncoder;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Create a minimal test PNG.
+        let mut png_buf = Vec::new();
+        {
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        // Position cursor at a known location.
+        handler.buffer_mut().set_cursor_pos(Some(5), Some(3));
+        let cursor_before = handler.cursor_pos();
+
+        let image_data = ITerm2InlineImageData {
+            name: None,
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: true,
+            data: png_buf,
+        };
+
+        handler.handle_iterm2_inline_image(&image_data);
+
+        // Cursor should NOT have moved because doNotMoveCursor=1.
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(
+            cursor_before, cursor_after,
+            "Cursor should be preserved when doNotMoveCursor=1"
+        );
+
+        // But the image should still have been placed.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(has_image, "Image should still be placed");
     }
 
     // ------------------------------------------------------------------
@@ -4994,6 +5154,7 @@ mod tests {
             height: Some(ImageDimension::Cells(2)),
             preserve_aspect_ratio: false,
             inline: true,
+            do_not_move_cursor: false,
             data: Vec::new(),
         };
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
@@ -5047,6 +5208,7 @@ mod tests {
             height: None,
             preserve_aspect_ratio: true,
             inline: true,
+            do_not_move_cursor: false,
             data: Vec::new(),
         };
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
@@ -5109,6 +5271,7 @@ mod tests {
             height: None,
             preserve_aspect_ratio: true,
             inline: true,
+            do_not_move_cursor: false,
             data: Vec::new(),
         };
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin1));
@@ -5122,6 +5285,7 @@ mod tests {
             height: Some(ImageDimension::Cells(2)),
             preserve_aspect_ratio: false,
             inline: true,
+            do_not_move_cursor: false,
             data: Vec::new(),
         };
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin2));
@@ -5160,6 +5324,7 @@ mod tests {
             height: None,
             preserve_aspect_ratio: true,
             inline: true,
+            do_not_move_cursor: false,
             data: Vec::new(),
         };
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
@@ -5196,6 +5361,7 @@ mod tests {
             height: None,
             preserve_aspect_ratio: true,
             inline: false, // not inline
+            do_not_move_cursor: false,
             data: Vec::new(),
         };
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
@@ -5664,6 +5830,78 @@ mod tests {
         assert!(
             handler.buffer().image_store().get(99).is_some(),
             "id=99 should survive delete-by-id of 42"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_clears_images_at_cursor_row() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place an image (will be at row 0).
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        // Cursor should now be below the image. Move it back to row 0.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        // Delete at cursor (row 0 only).
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::AtCursor),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        // Row 0 should have no image cells.
+        let row0_has_image = handler.buffer().get_rows()[0]
+            .cells()
+            .iter()
+            .any(crate::cell::Cell::has_image);
+        assert!(!row0_has_image, "AtCursor delete should clear row 0 images");
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_and_after_clears_remaining_rows() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place an image at row 0 (2x2 px → 1x1 cell with 8x16 cell size).
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        // Move cursor to row 0.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        // Delete at cursor and after.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::AtCursorAndAfter),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        // All rows from cursor onward should have no image cells.
+        let any_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !any_image,
+            "AtCursorAndAfter should clear all image cells from cursor onward"
         );
     }
 

@@ -74,6 +74,9 @@ pub struct ITerm2InlineImageData {
     pub preserve_aspect_ratio: bool,
     /// Whether to display inline (true) or treat as download (false).
     pub inline: bool,
+    /// When true, the cursor position is preserved after image placement
+    /// (iTerm2 `doNotMoveCursor=1`).  Default: false.
+    pub do_not_move_cursor: bool,
     /// Raw decoded file bytes (from base64 payload).
     pub data: Vec<u8>,
 }

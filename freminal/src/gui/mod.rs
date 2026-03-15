@@ -154,7 +154,6 @@ fn handle_window_manipulation(
     font_height: usize,
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
-    snap: &TerminalSnapshot,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -334,17 +333,13 @@ fn handle_window_manipulation(
 
                 send_pty_response(pty_write_tx, &format!("\x1b[5;{height};{width}t"));
             }
-            WindowManipulation::ReportCharacterSizeInPixels => {
-                send_pty_response(pty_write_tx, &format!("\x1b[6;{font_height};{font_width}t"));
-            }
-            WindowManipulation::ReportTerminalSizeInCharacters => {
-                let (width, height) = (snap.term_width, snap.term_height);
-                send_pty_response(pty_write_tx, &format!("\x1b[8;{height};{width}t"));
-            }
-            WindowManipulation::ReportRootWindowSizeInCharacters => {
-                let (width, height) = (snap.term_width, snap.term_height);
-                send_pty_response(pty_write_tx, &format!("\x1b[9;{height};{width}t"));
-            }
+            // ReportCharacterSizeInPixels, ReportTerminalSizeInCharacters, and
+            // ReportRootWindowSizeInCharacters are handled synchronously by the
+            // PTY thread (TerminalHandler::handle_window_manipulation) so that
+            // responses arrive in the same batch as DA1.  They never reach here.
+            WindowManipulation::ReportCharacterSizeInPixels
+            | WindowManipulation::ReportTerminalSizeInCharacters
+            | WindowManipulation::ReportRootWindowSizeInCharacters => {}
             WindowManipulation::ReportIconLabel => {
                 let title = ui.ctx().input(|r| r.raw.viewport().title.clone());
                 let title = title.unwrap_or_else(|| {
@@ -481,7 +476,6 @@ impl eframe::App for FreminalGui {
                 font_height,
                 window_width,
                 &mut self.window_title_stack,
-                &snap,
             );
 
             // Update background color based on whether the terminal is in

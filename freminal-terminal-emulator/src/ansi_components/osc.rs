@@ -503,6 +503,7 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
     let mut height: Option<ImageDimension> = None;
     let mut preserve_aspect_ratio = true;
     let mut inline = false;
+    let mut do_not_move_cursor = false;
 
     for pair in args_str.split(';') {
         if let Some((key, value)) = pair.split_once('=') {
@@ -528,6 +529,9 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
                 "inline" => {
                     inline = value == "1";
                 }
+                "doNotMoveCursor" => {
+                    do_not_move_cursor = value == "1";
+                }
                 _ => {
                     tracing::debug!("OSC 1337 File args: unknown arg: {key}={value}");
                 }
@@ -542,6 +546,7 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
         height,
         preserve_aspect_ratio,
         inline,
+        do_not_move_cursor,
         data: Vec::new(),
     }
 }
@@ -1226,5 +1231,58 @@ mod tests {
             &output[0],
             TerminalOutput::OscResponse(AnsiOscType::ITerm2FilePart(_))
         ));
+    }
+
+    #[test]
+    fn osc1337_file_parses_do_not_move_cursor() {
+        use freminal_common::base64;
+
+        // Build a minimal valid PNG-like payload (doesn't matter for parsing).
+        let b64_payload = base64::encode(b"\x89PNG\r\n\x1a\ntest");
+
+        // With doNotMoveCursor=1
+        let payload =
+            format!("1337;File=inline=1;doNotMoveCursor=1:{b64_payload}\x07").into_bytes();
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(data.inline);
+                assert!(
+                    data.do_not_move_cursor,
+                    "doNotMoveCursor=1 should set do_not_move_cursor to true"
+                );
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+
+        // With doNotMoveCursor=0
+        let payload =
+            format!("1337;File=inline=1;doNotMoveCursor=0:{b64_payload}\x07").into_bytes();
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(
+                    !data.do_not_move_cursor,
+                    "doNotMoveCursor=0 should set do_not_move_cursor to false"
+                );
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
+
+        // Without doNotMoveCursor (default = false)
+        let payload = format!("1337;File=inline=1:{b64_payload}\x07").into_bytes();
+        let output = feed_osc(&payload);
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2FileInline(data)) => {
+                assert!(
+                    !data.do_not_move_cursor,
+                    "Missing doNotMoveCursor should default to false"
+                );
+            }
+            other => panic!("Expected ITerm2FileInline, got: {other:?}"),
+        }
     }
 }
