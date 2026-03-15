@@ -1381,16 +1381,53 @@ impl FreminalTerminalWidget {
 
         paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
 
-        // URL hover detection is not yet ported to snapshots.
-        // TODO(task-9): implement URL hover via snapshot data.
+        // URL hover detection: convert mouse pixel position to a cell
+        // coordinate, find the FormatTag covering that cell in the snapshot,
+        // and check whether it carries a URL.
         if let Some(mouse_position) = view_state.mouse_position {
-            let _ = mouse_position; // suppress unused-variable lint
-            debug!("No URL hover detection in snapshot mode yet");
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = CursorIcon::Default;
+            let (col, row) = encode_egui_mouse_pos_as_usize(
+                mouse_position,
+                (cell_w_f, row_h_f),
+                terminal_origin,
+            );
+
+            // The flat index into visible_chars: rows are separated by
+            // TChar::NewLine, so each row occupies (term_width + 1) entries.
+            let flat_idx = row
+                .checked_mul(snap.term_width.saturating_add(1))
+                .and_then(|base| base.checked_add(col));
+
+            let hovered_url = flat_idx.and_then(|idx| {
+                snap.visible_tags
+                    .iter()
+                    .find(|tag| tag.start <= idx && idx < tag.end)
+                    .and_then(|tag| tag.url.as_ref())
             });
+
+            if let Some(url) = hovered_url {
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = CursorIcon::PointingHand;
+                });
+
+                // Ctrl+click (Cmd+click on macOS) opens the URL.
+                let clicked = ui
+                    .input(|i| i.pointer.any_click() && (i.modifiers.ctrl || i.modifiers.mac_cmd));
+                if clicked {
+                    let url_str = url.url.clone();
+                    // Spawn the open on a background thread to avoid blocking
+                    // the render loop on the system's URL handler.
+                    std::thread::spawn(move || {
+                        if let Err(e) = open::that(&url_str) {
+                            tracing::error!("Failed to open URL {url_str}: {e}");
+                        }
+                    });
+                }
+            } else {
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = CursorIcon::Default;
+                });
+            }
         } else {
-            debug!("No mouse position");
             ui.ctx().output_mut(|output| {
                 output.cursor_icon = CursorIcon::Default;
             });

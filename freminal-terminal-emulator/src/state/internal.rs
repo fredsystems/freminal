@@ -179,13 +179,6 @@ impl TerminalState {
         self.handler.get_win_size()
     }
 
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    pub const fn is_mouse_hovered_on_url(&mut self, pos: &CursorPos) -> Option<String> {
-        // URL hover detection is not yet ported to the new handler.
-        let _ = pos;
-        None
-    }
-
     #[allow(clippy::missing_const_for_fn)]
     #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn data_and_format_data_for_gui(

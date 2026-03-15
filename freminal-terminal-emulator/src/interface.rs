@@ -465,10 +465,6 @@ impl TerminalEmulator {
         self.internal.get_cursor_visual_style()
     }
 
-    pub const fn is_mouse_hovered_on_url(&mut self, mouse_position: &CursorPos) -> Option<String> {
-        self.internal.is_mouse_hovered_on_url(mouse_position)
-    }
-
     #[must_use]
     pub fn skip_draw_always(&self) -> bool {
         self.internal.skip_draw_always()
