@@ -13,6 +13,7 @@
 #       theme.name = "catppuccin-mocha";
 #     };
 #   };
+{ freminal-flake }:
 {
   config,
   lib,
@@ -28,6 +29,9 @@ let
     types
     ;
   cfg = config.programs.freminal;
+
+  # Resolve the package from the flake directly — no overlay required.
+  defaultPackage = freminal-flake.packages.${pkgs.stdenv.hostPlatform.system}.freminal;
 
   # Use pkgs.formats.toml to convert a Nix attrset into a TOML derivation.
   tomlFormat = pkgs.formats.toml { };
@@ -85,8 +89,8 @@ in
 
     package = mkOption {
       type = types.package;
-      default = pkgs.freminal;
-      defaultText = lib.literalExpression "pkgs.freminal";
+      default = defaultPackage;
+      defaultText = lib.literalExpression "freminal.packages.\${pkgs.stdenv.hostPlatform.system}.freminal";
       description = "The Freminal package to install.";
     };
 

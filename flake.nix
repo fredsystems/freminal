@@ -26,7 +26,7 @@
       ##########################################################################
       ## HOME-MANAGER MODULE — `programs.freminal` option set
       ##########################################################################
-      homeManagerModules.default = import ./nix/home-manager-module.nix;
+      homeManagerModules.default = import ./nix/home-manager-module.nix { freminal-flake = self; };
 
       packages = lib.genAttrs systems (
         system:
