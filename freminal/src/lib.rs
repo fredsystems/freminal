@@ -25,3 +25,4 @@
 extern crate tracing;
 
 pub mod gui;
+pub mod playback;

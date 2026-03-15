@@ -410,6 +410,30 @@ impl TerminalEmulator {
         }
     }
 
+    /// Creates a headless terminal emulator for playback mode.
+    ///
+    /// No PTY is spawned.  The returned `Receiver<PtyWrite>` drains any
+    /// escape-sequence responses that the emulator's handler sends (DA, CPR,
+    /// etc.) so channels never block.  The caller feeds recorded data via
+    /// `handle_incoming_data`.
+    #[must_use]
+    pub fn new_for_playback(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
+        use crossbeam_channel::unbounded;
+
+        let (write_tx, write_rx) = unbounded();
+
+        let emulator = Self {
+            internal: TerminalState::new(write_tx.clone(), scrollback_limit),
+            _io: None,
+            write_tx,
+            previous_visible_snap: None,
+            previous_was_alternate: false,
+            gui_scroll_offset: 0,
+            previous_scroll_offset: 0,
+        };
+        (emulator, write_rx)
+    }
+
     /// Create a new terminal emulator
     ///
     /// `scrollback_limit` overrides the default scrollback history size when
@@ -780,6 +804,7 @@ impl TerminalEmulator {
             theme,
             images,
             visible_image_placements,
+            playback_info: None,
         }
     }
 

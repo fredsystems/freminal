@@ -3,9 +3,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::{io::Write, path::Path};
+use std::{io::Write, path::Path, time::Instant};
 
 use super::{PtyRead, PtyWrite};
+use crate::recording;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
@@ -135,13 +136,21 @@ pub fn run_terminal(
     std::thread::spawn(move || {
         let buf = &mut [0u8; 4096];
         let mut recording = None;
+        let mut recording_start = None;
+
         // if recording path is some, open a file for writing
         if let Some(path) = &recording_path {
-            recording = match std::fs::File::create(path) {
-                Ok(file) => Some(file),
+            match std::fs::File::create(path) {
+                Ok(mut file) => {
+                    if let Err(e) = recording::write_header(&mut file) {
+                        error!("Failed to write recording header: {e}");
+                    } else {
+                        recording_start = Some(Instant::now());
+                        recording = Some(file);
+                    }
+                }
                 Err(e) => {
                     error!("Failed to create recording file: {e}");
-                    None
                 }
             }
         }
@@ -154,15 +163,14 @@ pub fn run_terminal(
             }
             let data = buf[..amount_read].to_vec();
 
-            // if recording is some, write to the file
-
+            // Write framed data to recording file
             if let Some(file) = &mut recording {
-                for byte in &data {
-                    if let Err(e) = file.write_all(format!("{byte},").as_bytes()) {
-                        error!("Failed to write to recording file: {e}");
-                        // exit
-                        std::process::exit(1);
-                    }
+                let elapsed = recording_start.map_or(0, |start| {
+                    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+                });
+                if let Err(e) = recording::write_frame(file, elapsed, &data) {
+                    error!("Failed to write to recording file: {e}");
+                    std::process::exit(1);
                 }
             }
 

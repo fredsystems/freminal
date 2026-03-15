@@ -41,4 +41,12 @@ pub struct Args {
     /// Path to a TOML configuration file (overrides default config locations)
     #[arg(long = "config")]
     pub config: Option<PathBuf>,
+
+    /// Replay a recorded session file instead of launching a PTY.
+    ///
+    /// The file must contain raw bytes as produced by `--recording-path`.
+    /// No shell is spawned; the recording is fed directly into the terminal
+    /// emulator.
+    #[arg(long = "with-playback-file")]
+    pub playback: Option<PathBuf>,
 }

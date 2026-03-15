@@ -41,6 +41,7 @@ use tracing_subscriber::{
 };
 
 pub mod gui;
+pub mod playback;
 
 use freminal_common::{args::Args, config, config::load_config, themes};
 
@@ -185,144 +186,272 @@ fn main() {
         args.shell = cfg.shell_path().map(String::from);
     }
 
-    let res = match TerminalEmulator::new(&args, Some(cfg.scrollback.limit)) {
-        Ok((mut terminal, pty_read_rx)) => {
-            // Apply the configured theme to the emulator so all snapshots carry
-            // the correct palette from the start.
-            let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
-            terminal.internal.handler.set_theme(theme);
+    // ── 3. Create the emulator and data source ───────────────────────
+    //
+    // Normal mode: spawn a PTY, feed its output through a channel.
+    // Playback mode: parse a FREC recording file into frames, hand them
+    //                to a dedicated playback consumer thread.
 
-            // Shared snapshot published by the PTY thread, consumed lock-free by the GUI.
-            let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
-                Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
-            let arc_swap_gui = Arc::clone(&arc_swap);
+    let is_playback = args.playback.is_some();
 
-            // Clone the PTY write sender before the emulator is moved into the
-            // consumer thread.  The GUI uses it to send Report* responses back
-            // to the PTY without going through the emulator.
-            let pty_write_tx = terminal.clone_write_tx();
+    let res = if let Some(ref playback_path) = args.playback {
+        // ── Playback mode ───────────────────────────────────────────
+        let file_data = match std::fs::read(playback_path) {
+            Ok(d) => d,
+            Err(e) => {
+                error!(
+                    "Failed to read playback file {}: {e}",
+                    playback_path.display()
+                );
+                return;
+            }
+        };
 
-            // Channel for GUI → PTY-consumer thread events (resize, key, focus).
-            let (input_tx, input_rx) = unbounded::<InputEvent>();
+        let frames = match freminal_terminal_emulator::recording::parse_recording(&file_data) {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to parse recording file: {e}");
+                return;
+            }
+        };
 
-            // Channel for PTY-consumer thread → GUI (window manipulation commands).
-            let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        info!(
+            "Loaded {} playback frames from {}",
+            frames.len(),
+            playback_path.display()
+        );
 
-            // Channel for clipboard text extraction responses (PTY → GUI).
-            // Bounded(1) acts as a oneshot: GUI sends ExtractSelection via
-            // input_tx, PTY thread sends the extracted text back here.
-            let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+        let (mut terminal, _pty_write_rx) =
+            TerminalEmulator::new_for_playback(Some(cfg.scrollback.limit));
 
-            // Shared egui context handle so the PTY consumer thread can request
-            // repaints after publishing new snapshots.  The GUI sets it during
-            // `FreminalGui::new()`; the PTY thread reads it after each store.
-            let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
-            let egui_ctx_pty = Arc::clone(&egui_ctx);
+        // Apply the configured theme.
+        let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
+        terminal.internal.handler.set_theme(theme);
 
-            // The TerminalEmulator is fully owned by the PTY consumer thread.
-            // No FairMutex. No shared lock.
-            std::thread::spawn(move || {
-                let mut emulator = terminal;
+        // Shared snapshot published by the playback thread.
+        let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
+            Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
+        let arc_swap_gui = Arc::clone(&arc_swap);
 
-                loop {
-                    // Use crossbeam select! to wait on either a PTY read or an
-                    // InputEvent from the GUI without spinning.
-                    crossbeam_channel::select! {
-                        recv(pty_read_rx) -> msg => {
-                            if let Ok(read) = msg {
-                                emulator.handle_incoming_data(
-                                    &read.buf[0..read.read_amount],
-                                );
-                            } else {
-                                // PTY read channel closed — shell exited.
-                                info!("PTY read channel closed; consumer thread exiting");
-                                break;
+        // The playback emulator has no real PTY, but the GUI still needs a
+        // pty_write_tx for Report* responses from handle_window_manipulation.
+        // Create a throwaway channel — responses are silently dropped.
+        let (pty_write_tx, _pty_write_sink) =
+            crossbeam_channel::unbounded::<freminal_common::pty_write::PtyWrite>();
+
+        let (input_tx, input_rx) = unbounded::<InputEvent>();
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+
+        let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
+        let egui_ctx_playback = Arc::clone(&egui_ctx);
+
+        std::thread::spawn(move || {
+            playback::run_playback_thread(
+                terminal,
+                frames,
+                input_rx,
+                window_cmd_tx,
+                arc_swap,
+                egui_ctx_playback,
+                clipboard_tx,
+            );
+        });
+
+        gui::run(
+            arc_swap_gui,
+            cfg,
+            args.config,
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            egui_ctx,
+            is_playback,
+        )
+    } else {
+        // ── Normal mode ─────────────────────────────────────────────
+        match TerminalEmulator::new(&args, Some(cfg.scrollback.limit)) {
+            Ok((mut terminal, pty_read_rx)) => {
+                // Apply the configured theme to the emulator so all snapshots carry
+                // the correct palette from the start.
+                let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
+                terminal.internal.handler.set_theme(theme);
+
+                // Shared snapshot published by the PTY thread, consumed lock-free by the GUI.
+                let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
+                    Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
+                let arc_swap_gui = Arc::clone(&arc_swap);
+
+                // Clone the PTY write sender before the emulator is moved into the
+                // consumer thread.  The GUI uses it to send Report* responses back
+                // to the PTY without going through the emulator.
+                let pty_write_tx = terminal.clone_write_tx();
+
+                // Channel for GUI → PTY-consumer thread events (resize, key, focus).
+                let (input_tx, input_rx) = unbounded::<InputEvent>();
+
+                // Channel for PTY-consumer thread → GUI (window manipulation commands).
+                let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+
+                // Channel for clipboard text extraction responses (PTY → GUI).
+                // Bounded(1) acts as a oneshot: GUI sends ExtractSelection via
+                // input_tx, PTY thread sends the extracted text back here.
+                let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+
+                // Shared egui context handle so the PTY consumer thread can request
+                // repaints after publishing new snapshots.  The GUI sets it during
+                // `FreminalGui::new()`; the PTY thread reads it after each store.
+                let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
+                let egui_ctx_pty = Arc::clone(&egui_ctx);
+
+                // The TerminalEmulator is fully owned by the PTY consumer thread.
+                // No FairMutex. No shared lock.
+                std::thread::spawn(move || {
+                    let mut emulator = terminal;
+
+                    // Helper closure: drain window commands, publish snapshot,
+                    // request repaint.  Called after every event in both loops.
+                    let post_event =
+                        |emulator: &mut TerminalEmulator,
+                         window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
+                         arc_swap: &ArcSwap<TerminalSnapshot>,
+                         egui_ctx_pty: &OnceLock<eframe::egui::Context>| {
+                            let cmds: Vec<_> =
+                                emulator.internal.window_commands.drain(..).collect();
+                            for cmd in cmds {
+                                use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+                                let wc = match &cmd {
+                                    WindowManipulation::ReportWindowState
+                                    | WindowManipulation::ReportWindowPositionWholeWindow
+                                    | WindowManipulation::ReportWindowPositionTextArea
+                                    | WindowManipulation::ReportWindowSizeInPixels
+                                    | WindowManipulation::ReportWindowTextAreaSizeInPixels
+                                    | WindowManipulation::ReportRootWindowSizeInPixels
+                                    | WindowManipulation::ReportIconLabel
+                                    | WindowManipulation::ReportTitle
+                                    | WindowManipulation::QueryClipboard(_) => {
+                                        WindowCommand::Report(cmd)
+                                    }
+                                    _ => WindowCommand::Viewport(cmd),
+                                };
+                                if let Err(e) = window_cmd_tx.send(wc) {
+                                    error!("Failed to send window command to GUI: {e}");
+                                }
+                            }
+
+                            let snap = emulator.build_snapshot();
+                            arc_swap.store(Arc::new(snap));
+
+                            if let Some(ctx) = egui_ctx_pty.get() {
+                                ctx.request_repaint_after(std::time::Duration::from_millis(8));
+                            }
+                        };
+
+                    // Helper closure: process a single InputEvent.  Returns
+                    // `false` if the input channel has closed (GUI exited).
+                    let handle_input = |emulator: &mut TerminalEmulator,
+                                        msg: Result<InputEvent, crossbeam_channel::RecvError>,
+                                        clipboard_tx: &crossbeam_channel::Sender<String>|
+                     -> bool {
+                        match msg {
+                            Ok(InputEvent::Resize(w, h, pw, ph)) => {
+                                emulator.handle_resize_event(w, h, pw, ph);
+                            }
+                            Ok(InputEvent::Key(bytes)) => {
+                                if let Err(e) = emulator.write_raw_bytes(&bytes) {
+                                    error!("Failed to forward key bytes to PTY: {e}");
+                                }
+                            }
+                            Ok(InputEvent::FocusChange(focused)) => {
+                                emulator.internal.send_focus_event(focused);
+                            }
+                            Ok(InputEvent::ScrollOffset(offset)) => {
+                                emulator.set_gui_scroll_offset(offset);
+                            }
+                            Ok(InputEvent::ThemeChange(theme)) => {
+                                emulator.internal.handler.set_theme(theme);
+                            }
+                            Ok(InputEvent::ExtractSelection {
+                                start_row,
+                                start_col,
+                                end_row,
+                                end_col,
+                            }) => {
+                                let text = emulator
+                                    .extract_selection_text(start_row, start_col, end_row, end_col);
+                                let _ = clipboard_tx.send(text);
+                            }
+                            Ok(InputEvent::PlaybackControl(_)) => {
+                                // Playback commands are handled by the dedicated playback
+                                // consumer thread, not the normal PTY consumer.  Ignore.
+                            }
+                            Err(_) => {
+                                info!("Input channel closed; consumer thread exiting");
+                                return false;
                             }
                         }
-                        recv(input_rx) -> msg => {
-                            match msg {
-                                Ok(InputEvent::Resize(w, h, pw, ph)) => {
-                                    emulator.handle_resize_event(w, h, pw, ph);
-                                }
-                                Ok(InputEvent::Key(bytes)) => {
-                                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
-                                        error!("Failed to forward key bytes to PTY: {e}");
-                                    }
-                                }
-                                Ok(InputEvent::FocusChange(focused)) => {
-                                    emulator.internal.send_focus_event(focused);
-                                }
-                                Ok(InputEvent::ScrollOffset(offset)) => {
-                                    emulator.set_gui_scroll_offset(offset);
-                                }
-                                Ok(InputEvent::ThemeChange(theme)) => {
-                                    emulator.internal.handler.set_theme(theme);
-                                }
-                                Ok(InputEvent::ExtractSelection { start_row, start_col, end_row, end_col }) => {
-                                    let text = emulator.extract_selection_text(
-                                        start_row, start_col, end_row, end_col,
+                        true
+                    };
+
+                    // Primary loop: service both PTY reads and GUI input events.
+                    loop {
+                        crossbeam_channel::select! {
+                            recv(pty_read_rx) -> msg => {
+                                if let Ok(read) = msg {
+                                    emulator.handle_incoming_data(
+                                        &read.buf[0..read.read_amount],
                                     );
-                                    let _ = clipboard_tx.send(text);
-                                }
-                                Err(_) => {
-                                    // GUI closed the sender — time to stop.
-                                    info!("Input channel closed; consumer thread exiting");
+                                } else {
+                                    // PTY read channel closed — shell exited.
+                                    // Fall through to the input-only loop so
+                                    // the GUI can still resize, scroll, and copy.
+                                    info!("PTY read channel closed; switching to input-only mode");
                                     break;
                                 }
                             }
+                            recv(input_rx) -> msg => {
+                                if !handle_input(&mut emulator, msg, &clipboard_tx) {
+                                    return;
+                                }
+                            }
                         }
+
+                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
                     }
 
-                    // After processing each event, drain any window manipulation
-                    // commands the emulator accumulated and forward them to the GUI.
-                    let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
-                    for cmd in cmds {
-                        use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-                        let wc = match &cmd {
-                            WindowManipulation::ReportWindowState
-                            | WindowManipulation::ReportWindowPositionWholeWindow
-                            | WindowManipulation::ReportWindowPositionTextArea
-                            | WindowManipulation::ReportWindowSizeInPixels
-                            | WindowManipulation::ReportWindowTextAreaSizeInPixels
-                            | WindowManipulation::ReportRootWindowSizeInPixels
-                            | WindowManipulation::ReportIconLabel
-                            | WindowManipulation::ReportTitle
-                            | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
-                            _ => WindowCommand::Viewport(cmd),
-                        };
-                        if let Err(e) = window_cmd_tx.send(wc) {
-                            error!("Failed to send window command to GUI: {e}");
+                    // Publish one final snapshot after PTY data is exhausted so
+                    // the GUI shows the complete output.
+                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+
+                    // Input-only loop: PTY is gone but the GUI is still alive.
+                    // Service resize, scroll, clipboard, and theme events until
+                    // the GUI closes.
+                    loop {
+                        let msg = input_rx.recv();
+                        if !handle_input(&mut emulator, msg, &clipboard_tx) {
+                            break;
                         }
+                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
                     }
+                });
 
-                    // Publish a fresh snapshot for the GUI to load lock-free.
-                    let snap = emulator.build_snapshot();
-                    arc_swap.store(Arc::new(snap));
-
-                    // Notify egui that new content is available so it wakes up
-                    // and renders the updated snapshot.  Cap the rate at ~120 fps
-                    // to avoid flooding egui during heavy PTY output (e.g. `cat`
-                    // of a large file).
-                    if let Some(ctx) = egui_ctx_pty.get() {
-                        ctx.request_repaint_after(std::time::Duration::from_millis(8));
-                    }
-                }
-            });
-
-            gui::run(
-                arc_swap_gui,
-                cfg,
-                args.config,
-                input_tx,
-                pty_write_tx,
-                window_cmd_rx,
-                clipboard_rx,
-                egui_ctx,
-            )
-        }
-        Err(e) => {
-            error!("Failed to create terminal emulator: {}", e);
-            return;
+                gui::run(
+                    arc_swap_gui,
+                    cfg,
+                    args.config,
+                    input_tx,
+                    pty_write_tx,
+                    window_cmd_rx,
+                    clipboard_rx,
+                    egui_ctx,
+                    is_playback,
+                )
+            }
+            Err(e) => {
+                error!("Failed to create terminal emulator: {}", e);
+                return;
+            }
         }
     };
 
