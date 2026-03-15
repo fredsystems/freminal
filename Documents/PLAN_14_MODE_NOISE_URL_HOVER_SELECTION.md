@@ -1,6 +1,6 @@
 # PLAN_14 — Mode Debug Noise, URL Hover, Scrollback Selection
 
-## Status: In Progress
+## Status: Complete
 
 ---
 
@@ -221,7 +221,7 @@ This means:
 
 ## Checklist
 
-- [ ] Fix A — Make mode match blocks exhaustive
-- [ ] Fix B — Restore URL hover detection
-- [ ] Fix C — Fix scrollback text selection
-- [ ] Full verification suite passes
+- [x] Fix A — Make mode match blocks exhaustive (committed db84a4f)
+- [x] Fix B — Restore URL hover detection (committed 33d67bc)
+- [x] Fix C — Fix scrollback text selection (committed e49295a)
+- [x] Full verification suite passes

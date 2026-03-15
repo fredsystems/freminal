@@ -38,7 +38,7 @@ and plan document maintenance rules.
 | 11  | Theming                        | `PLAN_11_THEMING.md`                        | Complete    | Tasks 2, 3   |
 | 12  | Terminfo Audit                 | `PLAN_12_TERMINFO.md`                       | Complete    | None         |
 | 13  | Image Protocol Support         | `PLAN_13_IMAGE_PROTOCOL.md`                 | Complete    | Task 1       |
-| 14  | Bug Fixes: Modes/URL/Selection | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | In Progress | None         |
+| 14  | Bug Fixes: Modes/URL/Selection | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | Complete    | None         |
 
 ---
 
@@ -228,7 +228,7 @@ Update this section as tasks complete:
 | 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4 |
 | 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4 |
 | 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4 |
-| 14   | 2026-03-15 | —          | Mode noise, URL hover, scrollback selection   |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection   |
 
 ---
 
