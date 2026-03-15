@@ -412,12 +412,29 @@ impl TerminalState {
                     Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
                     // LNM (20) — handler handles buffer-level, keep modes in sync
                     Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
-                    // All other modes are either:
-                    // - Handled entirely by the handler (XtExtscrn, Decawm,
-                    //   Dectcem, XtCBlink, UnknownQuery)
-                    // - Parsed but not yet acted on (Decom, Deccolm, etc.)
-                    other => {
-                        debug!("Mode not tracked in TerminalState mode-sync: {other}");
+                    // ── Modes handled entirely by TerminalHandler ──────
+                    // Buffer-level modes (auto-wrap, alt screen, cursor
+                    // visibility, cursor blink, origin, column mode, LNM
+                    // buffer-level, unknown query responses).  Listing them
+                    // explicitly silences spurious debug noise.
+                    Mode::XtExtscrn(_)
+                    | Mode::AltScreen47(_)
+                    | Mode::SaveCursor1048(_)
+                    | Mode::Decawm(_)
+                    | Mode::Dectem(_)
+                    | Mode::XtCBlink(_)
+                    | Mode::Decom(_)
+                    | Mode::Deccolm(_)
+                    | Mode::AllowColumnModeSwitch(_)
+                    | Mode::UnknownQuery(_) => {}
+
+                    // ── Modes parsed but not yet acted on ─────────────
+                    Mode::NoOp
+                    | Mode::Decsclm(_)
+                    | Mode::GraphemeClustering(_)
+                    | Mode::Theming(_)
+                    | Mode::Unknown(_) => {
+                        debug!("Mode not acted on by either layer: {mode}");
                     }
                 },
                 // 7.14 — DECPAM (ESC =) / DECPNM (ESC >)
