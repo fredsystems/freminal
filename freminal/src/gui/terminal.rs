@@ -123,6 +123,54 @@ const fn visible_window_start(snap: &TerminalSnapshot) -> usize {
         .saturating_sub(snap.scroll_offset)
 }
 
+/// Convert a screen-relative `(row, col)` — where `col` is a **display
+/// column** (a wide character occupies two columns) — to a flat index into
+/// the `visible_chars` slice.
+///
+/// `visible_chars` is produced by `Buffer::flatten_row`, which skips
+/// continuation cells.  A CJK character that occupies two display columns
+/// produces only one `TChar` entry.  The simple fixed-stride formula
+/// `row * (term_width + 1) + col` is therefore wrong whenever wide
+/// characters are present.  This function walks the flat vector to find the
+/// correct index.
+///
+/// Returns `None` if `row`/`col` are out of range.
+fn flat_index_for_cell(visible_chars: &[TChar], row: usize, col: usize) -> Option<usize> {
+    // Walk through visible_chars, splitting on TChar::NewLine to find the
+    // start of the target row.
+    let mut current_row: usize = 0;
+    let mut idx: usize = 0;
+
+    // Advance past preceding rows.
+    while current_row < row {
+        if idx >= visible_chars.len() {
+            return None; // row is beyond the data
+        }
+        if matches!(visible_chars[idx], TChar::NewLine) {
+            current_row += 1;
+        }
+        idx += 1;
+    }
+
+    // Now `idx` points to the first TChar of the target row (or past the end).
+    // Walk through the row's characters, accumulating display columns.
+    let mut display_col: usize = 0;
+    while idx < visible_chars.len() {
+        if matches!(visible_chars[idx], TChar::NewLine) {
+            break; // past end of this row
+        }
+        let w = visible_chars[idx].display_width();
+        // The mouse is within this character's display span.
+        if col < display_col + w {
+            return Some(idx);
+        }
+        display_col += w;
+        idx += 1;
+    }
+
+    None // col is beyond the row's content
+}
+
 /// Handle mouse scroll when mouse tracking is off.
 ///
 /// On the **alternate screen** (less, vim, htop, ...) scroll events are
@@ -1111,10 +1159,18 @@ impl FreminalTerminalWidget {
             // clear the selection within ~500 ms of mouse release (on every
             // cursor blink), making copy impossible.
             //
-            // We also exclude pure scroll events (`scroll_changed`) — when the
-            // user scrolls through history the visible window moves (triggering
-            // a re-flatten with `content_changed = true`), but the underlying
-            // buffer text has not mutated and the selection should be preserved.
+            // We also exclude scroll events (`scroll_changed`) — when the
+            // visible window moves (user scrolling OR auto-scroll-to-bottom on
+            // new PTY output), the flat content changes but the underlying
+            // buffer text at the selected rows has not mutated.  Selection
+            // coordinates are buffer-absolute, so they remain valid across
+            // scroll offset changes.
+            //
+            // Edge case: if `enforce_scrollback_limit` evicts rows from the
+            // top of the buffer, all row indices shift and the selection may
+            // point to different text.  This is a pre-existing limitation
+            // shared by all finite-scrollback terminals; the proper fix is to
+            // adjust selection coordinates on eviction, not to clear here.
             if snap.content_changed && !snap.scroll_changed && !view_state.selection.is_selecting {
                 view_state.selection.clear();
             }
@@ -1358,11 +1414,12 @@ impl FreminalTerminalWidget {
                 terminal_origin,
             );
 
-            // The flat index into visible_chars: rows are separated by
-            // TChar::NewLine, so each row occupies (term_width + 1) entries.
-            let flat_idx = row
-                .checked_mul(snap.term_width.saturating_add(1))
-                .and_then(|base| base.checked_add(col));
+            // Convert the mouse's display-column position to a flat index
+            // into visible_chars.  This correctly handles wide characters
+            // (CJK, emoji) whose continuation cells are stripped during
+            // flattening, making the per-row TChar count smaller than
+            // term_width.
+            let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col);
 
             let hovered_url = flat_idx.and_then(|idx| {
                 snap.visible_tags
@@ -1377,8 +1434,10 @@ impl FreminalTerminalWidget {
                 });
 
                 // Ctrl+click (Cmd+click on macOS) opens the URL.
-                let clicked = ui
-                    .input(|i| i.pointer.any_click() && (i.modifiers.ctrl || i.modifiers.mac_cmd));
+                let clicked = ui.input(|i| {
+                    i.pointer.button_clicked(PointerButton::Primary)
+                        && (i.modifiers.ctrl || i.modifiers.mac_cmd)
+                });
                 if clicked {
                     let url_str = url.url.clone();
                     // Spawn the open on a background thread to avoid blocking
@@ -1493,5 +1552,146 @@ mod subtask_1_7_tests {
         let (w, h) = fm.cell_size();
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");
+    }
+}
+
+#[cfg(test)]
+mod visible_window_start_tests {
+    use super::*;
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+
+    fn snap_with(total_rows: usize, term_height: usize, scroll_offset: usize) -> TerminalSnapshot {
+        let mut s = TerminalSnapshot::empty();
+        s.total_rows = total_rows;
+        s.term_height = term_height;
+        s.scroll_offset = scroll_offset;
+        s
+    }
+
+    #[test]
+    fn live_view_at_bottom() {
+        // 100 total rows, 24 visible, scrolled to live bottom.
+        let snap = snap_with(100, 24, 0);
+        assert_eq!(visible_window_start(&snap), 76);
+    }
+
+    #[test]
+    fn scrolled_back_fully() {
+        // 100 total rows, 24 visible, scrolled back 76 rows (to very top).
+        let snap = snap_with(100, 24, 76);
+        assert_eq!(visible_window_start(&snap), 0);
+    }
+
+    #[test]
+    fn scrolled_back_partially() {
+        let snap = snap_with(100, 24, 10);
+        assert_eq!(visible_window_start(&snap), 66);
+    }
+
+    #[test]
+    fn no_scrollback() {
+        // total_rows == term_height → no scrollback, always 0.
+        let snap = snap_with(24, 24, 0);
+        assert_eq!(visible_window_start(&snap), 0);
+    }
+
+    #[test]
+    fn fewer_rows_than_height() {
+        // Edge case: buffer has fewer rows than visible height.
+        let snap = snap_with(10, 24, 0);
+        assert_eq!(visible_window_start(&snap), 0);
+    }
+}
+
+#[cfg(test)]
+mod flat_index_for_cell_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Build a simple `visible_chars` vec: rows of ASCII chars separated by `NewLine`.
+    fn make_visible(rows: &[&str]) -> Vec<TChar> {
+        let mut chars = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for c in row.chars() {
+                chars.push(ascii(c));
+            }
+            if i + 1 < rows.len() {
+                chars.push(TChar::NewLine);
+            }
+        }
+        chars
+    }
+
+    #[test]
+    fn first_cell() {
+        let chars = make_visible(&["abcde", "fghij"]);
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0));
+    }
+
+    #[test]
+    fn middle_of_first_row() {
+        let chars = make_visible(&["abcde", "fghij"]);
+        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(2));
+    }
+
+    #[test]
+    fn start_of_second_row() {
+        let chars = make_visible(&["abcde", "fghij"]);
+        // Row 0 = 5 chars + 1 NewLine = indices 0..5, NL at 5.
+        // Row 1 starts at index 6.
+        assert_eq!(flat_index_for_cell(&chars, 1, 0), Some(6));
+    }
+
+    #[test]
+    fn col_beyond_row() {
+        let chars = make_visible(&["abc"]);
+        // Row has 3 chars (cols 0, 1, 2). Col 5 is out of range.
+        assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
+    }
+
+    #[test]
+    fn row_beyond_data() {
+        let chars = make_visible(&["abc"]);
+        assert_eq!(flat_index_for_cell(&chars, 5, 0), None);
+    }
+
+    #[test]
+    fn wide_character_handling() {
+        // Simulate a row with a wide character (display_width=2) followed by
+        // a narrow character.  In the flat vec, the wide char is one TChar
+        // entry but occupies 2 display columns.
+        let wide = TChar::Utf8("Ｗ".as_bytes().to_vec()); // fullwidth W, width=2
+        let chars = vec![wide, ascii('x')];
+
+        // Display columns: 0-1 = 'Ｗ', 2 = 'x'
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0)); // first col of wide char
+        assert_eq!(flat_index_for_cell(&chars, 0, 1), Some(0)); // second col of wide char
+        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(1)); // 'x'
+        assert_eq!(flat_index_for_cell(&chars, 0, 3), None); // beyond
+    }
+
+    #[test]
+    fn empty_visible_chars() {
+        let chars: Vec<TChar> = Vec::new();
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), None);
+    }
+
+    #[test]
+    fn multiple_wide_chars() {
+        let w1 = TChar::Utf8("Ｗ".as_bytes().to_vec()); // width 2
+        let w2 = TChar::Utf8("Ｘ".as_bytes().to_vec()); // width 2
+        let chars = vec![w1, w2, ascii('z')];
+
+        // Display layout: cols 0-1 = Ｗ, cols 2-3 = Ｘ, col 4 = z
+        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 1), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 0, 3), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 0, 4), Some(2));
+        assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
     }
 }

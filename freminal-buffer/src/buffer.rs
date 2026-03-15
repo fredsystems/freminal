@@ -5628,3 +5628,112 @@ mod image_tests {
         );
     }
 }
+
+// ============================================================================
+// extract_text tests
+// ============================================================================
+
+#[cfg(test)]
+mod extract_text_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Helper: insert a line of ASCII text and advance to the next line.
+    fn push_line(buf: &mut Buffer, text: &str) {
+        let chars: Vec<TChar> = text.chars().map(ascii).collect();
+        buf.insert_text(&chars);
+        buf.handle_lf();
+        buf.cursor.pos.x = 0; // carriage return
+    }
+
+    #[test]
+    fn single_row_full() {
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "hello");
+        // Row 0 contains "hello" (plus trailing spaces to width 10).
+        let result = buf.extract_text(0, 0, 0, 9);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn single_row_partial() {
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "abcdefghij");
+        // Extract columns 2..=5 → "cdef"
+        let result = buf.extract_text(0, 2, 0, 5);
+        assert_eq!(result, "cdef");
+    }
+
+    #[test]
+    fn multiple_rows() {
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "line one");
+        push_line(&mut buf, "line two");
+        push_line(&mut buf, "line three");
+
+        // Extract from row 0, col 0 to row 2, col 9 (full lines).
+        let result = buf.extract_text(0, 0, 2, 9);
+        assert_eq!(result, "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn start_row_beyond_buffer() {
+        let buf = Buffer::new(10, 5);
+        // Only 5 rows in a new buffer; asking for row 100 returns empty.
+        let result = buf.extract_text(100, 0, 100, 5);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn end_row_clamped() {
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "only");
+        // end_row far beyond buffer → clamped to last row.
+        let result = buf.extract_text(0, 0, 999, 9);
+        // Should extract all rows without panicking.
+        assert!(result.contains("only"));
+    }
+
+    #[test]
+    fn empty_buffer() {
+        let buf = Buffer::new(10, 3);
+        let result = buf.extract_text(0, 0, 0, 9);
+        // A fresh buffer has rows of spaces; trailing spaces are trimmed.
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn trailing_spaces_trimmed() {
+        let mut buf = Buffer::new(20, 5);
+        push_line(&mut buf, "abc");
+        // Row has "abc" + 17 spaces; extract_text trims trailing spaces.
+        let result = buf.extract_text(0, 0, 0, 19);
+        assert_eq!(result, "abc");
+    }
+
+    #[test]
+    fn col_begin_beyond_row_width() {
+        let mut buf = Buffer::new(5, 3);
+        push_line(&mut buf, "hi");
+        // start_col beyond the actual content should still not panic.
+        let result = buf.extract_text(0, 100, 0, 100);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn continuation_cells_skipped() {
+        // Wide characters produce a continuation cell that should be skipped.
+        let mut buf = Buffer::new(10, 3);
+        // Insert a UTF-8 wide character (e.g. "Ｗ" = fullwidth W, U+FF37).
+        let wide_char = TChar::Utf8("Ｗ".as_bytes().to_vec());
+        let chars = vec![wide_char, ascii('x')];
+        buf.insert_text(&chars);
+
+        let result = buf.extract_text(0, 0, 0, 9);
+        assert_eq!(result, "Ｗx");
+    }
+}
