@@ -291,14 +291,20 @@ fn encode_x11_mouse_wheel(
     pos: &FreminalMousePosition,
     encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
-    // Guard: ignore zero-delta events before encoding.  This must be checked
-    // against the raw delta, not against the encoded `cb` value, because the
-    // zero-delta check `cb == 32` only works for X11 encoding (where the
-    // padding of 32 has already been added).  For SGR encoding (padding = 0),
-    // a zero-delta scroll would produce `cb = 0`, which is a valid left-button
-    // press in SGR format — silently emitting phantom clicks in yazi and
-    // similar apps that enable SGR mouse mode.
-    if delta.y == 0.0 && delta.x == 0.0 {
+    // Guard: ignore events with no vertical scroll component.  The terminal
+    // mouse wheel protocol only defines vertical scroll (buttons 64/65).  If
+    // `delta.y` is zero we must bail out *before* encoding, because:
+    //
+    // - For X11 encoding, `encode_mouse_for_x11` would produce button code 0
+    //   (after the padding of 32 is added), which looks like a left-button
+    //   press.
+    // - For SGR encoding (padding = 0), button code 0 is an explicit
+    //   left-button press — silently emitting phantom clicks in yazi and
+    //   similar apps that enable SGR mouse mode.
+    //
+    // Horizontal-only scroll (`delta.y == 0, delta.x != 0`) is therefore
+    // intentionally ignored here.
+    if delta.y == 0.0 {
         return None;
     }
 
@@ -500,5 +506,107 @@ mod tests {
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button code 64 for scroll-up, 1-based coords (5+1=6, 5+1=6)
         assert_eq!(s, "\x1b[<64;6;6M", "SGR scroll-up sequence wrong: {s:?}");
+    }
+
+    // ---- Fix #3: horizontal-only scroll returns None ----------------------
+
+    #[test]
+    fn horizontal_only_scroll_returns_none_for_sgr() {
+        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        // Horizontal-only scroll (delta.y == 0, delta.x != 0) must return
+        // None — the terminal mouse wheel protocol only defines vertical
+        // scroll buttons (64/65).  Without this guard, encode_mouse_for_x11
+        // would produce button code 0 (left-click).
+        let result = handle_pointer_scroll(Vec2::new(3.0, 0.0), &state, &MouseTrack::XtMseSgr);
+        assert!(
+            result.is_none(),
+            "horizontal-only SGR scroll should return None, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn horizontal_only_scroll_returns_none_for_x11() {
+        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::new(-5.0, 0.0), &state, &MouseTrack::XtMseX11);
+        assert!(
+            result.is_none(),
+            "horizontal-only X11 scroll should return None, got: {result:?}"
+        );
+    }
+
+    // ---- Fix #1: unit-delta scroll produces correct per-line events -------
+    // The multi-line loop lives in terminal.rs; these tests verify that the
+    // encoding layer produces correct single-line events for unit deltas, which
+    // is what the loop feeds it.
+
+    #[test]
+    fn unit_scroll_up_sgr_produces_button_64() {
+        let pos = FreminalMousePosition::new(3, 7, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::XtMseSgr)
+            .expect("unit scroll-up should produce output");
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // Button 64 = scroll up, col 3+1=4, row 7+1=8
+        assert_eq!(s, "\x1b[<64;4;8M", "SGR unit scroll-up wrong: {s:?}");
+    }
+
+    #[test]
+    fn unit_scroll_down_sgr_produces_button_65() {
+        let pos = FreminalMousePosition::new(3, 7, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::new(0.0, -1.0), &state, &MouseTrack::XtMseSgr)
+            .expect("unit scroll-down should produce output");
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // Button 65 = scroll down, col 3+1=4, row 7+1=8
+        assert_eq!(s, "\x1b[<65;4;8M", "SGR unit scroll-down wrong: {s:?}");
+    }
+
+    #[test]
+    fn unit_scroll_up_x11_produces_button_64() {
+        let pos = FreminalMousePosition::new(0, 0, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::XtMseX11)
+            .expect("unit scroll-up X11 should produce output");
+        let bytes = inputs_to_bytes(result.as_ref());
+        // X11: ESC [ M <cb> <x> <y>
+        // cb = 32 (padding) + 64 (button) = 96
+        // x = 0 + 1 + 32 = 33
+        // y = 0 + 1 + 32 = 33
+        assert_eq!(bytes, b"\x1b[M`!!", "X11 unit scroll-up wrong: {bytes:?}");
+    }
+
+    #[test]
+    fn unit_scroll_down_x11_produces_button_65() {
+        let pos = FreminalMousePosition::new(0, 0, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::new(0.0, -1.0), &state, &MouseTrack::XtMseX11)
+            .expect("unit scroll-down X11 should produce output");
+        let bytes = inputs_to_bytes(result.as_ref());
+        // cb = 32 + 65 = 97 = 'a'
+        assert_eq!(bytes, b"\x1b[Ma!!", "X11 unit scroll-down wrong: {bytes:?}");
+    }
+
+    // ---- Scroll with no-tracking returns None -----------------------------
+
+    #[test]
+    fn scroll_with_no_tracking_returns_none() {
+        let pos = FreminalMousePosition::new(5, 5, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::NoTracking);
+        assert!(
+            result.is_none(),
+            "scroll with NoTracking should return None"
+        );
     }
 }

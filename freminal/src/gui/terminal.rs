@@ -789,10 +789,15 @@ fn write_input_to_terminal(
                     continue;
                 }
 
-                // the amount scrolled should be in increments of the character size
-                // the remaineder should be added to the next scroll event
-
-                let scroll_amount_to_do = scroll_amount.floor();
+                // The amount scrolled should be in increments of the character size.
+                // The remainder is carried to the next scroll event.
+                //
+                // `trunc()` rounds toward zero so the remainder preserves its
+                // sign.  `floor()` would overshoot for negative values (e.g.
+                // floor(-20.3) = -21), leaving a positive remainder that delays
+                // the next downward event and makes trackpad scrolling feel
+                // uneven.
+                let scroll_amount_to_do = scroll_amount.trunc();
                 scroll_amount -= scroll_amount_to_do;
 
                 state_changed = true;
@@ -803,36 +808,53 @@ fn write_input_to_terminal(
                         last_mouse_position.modifiers = *modifiers;
                         *last_mouse_position = last_mouse_position.clone();
                     }
-                    let response = handle_pointer_scroll(
-                        egui::Vec2::new(0.0, scroll_amount_to_do / character_size_y),
+
+                    // Compute how many discrete scroll lines this delta
+                    // represents and the unit direction (+1.0 up, -1.0 down).
+                    let lines_f = scroll_amount_to_do / character_size_y;
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let line_count = lines_f.abs().round().max(1.0) as usize;
+                    let direction = lines_f.signum(); // +1.0 or -1.0
+                    let unit_delta = egui::Vec2::new(0.0, direction);
+
+                    // Probe once to see if the active mouse-tracking mode
+                    // handles scroll events.
+                    if handle_pointer_scroll(
+                        unit_delta,
                         last_mouse_position,
                         effective_mouse_tracking,
-                    );
-
-                    if let Some(response) = response {
-                        response
-                    } else {
-                        // Mouse tracking is off — handle scroll ourselves.
-                        handle_scroll_fallback(
-                            scroll_amount_to_do,
-                            character_size_y,
-                            snap,
-                            input_tx,
-                            view_state,
-                        );
+                    )
+                    .is_some()
+                    {
+                        // Mouse tracking is active — send one escape sequence
+                        // per line, matching xterm / kitty / WezTerm behavior.
+                        for _ in 0..line_count {
+                            if let Some(response) = handle_pointer_scroll(
+                                unit_delta,
+                                last_mouse_position,
+                                effective_mouse_tracking,
+                            ) {
+                                send_terminal_inputs(
+                                    response.as_ref(),
+                                    input_tx,
+                                    snap.cursor_key_app_mode,
+                                );
+                            }
+                        }
                         continue;
                     }
-                } else {
-                    // No mouse position tracked — same fallback as above.
-                    handle_scroll_fallback(
-                        scroll_amount_to_do,
-                        character_size_y,
-                        snap,
-                        input_tx,
-                        view_state,
-                    );
-                    continue;
                 }
+
+                // Mouse tracking is off or no mouse position tracked — handle
+                // scroll ourselves.
+                handle_scroll_fallback(
+                    scroll_amount_to_do,
+                    character_size_y,
+                    snap,
+                    input_tx,
+                    view_state,
+                );
+                continue;
             }
             _ => {
                 continue;
