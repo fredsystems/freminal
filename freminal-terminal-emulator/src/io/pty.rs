@@ -156,14 +156,11 @@ pub fn run_terminal(
 
             // if recording is some, write to the file
 
-            if let Some(file) = &mut recording {
-                for byte in &data {
-                    if let Err(e) = file.write_all(format!("{byte},").as_bytes()) {
-                        error!("Failed to write to recording file: {e}");
-                        // exit
-                        std::process::exit(1);
-                    }
-                }
+            if let Some(file) = &mut recording
+                && let Err(e) = file.write_all(&data)
+            {
+                error!("Failed to write to recording file: {e}");
+                std::process::exit(1);
             }
 
             if let Err(e) = send_tx.send(PtyRead {
