@@ -804,6 +804,7 @@ impl TerminalEmulator {
             theme,
             images,
             visible_image_placements,
+            playback_info: None,
         }
     }
 

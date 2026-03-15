@@ -346,6 +346,10 @@ fn main() {
                                 .extract_selection_text(start_row, start_col, end_row, end_col);
                             let _ = clipboard_tx.send(text);
                         }
+                        Ok(InputEvent::PlaybackControl(_)) => {
+                            // Playback commands are handled by the dedicated playback
+                            // consumer thread, not the normal PTY consumer.  Ignore.
+                        }
                         Err(_) => {
                             info!("Input channel closed; consumer thread exiting");
                             return false;

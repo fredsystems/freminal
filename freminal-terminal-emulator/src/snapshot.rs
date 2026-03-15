@@ -26,6 +26,25 @@ use freminal_common::{
     themes::ThemePalette,
 };
 
+use crate::io::PlaybackMode;
+
+/// Playback status information carried in each snapshot.
+///
+/// When the terminal is running in playback mode, the consumer thread
+/// populates this struct after building the emulator snapshot so the GUI
+/// can display progress and controls.
+#[derive(Debug, Clone)]
+pub struct PlaybackInfo {
+    /// Index of the last processed frame (0-indexed).
+    pub current_frame: usize,
+    /// Total number of frames in the recording.
+    pub total_frames: usize,
+    /// Currently selected playback mode.
+    pub mode: PlaybackMode,
+    /// `true` when real-time playback is actively running (not paused).
+    pub playing: bool,
+}
+
 /// A point-in-time snapshot of the terminal state, ready for the GUI to render.
 ///
 /// All expensive work (flattening rows → `Vec<TChar>` / `Vec<FormatTag>`) is
@@ -182,6 +201,12 @@ pub struct TerminalSnapshot {
     ///
     /// Wrapped in `Arc` so the clean-path snapshot reuse is cheap.
     pub visible_image_placements: Arc<Vec<Option<ImagePlacement>>>,
+
+    /// Playback status, present only when the application is in playback mode.
+    ///
+    /// The GUI uses this to render playback controls and frame progress.
+    /// `None` in normal (live PTY) mode.
+    pub playback_info: Option<PlaybackInfo>,
 }
 
 impl TerminalSnapshot {
@@ -217,6 +242,7 @@ impl TerminalSnapshot {
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
+            playback_info: None,
         }
     }
 }
