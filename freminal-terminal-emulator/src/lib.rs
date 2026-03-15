@@ -27,7 +27,7 @@ pub mod error;
 
 pub mod interface;
 pub mod io;
-// pub mod playback;
+pub mod recording;
 pub mod snapshot;
 pub mod state;
 
