@@ -661,7 +661,8 @@ impl TerminalEmulator {
         //
         // The visible window moved — the cached flat content is from a
         // different set of rows and must not be reused.
-        if scroll_offset != self.previous_scroll_offset {
+        let scroll_changed = scroll_offset != self.previous_scroll_offset;
+        if scroll_changed {
             self.previous_visible_snap = None;
             self.previous_scroll_offset = scroll_offset;
         }
@@ -732,6 +733,8 @@ impl TerminalEmulator {
         // ── Inline image data ────────────────────────────────────────────────
         let (images, visible_image_placements) = self.collect_visible_images(scroll_offset);
 
+        let total_rows = self.internal.handler.buffer().get_rows().len();
+
         TerminalSnapshot {
             visible_chars,
             visible_tags,
@@ -745,7 +748,9 @@ impl TerminalEmulator {
             is_normal_display,
             term_width,
             term_height,
+            total_rows,
             content_changed,
+            scroll_changed,
             bracketed_paste,
             mouse_tracking,
             repeat_keys,

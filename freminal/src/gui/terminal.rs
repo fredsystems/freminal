@@ -109,6 +109,21 @@ fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     }
 }
 
+/// Compute the buffer-absolute row index of the first visible row.
+///
+/// This is the inverse of screen-relative → buffer-absolute:
+///   `buffer_row = visible_window_start + screen_row`
+///   `screen_row = buffer_row - visible_window_start`
+///
+/// The formula mirrors `Buffer::visible_window_start`: the live bottom of the
+/// buffer is at `total_rows - term_height`, and scrolling *back* subtracts
+/// from that position.
+const fn visible_window_start(snap: &TerminalSnapshot) -> usize {
+    snap.total_rows
+        .saturating_sub(snap.term_height)
+        .saturating_sub(snap.scroll_offset)
+}
+
 /// Handle mouse scroll when mouse tracking is off.
 ///
 /// On the **alternate screen** (less, vim, htop, ...) scroll events are
@@ -310,6 +325,7 @@ fn write_input_to_terminal(
                             &snap.visible_chars,
                             snap.term_width,
                             &view_state.selection,
+                            snap,
                         );
                         if !text.is_empty() {
                             clipboard_text = Some(text);
@@ -646,7 +662,11 @@ fn write_input_to_terminal(
                     // Mouse tracking is off — update text selection if a drag
                     // is in progress.
                     if view_state.selection.is_selecting {
-                        view_state.selection.end = Some(CellCoord { col: x, row: y });
+                        let abs_row = visible_window_start(snap) + y;
+                        view_state.selection.end = Some(CellCoord {
+                            col: x,
+                            row: abs_row,
+                        });
                         state_changed = true;
                     }
                     continue;
@@ -684,13 +704,23 @@ fn write_input_to_terminal(
                     if *button == PointerButton::Primary {
                         if *pressed {
                             // Start a new selection at this cell.
-                            let coord = CellCoord { col: x, row: y };
+                            // Use buffer-absolute row so the selection
+                            // survives scroll offset changes.
+                            let abs_row = visible_window_start(snap) + y;
+                            let coord = CellCoord {
+                                col: x,
+                                row: abs_row,
+                            };
                             view_state.selection.anchor = Some(coord);
                             view_state.selection.end = Some(coord);
                             view_state.selection.is_selecting = true;
                         } else if view_state.selection.is_selecting {
                             // Mouse released — finalize the selection.
-                            view_state.selection.end = Some(CellCoord { col: x, row: y });
+                            let abs_row = visible_window_start(snap) + y;
+                            view_state.selection.end = Some(CellCoord {
+                                col: x,
+                                row: abs_row,
+                            });
                             view_state.selection.is_selecting = false;
                         }
                     }
@@ -831,17 +861,47 @@ fn encode_egui_mouse_pos_as_usize(
 /// `TChar::NewLine`.  `term_width` is the terminal width in columns.
 ///
 /// The selection is defined by the normalised `(start, end)` `CellCoord`s from
-/// `SelectionState`.  For multi-line selections, trailing whitespace on each
-/// line is trimmed and a newline is inserted between rows.
+/// `SelectionState`.  Coordinates are **buffer-absolute** row indices and are
+/// converted to screen-relative using the snapshot's `total_rows`,
+/// `term_height`, and `scroll_offset`.
+///
+/// For multi-line selections, trailing whitespace on each line is trimmed and a
+/// newline is inserted between rows.
 fn extract_selected_text(
     visible_chars: &[TChar],
     _term_width: usize,
     selection: &super::view_state::SelectionState,
+    snap: &TerminalSnapshot,
 ) -> String {
     use std::fmt::Write as _;
 
     let Some((start, end)) = selection.normalised() else {
         return String::new();
+    };
+
+    // Convert buffer-absolute row indices to screen-relative so we can index
+    // into the per-visible-row `lines` slices.
+    let win_start = visible_window_start(snap);
+    let win_end = win_start + snap.term_height;
+
+    // If the entire selection is outside the visible window, nothing to copy.
+    if end.row < win_start || start.row >= win_end {
+        return String::new();
+    }
+
+    let scr_start_row = start.row.saturating_sub(win_start);
+    let scr_end_row = end
+        .row
+        .saturating_sub(win_start)
+        .min(snap.term_height.saturating_sub(1));
+
+    // Column clamping: if the selection starts above the visible window, begin
+    // at column 0; if it ends below, extend to the last column.
+    let scr_start_col = if start.row < win_start { 0 } else { start.col };
+    let scr_end_col = if end.row >= win_end {
+        snap.term_width.saturating_sub(1)
+    } else {
+        end.col
     };
 
     // Split the flat visible_chars on NewLine boundaries to get per-row slices.
@@ -852,7 +912,7 @@ fn extract_selected_text(
 
     let mut result = String::new();
 
-    for row in start.row..=end.row {
+    for row in scr_start_row..=scr_end_row {
         let line = if row < lines.len() {
             lines[row]
         } else {
@@ -860,9 +920,13 @@ fn extract_selected_text(
         };
 
         // Column range for this row within the selection.
-        let col_begin = if row == start.row { start.col } else { 0 };
-        let col_end = if row == end.row {
-            end.col
+        let col_begin = if row == scr_start_row {
+            scr_start_col
+        } else {
+            0
+        };
+        let col_end = if row == scr_end_row {
+            scr_end_col
         } else {
             // Select to end of line content (not a fixed width).
             line.len().saturating_sub(1)
@@ -888,7 +952,7 @@ fn extract_selected_text(
         result.push_str(trimmed);
 
         // Add newline between rows (but not after the last row).
-        if row < end.row {
+        if row < scr_end_row {
             result.push('\n');
         }
     }
@@ -1177,13 +1241,47 @@ impl FreminalTerminalWidget {
             // visible text is byte-identical.  Using the broader check would
             // clear the selection within ~500 ms of mouse release (on every
             // cursor blink), making copy impossible.
-            if snap.content_changed && !view_state.selection.is_selecting {
+            //
+            // We also exclude pure scroll events (`scroll_changed`) — when the
+            // user scrolls through history the visible window moves (triggering
+            // a re-flatten with `content_changed = true`), but the underlying
+            // buffer text has not mutated and the selection should be preserved.
+            if snap.content_changed && !snap.scroll_changed && !view_state.selection.is_selecting {
                 view_state.selection.clear();
             }
 
             // Check whether the selection has changed since the last frame.
             let current_selection = view_state.selection.normalised();
             let selection_changed = current_selection != self.previous_selection;
+
+            // Convert buffer-absolute selection coordinates to screen-relative
+            // for the renderer (which iterates `shaped_lines` by screen row).
+            let win_start = visible_window_start(snap);
+            let screen_selection = current_selection.and_then(|(s, e)| {
+                // Clamp the selection to the visible window.  If both start
+                // and end are outside the visible range, there is nothing to
+                // highlight on screen.
+                let win_end = win_start + snap.term_height;
+                if e.row < win_start || s.row >= win_end {
+                    return None; // entirely outside visible window
+                }
+                let s_row = s.row.saturating_sub(win_start);
+                let e_row = e
+                    .row
+                    .saturating_sub(win_start)
+                    .min(snap.term_height.saturating_sub(1));
+                // If the start row is above the visible window, the selection
+                // begins at column 0 of the first visible row.
+                let s_col = if s.row < win_start { 0 } else { s.col };
+                // If the end row is below the visible window, the selection
+                // extends to the last column of the last visible row.
+                let e_col = if e.row >= win_end {
+                    snap.term_width.saturating_sub(1)
+                } else {
+                    e.col
+                };
+                Some((s_col, s_row, e_col, e_row))
+            });
 
             // Determine whether we can take the cursor-only fast path.
             //
@@ -1267,7 +1365,7 @@ impl FreminalTerminalWidget {
                     cursor_blink_on,
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
-                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    screen_selection,
                     snap.theme,
                 );
 
@@ -1292,7 +1390,7 @@ impl FreminalTerminalWidget {
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
-                    current_selection.map(|(s, e)| (s.col, s.row, e.col, e.row)),
+                    screen_selection,
                     snap.theme,
                 );
                 let image_verts = build_image_verts(
