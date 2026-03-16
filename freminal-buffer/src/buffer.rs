@@ -554,8 +554,13 @@ impl Buffer {
         }
 
         // ---- WIDTH CHANGE → REFLOW ----
-        // reflow_to_width always resets the scroll offset to 0.
-        let after_reflow = if width_changed {
+        // Alternate buffers must never reflow (they represent a fixed-size screen,
+        // not a scrollback history).  Reflow re-wraps logical lines which can
+        // create more or fewer rows than `height`, breaking the invariant that
+        // alternate buffers always have exactly `height` rows.  Instead, just
+        // update each row's max_width (content that extends beyond the new width
+        // is simply clipped, which matches xterm/VT behaviour).
+        let after_reflow = if width_changed && self.kind != BufferType::Alternate {
             self.reflow_to_width(new_width);
             0
         } else {
@@ -563,7 +568,14 @@ impl Buffer {
         };
 
         // ---- HEIGHT CHANGE → GROW/SHRINK SCREEN ----
-        let after_resize = if height_changed {
+        // For alternate buffers we must ALWAYS reconcile row count with the
+        // target height, even when only the width changed (reflow was skipped
+        // above, so rows.len() is still the old height — but we also guard
+        // against any future code path that could desync them).
+        let needs_height_adjust =
+            height_changed || (self.kind == BufferType::Alternate && self.rows.len() != new_height);
+
+        let after_resize = if needs_height_adjust {
             let adjusted = self.resize_height(new_height, after_reflow);
 
             // Validate scroll region against new height.

@@ -4202,3 +4202,140 @@ fn alt_buffer_tmux_resize_scenario() {
         "bottom of scroll region should be blank after LF scroll"
     );
 }
+
+// ============================================================================
+// Alternate buffer width-change resize regression tests
+//
+// Root cause: `reflow_to_width` was called unconditionally for all buffer
+// types.  For the alternate buffer, reflow re-wraps logical lines which can
+// produce more or fewer rows than `height`, breaking the invariant that
+// alternate buffers always have exactly `height` rows.  This caused the
+// exact same class of symptom as the height-shrink bug: coordinates
+// desynchronised, operations silently malfunctioned, and tmux content
+// disappeared or overwrote itself after making the window narrower.
+// ============================================================================
+
+/// Shrinking the width of the alternate buffer must NOT change the row count.
+/// Before the fix, `reflow_to_width` would re-wrap long lines and produce
+/// extra rows.
+#[test]
+fn alt_buffer_width_shrink_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill every row to full width so reflow would have split them.
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink width only: 80 → 40 (height stays 24).
+    let _ = buf.set_size(40, 24, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        24,
+        "alternate buffer must still have exactly `height` rows after width shrink"
+    );
+}
+
+/// Growing the width of the alternate buffer must NOT change the row count.
+#[test]
+fn alt_buffer_width_grow_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill rows with content
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Grow width only: 80 → 120 (height stays 24).
+    let _ = buf.set_size(120, 24, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        24,
+        "alternate buffer must still have exactly `height` rows after width grow"
+    );
+}
+
+/// Simultaneous width shrink + height shrink must maintain the invariant.
+/// This is the exact scenario from the bug report: making the window smaller
+/// in both dimensions while tmux is running.
+#[test]
+fn alt_buffer_width_and_height_shrink_maintains_invariant() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill rows with full-width content
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink both: 80x24 → 40x18
+    let _ = buf.set_size(40, 18, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        18,
+        "alternate buffer must have exactly `new_height` rows after combined shrink"
+    );
+}
+
+/// After a width-only shrink, LF at the bottom of the scroll region must
+/// still trigger scrolling.
+#[test]
+fn alt_buffer_lf_works_after_width_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill rows
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Width-only shrink: 80 → 40
+    let _ = buf.set_size(40, 24, 0);
+
+    // Cursor at bottom of screen
+    buf.set_cursor_pos(Some(0), Some(23));
+    let bottom_before = buf.get_rows()[23].resolve_cell(0).tchar().clone();
+
+    buf.handle_lf();
+
+    // Bottom row should be blank (scroll happened)
+    let bottom_after = buf.get_rows()[23].resolve_cell(0).tchar().clone();
+    assert_ne!(
+        bottom_before, bottom_after,
+        "LF at bottom must scroll after width-only shrink"
+    );
+    assert_eq!(
+        bottom_after,
+        TChar::Space,
+        "new bottom row should be blank after LF scroll"
+    );
+}
