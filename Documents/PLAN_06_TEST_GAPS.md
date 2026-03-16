@@ -97,7 +97,7 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
 
 ---
 
-- [ ] **6.3 — Delete dead `report_*` methods from `TerminalState`**
+- [x] **6.3 — Delete dead `report_*` methods from `TerminalState`**
   - **Priority:** P0 (prerequisite — cleans up dead code before test work)
   - **Files:** `freminal-terminal-emulator/src/state/internal.rs`
   - **What:** Delete `report_window_state`, `report_window_position`, `report_window_size`,
@@ -108,6 +108,10 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
     These methods are pub but never called. Deleting them before test work avoids wasting effort
     and gives an accurate uncovered-lines baseline for `internal.rs`.
   - **Verify:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` passes. No call site references the deleted methods.
+  - ✅ **Completed 2026-03-16.** Deleted all 10 `report_*` methods (124 lines). `send_decrpm`
+    was kept — it is actively used by `handle_incoming_data` for DECRPM query responses.
+    Removed unused `collect_text` import. File reduced from 693 to 569 lines. All verifications
+    pass: `cargo test --all` (all pass), `cargo clippy` (clean), `cargo-machete` (clean).
 
 ---
 
