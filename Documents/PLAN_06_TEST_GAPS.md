@@ -34,7 +34,7 @@ not match the actual codebase state by the time implementation begins.
 
 ---
 
-- [ ] **6.1 — Run `cargo llvm-cov` and produce baseline coverage report**
+- [x] **6.1 — Run `cargo llvm-cov` and produce baseline coverage report**
   - Install `cargo-llvm-cov` if not present (`cargo install cargo-llvm-cov`).
   - Run: `cargo llvm-cov --all --lcov --output-path lcov.info`
   - Run: `cargo llvm-cov --all --text` to get a human-readable summary.
@@ -44,6 +44,11 @@ not match the actual codebase state by the time implementation begins.
   - Create a report (in this document) listing these files, their coverage, and any initial observations.
   - Do NOT write any tests yet — this is pure analysis.
   - **Verify:** Coverage report is generated. Baseline numbers are recorded in this document.
+  - ✅ **Completed 2026-03-16.** Baseline coverage recorded below. 71.6% overall line coverage
+    across 100 files. 16 files at 0% coverage, 17 additional files below 50%. Key observations:
+    `freminal-buffer` is strong at 91.9%; `freminal` binary is weakest at 48.5% (dominated by
+    untestable GUI/main code); `freminal-common` modes have many small files with boilerplate
+    at 0–48% coverage.
 
 ---
 
@@ -81,23 +86,61 @@ not match the actual codebase state by the time implementation begins.
 
 ## Coverage Baseline
 
-> Populated by subtask 6.1.
+> Populated by subtask 6.1 on 2026-03-16.
 
-| Crate                        | Files | Line Coverage | Branch Coverage | Notes |
-| ---------------------------- | ----- | ------------- | --------------- | ----- |
-| `freminal-common`            | —     | —             | —               | —     |
-| `freminal-buffer`            | —     | —             | —               | —     |
-| `freminal-terminal-emulator` | —     | —             | —               | —     |
-| `freminal` (binary)          | —     | —             | —               | —     |
-| **Total**                    | —     | —             | —               | —     |
+| Crate                        | Files | Line Coverage           | Notes                                          |
+| ---------------------------- | ----- | ----------------------- | ---------------------------------------------- |
+| `freminal-common`            | 41    | 76.6% (2396/3128)       | Many small mode files with boilerplate at ~48% |
+| `freminal-buffer`            | 5     | 91.9% (6991/7611)       | Strong coverage; row.rs at 81%                 |
+| `freminal-terminal-emulator` | 40    | 69.7% (2560/3673)       | interface.rs 21%, internal.rs 47%              |
+| `freminal` (binary)          | 13    | 48.5% (3179/6557)       | GUI code largely untestable                    |
+| `xtask`                      | 1     | 0.0% (0/165)            | CI tool, not production code                   |
+| **Total**                    | 100   | **71.6% (15126/21134)** |                                                |
+
+Branch coverage: not reported by `cargo-llvm-cov` for this project (0/0 branches instrumented).
 
 ### Zero-Coverage Files
 
-> Populated by subtask 6.1.
+| File                                                                 | Lines | Observation                                          |
+| -------------------------------------------------------------------- | ----- | ---------------------------------------------------- |
+| `freminal-common/src/buffer_states/modes/decsclm.rs`                 | 15    | Small mode type — boilerplate `From`/`Display` impls |
+| `freminal-common/src/buffer_states/modes/grapheme.rs`                | 23    | Small mode type — boilerplate                        |
+| `freminal-common/src/buffer_states/modes/keypad.rs`                  | 5     | Tiny mode type                                       |
+| `freminal-common/src/buffer_states/modes/mouse.rs`                   | 62    | Mouse tracking mode — larger, has real logic         |
+| `freminal-common/src/buffer_states/url.rs`                           | 5     | Tiny URL mode type                                   |
+| `freminal-common/src/pty_write.rs`                                   | 6     | `TryFrom` impl for `PtySize`                         |
+| `freminal-terminal-emulator/src/ansi_components/csi_commands/cpl.rs` | 21    | CSI CPL (Cursor Previous Line) parser                |
+| `freminal-terminal-emulator/src/ansi_components/csi_commands/ict.rs` | 16    | CSI ICT (Initiate Highlight) parser                  |
+| `freminal-terminal-emulator/src/ansi_components/csi_commands/sd.rs`  | 16    | CSI SD (Scroll Down) parser                          |
+| `freminal-terminal-emulator/src/io/pty.rs`                           | 173   | PTY I/O — platform-specific, requires live PTY       |
+| `freminal/src/gui/fonts.rs`                                          | 173   | Font loading — requires filesystem, hard to test     |
+| `freminal/src/gui/mod.rs`                                            | 543   | GUI main loop — requires egui context                |
+| `freminal/src/gui/view_state.rs`                                     | 19    | ViewState — simple struct + `Default`                |
+| `freminal/src/main.rs`                                               | 247   | Binary entrypoint — requires runtime env             |
+| `freminal/src/playback.rs`                                           | 244   | Recording playback — requires runtime env            |
+| `xtask/src/main.rs`                                                  | 165   | CI orchestration — not production code               |
 
-### Below-50% Files
+### Below-50% Files (excluding 0%)
 
-> Populated by subtask 6.1.
+| File                                                    | Coverage         | Lines | Observation                                           |
+| ------------------------------------------------------- | ---------------- | ----- | ----------------------------------------------------- |
+| `freminal/src/gui/terminal.rs`                          | 13.4% (132/985)  | 985   | Large; mostly GUI rendering, some testable logic      |
+| `freminal-common/.../modes/allow_column_mode_switch.rs` | 16.0% (4/25)     | 25    | Mode boilerplate                                      |
+| `freminal-common/.../modes/theme.rs`                    | 16.0% (4/25)     | 25    | Mode boilerplate                                      |
+| `freminal-terminal-emulator/src/interface.rs`           | 21.2% (97/458)   | 458   | Snapshot building, PTY coordination — **P0 critical** |
+| `freminal/src/gui/settings.rs`                          | 26.6% (76/286)   | 286   | Settings modal UI — partially testable                |
+| `freminal-common/.../cursor.rs`                         | 39.6% (36/91)    | 91    | Cursor types — `From`/`Display` impls                 |
+| `freminal-common/.../mode.rs`                           | 39.7% (48/121)   | 121   | Mode type dispatching — set/reset/query               |
+| `freminal-common/.../modes/xtextscrn.rs`                | 40.3% (31/77)    | 77    | XtExtScrn mode                                        |
+| `freminal-common/.../modes/decscnm.rs`                  | 42.9% (12/28)    | 28    | Screen mode                                           |
+| `freminal-common/src/sgr.rs`                            | 43.0% (43/100)   | 100   | SGR attribute types — `Display` impls                 |
+| `freminal-terminal-emulator/src/state/internal.rs`      | 47.1% (171/363)  | 363   | TerminalState — **P0/P1 critical**                    |
+| `freminal-common/.../modes/decarm.rs`                   | 48.0% (12/25)    | 25    | Mode boilerplate                                      |
+| `freminal-common/.../modes/lnm.rs`                      | 48.0% (12/25)    | 25    | Mode boilerplate                                      |
+| `freminal-common/.../modes/reverse_wrap_around.rs`      | 48.0% (12/25)    | 25    | Mode boilerplate                                      |
+| `freminal-common/.../modes/sync_updates.rs`             | 48.0% (12/25)    | 25    | Mode boilerplate                                      |
+| `freminal-common/.../modes/xtmsewin.rs`                 | 48.0% (12/25)    | 25    | Mode boilerplate                                      |
+| `freminal/src/gui/renderer.rs`                          | 48.4% (708/1464) | 1464  | OpenGL renderer — largely untestable                  |
 
 ---
 

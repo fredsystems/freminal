@@ -220,7 +220,7 @@ Update this section as tasks complete:
 | 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal              |
 | 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4          |
 | 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4 |
-| 6    | —          | —          |                                               |
+| 6    | 2026-03-16 | —          | Subtask 6.1 complete (baseline coverage)      |
 | 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                      |
 | 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                       |
 | 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging    |
