@@ -1181,22 +1181,12 @@ impl Buffer {
             BufferType::Primary => {
                 let sy = self.cursor_screen_y();
 
-                // FULL-SCREEN REGION → RI never scrolls
-                if self.scroll_region_top == 0 && self.scroll_region_bottom == self.height - 1 {
-                    if self.cursor.pos.y > 0 {
-                        self.cursor.pos.y -= 1;
-                    }
-                    self.debug_assert_invariants();
-                    return;
-                }
-
-                // PARTIAL DECSTBM
                 if sy >= self.scroll_region_top && sy <= self.scroll_region_bottom {
                     if sy > self.scroll_region_top {
                         // move up inside region
                         self.cursor.pos.y -= 1;
                     } else {
-                        // at top → scroll region DOWN
+                        // at top margin → scroll region DOWN
                         self.scroll_region_down_primary();
                     }
                 } else {
@@ -1436,15 +1426,11 @@ impl Buffer {
         self.scroll_region_top = top;
         self.scroll_region_bottom = bottom;
 
-        // Move cursor to the top of the scroll region, col 0.
+        // DECSTBM always homes the cursor to (0, 0).
         // When DECOM is enabled, set_cursor_pos interprets y=0 as
-        // scroll_region_top, which is already correct.
-        // When DECOM is disabled, we pass `top` directly as the screen row.
-        if self.decom_enabled {
-            self.set_cursor_pos(Some(0), Some(0));
-        } else {
-            self.set_cursor_pos(Some(0), Some(top));
-        }
+        // scroll_region_top.  When DECOM is disabled, y=0 is screen top.
+        // Both cases are handled correctly by a single call.
+        self.set_cursor_pos(Some(0), Some(0));
     }
 
     /// Return the current scroll region as 0-based inclusive `(top, bottom)`.
@@ -1545,12 +1531,20 @@ impl Buffer {
     }
 
     /// Convert DECSTBM region (screen coords) into buffer row indices (rows[])
-    fn scroll_region_rows(&self) -> (usize, usize) {
+    ///
+    /// Ensures `self.rows` is extended to at least `height` entries so that
+    /// the returned indices always point to real rows.  Without this, an early
+    /// buffer (`rows.len()` < height) would clamp both top and bottom to the
+    /// same index, causing every scroll operation to silently no-op.
+    fn scroll_region_rows(&mut self) -> (usize, usize) {
         let start = self.visible_window_start(0);
+        let required = start + self.scroll_region_bottom + 1;
+        while self.rows.len() < required {
+            self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
+        }
         let top = start + self.scroll_region_top;
         let bottom = start + self.scroll_region_bottom;
-        let max = self.rows.len().saturating_sub(1);
-        (top.min(max), bottom.min(max))
+        (top, bottom)
     }
 
     /// Scroll DECSTBM region UP by 1 (primary buffer)

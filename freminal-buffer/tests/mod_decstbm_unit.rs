@@ -38,7 +38,7 @@ fn visible_lengths(buf: &Buffer) -> Vec<usize> {
 
 /// Basic sanity: DECSTBM + LF in PRIMARY buffer scrolls region up.
 ///
-/// Key insight: set_scroll_region moves cursor to the TOP of the region.
+/// Key insight: set_scroll_region homes cursor to (0,0).
 /// To test scrolling UP, we must move cursor to the BOTTOM of the region first.
 #[test]
 fn decstbm_lf_scrolls_region_up_primary() {
@@ -51,11 +51,11 @@ fn decstbm_lf_scrolls_region_up_primary() {
     assert_eq!(visible_lengths(&buf), vec![1, 2, 3, 4, 5]);
 
     // Set scroll region to rows 2..4 (1-based: 2..4 => 0-based indices: 1..3)
-    // This also moves cursor to y=1 (top of region)
+    // DECSTBM homes cursor to screen origin (0,0).
     buf.set_scroll_region(2, 4);
 
-    // Move cursor to bottom of region (y=3)
-    // From y=1, we need 2 LF calls to reach y=3
+    // Move cursor to top of region (y=1) then to bottom
+    buf.set_cursor_pos(Some(0), Some(1)); // y=1 (top of region)
     buf.handle_lf(); // y: 1 -> 2 (inside region, below top)
     buf.handle_lf(); // y: 2 -> 3 (inside region, at bottom)
 
@@ -76,8 +76,8 @@ fn decstbm_lf_scrolls_region_up_primary() {
 
 /// DECSTBM + RI in PRIMARY buffer scrolls region down.
 ///
-/// set_scroll_region moves cursor to TOP of region, which is perfect
-/// for testing RI (reverse index) - it should scroll region DOWN.
+/// set_scroll_region homes cursor to (0,0).  We must explicitly move the
+/// cursor to the top of the region to test RI scroll behaviour.
 #[test]
 fn decstbm_ri_scrolls_region_down_primary() {
     let width = 10;
@@ -89,10 +89,12 @@ fn decstbm_ri_scrolls_region_down_primary() {
     assert_eq!(visible_lengths(&buf), vec![1, 2, 3, 4, 5]);
 
     // Region rows 2..4 (1-based: 2..4 => 0-based: 1..3)
-    // This moves cursor to y=1 (top of region)
+    // DECSTBM homes cursor to (0,0).
     buf.set_scroll_region(2, 4);
 
-    // Cursor is now at TOP margin of region (y=1)
+    // Move cursor to TOP margin of region (y=1)
+    buf.set_cursor_pos(Some(0), Some(1));
+
     // RI at top margin should scroll the region DOWN
     buf.handle_ri();
 
@@ -120,10 +122,12 @@ fn decstbm_insert_lines_primary() {
     assert_eq!(visible_lengths(&buf), vec![1, 2, 3, 4, 5]);
 
     // Region: rows 2..4 (1-based) => indices 1..3
-    // Cursor moves to y=1
+    // DECSTBM homes cursor to (0,0).
     buf.set_scroll_region(2, 4);
 
-    // Cursor is at y=1 (top of region)
+    // Move cursor to top of region (y=1) for IL
+    buf.set_cursor_pos(Some(0), Some(1));
+
     // Insert 1 line here should:
     // - Insert blank at y=1
     // - Shift y=1 -> y=2, y=2 -> y=3
@@ -154,10 +158,12 @@ fn decstbm_delete_lines_primary() {
     assert_eq!(visible_lengths(&buf), vec![1, 2, 3, 4, 5]);
 
     // Region: rows 2..4 (1-based) => indices 1..3
-    // Cursor moves to y=1
+    // DECSTBM homes cursor to (0,0).
     buf.set_scroll_region(2, 4);
 
-    // Cursor is at y=1 (top of region)
+    // Move cursor to top of region (y=1) for DL
+    buf.set_cursor_pos(Some(0), Some(1));
+
     // Delete 1 line here should:
     // - Delete line at y=1
     // - Shift y=2 -> y=1, y=3 -> y=2

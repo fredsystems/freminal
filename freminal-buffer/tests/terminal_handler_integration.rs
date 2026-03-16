@@ -3685,3 +3685,194 @@ fn ris_restores_original_non_80_width_after_deccolm() {
         "RIS after DECCOLM must restore original width (96), not hardcode 80"
     );
 }
+
+// ============================================================================
+// Regression tests for tmux scroll region / CPR fixes
+// ============================================================================
+
+/// Bug 1 regression: CPR must report screen-relative row, not absolute buffer row.
+///
+/// When scrollback exists, `cursor.pos.y` is an absolute index into the row
+/// vector.  CPR must subtract `visible_window_start` to report the screen row.
+#[test]
+fn cursor_report_with_scrollback_reports_screen_row() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Generate scrollback by outputting 30 lines (more than 24-row height)
+    for i in 0..30 {
+        handler.process_outputs(&[TerminalOutput::Data(format!("line {i}\n").into_bytes())]);
+    }
+
+    // Cursor should be on the last visible screen row (or near it).
+    // Move cursor to a known screen position.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(5),  // 1-indexed → col 4
+        y: Some(10), // 1-indexed → screen row 9
+    }]);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    // Drain to the last message (SetCursorPos doesn't write, but Data does write newlines)
+    let mut last_msg = None;
+    while let Ok(msg) = rx.try_recv() {
+        last_msg = Some(msg);
+    }
+    let bytes = match last_msg.expect("CursorReport must send a message") {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[10;5R",
+        "CPR must report screen-relative row (10), not absolute buffer row"
+    );
+}
+
+/// Bug 1 regression: CPR with DECOM reports region-relative row.
+#[test]
+fn cursor_report_with_decom_reports_region_relative_row() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Set scroll region rows 5..20 (1-based), then enable DECOM
+    handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+        top_margin: 5,
+        bottom_margin: 20,
+    }]);
+    handler.process_outputs(&[TerminalOutput::Mode(
+        freminal_common::buffer_states::mode::Mode::Decom(
+            freminal_common::buffer_states::modes::decom::Decom::OriginMode,
+        ),
+    )]);
+
+    // Move cursor to row 3 within the region (1-indexed, region-relative)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(1),
+        y: Some(3), // region-relative row 3
+    }]);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    let mut last_msg = None;
+    while let Ok(msg) = rx.try_recv() {
+        last_msg = Some(msg);
+    }
+    let bytes = match last_msg.expect("CursorReport must send a message") {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[3;1R",
+        "CPR with DECOM must report region-relative row (3)"
+    );
+}
+
+/// Bug 2 regression: DECSTBM always homes cursor to screen origin (0,0),
+/// not to the region top.
+#[test]
+fn decstbm_homes_cursor_to_screen_origin() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move cursor to row 12
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(10),
+        y: Some(12),
+    }]);
+
+    // Set scroll region
+    handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+        top_margin: 5,
+        bottom_margin: 20,
+    }]);
+
+    // Cursor must be at screen row 0, col 0
+    let screen_pos = handler.buffer().get_cursor_screen_pos();
+    assert_eq!(screen_pos.y, 0, "DECSTBM must home cursor to screen row 0");
+    assert_eq!(screen_pos.x, 0, "DECSTBM must home cursor to column 0");
+}
+
+/// Bug 4 regression: RI at screen top with full-screen region must scroll down.
+#[test]
+fn ri_at_screen_top_full_region_scrolls_down() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(10, 5);
+
+    // Fill all 5 rows with identifiable content
+    for i in 0..5 {
+        let count = i + 1;
+        let chars: Vec<TChar> = (0..count).map(|_| TChar::Ascii(b'X')).collect();
+        buf.insert_text(&chars);
+        if i < 4 {
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+    }
+
+    // Verify initial state: lengths [1,2,3,4,5]
+    let lengths: Vec<usize> = buf
+        .visible_rows(0)
+        .iter()
+        .map(|r| r.get_characters().len())
+        .collect();
+    assert_eq!(lengths, vec![1, 2, 3, 4, 5]);
+
+    // Move cursor to screen top (row 0)
+    buf.set_cursor_pos(Some(0), Some(0));
+
+    // Full-screen region (default). RI at top should scroll screen down.
+    buf.handle_ri();
+
+    let lengths_after: Vec<usize> = buf
+        .visible_rows(0)
+        .iter()
+        .map(|r| r.get_characters().len())
+        .collect();
+
+    // Row 0 should be blank (scrolled in), rows shift down, row 4 (length 5) falls off
+    assert_eq!(
+        lengths_after,
+        vec![0, 1, 2, 3, 4],
+        "RI at screen top with full-screen region must scroll content down"
+    );
+}
+
+/// Bug 5 regression: Scroll region operations work during early buffer fill.
+#[test]
+fn scroll_region_works_during_early_buffer_fill() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    // Create a 10x10 buffer but only fill 3 rows
+    let mut buf = Buffer::new(10, 10);
+    for i in 0..3 {
+        let chars: Vec<TChar> = (0..=i).map(|_| TChar::Ascii(b'X')).collect();
+        buf.insert_text(&chars);
+        if i < 2 {
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+    }
+
+    // Set a scroll region that extends beyond current rows
+    buf.set_scroll_region(2, 8);
+
+    // Move cursor to bottom of region
+    buf.set_cursor_pos(Some(0), Some(7));
+
+    // LF at bottom of region should scroll the region up without panicking
+    buf.handle_lf();
+
+    // Verify buffer is sane
+    assert!(
+        buf.get_rows().len() >= 8,
+        "Buffer should have grown to accommodate scroll region"
+    );
+}

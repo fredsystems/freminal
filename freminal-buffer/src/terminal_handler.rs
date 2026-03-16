@@ -1617,10 +1617,19 @@ impl TerminalHandler {
 
     /// Handle CPR — Cursor Position Report.
     /// Responds with `ESC [ <row> ; <col> R` (1-indexed).
+    ///
+    /// Per DEC VT510: when DECOM is enabled, the reported row is relative to the
+    /// scroll region top margin.  When DECOM is disabled, it is relative to the
+    /// screen origin.
     pub fn handle_cursor_report(&mut self) {
-        let pos = self.buffer.get_cursor().pos;
-        let x = pos.x + 1;
-        let y = pos.y + 1;
+        let screen_pos = self.buffer.get_cursor_screen_pos();
+        let x = screen_pos.x + 1;
+        let y = if self.buffer.is_decom_enabled() {
+            let (region_top, _) = self.buffer.scroll_region();
+            screen_pos.y.saturating_sub(region_top) + 1
+        } else {
+            screen_pos.y + 1
+        };
         self.write_to_pty(&format!("\x1b[{y};{x}R"));
     }
 

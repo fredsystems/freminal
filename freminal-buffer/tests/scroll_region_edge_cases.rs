@@ -45,13 +45,13 @@ fn scroll_region_zero_top_resets_to_full() {
 
     // Set valid region first
     buf.set_scroll_region(2, 4);
-    assert_eq!(buf.get_cursor().pos.y, 1); // Moved to region top
+    assert_eq!(buf.get_cursor_screen_pos().y, 0); // DECSTBM always homes to screen origin
 
     // Set with top=0 should reset to full screen
     buf.set_scroll_region(0, 3);
 
     // Cursor should be at row 0 (full screen region top)
-    assert_eq!(buf.get_cursor().pos.y, 0);
+    assert_eq!(buf.get_cursor_screen_pos().y, 0);
 }
 
 #[test]
@@ -60,10 +60,10 @@ fn scroll_region_zero_bottom_resets_to_full() {
     tag_rows(&mut buf, 5);
 
     buf.set_scroll_region(2, 4);
-    assert_eq!(buf.get_cursor().pos.y, 1);
+    assert_eq!(buf.get_cursor_screen_pos().y, 0); // DECSTBM always homes to screen origin
 
     buf.set_scroll_region(2, 0);
-    assert_eq!(buf.get_cursor().pos.y, 0);
+    assert_eq!(buf.get_cursor_screen_pos().y, 0);
 }
 
 #[test]
@@ -135,17 +135,17 @@ fn scroll_region_full_screen_explicit() {
 // ============================================================================
 
 #[test]
-fn scroll_region_moves_cursor_to_region_top() {
+fn scroll_region_moves_cursor_to_screen_origin() {
     let mut buf = Buffer::new(10, 10);
     tag_rows(&mut buf, 10);
 
     // Cursor starts at last row
-    assert_eq!(buf.get_cursor().pos.y, 9);
+    assert_eq!(buf.get_cursor_screen_pos().y, 9);
 
     buf.set_scroll_region(5, 8);
 
-    // Should move to row 4 (0-based index of row 5)
-    assert_eq!(buf.get_cursor().pos.y, 4);
+    // DECSTBM always homes cursor to screen origin (0, 0)
+    assert_eq!(buf.get_cursor_screen_pos().y, 0);
     assert_eq!(buf.get_cursor().pos.x, 0);
 }
 
@@ -354,12 +354,13 @@ fn scroll_region_in_alternate_buffer() {
 
     buf.set_scroll_region(2, 4);
 
-    // Should work in alternate buffer
-    assert_eq!(buf.get_cursor().pos.y, 1);
+    // DECSTBM homes cursor to screen origin
+    assert_eq!(buf.get_cursor().pos.y, 0);
 
-    // Move to bottom and scroll
-    buf.handle_lf();
-    buf.handle_lf();
+    // Move cursor to top of region, then to bottom
+    buf.set_cursor_pos(Some(0), Some(1)); // y=1 (top of region)
+    buf.handle_lf(); // y: 1 -> 2
+    buf.handle_lf(); // y: 2 -> 3 (bottom of region)
 
     let before_y = buf.get_cursor().pos.y;
     buf.handle_lf(); // Should scroll region up
@@ -400,14 +401,14 @@ fn resize_clamps_scroll_region_and_cursor() {
 
     // Set region near bottom
     buf.set_scroll_region(7, 10);
-    assert_eq!(buf.get_cursor().pos.y, 6); // 0-based row 6
+    assert_eq!(buf.get_cursor_screen_pos().y, 0); // DECSTBM homes to screen origin
 
     // Shrink height to 5
     buf.set_size(10, 5, 0);
 
     // Scroll region would be invalid (rows 6-9 don't exist)
     // Cursor should be clamped
-    assert!(buf.get_cursor().pos.y < 5);
+    assert!(buf.get_cursor_screen_pos().y < 5);
 }
 
 #[test]
@@ -437,10 +438,8 @@ fn multiple_scroll_up_operations() {
 
     buf.set_scroll_region(3, 6); // Rows 2,3,4,5 (0-based)
 
-    // Move to bottom of region
-    buf.handle_lf();
-    buf.handle_lf();
-    buf.handle_lf();
+    // Move cursor to bottom of region (y=5)
+    buf.set_cursor_pos(Some(0), Some(5));
 
     // Multiple scrolls
     for _ in 0..5 {
@@ -448,7 +447,7 @@ fn multiple_scroll_up_operations() {
     }
 
     // Should still be at bottom of region
-    assert_eq!(buf.get_cursor().pos.y, 5);
+    assert_eq!(buf.get_cursor_screen_pos().y, 5);
 
     // Verify buffer didn't crash and visible rows are sane
     assert_eq!(buf.visible_rows(0).len(), 8);
@@ -461,8 +460,9 @@ fn multiple_scroll_down_operations() {
 
     buf.set_scroll_region(3, 6);
 
-    // Cursor at top of region (y=2)
-    assert_eq!(buf.get_cursor().pos.y, 2);
+    // Move cursor to top of region (y=2, 0-based)
+    buf.set_cursor_pos(Some(0), Some(2));
+    assert_eq!(buf.get_cursor_screen_pos().y, 2);
 
     // Multiple RI at top should scroll region down multiple times
     for _ in 0..5 {
@@ -470,7 +470,7 @@ fn multiple_scroll_down_operations() {
     }
 
     // Should still be at top of region
-    assert_eq!(buf.get_cursor().pos.y, 2);
+    assert_eq!(buf.get_cursor_screen_pos().y, 2);
 
     assert_eq!(buf.visible_rows(0).len(), 8);
 }
@@ -484,7 +484,10 @@ fn insert_lines_count_larger_than_region() {
     let mut buf = Buffer::new(10, 10);
     tag_rows(&mut buf, 10);
 
-    buf.set_scroll_region(4, 7); // 4 rows
+    buf.set_scroll_region(4, 7); // 4 rows (0-based: 3..6)
+
+    // Move cursor to top of region (y=3) for IL
+    buf.set_cursor_pos(Some(0), Some(3));
 
     // Insert 100 lines (way more than region size)
     buf.insert_lines(100);
@@ -510,6 +513,9 @@ fn delete_lines_count_larger_than_region() {
     tag_rows(&mut buf, 10);
 
     buf.set_scroll_region(4, 7);
+
+    // Move cursor to top of region (y=3) for DL
+    buf.set_cursor_pos(Some(0), Some(3));
 
     buf.delete_lines(100);
 
@@ -537,13 +543,13 @@ fn reset_scroll_region_to_full_screen() {
     tag_rows(&mut buf, 5);
 
     buf.set_scroll_region(2, 4);
-    assert_eq!(buf.get_cursor().pos.y, 1);
+    assert_eq!(buf.get_cursor_screen_pos().y, 0); // DECSTBM homes to screen origin
 
     // Reset using DECSTBM with bounds 0,0
     buf.set_scroll_region(0, 0);
 
     // Should be back to full screen
-    assert_eq!(buf.get_cursor().pos.y, 0);
+    assert_eq!(buf.get_cursor_screen_pos().y, 0);
 
     // Verify LF behaves as full-screen again (accumulates scrollback)
     let initial_rows = buf.get_rows().len();
