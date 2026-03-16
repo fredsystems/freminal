@@ -142,10 +142,10 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
 
 ---
 
-- [ ] **6.5 — `split_format_data_for_scrollback` unit tests (P0)**
+- [x] **6.5 — `split_format_data_for_scrollback` unit tests (P0)**
   - **Priority:** P0 — pure function with tricky offset arithmetic, zero tests
   - **Files:** `freminal-terminal-emulator/src/interface.rs`
-  - **Tests in:** `freminal-terminal-emulator/tests/snapshot_tests.rs` (same file as 6.4)
+  - **Tests in:** `freminal-terminal-emulator/tests/split_format_data_tests.rs` (new file)
   - **What to test:**
     - Tags entirely before the split point → appear in scrollback section, untouched.
     - Tags entirely after the split point → appear in visible section, offsets re-based to 0.
@@ -155,6 +155,15 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
     - `include_scrollback = false` → scrollback section is empty.
     - Single tag covering the entire range → correctly split into both sections.
   - **Verify:** `cargo test --all` passes.
+  - ✅ **Completed 2026-03-16.** Created `freminal-terminal-emulator/tests/split_format_data_tests.rs`
+    with 18 unit tests covering: empty input (2), `include_scrollback = false` (1), tag entirely
+    before split (1), tag entirely after split / rebased (1), spanning tag in both sections (1),
+    exact boundary cases — end at split, start at split (2), tag past `visible_end` dropped (1),
+    sentinel `usize::MAX` end behaviour (3 — clamped in scrollback, dropped from visible, passes
+    when `visible_end` is also `MAX`), multiple mixed tags (1), zero split point (1), single tag
+    covering full range (1), zero-width tags (2), `visible_end == split` (1). Also documented
+    that the function currently has zero production callers — it was written for the scrollback
+    rendering path but is not yet wired up.
 
 ---
 
