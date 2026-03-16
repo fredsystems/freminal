@@ -23,22 +23,25 @@ and plan document maintenance rules.
 
 ## Task Summary
 
-| #   | Task                           | Plan Document                               | Status      | Dependencies |
-| --- | ------------------------------ | ------------------------------------------- | ----------- | ------------ |
-| 1   | Custom Terminal Renderer       | `PLAN_01_GLYPH_ATLAS.md`                    | Complete    | None         |
-| 2   | CLI Args + TOML Config         | `PLAN_02_CLI_CONFIG.md`                     | Complete    | None         |
-| 3   | Settings Modal                 | `PLAN_03_SETTINGS_MODAL.md`                 | Complete    | Task 2       |
-| 4   | Deployment Flake               | `PLAN_04_DEPLOYMENT_FLAKE.md`               | Complete    | Task 2       |
-| 5   | Font Ligatures                 | `PLAN_05_FONT_LIGATURES.md`                 | Complete    | Task 1       |
-| 6   | Test Gap Coverage              | `PLAN_06_TEST_GAPS.md`                      | Not Started | None         |
-| 7   | Escape Sequence Coverage       | `PLAN_07_ESCAPE_SEQUENCES.md`               | Complete    | None         |
-| 8   | Primary Screen Scrollback      | `PLAN_08_SCROLLBACK.md`                     | Complete    | None         |
-| 9   | tmux Compat + Logging          | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`        | Complete    | None         |
-| 10  | vttest Cursor Movement         | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`         | Complete    | None         |
-| 11  | Theming                        | `PLAN_11_THEMING.md`                        | Complete    | Tasks 2, 3   |
-| 12  | Terminfo Audit                 | `PLAN_12_TERMINFO.md`                       | Complete    | None         |
-| 13  | Image Protocol Support         | `PLAN_13_IMAGE_PROTOCOL.md`                 | Complete    | Task 1       |
-| 14  | Bug Fixes: Modes/URL/Selection | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | Complete    | None         |
+| #   | Task                                     | Plan Document                               | Status      | Dependencies |
+| --- | ---------------------------------------- | ------------------------------------------- | ----------- | ------------ |
+| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                    | Complete    | None         |
+| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                     | Complete    | None         |
+| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                 | Complete    | Task 2       |
+| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`               | Complete    | Task 2       |
+| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                 | Complete    | Task 1       |
+| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                      | Complete    | None         |
+| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`               | Complete    | None         |
+| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                     | Complete    | None         |
+| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`        | Complete    | None         |
+| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`         | Complete    | None         |
+| 11  | Theming                                  | `PLAN_11_THEMING.md`                        | Complete    | Tasks 2, 3   |
+| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                       | Complete    | None         |
+| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                 | Complete    | Task 1       |
+| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | Complete    | None         |
+| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`        | Not Started | None         |
+| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                 | Not Started | None         |
+| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                  | Not Started | None         |
 
 ---
 
@@ -213,22 +216,22 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                                         |
-| ---- | ---------- | ---------- | --------------------------------------------- |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas              |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config               |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal              |
-| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4          |
-| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4 |
-| 6    | —          | —          |                                               |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                      |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                       |
-| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging    |
-| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                         |
-| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4 |
-| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4 |
-| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4 |
-| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection   |
+| Task | Started    | Completed  | Notes                                          |
+| ---- | ---------- | ---------- | ---------------------------------------------- |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas               |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal               |
+| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4           |
+| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4  |
+| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp) |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                       |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                        |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging     |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                          |
+| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4  |
+| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4  |
+| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4  |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection    |
 
 ---
 

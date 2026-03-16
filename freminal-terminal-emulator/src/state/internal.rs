@@ -33,7 +33,7 @@ use std::{fmt::Write as _, time::Instant};
 
 use crate::{
     ansi::FreminalAnsiParser,
-    interface::{TerminalInput, TerminalInputPayload, collect_text},
+    interface::{TerminalInput, TerminalInputPayload},
     io::PtyWrite,
 };
 
@@ -551,130 +551,6 @@ impl TerminalState {
             let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
             // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
             let _new_offset = self.handler.handle_scroll_forward(0, n);
-        }
-    }
-
-    pub fn report_window_state(&mut self, minimized: bool) {
-        let output = if minimized {
-            collect_text(&String::from("\x1b[2t"))
-        } else {
-            collect_text(&String::from("\x1b[1t"))
-        };
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write window state: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_window_position(&mut self, x: usize, y: usize) {
-        let output = collect_text(&format!("\x1b[3;{x};{y}t"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write window position: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_window_size(&mut self, width: usize, height: usize) {
-        let output = collect_text(&format!("\x1b[4;{height};{width}t"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write window size: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_root_window_size(&mut self, width: usize, height: usize) {
-        let output = collect_text(&format!("\x1b[5;{height};{width}t"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write window size: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_character_size(&mut self, width: usize, height: usize) {
-        let output = collect_text(&format!("\x1b[6;{height};{width}t"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write character size: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_terminal_size_in_characters(&mut self, width: usize, height: usize) {
-        let output = collect_text(&format!("\x1b[8;{height};{width}t"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write terminal size in characters: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_root_terminal_size_in_characters(&mut self, width: usize, height: usize) {
-        let output = collect_text(&format!("\x1b[9;{height};{width}t"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write terminal size in characters: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_icon_label(&mut self, title: &str) {
-        let output = collect_text(&format!("\x1b]L{title}\x1b\\"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write title: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_title(&mut self, title: &str) {
-        let output = collect_text(&format!("\x1b]l{title}\x1b\\"));
-        for input in output.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write title: {e}");
-                }
-            }
-        }
-    }
-
-    pub fn report_mode(&mut self, report: &String) {
-        let report = collect_text(report);
-        for input in report.iter() {
-            match self.write(input) {
-                Ok(()) => (),
-                Err(e) => {
-                    error!("Failed to write mode report: {e}");
-                }
-            }
         }
     }
 
