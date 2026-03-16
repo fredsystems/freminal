@@ -76,18 +76,17 @@ pub fn run_terminal(
 ) -> Result<()> {
     let pty_system = NativePtySystem::default();
 
-    let pair = match pty_system.openpty(PtySize {
-        rows: DEFAULT_HEIGHT,
-        cols: DEFAULT_WIDTH,
-        pixel_width: 0,
-        pixel_height: 0,
-    }) {
-        Ok(pair) => pair,
-        Err(e) => {
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: DEFAULT_HEIGHT,
+            cols: DEFAULT_WIDTH,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| {
             error!("Failed to open pty: {e}");
-            std::process::exit(1);
-        }
-    };
+            e
+        })?;
 
     let mut cmd = shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new);
 
@@ -193,11 +192,20 @@ pub fn run_terminal(
             }
         }
 
-        // Consume the output from the child
+        // Consume the output from the child.
+        //
+        // When the PTY is closed (amount_read == 0, i.e. the shell exited),
+        // we simply `return` instead of calling `process::exit()`.  Returning
+        // drops `send_tx`, which closes the `pty_read_rx` channel in the PTY
+        // consumer thread — that thread then signals the GUI to close cleanly.
+        //
+        // Calling `process::exit()` from a worker thread is dangerous: it
+        // runs C exit handlers (`__eglFini`, etc.) while the GUI main thread
+        // may be mid-`eglSwapBuffers`, causing heap corruption → SIGSEGV.
         while let Ok(amount_read) = reader.read(buf) {
             if amount_read == 0 {
-                // PTY closed, exit(0)
-                std::process::exit(0);
+                info!("PTY closed (read returned 0 bytes); reader thread exiting");
+                return;
             }
             let data = buf[..amount_read].to_vec();
 
@@ -208,7 +216,7 @@ pub fn run_terminal(
                 });
                 if let Err(e) = recording::write_frame(file, elapsed, &data) {
                     error!("Failed to write to recording file: {e}");
-                    std::process::exit(1);
+                    return;
                 }
             }
 
@@ -217,8 +225,7 @@ pub fn run_terminal(
                 read_amount: amount_read,
             }) {
                 error!("Failed to send data to terminal: {e}");
-                // exit
-                std::process::exit(1);
+                return;
             }
         }
     });
@@ -242,7 +249,7 @@ pub fn run_terminal(
                 Ok(writer) => writer,
                 Err(e) => {
                     error!("Failed to take writer: {e}");
-                    std::process::exit(1);
+                    return;
                 }
             };
 
