@@ -186,15 +186,23 @@ jobs:
         env:
           MACOS_CERTIFICATE_PWD: ${{ secrets.MAOS_CERTIFICATE_PWD }}
           MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE }}
+        uses: toitlang/action-macos-sign-notarize@v1.2.0
+        with:
+          certificate: ${{ secrets.MACOS_CERTIFICATE }}
+          certificate-password: ${{ secrets.MAOS_CERTIFICATE_PWD }}
+          username: ${{ secrets.APPLE_ID_USERNAME }}
+          password: ${{ secrets.APPLE_ID_PASSWORD }}
+          apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
+          app-path: target/release/bundle/osx/*.app/entitlements.plist
           # the stupid cert pwd env var is not named properly in github. Nvm, just use the wrong name and it will work.
-        run: |
-          echo "$MACOS_CERTIFICATE" | base64 -d > certificate.p12
-          security create-keychain -p build build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p build build.keychain
-          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build build.keychain
-          /usr/bin/codesign --force -s "$MACOS_CODESIGN_IDENTITY" target/release/bundle/osx/*.app -v
+        # run: |
+        #   echo "$MACOS_CERTIFICATE" | base64 -d > certificate.p12
+        #   security create-keychain -p build build.keychain
+        #   security default-keychain -s build.keychain
+        #   security unlock-keychain -p build build.keychain
+        #   security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+        #   security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build build.keychain
+        #   /usr/bin/codesign --force -s "$MACOS_CODESIGN_IDENTITY" target/release/bundle/osx/*.app -v
 
       - name: Extract version
         run: |
