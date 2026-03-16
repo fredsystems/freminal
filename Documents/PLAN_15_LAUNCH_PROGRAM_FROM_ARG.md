@@ -44,7 +44,7 @@ Add to `Args`:
 /// Everything after `--` (or the first non-option argument) is treated as
 /// a command and its arguments. When specified, freminal launches this
 /// program and exits when it terminates.
-#[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+#[arg(trailing_var_arg = true)]
 pub command: Vec<String>,
 ```
 
@@ -80,15 +80,24 @@ sends `ViewportCommand::Close` -> clean exit.
 
 ## Subtasks
 
-- [ ] **15.1** Add `command: Vec<String>` trailing positional arg to `Args` struct
-- [ ] **15.2** Update `run_terminal()` and `FreminalPtyInputOutput::new()` to accept
+- [x] **15.1** Add `command: Vec<String>` trailing positional arg to `Args` struct
+  - ✅ Completed 2026-03-16. Added with `trailing_var_arg = true`. Removed
+    `allow_hyphen_values` to preserve unknown-flag detection; users use `--` for
+    command args starting with `-`.
+- [x] **15.2** Update `run_terminal()` and `FreminalPtyInputOutput::new()` to accept
       `Option<(String, Vec<String>)>` and use `CommandBuilder::new(prog) + cmd.args(args)`
-- [ ] **15.3** Update `TerminalEmulator::new()` to accept and forward command tuple
-- [ ] **15.4** Wire up `main.rs` to extract command from `args.command`, handle precedence
+  - ✅ Completed 2026-03-16. Both functions accept `command` and `shell` separately.
+- [x] **15.3** Update `TerminalEmulator::new()` to accept and forward command tuple
+  - ✅ Completed 2026-03-16. Extracts command tuple from `args.command` Vec.
+- [x] **15.4** Wire up `main.rs` to extract command from `args.command`, handle precedence
       over `--shell`, and pass through to emulator creation
-- [ ] **15.5** Add tests for argument parsing (command with args, command alone, empty,
+  - ✅ Completed 2026-03-16. Warning logged when both `--shell` and command specified.
+- [x] **15.5** Add tests for argument parsing (command with args, command alone, empty,
       precedence over `--shell`)
-- [ ] **15.6** Update `--help` text and verify `freminal --help` output is correct
+  - ✅ Completed 2026-03-16. Added 6 new tests + updated property test. 27 arg tests
+    total, all passing.
+- [x] **15.6** Update `--help` text and verify `freminal --help` output is correct
+  - ✅ Completed 2026-03-16. Help shows `[COMMAND]...` usage with examples.
 
 ## Verification
 
