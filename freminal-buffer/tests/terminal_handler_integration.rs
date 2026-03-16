@@ -3876,3 +3876,329 @@ fn scroll_region_works_during_early_buffer_fill() {
         "Buffer should have grown to accommodate scroll region"
     );
 }
+
+// ============================================================================
+// Alternate buffer resize regression tests
+//
+// Root cause: `resize_height` did not truncate rows in the alternate buffer
+// when shrinking, leaving `rows.len() > height`.  This broke the invariant
+// that alternate buffer coordinates (`cursor.pos.y`) equal screen coordinates,
+// causing `handle_lf`, `handle_ri`, `insert_lines`, and `delete_lines` to
+// silently malfunction (cursor.pos.y would fall outside the scroll region
+// range even when the cursor was visually at the bottom of the screen).
+// ============================================================================
+
+/// After shrinking the alternate buffer, `rows.len()` must equal `new_height`.
+#[test]
+fn alt_buffer_resize_shrink_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    assert_eq!(buf.get_rows().len(), 24, "pre-condition");
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        20,
+        "alternate buffer must have exactly `height` rows after shrink"
+    );
+}
+
+/// After growing the alternate buffer, `rows.len()` must equal `new_height`.
+#[test]
+fn alt_buffer_resize_grow_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    assert_eq!(buf.get_rows().len(), 24, "pre-condition");
+
+    // Grow from 24 → 30
+    let _ = buf.set_size(80, 30, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        30,
+        "alternate buffer must have exactly `height` rows after grow"
+    );
+}
+
+/// LF at the bottom of the scroll region must trigger scrolling after a
+/// height shrink.  This was the exact symptom reported: tmux pane content
+/// overwrote itself instead of scrolling after a window resize.
+#[test]
+fn alt_buffer_lf_scrolls_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Set scroll region to full screen (1-based inclusive: 1..24)
+    buf.set_scroll_region(1, 24);
+
+    // Fill every row with a distinct marker character
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // After resize, scroll region is reset/clamped to full screen (0..19).
+    // Place cursor at the bottom of the visible screen.
+    buf.set_cursor_pos(Some(0), Some(19));
+
+    // LF at scroll_region_bottom should scroll the region up.
+    // Before the fix, this was a no-op because cursor.pos.y (e.g. 23)
+    // was > scroll_region_bottom (19), so the scroll_region check failed.
+    let bottom_tchar_before = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+
+    buf.handle_lf();
+
+    // The old bottom row should have been replaced with a blank row
+    let bottom_tchar_after = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+
+    assert_ne!(
+        bottom_tchar_before, bottom_tchar_after,
+        "LF at scroll_region_bottom must scroll the region (bottom row should change)"
+    );
+
+    // The new bottom row should be blank (Space)
+    assert_eq!(
+        bottom_tchar_after,
+        TChar::Space,
+        "new bottom row after LF scroll should be blank"
+    );
+}
+
+/// DL (delete lines) must work correctly in the alternate buffer after a
+/// height shrink.  tmux uses DL extensively for pane scrolling.
+#[test]
+fn alt_buffer_delete_lines_works_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill screen
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // Place cursor at row 5 (inside scroll region)
+    buf.set_cursor_pos(Some(0), Some(5));
+
+    // Read the character at row 6 before DL
+    let row_6_tchar_before = buf.get_rows()[6].resolve_cell(0).tchar().clone();
+
+    // Delete 1 line at cursor position
+    buf.delete_lines(1);
+
+    // Row 6's content should now be at row 5 (shifted up by DL)
+    let row_5_tchar_after = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+
+    assert_eq!(
+        row_5_tchar_after, row_6_tchar_before,
+        "DL should shift row 6 content up to row 5"
+    );
+
+    // Bottom of scroll region should be blank after DL
+    let bottom_tchar = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        bottom_tchar,
+        TChar::Space,
+        "bottom row should be blank after DL"
+    );
+}
+
+/// IL (insert lines) must work correctly in the alternate buffer after a
+/// height shrink.  tmux uses IL for pane scrolling.
+#[test]
+fn alt_buffer_insert_lines_works_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill screen
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // Place cursor at row 5
+    buf.set_cursor_pos(Some(0), Some(5));
+
+    // Read the character at row 5 before IL
+    let row_5_tchar_before = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+
+    // Insert 1 line at cursor position
+    buf.insert_lines(1);
+
+    // Row 5's content should have shifted down to row 6
+    let row_6_tchar_after = buf.get_rows()[6].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_6_tchar_after, row_5_tchar_before,
+        "IL should shift row 5 content down to row 6"
+    );
+
+    // Row 5 itself should now be blank (the inserted line)
+    let row_5_tchar_after = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_5_tchar_after,
+        TChar::Space,
+        "inserted row should be blank"
+    );
+}
+
+/// RI (reverse index) at scroll_region_top must scroll down after a height
+/// shrink.
+#[test]
+fn alt_buffer_ri_scrolls_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill screen
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // Place cursor at row 0 (top of scroll region)
+    buf.set_cursor_pos(Some(0), Some(0));
+
+    // Read the character at row 0 before RI
+    let row_0_tchar_before = buf.get_rows()[0].resolve_cell(0).tchar().clone();
+
+    // RI at scroll_region_top should scroll the region down
+    buf.handle_ri();
+
+    // Row 0's content should have moved to row 1
+    let row_1_tchar_after = buf.get_rows()[1].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_1_tchar_after, row_0_tchar_before,
+        "RI should shift row 0 content down to row 1"
+    );
+
+    // Row 0 should now be blank
+    let row_0_tchar_after = buf.get_rows()[0].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_0_tchar_after,
+        TChar::Space,
+        "top row should be blank after RI"
+    );
+}
+
+/// Multiple shrink-grow cycles must maintain the invariant.
+#[test]
+fn alt_buffer_resize_multiple_cycles_maintain_invariant() {
+    use freminal_buffer::buffer::Buffer;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Shrink → grow → shrink → grow
+    for &new_height in &[20_usize, 30, 15, 24] {
+        let _ = buf.set_size(80, new_height, 0);
+        assert_eq!(
+            buf.get_rows().len(),
+            new_height,
+            "alternate buffer rows.len() must equal height={new_height} after resize"
+        );
+    }
+}
+
+/// Simulates the exact tmux failure scenario: alternate buffer is active,
+/// DECSTBM is set, content is written, then the window is resized.  After
+/// resize, new output must scroll correctly.
+#[test]
+fn alt_buffer_tmux_resize_scenario() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // tmux sets DECSTBM to (1, height-1) for the top pane, leaving the
+    // bottom row for the status bar.  set_scroll_region takes 1-based
+    // inclusive params matching DECSTBM.
+    buf.set_scroll_region(1, 23); // 0-based rows 0..22 scroll, row 23 is status
+
+    // Fill the scroll region with content
+    for row in 0..23 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Write status bar
+    let status: Vec<TChar> = b"[tmux] 0:bash".iter().map(|&b| TChar::Ascii(b)).collect();
+    buf.set_cursor_pos(Some(0), Some(23));
+    buf.insert_text(&status);
+
+    // Now resize the window from 24 → 18 rows
+    let _ = buf.set_size(80, 18, 0);
+
+    assert_eq!(buf.get_rows().len(), 18, "post-resize row count");
+
+    // After resize, scroll region is clamped/reset.
+    // tmux would re-send DECSTBM for the new size (1-based inclusive):
+    buf.set_scroll_region(1, 17); // 0-based rows 0..16 scroll, row 17 is status
+
+    // Place cursor at the bottom of the scroll region
+    buf.set_cursor_pos(Some(0), Some(16));
+
+    // Write new content and LF — this must scroll, not overwrite
+    let new_content: Vec<TChar> = b"New output line"
+        .iter()
+        .map(|&b| TChar::Ascii(b))
+        .collect();
+    buf.insert_text(&new_content);
+    buf.handle_lf();
+
+    // Cursor should still be at row 16 (bottom of region, after scroll)
+    assert_eq!(
+        buf.get_cursor().pos.y,
+        16,
+        "cursor should stay at scroll region bottom after LF-triggered scroll"
+    );
+
+    // The new bottom row (16) should be blank (LF scrolled the region)
+    let bottom_tchar = buf.get_rows()[16].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        bottom_tchar,
+        TChar::Space,
+        "bottom of scroll region should be blank after LF scroll"
+    );
+}

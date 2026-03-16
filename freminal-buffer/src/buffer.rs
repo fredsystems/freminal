@@ -788,9 +788,27 @@ impl Buffer {
                 self.row_cache.push(None);
             }
         } else if new_height < old_height {
-            // If cursor is above the bottom of the new visible window, clamp it.
-            if self.cursor.pos.y >= new_height {
-                self.cursor.pos.y = new_height.saturating_sub(1);
+            if self.kind == BufferType::Alternate {
+                // Alternate buffer must never have scrollback.  When shrinking,
+                // keep the bottom `new_height` rows (the ones the user can see)
+                // and discard the top ones.  This preserves the invariant
+                // `rows.len() == height` which all alternate-buffer coordinate
+                // logic depends on (handle_lf, handle_ri, insert_lines,
+                // delete_lines all compare cursor.pos.y against
+                // scroll_region_top/bottom directly without an offset).
+                let excess = self.rows.len().saturating_sub(new_height);
+                if excess > 0 {
+                    self.rows.drain(0..excess);
+                    self.row_cache.drain(0..excess);
+                    // Adjust cursor Y for the removed rows.
+                    self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
+                }
+            } else {
+                // Primary buffer: extra rows become scrollback (handled by
+                // enforce_scrollback_limit later).  Just clamp cursor.
+                if self.cursor.pos.y >= new_height {
+                    self.cursor.pos.y = new_height.saturating_sub(1);
+                }
             }
         }
 
