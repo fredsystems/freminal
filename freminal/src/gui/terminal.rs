@@ -314,6 +314,8 @@ fn write_input_to_terminal(
         &snap.mouse_tracking
     };
 
+    let mouse_encoding = &snap.mouse_encoding;
+
     for event in &input.raw.events {
         debug!("event: {:?}", event);
         if let Event::Key { pressed: false, .. } = event {
@@ -691,7 +693,12 @@ fn write_input_to_terminal(
                         )
                     };
 
-                let res = handle_pointer_moved(&current, &previous, effective_mouse_tracking);
+                let res = handle_pointer_moved(
+                    &current,
+                    &previous,
+                    effective_mouse_tracking,
+                    mouse_encoding,
+                );
 
                 last_reported_mouse_pos = Some(current);
 
@@ -727,8 +734,12 @@ fn write_input_to_terminal(
                 let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
-                let response =
-                    handle_pointer_button(*button, &new_mouse_position, effective_mouse_tracking);
+                let response = handle_pointer_button(
+                    *button,
+                    &new_mouse_position,
+                    effective_mouse_tracking,
+                    mouse_encoding,
+                );
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
@@ -823,6 +834,7 @@ fn write_input_to_terminal(
                         unit_delta,
                         last_mouse_position,
                         effective_mouse_tracking,
+                        mouse_encoding,
                     )
                     .is_some()
                     {
@@ -833,6 +845,7 @@ fn write_input_to_terminal(
                                 unit_delta,
                                 last_mouse_position,
                                 effective_mouse_tracking,
+                                mouse_encoding,
                             ) {
                                 send_terminal_inputs(
                                     response.as_ref(),

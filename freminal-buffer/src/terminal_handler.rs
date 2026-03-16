@@ -2514,6 +2514,7 @@ impl TerminalHandler {
                 Mode::Decckm(_)
                 | Mode::BracketedPaste(_)
                 | Mode::MouseMode(_)
+                | Mode::MouseEncodingMode(_)
                 | Mode::XtMseWin(_)
                 | Mode::Decscnm(_)
                 | Mode::Decarm(_)

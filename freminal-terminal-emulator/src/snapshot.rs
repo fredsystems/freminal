@@ -19,7 +19,10 @@ use freminal_common::{
         cursor::CursorPos,
         format_tag::FormatTag,
         ftcs::FtcsState,
-        modes::{mouse::MouseTrack, rl_bracket::RlBracket},
+        modes::{
+            mouse::{MouseEncoding, MouseTrack},
+            rl_bracket::RlBracket,
+        },
         tchar::TChar,
     },
     cursor::CursorVisualStyle,
@@ -145,6 +148,16 @@ pub struct TerminalSnapshot {
     /// encode and send to the PTY without holding the emulator lock.
     pub mouse_tracking: MouseTrack,
 
+    /// Current mouse-encoding format setting.
+    ///
+    /// Orthogonal to `mouse_tracking` — the tracking level determines *which*
+    /// events are reported, while the encoding determines *how* they are
+    /// formatted (X11 binary vs SGR text vs UTF-8 extended).
+    ///
+    /// Set by `?1005` (Utf8), `?1006` (Sgr), `?1016` (`SgrPixels`).
+    /// Defaults to `X11` when no encoding mode has been explicitly set.
+    pub mouse_encoding: MouseEncoding,
+
     /// Whether the terminal should repeat key-press events while a key is held.
     pub repeat_keys: bool,
 
@@ -233,6 +246,7 @@ impl TerminalSnapshot {
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
+            mouse_encoding: MouseEncoding::default(),
             repeat_keys: true,
             cursor_key_app_mode: false,
             skip_draw: false,

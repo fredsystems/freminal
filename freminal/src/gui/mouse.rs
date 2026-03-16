@@ -101,11 +101,16 @@ impl PartialEq for FreminalMousePosition {
     }
 }
 
+/// Encode a mouse button press/release event for the PTY.
+///
+/// `mouse_track` determines whether this tracking level reports button events.
+/// `encoding` determines the wire format (X11 binary vs SGR text).
 #[must_use]
 pub fn handle_pointer_button(
     button: PointerButton,
     current_state: &PreviousMouseState,
     mouse_track: &MouseTrack,
+    encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
     match mouse_track {
         MouseTrack::XtMsex10 => {
@@ -116,35 +121,35 @@ pub fn handle_pointer_button(
                     current_state.modifiers,
                     &current_state.mouse_position,
                     false,
-                    &mouse_track.get_encoding(),
+                    encoding,
                 ));
             }
             None
         }
-        MouseTrack::XtMseX11
-        | MouseTrack::XtMseBtn
-        | MouseTrack::XtMseAny
-        | MouseTrack::XtMseSgr => Some(encode_x11_mouse_button(
-            button,
-            current_state.button_pressed,
-            current_state.modifiers,
-            &current_state.mouse_position,
-            false,
-            &mouse_track.get_encoding(),
-        )),
-        MouseTrack::NoTracking
-        | MouseTrack::XtMseUtf
-        | MouseTrack::XtMseUrXvt
-        | MouseTrack::XtMseSgrPixels
-        | MouseTrack::Query(_) => None,
+        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
+            Some(encode_x11_mouse_button(
+                button,
+                current_state.button_pressed,
+                current_state.modifiers,
+                &current_state.mouse_position,
+                false,
+                encoding,
+            ))
+        }
+        MouseTrack::NoTracking | MouseTrack::Query(_) => None,
     }
 }
 
+/// Encode a mouse motion event for the PTY.
+///
+/// `mouse_track` determines whether this tracking level reports motion events.
+/// `encoding` determines the wire format (X11 binary vs SGR text).
 #[must_use]
 pub fn handle_pointer_moved(
     current_state: &PreviousMouseState,
     previous_state: &PreviousMouseState,
     mouse_track: &MouseTrack,
+    encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
     match mouse_track {
         MouseTrack::XtMseBtn => {
@@ -155,13 +160,13 @@ pub fn handle_pointer_moved(
                     current_state.modifiers,
                     &current_state.mouse_position,
                     true,
-                    &mouse_track.get_encoding(),
+                    encoding,
                 ));
             }
 
             None
         }
-        MouseTrack::XtMseAny | MouseTrack::XtMseSgr => {
+        MouseTrack::XtMseAny => {
             if previous_state.should_report(current_state) {
                 return Some(encode_x11_mouse_button(
                     current_state.button,
@@ -169,7 +174,7 @@ pub fn handle_pointer_moved(
                     current_state.modifiers,
                     &current_state.mouse_position,
                     true,
-                    &mouse_track.get_encoding(),
+                    encoding,
                 ));
             }
 
@@ -178,35 +183,31 @@ pub fn handle_pointer_moved(
         MouseTrack::NoTracking
         | MouseTrack::XtMsex10
         | MouseTrack::XtMseX11
-        | MouseTrack::XtMseUtf
-        | MouseTrack::XtMseUrXvt
-        | MouseTrack::XtMseSgrPixels
         | MouseTrack::Query(_) => None,
     }
 }
 
+/// Encode a mouse scroll event for the PTY.
+///
+/// `mouse_track` determines whether this tracking level reports scroll events.
+/// `encoding` determines the wire format (X11 binary vs SGR text).
 #[must_use]
 pub fn handle_pointer_scroll(
     delta: Vec2,
     current_state: &PreviousMouseState,
     mouse_track: &MouseTrack,
+    encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
     match mouse_track {
-        MouseTrack::XtMseX11
-        | MouseTrack::XtMseBtn
-        | MouseTrack::XtMseAny
-        | MouseTrack::XtMseSgr => encode_x11_mouse_wheel(
-            delta,
-            current_state.modifiers,
-            &current_state.mouse_position,
-            &mouse_track.get_encoding(),
-        ),
-        MouseTrack::NoTracking
-        | MouseTrack::XtMsex10
-        | MouseTrack::XtMseUtf
-        | MouseTrack::XtMseUrXvt
-        | MouseTrack::XtMseSgrPixels
-        | MouseTrack::Query(_) => None,
+        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
+            encode_x11_mouse_wheel(
+                delta,
+                current_state.modifiers,
+                &current_state.mouse_position,
+                encoding,
+            )
+        }
+        MouseTrack::NoTracking | MouseTrack::XtMsex10 | MouseTrack::Query(_) => None,
     }
 }
 
@@ -313,7 +314,7 @@ fn encode_x11_mouse_wheel(
 
     // Both X11 and SGR protocols use 1-based coordinates.
     // X11 additionally adds 32 as a "padding" offset to make the byte printable.
-    if encoding == &MouseEncoding::X11 {
+    if *encoding == MouseEncoding::X11 {
         let padding: usize = 32;
         let cb = padding + button_code + modifiers_code;
         let x = pos.x_as_character_column + 1 + padding;
@@ -343,7 +344,7 @@ fn encode_x11_mouse_button(
 ) -> Cow<'static, [TerminalInput]> {
     //Normal tracking mode sends an escape sequence on both button press and release. Modifier key (shift, ctrl, meta) information is also sent. It is enabled by specifying parameter 1000 to DECSET. On button press or release, xterm sends CSI M C b C x C y . The low two bits of C b encode button information: 0=MB1 pressed, 1=MB2 pressed, 2=MB3 pressed, 3=release. The next three bits encode the modifiers which were down when the button was pressed and are added together: 4=Shift, 8=Meta, 16=Control
 
-    let padding = if encoding == &MouseEncoding::X11 {
+    let padding = if *encoding == MouseEncoding::X11 {
         32
     } else {
         0
@@ -351,7 +352,7 @@ fn encode_x11_mouse_button(
 
     let motion = if report_motion { 32 } else { 0 };
     let mut cb: usize = padding + motion;
-    let internal_pressed = if encoding == &MouseEncoding::X11 {
+    let internal_pressed = if *encoding == MouseEncoding::X11 {
         pressed
     } else {
         true
@@ -362,7 +363,7 @@ fn encode_x11_mouse_button(
 
     // Both X11 and SGR protocols use 1-based coordinates.
     // X11 additionally adds 32 as a "padding" offset to make the byte printable.
-    if encoding == &MouseEncoding::X11 {
+    if *encoding == MouseEncoding::X11 {
         // X11 binary encoding: add the printability padding (32) and encode as bytes.
         let x = pos.x_as_character_column + 1 + padding;
         let y = pos.y_as_character_row + 1 + padding;
@@ -398,19 +399,20 @@ mod tests {
             .collect()
     }
 
-    // ---- Bug #1 regression (atomicity) -----------------------------------
-    // Verify that mouse escape sequences are encoded as a single contiguous
-    // Cow<[TerminalInput]> slice, not split across separate elements.
-    // The PTY consumer sends the whole slice as one InputEvent::Key, so all
-    // bytes must be present in one shot.
+    // ── Regression tests: correct encoding is used based on separate encoding param ──
 
     #[test]
     fn sgr_button_press_is_single_contiguous_sequence() {
         let pos = FreminalMousePosition::new(4, 2, 0.0, 0.0); // col=4, row=2
         let state =
             PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
-        let result = handle_pointer_button(PointerButton::Primary, &state, &MouseTrack::XtMseSgr)
-            .expect("SGR button press should produce output");
+        let result = handle_pointer_button(
+            PointerButton::Primary,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("SGR button press should produce output");
 
         // The whole sequence must arrive as a single Cow slice.
         let bytes = inputs_to_bytes(result.as_ref());
@@ -422,8 +424,6 @@ mod tests {
         );
     }
 
-    // ---- Bug #2 fix (SGR coordinates not truncated to u8) -----------------
-
     #[test]
     fn sgr_button_press_wide_terminal_column_not_truncated() {
         // Column 300 would wrap to 44 if truncated to u8 (300 % 256 = 44).
@@ -431,8 +431,13 @@ mod tests {
         let pos = FreminalMousePosition::new(300, 10, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
-        let result = handle_pointer_button(PointerButton::Primary, &state, &MouseTrack::XtMseSgr)
-            .expect("wide-terminal SGR button press should produce output");
+        let result = handle_pointer_button(
+            PointerButton::Primary,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("wide-terminal SGR button press should produce output");
 
         let bytes = inputs_to_bytes(result.as_ref());
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
@@ -452,7 +457,8 @@ mod tests {
         let result = handle_pointer_scroll(
             Vec2::new(0.0, 1.0), // scroll up
             &state,
-            &MouseTrack::XtMseSgr,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
         )
         .expect("wide-terminal SGR scroll should produce output");
 
@@ -464,7 +470,7 @@ mod tests {
         );
     }
 
-    // ---- Bug #3 fix (zero-delta scroll guard) -----------------------------
+    // ── Zero-delta scroll guard ──
 
     #[test]
     fn zero_delta_scroll_returns_none_for_sgr() {
@@ -472,7 +478,12 @@ mod tests {
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         // A zero-delta scroll event must produce None, not a phantom click.
-        let result = handle_pointer_scroll(Vec2::ZERO, &state, &MouseTrack::XtMseSgr);
+        let result = handle_pointer_scroll(
+            Vec2::ZERO,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        );
         assert!(
             result.is_none(),
             "zero-delta SGR scroll should return None to avoid phantom clicks, got: {result:?}"
@@ -484,7 +495,12 @@ mod tests {
         let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::ZERO, &state, &MouseTrack::XtMseX11);
+        let result = handle_pointer_scroll(
+            Vec2::ZERO,
+            &state,
+            &MouseTrack::XtMseX11,
+            &MouseEncoding::X11,
+        );
         assert!(
             result.is_none(),
             "zero-delta X11 scroll should return None, got: {result:?}"
@@ -497,7 +513,12 @@ mod tests {
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         // Scroll up (positive y delta) must produce a real mouse report.
-        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::XtMseSgr);
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0),
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        );
         assert!(
             result.is_some(),
             "non-zero SGR scroll should produce output"
@@ -508,18 +529,19 @@ mod tests {
         assert_eq!(s, "\x1b[<64;6;6M", "SGR scroll-up sequence wrong: {s:?}");
     }
 
-    // ---- Fix #3: horizontal-only scroll returns None ----------------------
+    // ── Horizontal-only scroll returns None ──
 
     #[test]
     fn horizontal_only_scroll_returns_none_for_sgr() {
         let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        // Horizontal-only scroll (delta.y == 0, delta.x != 0) must return
-        // None — the terminal mouse wheel protocol only defines vertical
-        // scroll buttons (64/65).  Without this guard, encode_mouse_for_x11
-        // would produce button code 0 (left-click).
-        let result = handle_pointer_scroll(Vec2::new(3.0, 0.0), &state, &MouseTrack::XtMseSgr);
+        let result = handle_pointer_scroll(
+            Vec2::new(3.0, 0.0),
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        );
         assert!(
             result.is_none(),
             "horizontal-only SGR scroll should return None, got: {result:?}"
@@ -531,25 +553,32 @@ mod tests {
         let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::new(-5.0, 0.0), &state, &MouseTrack::XtMseX11);
+        let result = handle_pointer_scroll(
+            Vec2::new(-5.0, 0.0),
+            &state,
+            &MouseTrack::XtMseX11,
+            &MouseEncoding::X11,
+        );
         assert!(
             result.is_none(),
             "horizontal-only X11 scroll should return None, got: {result:?}"
         );
     }
 
-    // ---- Fix #1: unit-delta scroll produces correct per-line events -------
-    // The multi-line loop lives in terminal.rs; these tests verify that the
-    // encoding layer produces correct single-line events for unit deltas, which
-    // is what the loop feeds it.
+    // ── Unit-delta scroll tests ──
 
     #[test]
     fn unit_scroll_up_sgr_produces_button_64() {
         let pos = FreminalMousePosition::new(3, 7, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::XtMseSgr)
-            .expect("unit scroll-up should produce output");
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0),
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("unit scroll-up should produce output");
         let bytes = inputs_to_bytes(result.as_ref());
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 64 = scroll up, col 3+1=4, row 7+1=8
@@ -561,8 +590,13 @@ mod tests {
         let pos = FreminalMousePosition::new(3, 7, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::new(0.0, -1.0), &state, &MouseTrack::XtMseSgr)
-            .expect("unit scroll-down should produce output");
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, -1.0),
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("unit scroll-down should produce output");
         let bytes = inputs_to_bytes(result.as_ref());
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 65 = scroll down, col 3+1=4, row 7+1=8
@@ -574,8 +608,13 @@ mod tests {
         let pos = FreminalMousePosition::new(0, 0, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::XtMseX11)
-            .expect("unit scroll-up X11 should produce output");
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0),
+            &state,
+            &MouseTrack::XtMseX11,
+            &MouseEncoding::X11,
+        )
+        .expect("unit scroll-up X11 should produce output");
         let bytes = inputs_to_bytes(result.as_ref());
         // X11: ESC [ M <cb> <x> <y>
         // cb = 32 (padding) + 64 (button) = 96
@@ -589,24 +628,142 @@ mod tests {
         let pos = FreminalMousePosition::new(0, 0, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::new(0.0, -1.0), &state, &MouseTrack::XtMseX11)
-            .expect("unit scroll-down X11 should produce output");
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, -1.0),
+            &state,
+            &MouseTrack::XtMseX11,
+            &MouseEncoding::X11,
+        )
+        .expect("unit scroll-down X11 should produce output");
         let bytes = inputs_to_bytes(result.as_ref());
         // cb = 32 + 65 = 97 = 'a'
         assert_eq!(bytes, b"\x1b[Ma!!", "X11 unit scroll-down wrong: {bytes:?}");
     }
 
-    // ---- Scroll with no-tracking returns None -----------------------------
+    // ── No-tracking returns None ──
 
     #[test]
     fn scroll_with_no_tracking_returns_none() {
         let pos = FreminalMousePosition::new(5, 5, 0.0, 0.0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let result = handle_pointer_scroll(Vec2::new(0.0, 1.0), &state, &MouseTrack::NoTracking);
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0),
+            &state,
+            &MouseTrack::NoTracking,
+            &MouseEncoding::X11,
+        );
         assert!(
             result.is_none(),
             "scroll with NoTracking should return None"
         );
+    }
+
+    // ── The lazygit scenario: tracking=XtMseAny + encoding=Sgr ──
+    // This is the exact combination that was broken before the decoupling fix.
+    // lazygit sends: ?1006h (SGR encoding), then ?1000h (X11 tracking), then
+    // ?1002h (button tracking), then ?1003h (any-event tracking).  With the
+    // old conflated design, ?1003h overwrote the SGR encoding.
+
+    #[test]
+    fn lazygit_scenario_any_tracking_sgr_encoding_button_press() {
+        let pos = FreminalMousePosition::new(10, 5, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
+        let result = handle_pointer_button(
+            PointerButton::Primary,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("any-tracking + SGR encoding should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // Must be SGR format, not X11 binary
+        assert!(
+            s.starts_with("\x1b[<"),
+            "expected SGR format (ESC[<...), got: {s:?}"
+        );
+        assert_eq!(s, "\x1b[<0;11;6M");
+    }
+
+    #[test]
+    fn lazygit_scenario_any_tracking_sgr_encoding_motion() {
+        let pos = FreminalMousePosition::new(12, 7, 0.0, 0.0);
+        let current =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let prev_pos = FreminalMousePosition::new(11, 7, 0.0, 0.0);
+        let previous = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            prev_pos,
+            Modifiers::default(),
+        );
+        let result = handle_pointer_moved(
+            &current,
+            &previous,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("any-tracking + SGR encoding should produce motion output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        assert!(
+            s.starts_with("\x1b[<"),
+            "expected SGR format for motion, got: {s:?}"
+        );
+        // motion bit = 32, button 0 (Primary, not held), cb = 32 + 0 = 32
+        // Lowercase 'm' because button_pressed is false (release suffix in SGR).
+        assert_eq!(s, "\x1b[<32;13;8m");
+    }
+
+    #[test]
+    fn lazygit_scenario_any_tracking_sgr_encoding_scroll() {
+        let pos = FreminalMousePosition::new(10, 5, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0),
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("any-tracking + SGR encoding should produce scroll output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        assert!(
+            s.starts_with("\x1b[<"),
+            "expected SGR format for scroll, got: {s:?}"
+        );
+        assert_eq!(s, "\x1b[<64;11;6M");
+    }
+
+    // ── Verify X11 encoding works correctly with various tracking levels ──
+
+    #[test]
+    fn x11_encoding_with_any_tracking_button_press() {
+        let pos = FreminalMousePosition::new(5, 3, 0.0, 0.0);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
+        let result = handle_pointer_button(
+            PointerButton::Primary,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::X11,
+        )
+        .expect("any-tracking + X11 encoding should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        // Must be X11 binary format: ESC [ M <cb> <x> <y>
+        assert_eq!(
+            bytes[0..3],
+            *b"\x1b[M",
+            "expected X11 format, got: {bytes:?}"
+        );
+        // cb = 32 + 0 (left press) = 32, x = 5+1+32 = 38, y = 3+1+32 = 36
+        assert_eq!(bytes, b"\x1b[M &$", "X11 button press wrong: {bytes:?}");
     }
 }

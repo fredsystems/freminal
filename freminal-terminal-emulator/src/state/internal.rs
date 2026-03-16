@@ -12,9 +12,14 @@ use freminal_common::{
         mode::SetMode,
         mode::{Mode, TerminalModes},
         modes::{
-            MouseModeNumber, ReportMode, decarm::Decarm, decckm::Decckm, keypad::KeypadMode,
-            mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround,
-            sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+            MouseModeNumber, ReportMode,
+            decarm::Decarm,
+            decckm::Decckm,
+            keypad::KeypadMode,
+            mouse::{MouseEncoding, MouseTrack},
+            reverse_wrap_around::ReverseWrapAround,
+            sync_updates::SynchronizedUpdates,
+            xtmsewin::XtMseWin,
         },
         tchar::TChar,
         terminal_output::TerminalOutput,
@@ -350,16 +355,35 @@ impl TerminalState {
                         self.send_decrpm(&resp);
                     }
                     Mode::MouseMode(MouseTrack::Query(report_mode)) => {
-                        // Determine whether the queried mode number is the currently
-                        // active mouse tracking mode, then report via DECRPM using
-                        // the queried mode number as Ps.
-                        let active_num = self.modes.mouse_tracking.mouse_mode_number();
-                        let override_mode = if active_num == *report_mode
-                            && self.modes.mouse_tracking != MouseTrack::NoTracking
-                        {
-                            SetMode::DecSet
-                        } else {
-                            SetMode::DecRst
+                        // Determine whether the queried mode number matches
+                        // either the active mouse tracking level or the active
+                        // mouse encoding, and report accordingly via DECRPM.
+                        //
+                        // Encoding modes (?1005/?1006/?1016) are checked
+                        // against `mouse_encoding`; tracking modes
+                        // (?9/?1000/?1002/?1003) are checked against
+                        // `mouse_tracking`.
+                        let override_mode = match *report_mode {
+                            1005 | 1006 | 1016 => {
+                                let active_enc_num = self.modes.mouse_encoding.mouse_mode_number();
+                                if active_enc_num == *report_mode
+                                    && self.modes.mouse_encoding != MouseEncoding::X11
+                                {
+                                    SetMode::DecSet
+                                } else {
+                                    SetMode::DecRst
+                                }
+                            }
+                            _ => {
+                                let active_num = self.modes.mouse_tracking.mouse_mode_number();
+                                if active_num == *report_mode
+                                    && self.modes.mouse_tracking != MouseTrack::NoTracking
+                                {
+                                    SetMode::DecSet
+                                } else {
+                                    SetMode::DecRst
+                                }
+                            }
                         };
                         let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
                         self.send_decrpm(&resp);
@@ -391,8 +415,10 @@ impl TerminalState {
                     Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
                     // 7.8  — Bracketed paste (?2004)
                     Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
-                    // 7.9  — Mouse tracking (?9/?1000/?1002/?1003/?1005/?1006/?1016)
+                    // 7.9a — Mouse tracking level (?9/?1000/?1002/?1003)
                     Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
+                    // 7.9b — Mouse encoding format (?1005/?1006/?1016)
+                    Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
                     // 7.10 — Focus events (?1004)
                     Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
                     // 7.15 — DECSCNM (?5) screen inversion
