@@ -1,114 +1,209 @@
 name: Deploy
 
 on:
-  # Enable manual running of action if necessary
+  push:
+    tags:
+      - "v*"
+  # Retain manual dispatch for testing the workflow
   workflow_dispatch:
 
+permissions:
+  contents: write # required for creating GitHub Releases
+
 jobs:
-  deploy_linux_amd64:
-    name: Bundle Linux AMD64
+  build-linux-amd64:
+    name: Build Linux AMD64
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Bundle
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - run: |
-          cargo install cargo-bundle
-          cargo bundle --release
 
-      - name: Archive production artifacts debian
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Bundle .deb package and build release binary
+        run: cargo bundle --release
+
+      - name: Extract version
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Rename artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/freminal "dist/freminal-${VERSION}-linux-amd64"
+          cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-amd64.deb"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: LinuxAMD64 Debian
-          path: |
-            target/release/bundle/deb/*.deb
+          name: linux-amd64
+          path: dist/*
 
-      - name: Archive production artifacts executable only
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: LinuxAMD64 Executable
-          path: |
-            target/release/freminal
-
-  deploy_linux_arm:
-    name: Bundle Linux ARM64
+  build-linux-arm64:
+    name: Build Linux ARM64
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Bundle
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - run: |
-          cargo install cargo-bundle
-          cargo bundle --release
 
-      - name: Archive production artifacts
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Bundle .deb package and build release binary
+        run: cargo bundle --release
+
+      - name: Extract version
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Rename artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/freminal "dist/freminal-${VERSION}-linux-arm64"
+          cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-arm64.deb"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: LinuxARM64
-          path: |
-            target/release/bundle/deb/*.deb
+          name: linux-arm64
+          path: dist/*
 
-      - name: Archive production artifacts executable only
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: LinuxARM64 Executable
-          path: |
-            target/release/freminal
-
-  deploy_windows:
-    name: Bundle Windows
+  build-windows:
+    name: Build Windows
     runs-on: windows-latest
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Bundle
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - run: |
-          # cargo install cargo-bundle
-          # cargo bundle --release
-          cargo build --release
 
-      # FIXME: https://github.com/burtonageo/cargo-bundle/issues/77
-      # we can't bundle windows yet
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Archive production artifacts executable only
+      # cargo-bundle does not support Windows (cargo-bundle issue #77)
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Extract version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Rename artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/freminal.exe "dist/freminal-${VERSION}-windows-amd64.exe"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: Windows Executable
-          path: |
-            target/release/freminal.exe
+          name: windows-amd64
+          path: dist/*
 
-  # deploy_mac:
-  #   name: Bundle Mac
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-linux-amd64, build-linux-arm64, build-windows]
+    # Only create a release when triggered by a version tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
+
+  # ----- macOS (deferred) -----
+  # macOS .app bundling and code signing had problems.
+  # Uncomment and complete when ready to support macOS releases.
+  #
+  # build-macos:
+  #   name: Build macOS
   #   runs-on: macos-latest
   #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v5
-
-  #     - name: Bundle
+  #     - name: Checkout
+  #       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+  #
+  #     - name: Install Rust toolchain
   #       uses: dtolnay/rust-toolchain@stable
+  #
+  #     - name: Cache Rust dependencies
+  #       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+  #
+  #     - name: Install cargo-bundle
+  #       run: cargo install cargo-bundle
+  #
+  #     - name: Bundle .app
+  #       run: cargo bundle --release
+  #
+  #     - name: Code sign (requires MACOS_CERTIFICATE secret)
   #       env:
   #         MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
   #         MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-  #     - run: |
-  #         echo $MACOS_CERTIFICATE | base64 -d > certificate.p12
-  #         security create-keychain -p fred build.keychain
+  #       run: |
+  #         echo "$MACOS_CERTIFICATE" | base64 -d > certificate.p12
+  #         security create-keychain -p build build.keychain
   #         security default-keychain -s build.keychain
-  #         security unlock-keychain -p fred build.keychain
-  #         security import certificate.p12 -k build.keychain -P $MACOS_CERTIFICATE_PWD -T /usr/bin/codesign
-  #         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k fred build.keychain
-  #         cargo install cargo-bundle
-  #         cargo bundle --release
-  #         /usr/bin/codesign --force -s "Developer ID Application: Fred Clausen (8J9KGJ49RD)" target/release/bundle/osx/*.app -v
-
-  #     - name: Archive production artifacts
-  #       uses: actions/upload-artifact@v5
+  #         security unlock-keychain -p build build.keychain
+  #         security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+  #         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build build.keychain
+  #         /usr/bin/codesign --force -s "Developer ID Application: ..." target/release/bundle/osx/*.app -v
+  #
+  #     - name: Extract version
+  #       run: |
+  #         if [[ "$GITHUB_REF_NAME" == v* ]]; then
+  #           echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+  #         else
+  #           echo "VERSION=dev-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+  #         fi
+  #
+  #     - name: Upload artifacts
+  #       uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
   #       with:
-  #         name: Mac
-  #         path: |
-  #           target/release/bundle/osx/*
+  #         name: macos
+  #         path: target/release/bundle/osx/*

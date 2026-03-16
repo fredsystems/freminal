@@ -88,9 +88,13 @@ Fix `freminal/Cargo.toml` `[package.metadata.bundle]`:
 
 ## Subtasks
 
-- [ ] **16.1** Fix `[package.metadata.bundle]` in `freminal/Cargo.toml`:
+- [x] **16.1** Fix `[package.metadata.bundle]` in `freminal/Cargo.toml`:
       remove hardcoded version, clean up resources, verify deb_depends
-- [ ] **16.2** Rewrite `.github/workflows/deploy.yaml`:
+      ✅ Removed `version = "1.0.0"` (cargo-bundle reads from `[package]`), removed
+      `icon` (referenced files don't exist), removed `resources` (none of the listed
+      paths exist inside the crate directory), uncommented `deb_depends` with
+      `libgl1-mesa-glx`, commented out `osx_url_schemes` (macOS deferred).
+- [x] **16.2** Rewrite `.github/workflows/deploy.yaml`:
   - Tag trigger (`v*`) + `workflow_dispatch`
   - Linux AMD64 job: build, bundle .deb, upload artifacts with versioned names
   - Linux ARM64 job: build, bundle .deb, upload artifacts with versioned names
@@ -98,6 +102,16 @@ Fix `freminal/Cargo.toml` `[package.metadata.bundle]`:
   - Release job: depends on all build jobs, uses `softprops/action-gh-release`
     to create release and attach all artifacts
   - macOS job: commented-out placeholder
+    ✅ Rewrote deploy.yaml (209 lines). Tag push (`v*`) + `workflow_dispatch` trigger.
+    Three build jobs (linux-amd64 on `ubuntu-24.04`, linux-arm64 on `ubuntu-24.04-arm`,
+    windows on `windows-latest`). Linux jobs install system deps (xcb, xkbcommon, wayland,
+    mesa), use `cargo bundle --release` for both .deb and raw binary, rename with version.
+    Windows uses `cargo build --release` (cargo-bundle #77). Release job downloads all
+    artifacts with `merge-multiple: true` and creates GitHub Release via
+    `softprops/action-gh-release@v2` with auto-generated release notes. macOS included
+    as commented-out placeholder with code-signing skeleton. Version extracted from tag
+    (`v0.1.0` -> `0.1.0`) or `dev-<sha>` for manual dispatch. Action SHA pins match
+    existing `ci.yml` conventions.
 - [ ] **16.3** Verify workflow syntax with `actionlint` or manual review
 - [ ] **16.4** Test with a manual `workflow_dispatch` run (if possible) or verify
       the YAML is syntactically correct
