@@ -331,7 +331,7 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
     Each mode type follows the same pattern: 2-3 variants, `From<SetMode>`, `Display`, `report()`.
   - **Verify:** `cargo test --all` passes.
   - ✅ **Completed (prior session).** Created `freminal-common/tests/mode_boilerplate_tests.rs`
-    with 266 tests covering all 13 mode types — defaults, Display, report(), and From<SetMode>
+    with 266 tests covering all 13 mode types — defaults, Display, report(), and `From<SetMode>`
     conversions. All pass.
 
 ---

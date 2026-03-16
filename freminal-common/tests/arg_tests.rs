@@ -5,7 +5,7 @@
 
 use clap::Parser;
 use freminal_common::args::Args;
-use proptest::{prop_assert, prop_assert_eq, proptest};
+use proptest::{prop_assert_eq, proptest};
 
 /// Helper: run the parser with a simple iterator of strings
 fn parse_from<I: IntoIterator<Item = S>, S: Into<std::ffi::OsString> + Clone>(
@@ -28,6 +28,7 @@ fn parses_empty_args_defaults() {
     // The merge logic in main.rs will fall back to the config/default value.
     assert!(args.write_logs_to_file.is_none());
     assert!(args.config.is_none());
+    assert!(args.command.is_empty());
 }
 
 #[test]
@@ -148,6 +149,59 @@ fn all_flags_combined() {
         args.config.as_deref(),
         Some(std::path::Path::new("/tmp/config.toml"))
     );
+    assert!(args.command.is_empty());
+}
+
+// ---- Command (trailing positional) tests ----
+
+#[test]
+fn parses_simple_command() {
+    let args = parse_from(["freminal", "yazi"]).unwrap();
+    assert_eq!(args.command, vec!["yazi"]);
+}
+
+#[test]
+fn parses_command_with_arguments() {
+    let args = parse_from(["freminal", "nvim", "file.txt"]).unwrap();
+    assert_eq!(args.command, vec!["nvim", "file.txt"]);
+}
+
+#[test]
+fn parses_command_after_double_dash() {
+    let args = parse_from(["freminal", "--", "nvim", "-u", "NONE", "file.txt"]).unwrap();
+    assert_eq!(args.command, vec!["nvim", "-u", "NONE", "file.txt"]);
+}
+
+#[test]
+fn no_command_gives_empty_vec() {
+    let args = parse_from(["freminal"]).unwrap();
+    assert!(args.command.is_empty());
+}
+
+#[test]
+fn command_with_flags_uses_double_dash() {
+    let args = parse_from(["freminal", "--shell", "/bin/zsh", "--", "htop", "-d", "10"]).unwrap();
+    assert_eq!(args.shell.as_deref(), Some("/bin/zsh"));
+    assert_eq!(args.command, vec!["htop", "-d", "10"]);
+}
+
+#[test]
+fn all_flags_combined_with_command() {
+    let args = parse_from([
+        "freminal",
+        "--recording-path",
+        "rec.log",
+        "--shell",
+        "/bin/zsh",
+        "--",
+        "vim",
+        "-R",
+        "readme.md",
+    ])
+    .unwrap();
+    assert_eq!(args.recording.as_deref(), Some("rec.log"));
+    assert_eq!(args.shell.as_deref(), Some("/bin/zsh"));
+    assert_eq!(args.command, vec!["vim", "-R", "readme.md"]);
 }
 
 // ------------------------
@@ -164,12 +218,14 @@ proptest! {
         prop_assert_eq!(args.write_logs_to_file, Some(val));
     }
 
-    /// Arbitrary strings that do *not* start with `--` should always trigger an error.
+    /// Arbitrary strings that do *not* start with `--` are now treated as the
+    /// positional `command` argument — they should parse successfully and populate
+    /// `args.command`.
     #[test]
-    fn invalid_arguments_fail(s in "[a-zA-Z0-9_]+") {
-        // Avoid empty program name
+    fn positional_strings_become_command(s in "[a-zA-Z0-9_]+") {
         let result = parse_from(["freminal", &s]);
-        prop_assert!(result.is_err());
+        let args = result.unwrap();
+        prop_assert_eq!(&args.command, &[s]);
     }
 
     /// Mixing valid and invalid flags: the first invalid should cause failure.

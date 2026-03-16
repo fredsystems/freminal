@@ -445,12 +445,26 @@ impl TerminalEmulator {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
 
-        let io = FreminalPtyInputOutput::new(
-            read_rx,
-            pty_tx,
-            args.recording.clone(),
-            args.shell.clone(),
-        )?;
+        // Derive the command tuple from the positional `command` arg.
+        // If `command` is non-empty, it takes precedence over `--shell`.
+        let command = if args.command.is_empty() {
+            None
+        } else {
+            let mut iter = args.command.iter().cloned();
+            // SAFETY: we just checked `is_empty()` above; first element exists.
+            let prog = iter.next().unwrap_or_default();
+            Some((prog, iter.collect()))
+        };
+
+        // When a positional command is specified, shell is ignored.
+        let shell = if command.is_some() {
+            None
+        } else {
+            args.shell.clone()
+        };
+
+        let io =
+            FreminalPtyInputOutput::new(read_rx, pty_tx, args.recording.clone(), command, shell)?;
 
         if let Err(e) = write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
             width: DEFAULT_WIDTH as usize,

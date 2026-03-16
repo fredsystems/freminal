@@ -178,10 +178,19 @@ fn main() {
     }
     debug!("Loaded config: {:#?}", cfg);
 
+    // Warn if both a positional command and --shell are specified.
+    // The positional command takes precedence (handled in TerminalEmulator::new).
+    let mut args = args;
+    if !args.command.is_empty() && args.shell.is_some() {
+        warn!(
+            "Both --shell and a positional command were specified; \
+             the positional command takes precedence and --shell is ignored"
+        );
+    }
+
     // Propagate the merged shell path back into args so that
     // TerminalEmulator::new (which reads args.shell) gets the effective
     // value from the CLI > TOML > default precedence chain.
-    let mut args = args;
     if args.shell.is_none() {
         args.shell = cfg.shell_path().map(String::from);
     }
