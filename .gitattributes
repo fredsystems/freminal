@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Binary recording files — never apply text fixers
+*.bin binary

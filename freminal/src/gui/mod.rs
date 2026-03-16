@@ -710,7 +710,17 @@ pub fn run(
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
     is_playback: bool,
 ) -> Result<()> {
-    let native_options = eframe::NativeOptions::default();
+    let icon = match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png")) {
+        Ok(icon) => icon,
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to load window icon from bytes: {e}"
+            ));
+        }
+    };
+
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.viewport.icon = Some(Arc::new(icon));
 
     match eframe::run_native(
         "Freminal",

@@ -551,3 +551,4 @@ output.txt
 snapshots/*
 dump.txt
 doc/
+!freminal.bin

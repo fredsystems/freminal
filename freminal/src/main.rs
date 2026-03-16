@@ -403,11 +403,21 @@ fn main() {
                                         &read.buf[0..read.read_amount],
                                     );
                                 } else {
-                                    // PTY read channel closed — shell exited.
-                                    // Fall through to the input-only loop so
-                                    // the GUI can still resize, scroll, and copy.
-                                    info!("PTY read channel closed; switching to input-only mode");
-                                    break;
+                                    // PTY read channel closed — the shell exited
+                                    // and the reader thread returned (dropping its
+                                    // Sender).  Signal the GUI to close cleanly.
+                                    info!("PTY read channel closed; requesting GUI close");
+
+                                    // Publish one final snapshot so the GUI shows
+                                    // the complete output.
+                                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+
+                                    if let Some(ctx) = egui_ctx_pty.get() {
+                                        ctx.send_viewport_cmd(
+                                            eframe::egui::ViewportCommand::Close,
+                                        );
+                                    }
+                                    return;
                                 }
                             }
                             recv(input_rx) -> msg => {
@@ -417,21 +427,6 @@ fn main() {
                             }
                         }
 
-                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
-                    }
-
-                    // Publish one final snapshot after PTY data is exhausted so
-                    // the GUI shows the complete output.
-                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
-
-                    // Input-only loop: PTY is gone but the GUI is still alive.
-                    // Service resize, scroll, clipboard, and theme events until
-                    // the GUI closes.
-                    loop {
-                        let msg = input_rx.recv();
-                        if !handle_input(&mut emulator, msg, &clipboard_tx) {
-                            break;
-                        }
                         post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
                     }
                 });

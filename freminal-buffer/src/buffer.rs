@@ -554,8 +554,13 @@ impl Buffer {
         }
 
         // ---- WIDTH CHANGE → REFLOW ----
-        // reflow_to_width always resets the scroll offset to 0.
-        let after_reflow = if width_changed {
+        // Alternate buffers must never reflow (they represent a fixed-size screen,
+        // not a scrollback history).  Reflow re-wraps logical lines which can
+        // create more or fewer rows than `height`, breaking the invariant that
+        // alternate buffers always have exactly `height` rows.  Instead, just
+        // update each row's max_width (content that extends beyond the new width
+        // is simply clipped, which matches xterm/VT behaviour).
+        let after_reflow = if width_changed && self.kind != BufferType::Alternate {
             self.reflow_to_width(new_width);
             0
         } else {
@@ -563,7 +568,14 @@ impl Buffer {
         };
 
         // ---- HEIGHT CHANGE → GROW/SHRINK SCREEN ----
-        let after_resize = if height_changed {
+        // For alternate buffers we must ALWAYS reconcile row count with the
+        // target height, even when only the width changed (reflow was skipped
+        // above, so rows.len() is still the old height — but we also guard
+        // against any future code path that could desync them).
+        let needs_height_adjust =
+            height_changed || (self.kind == BufferType::Alternate && self.rows.len() != new_height);
+
+        let after_resize = if needs_height_adjust {
             let adjusted = self.resize_height(new_height, after_reflow);
 
             // Validate scroll region against new height.
@@ -788,9 +800,27 @@ impl Buffer {
                 self.row_cache.push(None);
             }
         } else if new_height < old_height {
-            // If cursor is above the bottom of the new visible window, clamp it.
-            if self.cursor.pos.y >= new_height {
-                self.cursor.pos.y = new_height.saturating_sub(1);
+            if self.kind == BufferType::Alternate {
+                // Alternate buffer must never have scrollback.  When shrinking,
+                // keep the bottom `new_height` rows (the ones the user can see)
+                // and discard the top ones.  This preserves the invariant
+                // `rows.len() == height` which all alternate-buffer coordinate
+                // logic depends on (handle_lf, handle_ri, insert_lines,
+                // delete_lines all compare cursor.pos.y against
+                // scroll_region_top/bottom directly without an offset).
+                let excess = self.rows.len().saturating_sub(new_height);
+                if excess > 0 {
+                    self.rows.drain(0..excess);
+                    self.row_cache.drain(0..excess);
+                    // Adjust cursor Y for the removed rows.
+                    self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
+                }
+            } else {
+                // Primary buffer: extra rows become scrollback (handled by
+                // enforce_scrollback_limit later).  Just clamp cursor.
+                if self.cursor.pos.y >= new_height {
+                    self.cursor.pos.y = new_height.saturating_sub(1);
+                }
             }
         }
 
@@ -1181,22 +1211,12 @@ impl Buffer {
             BufferType::Primary => {
                 let sy = self.cursor_screen_y();
 
-                // FULL-SCREEN REGION → RI never scrolls
-                if self.scroll_region_top == 0 && self.scroll_region_bottom == self.height - 1 {
-                    if self.cursor.pos.y > 0 {
-                        self.cursor.pos.y -= 1;
-                    }
-                    self.debug_assert_invariants();
-                    return;
-                }
-
-                // PARTIAL DECSTBM
                 if sy >= self.scroll_region_top && sy <= self.scroll_region_bottom {
                     if sy > self.scroll_region_top {
                         // move up inside region
                         self.cursor.pos.y -= 1;
                     } else {
-                        // at top → scroll region DOWN
+                        // at top margin → scroll region DOWN
                         self.scroll_region_down_primary();
                     }
                 } else {
@@ -1436,15 +1456,11 @@ impl Buffer {
         self.scroll_region_top = top;
         self.scroll_region_bottom = bottom;
 
-        // Move cursor to the top of the scroll region, col 0.
+        // DECSTBM always homes the cursor to (0, 0).
         // When DECOM is enabled, set_cursor_pos interprets y=0 as
-        // scroll_region_top, which is already correct.
-        // When DECOM is disabled, we pass `top` directly as the screen row.
-        if self.decom_enabled {
-            self.set_cursor_pos(Some(0), Some(0));
-        } else {
-            self.set_cursor_pos(Some(0), Some(top));
-        }
+        // scroll_region_top.  When DECOM is disabled, y=0 is screen top.
+        // Both cases are handled correctly by a single call.
+        self.set_cursor_pos(Some(0), Some(0));
     }
 
     /// Return the current scroll region as 0-based inclusive `(top, bottom)`.
@@ -1545,12 +1561,20 @@ impl Buffer {
     }
 
     /// Convert DECSTBM region (screen coords) into buffer row indices (rows[])
-    fn scroll_region_rows(&self) -> (usize, usize) {
+    ///
+    /// Ensures `self.rows` is extended to at least `height` entries so that
+    /// the returned indices always point to real rows.  Without this, an early
+    /// buffer (`rows.len()` < height) would clamp both top and bottom to the
+    /// same index, causing every scroll operation to silently no-op.
+    fn scroll_region_rows(&mut self) -> (usize, usize) {
         let start = self.visible_window_start(0);
+        let required = start + self.scroll_region_bottom + 1;
+        while self.rows.len() < required {
+            self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
+        }
         let top = start + self.scroll_region_top;
         let bottom = start + self.scroll_region_bottom;
-        let max = self.rows.len().saturating_sub(1);
-        (top.min(max), bottom.min(max))
+        (top, bottom)
     }
 
     /// Scroll DECSTBM region UP by 1 (primary buffer)

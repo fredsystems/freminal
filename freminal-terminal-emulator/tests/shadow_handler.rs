@@ -13,9 +13,16 @@
 //! handler code path is always exercised here.
 
 use freminal_common::buffer_states::modes::{
-    decarm::Decarm, decckm::Decckm, decscnm::Decscnm, keypad::KeypadMode, lnm::Lnm,
-    mouse::MouseTrack, reverse_wrap_around::ReverseWrapAround, rl_bracket::RlBracket,
-    sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+    decarm::Decarm,
+    decckm::Decckm,
+    decscnm::Decscnm,
+    keypad::KeypadMode,
+    lnm::Lnm,
+    mouse::{MouseEncoding, MouseTrack},
+    reverse_wrap_around::ReverseWrapAround,
+    rl_bracket::RlBracket,
+    sync_updates::SynchronizedUpdates,
+    xtmsewin::XtMseWin,
 };
 use freminal_terminal_emulator::state::internal::TerminalState;
 
@@ -256,18 +263,18 @@ fn mode_mouse_tracking_1003_any_event() {
 }
 
 #[test]
-fn mode_mouse_tracking_1006_sgr() {
+fn mode_mouse_encoding_1006_sgr() {
     let mut state = make_state();
     state.handle_incoming_data(b"\x1b[?1006h");
-    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseSgr);
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::Sgr);
 }
 
 #[test]
-fn mode_mouse_tracking_1006_reset() {
+fn mode_mouse_encoding_1006_reset() {
     let mut state = make_state();
     state.handle_incoming_data(b"\x1b[?1006h");
     state.handle_incoming_data(b"\x1b[?1006l");
-    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::X11);
 }
 
 // ── 7.10  Focus events (?1004) ──────────────────────────────────────
@@ -411,8 +418,9 @@ fn mode_wiring_realistic_session() {
 
     assert_eq!(state.modes.cursor_key, Decckm::Application);
     assert_eq!(state.modes.bracketed_paste, RlBracket::Enabled);
-    // Note: ?1006 overwrites ?1000 since both are MouseMode variants
-    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseSgr);
+    // ?1000h sets tracking to X11, ?1006h sets encoding to SGR — orthogonal axes
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::Sgr);
     assert_eq!(state.modes.focus_reporting, XtMseWin::Enabled);
     assert_eq!(
         state.modes.synchronized_updates,
@@ -428,9 +436,38 @@ fn mode_wiring_realistic_session() {
 
     assert_eq!(state.modes.cursor_key, Decckm::Ansi);
     assert_eq!(state.modes.bracketed_paste, RlBracket::Disabled);
-    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+    // ?1006l resets encoding to X11 but does NOT affect tracking level
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::X11);
     assert_eq!(state.modes.focus_reporting, XtMseWin::Disabled);
     assert_eq!(state.modes.synchronized_updates, SynchronizedUpdates::Draw);
+}
+
+// ── Lazygit scenario: mouse tracking + encoding are orthogonal ──────
+
+#[test]
+fn mode_lazygit_mouse_sequence() {
+    // Lazygit sends: ?1006h (SGR encoding), ?1000h (X11 tracking),
+    // ?1002h (button tracking), ?1003h (any-event tracking).
+    // Before the fix, ?1006h set mouse_tracking to XtMseSgr and ?1000h
+    // then overwrote it to XtMseX11, losing the SGR encoding.
+    let mut state = make_state();
+
+    state.handle_incoming_data(b"\x1b[?1006h"); // SGR encoding
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::Sgr);
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::NoTracking);
+
+    state.handle_incoming_data(b"\x1b[?1000h"); // X11 tracking
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::Sgr); // encoding preserved!
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+
+    state.handle_incoming_data(b"\x1b[?1002h"); // Button tracking
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::Sgr); // encoding preserved!
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseBtn);
+
+    state.handle_incoming_data(b"\x1b[?1003h"); // Any-event tracking
+    assert_eq!(state.modes.mouse_encoding, MouseEncoding::Sgr); // encoding preserved!
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseAny);
 }
 
 // ── 7.14  DECPAM / DECPNM (keypad mode) ──────────────────────────────

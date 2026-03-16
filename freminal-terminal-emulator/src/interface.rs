@@ -756,6 +756,7 @@ impl TerminalEmulator {
 
         let bracketed_paste = self.internal.modes.bracketed_paste.clone();
         let mouse_tracking = self.internal.modes.mouse_tracking.clone();
+        let mouse_encoding = self.internal.modes.mouse_encoding.clone();
         let repeat_keys = self.internal.should_repeat_keys();
         let cursor_key_app_mode = {
             use freminal_common::buffer_states::modes::decckm::Decckm;
@@ -795,6 +796,7 @@ impl TerminalEmulator {
             scroll_changed,
             bracketed_paste,
             mouse_tracking,
+            mouse_encoding,
             repeat_keys,
             cursor_key_app_mode,
             skip_draw,

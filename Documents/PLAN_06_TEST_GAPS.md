@@ -41,6 +41,7 @@ not match the actual codebase state by the time implementation begins.
   - Record the per-crate and per-file coverage percentages in Section "Coverage Baseline" below.
   - Identify all files with 0% coverage.
   - Identify all files below 50% coverage.
+  - Create a report (in this document) listing these files, their coverage, and any initial observations.
   - Do NOT write any tests yet — this is pure analysis.
   - **Verify:** Coverage report is generated. Baseline numbers are recorded in this document.
 
@@ -74,6 +75,7 @@ not match the actual codebase state by the time implementation begins.
   - Run `cargo test --all` — all tests pass.
   - Run `cargo llvm-cov --all --text` — coverage improved for the targeted files.
   - Update the coverage table in this document.
+  - At the end of the last subtask, create a final report summarizing the coverage improvements and any remaining gaps.
 
 ---
 

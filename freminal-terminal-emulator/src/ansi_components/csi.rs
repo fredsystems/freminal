@@ -344,7 +344,10 @@ fn is_csi_intermediate(b: u8) -> bool {
 mod tests {
     use super::*;
     use freminal_common::buffer_states::modes::{
-        decckm::Decckm, mouse::MouseTrack, rl_bracket::RlBracket, xtextscrn::XtExtscrn,
+        decckm::Decckm,
+        mouse::{MouseEncoding, MouseTrack},
+        rl_bracket::RlBracket,
+        xtextscrn::XtExtscrn,
     };
 
     /// Helper: feed a full CSI sequence (everything after ESC[) into the parser
@@ -407,7 +410,7 @@ mod tests {
         let modes = extract_modes(&output);
         assert_eq!(modes.len(), 2, "expected two modes, got {modes:?}");
         assert_eq!(*modes[0], Mode::MouseMode(MouseTrack::XtMseX11));
-        assert_eq!(*modes[1], Mode::MouseMode(MouseTrack::XtMseSgr));
+        assert_eq!(*modes[1], Mode::MouseEncodingMode(MouseEncoding::Sgr));
     }
 
     #[test]

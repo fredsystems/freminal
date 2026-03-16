@@ -59,8 +59,10 @@ pub fn ansi_parser_inner_csi_finished_sgr_ansi(
 
     let mut param_iter: IntoIter<Option<usize>> = params.into_iter();
     loop {
-        let Some(param) = param_iter.next().flatten() else {
-            break;
+        let param = match param_iter.next() {
+            None => break,      // iterator exhausted — genuinely done
+            Some(None) => 0,    // omitted param → default value 0 (Reset) per ECMA-48 §5.4.2
+            Some(Some(v)) => v, // explicit param
         };
 
         if param == 38 || param == 48 || param == 58 {

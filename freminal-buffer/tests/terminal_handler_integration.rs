@@ -3685,3 +3685,657 @@ fn ris_restores_original_non_80_width_after_deccolm() {
         "RIS after DECCOLM must restore original width (96), not hardcode 80"
     );
 }
+
+// ============================================================================
+// Regression tests for tmux scroll region / CPR fixes
+// ============================================================================
+
+/// Bug 1 regression: CPR must report screen-relative row, not absolute buffer row.
+///
+/// When scrollback exists, `cursor.pos.y` is an absolute index into the row
+/// vector.  CPR must subtract `visible_window_start` to report the screen row.
+#[test]
+fn cursor_report_with_scrollback_reports_screen_row() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Generate scrollback by outputting 30 lines (more than 24-row height)
+    for i in 0..30 {
+        handler.process_outputs(&[TerminalOutput::Data(format!("line {i}\n").into_bytes())]);
+    }
+
+    // Cursor should be on the last visible screen row (or near it).
+    // Move cursor to a known screen position.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(5),  // 1-indexed → col 4
+        y: Some(10), // 1-indexed → screen row 9
+    }]);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    // Drain to the last message (SetCursorPos doesn't write, but Data does write newlines)
+    let mut last_msg = None;
+    while let Ok(msg) = rx.try_recv() {
+        last_msg = Some(msg);
+    }
+    let bytes = match last_msg.expect("CursorReport must send a message") {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[10;5R",
+        "CPR must report screen-relative row (10), not absolute buffer row"
+    );
+}
+
+/// Bug 1 regression: CPR with DECOM reports region-relative row.
+#[test]
+fn cursor_report_with_decom_reports_region_relative_row() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Set scroll region rows 5..20 (1-based), then enable DECOM
+    handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+        top_margin: 5,
+        bottom_margin: 20,
+    }]);
+    handler.process_outputs(&[TerminalOutput::Mode(
+        freminal_common::buffer_states::mode::Mode::Decom(
+            freminal_common::buffer_states::modes::decom::Decom::OriginMode,
+        ),
+    )]);
+
+    // Move cursor to row 3 within the region (1-indexed, region-relative)
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(1),
+        y: Some(3), // region-relative row 3
+    }]);
+
+    handler.process_outputs(&[TerminalOutput::CursorReport]);
+
+    let mut last_msg = None;
+    while let Ok(msg) = rx.try_recv() {
+        last_msg = Some(msg);
+    }
+    let bytes = match last_msg.expect("CursorReport must send a message") {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+    assert_eq!(
+        response, "\x1b[3;1R",
+        "CPR with DECOM must report region-relative row (3)"
+    );
+}
+
+/// Bug 2 regression: DECSTBM always homes cursor to screen origin (0,0),
+/// not to the region top.
+#[test]
+fn decstbm_homes_cursor_to_screen_origin() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Move cursor to row 12
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(10),
+        y: Some(12),
+    }]);
+
+    // Set scroll region
+    handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+        top_margin: 5,
+        bottom_margin: 20,
+    }]);
+
+    // Cursor must be at screen row 0, col 0
+    let screen_pos = handler.buffer().get_cursor_screen_pos();
+    assert_eq!(screen_pos.y, 0, "DECSTBM must home cursor to screen row 0");
+    assert_eq!(screen_pos.x, 0, "DECSTBM must home cursor to column 0");
+}
+
+/// Bug 4 regression: RI at screen top with full-screen region must scroll down.
+#[test]
+fn ri_at_screen_top_full_region_scrolls_down() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(10, 5);
+
+    // Fill all 5 rows with identifiable content
+    for i in 0..5 {
+        let count = i + 1;
+        let chars: Vec<TChar> = (0..count).map(|_| TChar::Ascii(b'X')).collect();
+        buf.insert_text(&chars);
+        if i < 4 {
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+    }
+
+    // Verify initial state: lengths [1,2,3,4,5]
+    let lengths: Vec<usize> = buf
+        .visible_rows(0)
+        .iter()
+        .map(|r| r.get_characters().len())
+        .collect();
+    assert_eq!(lengths, vec![1, 2, 3, 4, 5]);
+
+    // Move cursor to screen top (row 0)
+    buf.set_cursor_pos(Some(0), Some(0));
+
+    // Full-screen region (default). RI at top should scroll screen down.
+    buf.handle_ri();
+
+    let lengths_after: Vec<usize> = buf
+        .visible_rows(0)
+        .iter()
+        .map(|r| r.get_characters().len())
+        .collect();
+
+    // Row 0 should be blank (scrolled in), rows shift down, row 4 (length 5) falls off
+    assert_eq!(
+        lengths_after,
+        vec![0, 1, 2, 3, 4],
+        "RI at screen top with full-screen region must scroll content down"
+    );
+}
+
+/// Bug 5 regression: Scroll region operations work during early buffer fill.
+#[test]
+fn scroll_region_works_during_early_buffer_fill() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    // Create a 10x10 buffer but only fill 3 rows
+    let mut buf = Buffer::new(10, 10);
+    for i in 0..3 {
+        let chars: Vec<TChar> = (0..=i).map(|_| TChar::Ascii(b'X')).collect();
+        buf.insert_text(&chars);
+        if i < 2 {
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+    }
+
+    // Set a scroll region that extends beyond current rows
+    buf.set_scroll_region(2, 8);
+
+    // Move cursor to bottom of region
+    buf.set_cursor_pos(Some(0), Some(7));
+
+    // LF at bottom of region should scroll the region up without panicking
+    buf.handle_lf();
+
+    // Verify buffer is sane
+    assert!(
+        buf.get_rows().len() >= 8,
+        "Buffer should have grown to accommodate scroll region"
+    );
+}
+
+// ============================================================================
+// Alternate buffer resize regression tests
+//
+// Root cause: `resize_height` did not truncate rows in the alternate buffer
+// when shrinking, leaving `rows.len() > height`.  This broke the invariant
+// that alternate buffer coordinates (`cursor.pos.y`) equal screen coordinates,
+// causing `handle_lf`, `handle_ri`, `insert_lines`, and `delete_lines` to
+// silently malfunction (cursor.pos.y would fall outside the scroll region
+// range even when the cursor was visually at the bottom of the screen).
+// ============================================================================
+
+/// After shrinking the alternate buffer, `rows.len()` must equal `new_height`.
+#[test]
+fn alt_buffer_resize_shrink_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    assert_eq!(buf.get_rows().len(), 24, "pre-condition");
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        20,
+        "alternate buffer must have exactly `height` rows after shrink"
+    );
+}
+
+/// After growing the alternate buffer, `rows.len()` must equal `new_height`.
+#[test]
+fn alt_buffer_resize_grow_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    assert_eq!(buf.get_rows().len(), 24, "pre-condition");
+
+    // Grow from 24 → 30
+    let _ = buf.set_size(80, 30, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        30,
+        "alternate buffer must have exactly `height` rows after grow"
+    );
+}
+
+/// LF at the bottom of the scroll region must trigger scrolling after a
+/// height shrink.  This was the exact symptom reported: tmux pane content
+/// overwrote itself instead of scrolling after a window resize.
+#[test]
+fn alt_buffer_lf_scrolls_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Set scroll region to full screen (1-based inclusive: 1..24)
+    buf.set_scroll_region(1, 24);
+
+    // Fill every row with a distinct marker character
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // After resize, scroll region is reset/clamped to full screen (0..19).
+    // Place cursor at the bottom of the visible screen.
+    buf.set_cursor_pos(Some(0), Some(19));
+
+    // LF at scroll_region_bottom should scroll the region up.
+    // Before the fix, this was a no-op because cursor.pos.y (e.g. 23)
+    // was > scroll_region_bottom (19), so the scroll_region check failed.
+    let bottom_tchar_before = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+
+    buf.handle_lf();
+
+    // The old bottom row should have been replaced with a blank row
+    let bottom_tchar_after = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+
+    assert_ne!(
+        bottom_tchar_before, bottom_tchar_after,
+        "LF at scroll_region_bottom must scroll the region (bottom row should change)"
+    );
+
+    // The new bottom row should be blank (Space)
+    assert_eq!(
+        bottom_tchar_after,
+        TChar::Space,
+        "new bottom row after LF scroll should be blank"
+    );
+}
+
+/// DL (delete lines) must work correctly in the alternate buffer after a
+/// height shrink.  tmux uses DL extensively for pane scrolling.
+#[test]
+fn alt_buffer_delete_lines_works_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill screen
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // Place cursor at row 5 (inside scroll region)
+    buf.set_cursor_pos(Some(0), Some(5));
+
+    // Read the character at row 6 before DL
+    let row_6_tchar_before = buf.get_rows()[6].resolve_cell(0).tchar().clone();
+
+    // Delete 1 line at cursor position
+    buf.delete_lines(1);
+
+    // Row 6's content should now be at row 5 (shifted up by DL)
+    let row_5_tchar_after = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+
+    assert_eq!(
+        row_5_tchar_after, row_6_tchar_before,
+        "DL should shift row 6 content up to row 5"
+    );
+
+    // Bottom of scroll region should be blank after DL
+    let bottom_tchar = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        bottom_tchar,
+        TChar::Space,
+        "bottom row should be blank after DL"
+    );
+}
+
+/// IL (insert lines) must work correctly in the alternate buffer after a
+/// height shrink.  tmux uses IL for pane scrolling.
+#[test]
+fn alt_buffer_insert_lines_works_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill screen
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // Place cursor at row 5
+    buf.set_cursor_pos(Some(0), Some(5));
+
+    // Read the character at row 5 before IL
+    let row_5_tchar_before = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+
+    // Insert 1 line at cursor position
+    buf.insert_lines(1);
+
+    // Row 5's content should have shifted down to row 6
+    let row_6_tchar_after = buf.get_rows()[6].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_6_tchar_after, row_5_tchar_before,
+        "IL should shift row 5 content down to row 6"
+    );
+
+    // Row 5 itself should now be blank (the inserted line)
+    let row_5_tchar_after = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_5_tchar_after,
+        TChar::Space,
+        "inserted row should be blank"
+    );
+}
+
+/// RI (reverse index) at scroll_region_top must scroll down after a height
+/// shrink.
+#[test]
+fn alt_buffer_ri_scrolls_after_resize_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill screen
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink from 24 → 20
+    let _ = buf.set_size(80, 20, 0);
+
+    // Place cursor at row 0 (top of scroll region)
+    buf.set_cursor_pos(Some(0), Some(0));
+
+    // Read the character at row 0 before RI
+    let row_0_tchar_before = buf.get_rows()[0].resolve_cell(0).tchar().clone();
+
+    // RI at scroll_region_top should scroll the region down
+    buf.handle_ri();
+
+    // Row 0's content should have moved to row 1
+    let row_1_tchar_after = buf.get_rows()[1].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_1_tchar_after, row_0_tchar_before,
+        "RI should shift row 0 content down to row 1"
+    );
+
+    // Row 0 should now be blank
+    let row_0_tchar_after = buf.get_rows()[0].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        row_0_tchar_after,
+        TChar::Space,
+        "top row should be blank after RI"
+    );
+}
+
+/// Multiple shrink-grow cycles must maintain the invariant.
+#[test]
+fn alt_buffer_resize_multiple_cycles_maintain_invariant() {
+    use freminal_buffer::buffer::Buffer;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Shrink → grow → shrink → grow
+    for &new_height in &[20_usize, 30, 15, 24] {
+        let _ = buf.set_size(80, new_height, 0);
+        assert_eq!(
+            buf.get_rows().len(),
+            new_height,
+            "alternate buffer rows.len() must equal height={new_height} after resize"
+        );
+    }
+}
+
+/// Simulates the exact tmux failure scenario: alternate buffer is active,
+/// DECSTBM is set, content is written, then the window is resized.  After
+/// resize, new output must scroll correctly.
+#[test]
+fn alt_buffer_tmux_resize_scenario() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // tmux sets DECSTBM to (1, height-1) for the top pane, leaving the
+    // bottom row for the status bar.  set_scroll_region takes 1-based
+    // inclusive params matching DECSTBM.
+    buf.set_scroll_region(1, 23); // 0-based rows 0..22 scroll, row 23 is status
+
+    // Fill the scroll region with content
+    for row in 0..23 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Write status bar
+    let status: Vec<TChar> = b"[tmux] 0:bash".iter().map(|&b| TChar::Ascii(b)).collect();
+    buf.set_cursor_pos(Some(0), Some(23));
+    buf.insert_text(&status);
+
+    // Now resize the window from 24 → 18 rows
+    let _ = buf.set_size(80, 18, 0);
+
+    assert_eq!(buf.get_rows().len(), 18, "post-resize row count");
+
+    // After resize, scroll region is clamped/reset.
+    // tmux would re-send DECSTBM for the new size (1-based inclusive):
+    buf.set_scroll_region(1, 17); // 0-based rows 0..16 scroll, row 17 is status
+
+    // Place cursor at the bottom of the scroll region
+    buf.set_cursor_pos(Some(0), Some(16));
+
+    // Write new content and LF — this must scroll, not overwrite
+    let new_content: Vec<TChar> = b"New output line"
+        .iter()
+        .map(|&b| TChar::Ascii(b))
+        .collect();
+    buf.insert_text(&new_content);
+    buf.handle_lf();
+
+    // Cursor should still be at row 16 (bottom of region, after scroll)
+    assert_eq!(
+        buf.get_cursor().pos.y,
+        16,
+        "cursor should stay at scroll region bottom after LF-triggered scroll"
+    );
+
+    // The new bottom row (16) should be blank (LF scrolled the region)
+    let bottom_tchar = buf.get_rows()[16].resolve_cell(0).tchar().clone();
+    assert_eq!(
+        bottom_tchar,
+        TChar::Space,
+        "bottom of scroll region should be blank after LF scroll"
+    );
+}
+
+// ============================================================================
+// Alternate buffer width-change resize regression tests
+//
+// Root cause: `reflow_to_width` was called unconditionally for all buffer
+// types.  For the alternate buffer, reflow re-wraps logical lines which can
+// produce more or fewer rows than `height`, breaking the invariant that
+// alternate buffers always have exactly `height` rows.  This caused the
+// exact same class of symptom as the height-shrink bug: coordinates
+// desynchronised, operations silently malfunctioned, and tmux content
+// disappeared or overwrote itself after making the window narrower.
+// ============================================================================
+
+/// Shrinking the width of the alternate buffer must NOT change the row count.
+/// Before the fix, `reflow_to_width` would re-wrap long lines and produce
+/// extra rows.
+#[test]
+fn alt_buffer_width_shrink_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill every row to full width so reflow would have split them.
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink width only: 80 → 40 (height stays 24).
+    let _ = buf.set_size(40, 24, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        24,
+        "alternate buffer must still have exactly `height` rows after width shrink"
+    );
+}
+
+/// Growing the width of the alternate buffer must NOT change the row count.
+#[test]
+fn alt_buffer_width_grow_maintains_row_count_invariant() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill rows with content
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Grow width only: 80 → 120 (height stays 24).
+    let _ = buf.set_size(120, 24, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        24,
+        "alternate buffer must still have exactly `height` rows after width grow"
+    );
+}
+
+/// Simultaneous width shrink + height shrink must maintain the invariant.
+/// This is the exact scenario from the bug report: making the window smaller
+/// in both dimensions while tmux is running.
+#[test]
+fn alt_buffer_width_and_height_shrink_maintains_invariant() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill rows with full-width content
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Shrink both: 80x24 → 40x18
+    let _ = buf.set_size(40, 18, 0);
+
+    assert_eq!(
+        buf.get_rows().len(),
+        18,
+        "alternate buffer must have exactly `new_height` rows after combined shrink"
+    );
+}
+
+/// After a width-only shrink, LF at the bottom of the scroll region must
+/// still trigger scrolling.
+#[test]
+fn alt_buffer_lf_works_after_width_shrink() {
+    use freminal_buffer::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let mut buf = Buffer::new(80, 24);
+    buf.enter_alternate(0);
+
+    // Fill rows
+    for row in 0..24 {
+        let ch = b'A' + (row as u8);
+        let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
+        buf.set_cursor_pos(Some(0), Some(row));
+        buf.insert_text(&chars);
+    }
+
+    // Width-only shrink: 80 → 40
+    let _ = buf.set_size(40, 24, 0);
+
+    // Cursor at bottom of screen
+    buf.set_cursor_pos(Some(0), Some(23));
+    let bottom_before = buf.get_rows()[23].resolve_cell(0).tchar().clone();
+
+    buf.handle_lf();
+
+    // Bottom row should be blank (scroll happened)
+    let bottom_after = buf.get_rows()[23].resolve_cell(0).tchar().clone();
+    assert_ne!(
+        bottom_before, bottom_after,
+        "LF at bottom must scroll after width-only shrink"
+    );
+    assert_eq!(
+        bottom_after,
+        TChar::Space,
+        "new bottom row should be blank after LF scroll"
+    );
+}

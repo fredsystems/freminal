@@ -19,7 +19,7 @@ use crate::buffer_states::modes::{
     grapheme::GraphemeClustering,
     keypad::KeypadMode,
     lnm::Lnm,
-    mouse::MouseTrack,
+    mouse::{MouseEncoding, MouseTrack},
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
@@ -56,6 +56,11 @@ pub struct TerminalModes {
     pub focus_reporting: XtMseWin,
     pub cursor_blinking: XtCBlink,
     pub mouse_tracking: MouseTrack,
+    /// The wire format for mouse reports, set independently of `mouse_tracking`.
+    ///
+    /// `?1005` → `Utf8`, `?1006` → `Sgr`, `?1016` → `SgrPixels`.
+    /// Default is `X11` (legacy binary encoding).
+    pub mouse_encoding: MouseEncoding,
     pub synchronized_updates: SynchronizedUpdates,
     pub invert_screen: Decscnm,
     pub repeat_keys: Decarm,
@@ -87,6 +92,8 @@ pub enum Mode {
     XtMseWin(XtMseWin),
     BracketedPaste(RlBracket),
     MouseMode(MouseTrack),
+    /// Mouse encoding format (?1005/?1006/?1016) — orthogonal to `MouseMode`.
+    MouseEncodingMode(MouseEncoding),
     ReverseWrapAround(ReverseWrapAround),
     SynchronizedUpdates(SynchronizedUpdates),
     GraphemeClustering(GraphemeClustering),
@@ -101,6 +108,15 @@ impl Mode {
         match mode {
             SetMode::DecSet => Self::MouseMode(set),
             SetMode::DecRst => Self::MouseMode(MouseTrack::NoTracking),
+            SetMode::DecQuery => Self::MouseMode(MouseTrack::Query(query_id)),
+        }
+    }
+
+    /// Map a mouse-encoding param to the appropriate `MouseEncodingMode` variant.
+    const fn mouse_encoding_mode(mode: SetMode, set: MouseEncoding, query_id: usize) -> Self {
+        match mode {
+            SetMode::DecSet => Self::MouseEncodingMode(set),
+            SetMode::DecRst => Self::MouseEncodingMode(MouseEncoding::X11),
             SetMode::DecQuery => Self::MouseMode(MouseTrack::Query(query_id)),
         }
     }
@@ -126,12 +142,12 @@ impl Mode {
             b"?1002" => Self::mouse_mode(mode, MouseTrack::XtMseBtn, 1002),
             b"?1003" => Self::mouse_mode(mode, MouseTrack::XtMseAny, 1003),
             b"?1004" => Self::XtMseWin(XtMseWin::new(&mode)),
-            b"?1005" => Self::mouse_mode(mode, MouseTrack::XtMseUtf, 1005),
-            b"?1006" => Self::mouse_mode(mode, MouseTrack::XtMseSgr, 1006),
+            b"?1005" => Self::mouse_encoding_mode(mode, MouseEncoding::Utf8, 1005),
+            b"?1006" => Self::mouse_encoding_mode(mode, MouseEncoding::Sgr, 1006),
             // ?1015 (urxvt mouse) intentionally omitted — the format clashes
             // with DL / SD / window manipulation sequences and is not
             // recommended; ?1006 (SGR) is the preferred replacement.
-            b"?1016" => Self::mouse_mode(mode, MouseTrack::XtMseSgrPixels, 1016),
+            b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
             b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
             b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(&mode)),
@@ -180,6 +196,7 @@ impl ReportMode for Mode {
             Self::XtMseWin(xt_mse_win) => xt_mse_win.report(override_mode),
             Self::BracketedPaste(rl_bracket) => rl_bracket.report(override_mode),
             Self::MouseMode(mouse_mode) => mouse_mode.report(override_mode),
+            Self::MouseEncodingMode(mouse_encoding) => mouse_encoding.report(override_mode),
             Self::ReverseWrapAround(reverse_wrap_around) => {
                 reverse_wrap_around.report(override_mode)
             }
@@ -216,6 +233,9 @@ impl fmt::Display for Mode {
             Self::LineFeedMode(lnm) => write!(f, "{lnm}"),
             Self::XtCBlink(xt_cblink) => write!(f, "{xt_cblink}"),
             Self::MouseMode(mouse_mode) => write!(f, "{mouse_mode}"),
+            Self::MouseEncodingMode(mouse_encoding) => {
+                write!(f, "MouseEncoding({mouse_encoding})")
+            }
             Self::XtMseWin(xt_mse_win) => write!(f, "{xt_mse_win}"),
             Self::XtExtscrn(xt_extscrn) => write!(f, "{xt_extscrn}"),
             Self::AltScreen47(alt47) => write!(f, "{alt47}"),

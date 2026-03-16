@@ -53,8 +53,22 @@
               "System"
               "TerminalEmulator"
             ];
-            startupNotify = true;
-            # icon = "freminal"; # add this once you install an icon
+            startupNotify = false;
+            icon = "freminal";
+          };
+
+          desktopItemTest = pkgs.makeDesktopItem {
+            name = "freminal-recording";
+            desktopName = "Freminal (recording)";
+            comment = "Terminal emulator";
+            exec = "freminal --recording-path /home/fred/freminal.bin";
+            terminal = false;
+            categories = [
+              "System"
+              "TerminalEmulator"
+            ];
+            startupNotify = false;
+            icon = "freminal";
           };
         in
         {
@@ -73,15 +87,18 @@
 
             buildInputs = runtimeLibs;
 
-            desktopItems = [ desktopItem ];
+            desktopItems = [
+              desktopItem
+              desktopItemTest
+            ];
 
             postInstall = ''
               wrapProgram $out/bin/freminal \
                 --prefix LD_LIBRARY_PATH : ${runtimeLibPath}
 
               # optional, once you have icons in the repo:
-              # install -Dm644 assets/freminal.png \
-              #   $out/share/icons/hicolor/256x256/apps/freminal.png
+              install -Dm644 assets/icon.png \
+                $out/share/icons/hicolor/256x256/apps/freminal.png
             '';
           };
         }
@@ -104,6 +121,7 @@
                 "^Documents/reference"
                 "^res/"
                 "typos.toml"
+                "\\.bin$"
               ];
             };
           };

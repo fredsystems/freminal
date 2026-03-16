@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::{io::Write, path::Path, time::Instant};
+use std::{io::Write, path::Path, path::PathBuf, time::Instant};
 
 use super::{PtyRead, PtyWrite};
 use crate::recording;
@@ -22,9 +22,31 @@ pub struct FreminalPtyInputOutput {
     _termcaps: TempDir,
 }
 
+/// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
+/// by Nix devshell sandbox environments (pointing to e.g. `/build` which does
+/// not exist at runtime).
+///
+/// Resolution order:
+/// 1. `XDG_RUNTIME_DIR` — per-user volatile dir guaranteed to exist on systemd
+///    systems (typically `/run/user/<uid>`).
+/// 2. `/tmp` — universal fallback.
+fn safe_temp_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        let path = PathBuf::from(&xdg);
+        if path.is_dir() {
+            return path;
+        }
+    }
+    PathBuf::from("/tmp")
+}
+
 fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
     let mut terminfo_tarball = tar::Archive::new(TERMINFO);
-    let temp_dir = TempDir::new().map_err(ExtractTerminfoError::CreateTempDir)?;
+    let base = safe_temp_dir();
+    let temp_dir = TempDir::new_in(&base).map_err(|e| ExtractTerminfoError::CreateTempDir {
+        source: e,
+        path: base,
+    })?;
     terminfo_tarball
         .unpack(temp_dir.path())
         .map_err(ExtractTerminfoError::Extraction)?;
@@ -36,8 +58,12 @@ fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
 enum ExtractTerminfoError {
     #[error("failed to extract")]
     Extraction(#[source] std::io::Error),
-    #[error("failed to create temp dir")]
-    CreateTempDir(#[source] std::io::Error),
+    #[error("failed to create temp dir in {path}")]
+    CreateTempDir {
+        #[source]
+        source: std::io::Error,
+        path: PathBuf,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -50,18 +76,17 @@ pub fn run_terminal(
 ) -> Result<()> {
     let pty_system = NativePtySystem::default();
 
-    let pair = match pty_system.openpty(PtySize {
-        rows: DEFAULT_HEIGHT,
-        cols: DEFAULT_WIDTH,
-        pixel_width: 0,
-        pixel_height: 0,
-    }) {
-        Ok(pair) => pair,
-        Err(e) => {
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: DEFAULT_HEIGHT,
+            cols: DEFAULT_WIDTH,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| {
             error!("Failed to open pty: {e}");
-            std::process::exit(1);
-        }
-    };
+            e
+        })?;
 
     let mut cmd = shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new);
 
@@ -112,14 +137,26 @@ pub fn run_terminal(
         cmd.env("LANG", locale);
     }
 
-    // these are cleanups because I develop this on my system under wezterm. I don't want
-    // to inherit anything from the env except what the system provides.
+    // Remove parent-terminal environment variables so the child shell does
+    // not inherit stale references to the parent terminal emulator.
     cmd.env_remove("WEZTERM_CONFIG_DIR");
     cmd.env_remove("WEZTERM_CONFIG_FILE");
     cmd.env_remove("WEZTERM_EXECUTABLE");
     cmd.env_remove("WEZTERM_EXECUTABLE_DIR");
     cmd.env_remove("WEZTERM_PANE");
     cmd.env_remove("WEZTERM_UNIX_SOCKET");
+
+    // Nix devshell / sandbox hygiene: when Freminal is launched from a
+    // shell that has `direnv` + Nix devshell active, several variables
+    // may point to non-existent sandbox paths (e.g. TMPDIR=/build).
+    // Removing them lets the child shell fall back to system defaults.
+    cmd.env_remove("TMPDIR");
+    cmd.env_remove("TEMP");
+    cmd.env_remove("TMP");
+    cmd.env_remove("TEMPDIR");
+    cmd.env_remove("NIX_BUILD_TOP");
+    cmd.env_remove("IN_NIX_SHELL");
+    cmd.env_remove("TERMINFO_DIRS");
 
     let _child = pair.slave.spawn_command(cmd)?;
 
@@ -155,11 +192,20 @@ pub fn run_terminal(
             }
         }
 
-        // Consume the output from the child
+        // Consume the output from the child.
+        //
+        // When the PTY is closed (amount_read == 0, i.e. the shell exited),
+        // we simply `return` instead of calling `process::exit()`.  Returning
+        // drops `send_tx`, which closes the `pty_read_rx` channel in the PTY
+        // consumer thread — that thread then signals the GUI to close cleanly.
+        //
+        // Calling `process::exit()` from a worker thread is dangerous: it
+        // runs C exit handlers (`__eglFini`, etc.) while the GUI main thread
+        // may be mid-`eglSwapBuffers`, causing heap corruption → SIGSEGV.
         while let Ok(amount_read) = reader.read(buf) {
             if amount_read == 0 {
-                // PTY closed, exit(0)
-                std::process::exit(0);
+                info!("PTY closed (read returned 0 bytes); reader thread exiting");
+                return;
             }
             let data = buf[..amount_read].to_vec();
 
@@ -170,7 +216,7 @@ pub fn run_terminal(
                 });
                 if let Err(e) = recording::write_frame(file, elapsed, &data) {
                     error!("Failed to write to recording file: {e}");
-                    std::process::exit(1);
+                    return;
                 }
             }
 
@@ -179,8 +225,7 @@ pub fn run_terminal(
                 read_amount: amount_read,
             }) {
                 error!("Failed to send data to terminal: {e}");
-                // exit
-                std::process::exit(1);
+                return;
             }
         }
     });
@@ -204,7 +249,7 @@ pub fn run_terminal(
                 Ok(writer) => writer,
                 Err(e) => {
                     error!("Failed to take writer: {e}");
-                    std::process::exit(1);
+                    return;
                 }
             };
 
@@ -253,10 +298,10 @@ impl FreminalPtyInputOutput {
         recording: Option<String>,
         shell: Option<String>,
     ) -> Result<Self> {
-        let termcaps = extract_terminfo().unwrap_or_else(|e| {
+        let termcaps = extract_terminfo().map_err(|e| {
             error!("Failed to extract terminfo: {e}");
-            std::process::exit(1);
-        });
+            e
+        })?;
 
         run_terminal(write_rx, send_tx, recording, shell, termcaps.path())?;
         Ok(Self {
