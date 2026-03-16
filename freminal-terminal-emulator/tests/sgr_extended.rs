@@ -92,3 +92,138 @@ fn mixed_partial_and_complete_sequences_do_not_panic() {
         "expected at least one SGR output from mixed partial and valid sequences"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Leading-semicolon SGR tests — ECMA-48 §5.4.2: omitted parameters default to 0
+// ---------------------------------------------------------------------------
+
+use freminal_common::colors::TerminalColor;
+use freminal_common::sgr::SelectGraphicRendition;
+
+/// `ESC[;1m` — omitted first param (= reset), then bold.
+/// Per ECMA-48, the leading `;` means the first parameter is absent and
+/// takes its default value (0 = Reset for SGR).
+#[test]
+fn sgr_leading_semicolon_reset_then_bold() {
+    let outs = push_seq("\x1b[;1m");
+    let sgrs: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            TerminalOutput::Sgr(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sgrs,
+        vec![SelectGraphicRendition::Reset, SelectGraphicRendition::Bold],
+        "leading semicolon should produce Reset then Bold"
+    );
+}
+
+/// `ESC[;38;2;203;166;247m` — the atuin mauve/pink color that was broken.
+/// Omitted first param (= reset), then truecolor foreground.
+#[test]
+fn sgr_leading_semicolon_truecolor_fg() {
+    let outs = push_seq("\x1b[;38;2;203;166;247m");
+    let sgrs: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            TerminalOutput::Sgr(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sgrs,
+        vec![
+            SelectGraphicRendition::Reset,
+            SelectGraphicRendition::Foreground(TerminalColor::Custom(203, 166, 247)),
+        ],
+        "leading semicolon + truecolor fg should produce Reset + Custom(203,166,247)"
+    );
+}
+
+/// `ESC[;1;38;2;203;166;247;48;2;49;50;68m` — the full atuin highlight sequence.
+/// Omitted first param (= reset), bold, truecolor fg (mauve), truecolor bg (dark).
+#[test]
+fn sgr_leading_semicolon_bold_truecolor_fg_and_bg() {
+    let outs = push_seq("\x1b[;1;38;2;203;166;247;48;2;49;50;68m");
+    let sgrs: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            TerminalOutput::Sgr(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sgrs,
+        vec![
+            SelectGraphicRendition::Reset,
+            SelectGraphicRendition::Bold,
+            SelectGraphicRendition::Foreground(TerminalColor::Custom(203, 166, 247)),
+            SelectGraphicRendition::Background(TerminalColor::Custom(49, 50, 68)),
+        ],
+    );
+}
+
+/// `ESC[;48;2;30;30;46m` — the atuin dark background fill (95 occurrences in test.bin).
+#[test]
+fn sgr_leading_semicolon_truecolor_bg() {
+    let outs = push_seq("\x1b[;48;2;30;30;46m");
+    let sgrs: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            TerminalOutput::Sgr(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sgrs,
+        vec![
+            SelectGraphicRendition::Reset,
+            SelectGraphicRendition::Background(TerminalColor::Custom(30, 30, 46)),
+        ],
+    );
+}
+
+/// `ESC[;38;5;59;48;2;30;30;46m` — palette-index fg + truecolor bg with leading semicolon.
+#[test]
+fn sgr_leading_semicolon_palette_fg_truecolor_bg() {
+    let outs = push_seq("\x1b[;38;5;59;48;2;30;30;46m");
+    let sgrs: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            TerminalOutput::Sgr(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sgrs,
+        vec![
+            SelectGraphicRendition::Reset,
+            SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(59)),
+            SelectGraphicRendition::Background(TerminalColor::Custom(30, 30, 46)),
+        ],
+    );
+}
+
+/// Mid-sequence omitted parameter: `ESC[1;;38;2;100;200;50m`
+/// means Bold, Reset (omitted = 0), then truecolor fg.
+#[test]
+fn sgr_mid_sequence_omitted_param() {
+    let outs = push_seq("\x1b[1;;38;2;100;200;50m");
+    let sgrs: Vec<_> = outs
+        .iter()
+        .filter_map(|o| match o {
+            TerminalOutput::Sgr(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sgrs,
+        vec![
+            SelectGraphicRendition::Bold,
+            SelectGraphicRendition::Reset,
+            SelectGraphicRendition::Foreground(TerminalColor::Custom(100, 200, 50)),
+        ],
+    );
+}
