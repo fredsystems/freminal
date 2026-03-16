@@ -185,7 +185,7 @@ jobs:
         if: env.MACOS_CERTIFICATE != ''
         env:
           MACOS_CERTIFICATE_PWD: ${{ secrets.MAOS_CERTIFICATE_PWD }}
-          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE }}
           # the stupid cert pwd env var is not named properly in github. Nvm, just use the wrong name and it will work.
         run: |
           echo "$MACOS_CERTIFICATE" | base64 -d > certificate.p12
