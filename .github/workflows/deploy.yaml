@@ -34,7 +34,7 @@ jobs:
         run: cargo install cargo-bundle
 
       - name: Bundle .deb package and build release binary
-        run: cargo bundle --release
+        run: cargo bundle --release -p freminal
 
       - name: Extract version
         run: |
@@ -79,7 +79,7 @@ jobs:
         run: cargo install cargo-bundle
 
       - name: Bundle .deb package and build release binary
-        run: cargo bundle --release
+        run: cargo bundle --release -p freminal
 
       - name: Extract version
         run: |
@@ -116,7 +116,7 @@ jobs:
 
       # cargo-bundle does not support Windows (cargo-bundle issue #77)
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release -p freminal
 
       - name: Extract version
         shell: bash
