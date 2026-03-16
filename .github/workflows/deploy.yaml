@@ -163,6 +163,8 @@ jobs:
   build-macos:
     name: Build macOS
     runs-on: macos-latest
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -180,9 +182,8 @@ jobs:
         run: cargo bundle --release -p freminal
 
       - name: Code sign
-        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        if: env.MACOS_CERTIFICATE != ''
         env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MAOS_CERTIFICATE_PWD }}
           MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
           # the stupid cert pwd env var is not named properly in github. Nvm, just use the wrong name and it will work.
