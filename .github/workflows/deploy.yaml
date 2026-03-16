@@ -94,6 +94,7 @@ jobs:
           mkdir -p dist
           cp target/release/freminal "dist/freminal-${VERSION}-linux-arm64"
           cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-arm64.deb"
+          cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-arm64.AppImage"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
