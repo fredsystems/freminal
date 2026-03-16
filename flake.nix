@@ -53,8 +53,8 @@
               "System"
               "TerminalEmulator"
             ];
-            startupNotify = true;
-            icon = "freminal"; # add this once you install an icon
+            startupNotify = false;
+            icon = "freminal";
           };
 
           desktopItemTest = pkgs.makeDesktopItem {
@@ -67,8 +67,8 @@
               "System"
               "TerminalEmulator"
             ];
-            startupNotify = true;
-            icon = "freminal"; # add this once you install an icon
+            startupNotify = false;
+            icon = "freminal";
           };
         in
         {
