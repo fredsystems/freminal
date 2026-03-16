@@ -115,10 +115,10 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
 
 ---
 
-- [ ] **6.4 — `build_snapshot` behavioral tests (P0)**
+- [x] **6.4 — `build_snapshot` behavioral tests (P0)**
   - **Priority:** P0 — every frame depends on correct snapshot production
   - **Files:** `freminal-terminal-emulator/src/interface.rs`
-  - **Tests in:** `freminal-terminal-emulator/tests/snapshot_tests.rs` (new file)
+  - **Tests in:** `freminal-terminal-emulator/tests/snapshot_build.rs` (new file)
   - **What to test:**
     - `content_changed` is `true` after PTY data arrives, `false` on a second call with no data.
     - `content_changed` is `true` after `erase_display`.
@@ -131,6 +131,14 @@ dead code and to get an accurate coverage baseline for `internal.rs`.
     - `scroll_offset` clamping: `set_gui_scroll_offset` with a value beyond max is clamped.
     - Auto-scroll reset: `gui_scroll_offset` resets to 0 when new PTY data arrives while scrolled back.
   - **Verify:** `cargo test --all` passes.
+  - ✅ **Completed 2026-03-16.** Created `freminal-terminal-emulator/tests/snapshot_build.rs`
+    with 27 behavioral tests grouped by invariant: first-ever snapshot (3), clean path / Arc
+    reuse (2), dirty path (3), cursor-only move (1), alternate screen (5), show_cursor
+    suppression when scrolled back (1), scroll_changed flag (3), auto-scroll reset (1), offset
+    clamping (1), dimension tracking (2), is_normal_display / DECSCNM (3), visible content
+    match (1), erase display cache invalidation (1). Default terminal size discovered to be
+    100×100 (not 24×80); `fill_scrollback` helper writes 150 lines to guarantee scrollback.
+    All 27 tests pass. Clippy clean. Machete clean.
 
 ---
 
