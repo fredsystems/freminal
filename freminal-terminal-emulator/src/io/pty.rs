@@ -41,7 +41,9 @@ pub struct FreminalPtyInputOutput {
 /// 1. `XDG_RUNTIME_DIR` — per-user volatile dir guaranteed to exist on systemd
 ///    systems (typically `/run/user/<uid>`).
 /// 2. `std::env::temp_dir()` — platform-native fallback (`%TEMP%` on Windows,
-///    `/tmp` on Linux/macOS).
+///    `/tmp` on Linux/macOS).  Validated with `.is_dir()` to catch poisoned
+///    environment variables (e.g. `TMPDIR=/build` in Nix sandboxes).
+/// 3. On Unix only: hardcoded `/tmp` as a last resort.
 fn safe_temp_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         let path = PathBuf::from(&xdg);
@@ -49,7 +51,22 @@ fn safe_temp_dir() -> PathBuf {
             return path;
         }
     }
-    std::env::temp_dir()
+    let system_temp = std::env::temp_dir();
+    if system_temp.is_dir() {
+        return system_temp;
+    }
+    // On Unix, /tmp is virtually always available even when env vars are
+    // poisoned (e.g. inside Nix build sandboxes).
+    #[cfg(unix)]
+    {
+        let fallback = PathBuf::from("/tmp");
+        if fallback.is_dir() {
+            return fallback;
+        }
+    }
+    // All validation failed — return the system default anyway and let the
+    // caller surface the error when it tries to create a temp directory.
+    system_temp
 }
 
 fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {

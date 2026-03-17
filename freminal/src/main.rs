@@ -453,12 +453,26 @@ fn main() {
                                 }
                             }
                             recv(child_exit) -> _ => {
-                                // The child process exited.  On Windows the PTY
-                                // read pipe may still be open (ConPTY does not
-                                // close it), so we cannot rely on `pty_read_rx`
-                                // closing.  Shut down cleanly here.
-                                info!("Child process exited; requesting GUI close");
+                                // The child process exited.  On Unix the PTY
+                                // reader thread may still have buffered data
+                                // that hasn't been sent yet (waitpid can return
+                                // before the pipe is fully drained).  Drain any
+                                // remaining PTY output with a short timeout so
+                                // the final chunks are not lost.
+                                //
+                                // On Windows, ConPTY does not close the read
+                                // pipe after child exit, so the timeout ensures
+                                // we don't block forever.
+                                info!("Child process exited; draining remaining PTY output");
 
+                                let drain_deadline = std::time::Duration::from_millis(200);
+                                while let Ok(read) = pty_read_rx.recv_timeout(drain_deadline) {
+                                    emulator.handle_incoming_data(
+                                        &read.buf[0..read.read_amount],
+                                    );
+                                }
+
+                                info!("PTY drain complete; requesting GUI close");
                                 post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
 
                                 if let Some(ctx) = egui_ctx_pty.get() {

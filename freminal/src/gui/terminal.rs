@@ -1161,6 +1161,7 @@ impl FreminalTerminalWidget {
         // as a pointer event, and resets stale inter-frame state so the next
         // real input starts from a clean slate.
         if suppress_input {
+            self.previous_key = None;
             self.previous_mouse_state = None;
             self.previous_scroll_amount = 0.0;
             view_state.selection.is_selecting = false;
