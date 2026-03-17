@@ -193,7 +193,7 @@ jobs:
           username: ${{ secrets.APPLE_ID_USERNAME }}
           password: ${{ secrets.APPLE_ID_PASSWORD }}
           apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
-          app-path: target/release/bundle/osx/*.app/entitlements.plist
+          app-path: target/release/bundle/osx/*.app
           # the stupid cert pwd env var is not named properly in github. Nvm, just use the wrong name and it will work.
         # run: |
         #   echo "$MACOS_CERTIFICATE" | base64 -d > certificate.p12
