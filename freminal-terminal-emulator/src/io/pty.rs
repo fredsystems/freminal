@@ -71,6 +71,7 @@ pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,
     send_tx: Sender<PtyRead>,
     recording_path: Option<String>,
+    command: Option<(String, Vec<String>)>,
     shell: Option<String>,
     termcaps: &Path,
 ) -> Result<()> {
@@ -88,7 +89,13 @@ pub fn run_terminal(
             e
         })?;
 
-    let mut cmd = shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new);
+    let mut cmd = if let Some((prog, args)) = command {
+        let mut c = CommandBuilder::new(prog);
+        c.args(args);
+        c
+    } else {
+        shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
+    };
 
     cmd.env("TERMINFO", termcaps);
     // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
@@ -296,6 +303,7 @@ impl FreminalPtyInputOutput {
         write_rx: Receiver<PtyWrite>,
         send_tx: Sender<PtyRead>,
         recording: Option<String>,
+        command: Option<(String, Vec<String>)>,
         shell: Option<String>,
     ) -> Result<Self> {
         let termcaps = extract_terminfo().map_err(|e| {
@@ -303,7 +311,14 @@ impl FreminalPtyInputOutput {
             e
         })?;
 
-        run_terminal(write_rx, send_tx, recording, shell, termcaps.path())?;
+        run_terminal(
+            write_rx,
+            send_tx,
+            recording,
+            command,
+            shell,
+            termcaps.path(),
+        )?;
         Ok(Self {
             _termcaps: termcaps,
         })

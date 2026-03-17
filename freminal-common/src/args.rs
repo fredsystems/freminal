@@ -49,4 +49,17 @@ pub struct Args {
     /// emulator.
     #[arg(long = "with-playback-file")]
     pub playback: Option<PathBuf>,
+
+    /// Program to run instead of the default shell.
+    ///
+    /// Everything after `--` (or the first non-option argument) is treated as
+    /// a command and its arguments. When specified, freminal launches this
+    /// program and exits when it terminates.
+    ///
+    /// Examples:
+    ///   freminal yazi
+    ///   freminal -- nvim -u NONE file.txt
+    ///   freminal htop
+    #[arg(trailing_var_arg = true)]
+    pub command: Vec<String>,
 }

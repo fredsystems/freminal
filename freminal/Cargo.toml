@@ -17,16 +17,13 @@ name = "Freminal"
 identifier = "io.github.fredclausen.freminal"
 copyright = "Copyright (c) 2024-2025 Fred Clausen"
 category = "Developer Tools"
-icon = ["32x32.png", "128x128.png", "128x128@2x.png"]
-version = "1.0.0"
-resources = ["assets", "images/**/*.png", "secrets/public_key.txt"]
 short_description = "A terminal emulator written in Rust"
 long_description = """
 Freminal is a terminal emulator written in Rust, designed to provide a fast, efficient, and customizable terminal experience. It leverages modern Rust libraries and technologies to deliver a robust and user-friendly interface for developers and power users.
 """
-# deb_depends = ["libgl1-mesa-glx", "libsdl2-2.0-0 (>= 2.0.5)"]
+deb_depends = ["libgl1-mesa-glx"]
 # osx_frameworks = ["SDL2"]
-osx_url_schemes = ["io.github.fredclausen.freminal"]
+# osx_url_schemes = ["io.github.fredclausen.freminal"]
 
 [[bin]]
 name = "freminal"
