@@ -19,7 +19,9 @@ use tempfile::TempDir;
 use thiserror::Error;
 
 pub struct FreminalPtyInputOutput {
-    _termcaps: TempDir,
+    /// Holds the extracted terminfo directory alive for the lifetime of the PTY.
+    /// `None` on Windows where terminfo is not used.
+    _termcaps: Option<TempDir>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -74,7 +76,7 @@ pub fn run_terminal(
     recording_path: Option<String>,
     command: Option<(String, Vec<String>)>,
     shell: Option<String>,
-    termcaps: &Path,
+    termcaps: Option<&Path>,
 ) -> Result<()> {
     let pty_system = NativePtySystem::default();
 
@@ -98,7 +100,9 @@ pub fn run_terminal(
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
     };
 
-    cmd.env("TERMINFO", termcaps);
+    if let Some(termcaps) = termcaps {
+        cmd.env("TERMINFO", termcaps);
+    }
     // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
     // "xterm-freminal" for maximum compatibility. Programs like neovim, tmux, and
     // many TUI apps have hardcoded behavior based on TERM — setting it to an
@@ -313,10 +317,17 @@ impl FreminalPtyInputOutput {
         command: Option<(String, Vec<String>)>,
         shell: Option<String>,
     ) -> Result<Self> {
-        let termcaps = extract_terminfo().map_err(|e| {
-            error!("Failed to extract terminfo: {e}");
-            e
-        })?;
+        // Terminfo is a Unix concept — Windows programs (cmd.exe, PowerShell)
+        // don't use it.  Skip extraction entirely on Windows to avoid issues
+        // with symlinks in the tarball requiring elevated privileges.
+        let termcaps = if cfg!(target_os = "windows") {
+            None
+        } else {
+            Some(extract_terminfo().map_err(|e| {
+                error!("Failed to extract terminfo: {e}");
+                e
+            })?)
+        };
 
         run_terminal(
             write_rx,
@@ -324,7 +335,7 @@ impl FreminalPtyInputOutput {
             recording,
             command,
             shell,
-            termcaps.path(),
+            termcaps.as_ref().map(TempDir::path),
         )?;
         Ok(Self {
             _termcaps: termcaps,
