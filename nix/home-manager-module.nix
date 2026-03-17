@@ -71,6 +71,10 @@ let
         inherit (s.scrollback) limit;
       };
 
+      uiSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.ui) hide_menu_bar;
+      };
+
       result = {
         version = 1;
         cursor = cursorSection;
@@ -79,7 +83,8 @@ let
       }
       // lib.optionalAttrs (fontSection != { }) { font = fontSection; }
       // lib.optionalAttrs (shellSection != { }) { shell = shellSection; }
-      // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; };
+      // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; }
+      // lib.optionalAttrs (uiSection != { }) { ui = uiSection; };
     in
     result;
 in
@@ -208,6 +213,17 @@ in
           type = types.ints.between 1 100000;
           default = 4000;
           description = "Maximum number of scrollback lines (1–100000).";
+        };
+      };
+
+      ui = {
+        hide_menu_bar = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Hide the menu bar at the top of the window.
+            Null uses the default (false).
+          '';
         };
       };
     };

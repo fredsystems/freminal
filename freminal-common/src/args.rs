@@ -50,6 +50,10 @@ pub struct Args {
     #[arg(long = "with-playback-file")]
     pub playback: Option<PathBuf>,
 
+    /// Hide the menu bar at the top of the window (overrides config file)
+    #[arg(long = "hide-menu-bar")]
+    pub hide_menu_bar: bool,
+
     /// Program to run instead of the default shell.
     ///
     /// Everything after `--` (or the first non-option argument) is treated as

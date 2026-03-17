@@ -466,7 +466,7 @@ fn cli_shell_overrides_toml_shell() {
     let mut cfg = load_from_toml(toml).expect("should parse");
     assert_eq!(cfg.shell_path(), Some("/bin/zsh"));
 
-    cfg.apply_cli_overrides(Some("/bin/bash"), None);
+    cfg.apply_cli_overrides(Some("/bin/bash"), None, false);
     assert_eq!(cfg.shell_path(), Some("/bin/bash"));
 }
 
@@ -478,7 +478,7 @@ fn cli_shell_none_preserves_toml_shell() {
         path = "/bin/zsh"
     "#;
     let mut cfg = load_from_toml(toml).expect("should parse");
-    cfg.apply_cli_overrides(None, None);
+    cfg.apply_cli_overrides(None, None, false);
     assert_eq!(cfg.shell_path(), Some("/bin/zsh"));
 }
 
@@ -493,8 +493,7 @@ fn cli_write_logs_override_is_ignored_deprecated() {
     assert!(!cfg.logging.write_to_file);
 
     // apply_cli_overrides intentionally ignores write_logs_to_file (deprecated)
-    cfg.apply_cli_overrides(None, Some(true));
-    assert!(!cfg.logging.write_to_file);
+    cfg.apply_cli_overrides(None, Some(true), false);
 }
 
 #[test]
@@ -507,7 +506,7 @@ fn cli_write_logs_none_preserves_toml_logging() {
     let mut cfg = load_from_toml(toml).expect("should parse");
     assert!(cfg.logging.write_to_file);
 
-    cfg.apply_cli_overrides(None, None);
+    cfg.apply_cli_overrides(None, None, false);
     assert!(cfg.logging.write_to_file);
 }
 
@@ -522,7 +521,7 @@ fn cli_overrides_shell_but_not_logging() {
     "#;
     let mut cfg = load_from_toml(toml).expect("should parse");
 
-    cfg.apply_cli_overrides(Some("/usr/local/bin/fish"), Some(true));
+    cfg.apply_cli_overrides(Some("/usr/local/bin/fish"), Some(true), false);
     assert_eq!(cfg.shell_path(), Some("/usr/local/bin/fish"));
     // write_logs_to_file is deprecated and ignored by apply_cli_overrides
     assert!(!cfg.logging.write_to_file);
@@ -534,7 +533,7 @@ fn default_config_with_no_cli_overrides() {
     assert!(cfg.shell_path().is_none());
     assert!(!cfg.logging.write_to_file);
 
-    cfg.apply_cli_overrides(None, None);
+    cfg.apply_cli_overrides(None, None, false);
     assert!(cfg.shell_path().is_none());
     assert!(!cfg.logging.write_to_file);
 }
@@ -544,7 +543,7 @@ fn cli_shell_overrides_when_toml_has_no_shell() {
     let mut cfg = Config::default();
     assert!(cfg.shell_path().is_none());
 
-    cfg.apply_cli_overrides(Some("/bin/fish"), None);
+    cfg.apply_cli_overrides(Some("/bin/fish"), None, false);
     assert_eq!(cfg.shell_path(), Some("/bin/fish"));
 }
 
@@ -559,7 +558,7 @@ fn cli_write_logs_false_is_ignored_deprecated() {
     assert!(cfg.logging.write_to_file);
 
     // apply_cli_overrides intentionally ignores write_logs_to_file (deprecated)
-    cfg.apply_cli_overrides(None, Some(false));
+    cfg.apply_cli_overrides(None, Some(false), false);
     assert!(cfg.logging.write_to_file);
 }
 

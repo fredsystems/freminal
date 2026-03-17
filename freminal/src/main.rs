@@ -64,7 +64,11 @@ fn main() {
         }
     };
 
-    cfg.apply_cli_overrides(args.shell.as_deref(), args.write_logs_to_file);
+    cfg.apply_cli_overrides(
+        args.shell.as_deref(),
+        args.write_logs_to_file,
+        args.hide_menu_bar,
+    );
 
     // Print deprecation notice if --write-logs-to-file was used.
     if args.write_logs_to_file.is_some() {

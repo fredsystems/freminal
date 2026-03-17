@@ -16,17 +16,19 @@ pub enum SettingsTab {
     Shell,
     Scrollback,
     Logging,
+    Ui,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
         Self::Shell,
         Self::Scrollback,
         Self::Logging,
+        Self::Ui,
     ];
 
     const fn label(self) -> &'static str {
@@ -37,6 +39,7 @@ impl SettingsTab {
             Self::Shell => "Shell",
             Self::Scrollback => "Scrollback",
             Self::Logging => "Logging",
+            Self::Ui => "UI",
         }
     }
 }
@@ -142,6 +145,7 @@ impl SettingsModal {
                         SettingsTab::Shell => self.show_shell_tab(ui),
                         SettingsTab::Scrollback => self.show_scrollback_tab(ui),
                         SettingsTab::Logging => self.show_logging_tab(ui),
+                        SettingsTab::Ui => self.show_ui_tab(ui),
                     });
 
                 ui.separator();
@@ -320,6 +324,20 @@ impl SettingsModal {
         );
     }
 
+    fn show_ui_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When enabled, the menu bar at the top of the window is hidden.",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Can also be set via the --hide-menu-bar CLI flag.",
+        );
+    }
+
     // -------------------------------------------------------------------------
     //  Apply logic
     // -------------------------------------------------------------------------
@@ -437,6 +455,7 @@ mod tests {
         assert_eq!(SettingsTab::Shell.label(), "Shell");
         assert_eq!(SettingsTab::Scrollback.label(), "Scrollback");
         assert_eq!(SettingsTab::Logging.label(), "Logging");
+        assert_eq!(SettingsTab::Ui.label(), "UI");
     }
 
     #[test]
@@ -451,6 +470,6 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 6);
+        assert_eq!(SettingsTab::ALL.len(), 7);
     }
 }

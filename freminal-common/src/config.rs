@@ -25,6 +25,7 @@ pub struct Config {
     pub shell: ShellConfig,
     pub logging: LoggingConfig,
     pub scrollback: ScrollbackConfig,
+    pub ui: UiConfig,
 }
 
 impl Default for Config {
@@ -37,6 +38,7 @@ impl Default for Config {
             shell: ShellConfig::default(),
             logging: LoggingConfig::default(),
             scrollback: ScrollbackConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -155,6 +157,16 @@ impl Default for ScrollbackConfig {
 }
 
 /// ---------------------------------------------------------------------------------------------
+///  UI
+/// ---------------------------------------------------------------------------------------------
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Hide the menu bar at the top of the window. Default: `false`.
+    pub hide_menu_bar: bool,
+}
+
+/// ---------------------------------------------------------------------------------------------
 ///  Partial config (for layered merging)
 /// ---------------------------------------------------------------------------------------------
 #[derive(Debug, Default, Deserialize)]
@@ -167,6 +179,7 @@ struct ConfigPartial {
     pub shell: Option<ShellConfig>,
     pub logging: Option<LoggingConfig>,
     pub scrollback: Option<ScrollbackConfig>,
+    pub ui: Option<UiConfig>,
 }
 
 impl Config {
@@ -192,6 +205,9 @@ impl Config {
         if let Some(scrollback) = partial.scrollback {
             self.scrollback = scrollback;
         }
+        if let Some(ui) = partial.ui {
+            self.ui = ui;
+        }
     }
 
     /// Apply CLI argument overrides on top of the loaded configuration.
@@ -201,13 +217,22 @@ impl Config {
     ///
     /// Only `Some` values override; `None` means the CLI flag was not specified
     /// and the TOML value (or default) is kept.
-    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, _write_logs_to_file: Option<bool>) {
+    pub fn apply_cli_overrides(
+        &mut self,
+        shell: Option<&str>,
+        _write_logs_to_file: Option<bool>,
+        hide_menu_bar: bool,
+    ) {
         if let Some(shell_path) = shell {
             self.shell.path = Some(shell_path.to_owned());
         }
         // `write_logs_to_file` is intentionally ignored — file logging is always on.
         // The CLI flag is retained only for backwards compatibility (deprecation notice
         // is printed by the caller).
+
+        if hide_menu_bar {
+            self.ui.hide_menu_bar = true;
+        }
     }
 
     /// Returns the effective file log level as a string.
