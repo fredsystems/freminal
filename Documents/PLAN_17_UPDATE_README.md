@@ -61,10 +61,22 @@ moved. Verify current org name.
 
 ## Subtasks
 
-- [ ] **17.1** Verify current GitHub org/repo URL and badge correctness
-- [ ] **17.2** Rewrite README with updated structure, features, install instructions,
+- [x] **17.1** Verify current GitHub org/repo URL and badge correctness
+      Repo is `fredsystems/freminal`. Badges updated from `fredclausen` to `fredsystems`.
+      `docs/` directory does not exist (removed broken links). `CONTRIBUTING.md` does not
+      exist (removed reference).
+- [x] **17.2** Rewrite README with updated structure, features, install instructions,
       CLI table, architecture, and links
-- [ ] **17.3** Review for accuracy against current codebase
+      Full rewrite: 12 feature items (OpenGL renderer, ligatures, 25 themes, image
+      protocols, scrollback, recording/playback, lock-free architecture, etc.), install
+      instructions (Nix flake/home-manager, deb, Windows, macOS, cargo install), config
+      section with platform paths, CLI table matching `--help` output including
+      `[COMMAND]...` and `--with-playback-file`, architecture diagram showing ArcSwap
+      snapshot model, development section with Nix devshell.
+- [x] **17.3** Review for accuracy against current codebase
+      Verified: CLI options match `--help` output, feature descriptions match implemented
+      code (confirmed via codebase exploration), no stale "planned" language, all local
+      file links valid (`config_example.toml`, `LICENSE`), `cargo test --all` passes.
 
 ## Verification
 
