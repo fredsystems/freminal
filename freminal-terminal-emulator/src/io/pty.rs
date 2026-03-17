@@ -29,7 +29,8 @@ pub struct FreminalPtyInputOutput {
 /// Resolution order:
 /// 1. `XDG_RUNTIME_DIR` — per-user volatile dir guaranteed to exist on systemd
 ///    systems (typically `/run/user/<uid>`).
-/// 2. `/tmp` — universal fallback.
+/// 2. `std::env::temp_dir()` — platform-native fallback (`%TEMP%` on Windows,
+///    `/tmp` on Linux/macOS).
 fn safe_temp_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         let path = PathBuf::from(&xdg);
@@ -37,7 +38,7 @@ fn safe_temp_dir() -> PathBuf {
             return path;
         }
     }
-    PathBuf::from("/tmp")
+    std::env::temp_dir()
 }
 
 fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
@@ -157,10 +158,16 @@ pub fn run_terminal(
     // shell that has `direnv` + Nix devshell active, several variables
     // may point to non-existent sandbox paths (e.g. TMPDIR=/build).
     // Removing them lets the child shell fall back to system defaults.
-    cmd.env_remove("TMPDIR");
-    cmd.env_remove("TEMP");
-    cmd.env_remove("TMP");
-    cmd.env_remove("TEMPDIR");
+    //
+    // On Windows, TEMP and TMP are essential system variables that must
+    // not be removed — many programs (and the OS itself) rely on them.
+    // TMPDIR and TEMPDIR are Unix conventions that don't exist on Windows.
+    if cfg!(not(target_os = "windows")) {
+        cmd.env_remove("TMPDIR");
+        cmd.env_remove("TEMP");
+        cmd.env_remove("TMP");
+        cmd.env_remove("TEMPDIR");
+    }
     cmd.env_remove("NIX_BUILD_TOP");
     cmd.env_remove("IN_NIX_SHELL");
     cmd.env_remove("TERMINFO_DIRS");
