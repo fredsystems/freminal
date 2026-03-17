@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 #![deny(
     clippy::pedantic,
     clippy::cargo,
@@ -55,6 +56,12 @@ fn main() {
 
     let args = Args::parse();
 
+    // Collect warnings that occur before the tracing subscriber is
+    // initialised.  They are replayed as `warn!()` once logging is ready.
+    // On Windows (with windows_subsystem = "windows") there is no console
+    // attached, so eprintln!() output would be silently lost.
+    let mut early_warnings: Vec<String> = Vec::new();
+
     // ── 1. Load config and apply CLI overrides ──────────────────────────
     let mut cfg = match load_config(args.config.as_deref()) {
         Ok(cfg) => cfg,
@@ -72,12 +79,13 @@ fn main() {
 
     // Print deprecation notice if --write-logs-to-file was used.
     if args.write_logs_to_file.is_some() {
-        eprintln!(
-            "WARNING: --write-logs-to-file is deprecated and ignored. \
+        early_warnings.push(
+            "--write-logs-to-file is deprecated and ignored. \
              File logging is now managed automatically. Freminal will \
              attempt to write logs to the platform log directory; if no \
              suitable log directory is available or log files cannot be \
              created, logs will only be written to the console."
+                .to_string(),
         );
     }
 
@@ -114,9 +122,9 @@ fn main() {
     // File filter: config level (default DEBUG), framework silencers.
     let file_log_level = cfg.file_log_level();
     let file_default_directive: Directive = file_log_level.parse().unwrap_or_else(|_| {
-        eprintln!(
-            "WARNING: invalid log level \"{file_log_level}\" in config; falling back to debug"
-        );
+        early_warnings.push(format!(
+            "invalid log level \"{file_log_level}\" in config; falling back to debug"
+        ));
         Level::DEBUG.into()
     });
 
@@ -163,7 +171,7 @@ fn main() {
                     .with_filter(file_filter),
             ),
             Err(e) => {
-                eprintln!("Failed to create file appender: {e}");
+                early_warnings.push(format!("Failed to create file appender: {e}"));
                 None
             }
         }
@@ -175,6 +183,11 @@ fn main() {
         .with(file_layer)
         .with(std_out_layer)
         .init();
+
+    // Replay any warnings that were collected before tracing was ready.
+    for msg in &early_warnings {
+        warn!("{msg}");
+    }
 
     info!("Starting freminal");
     if let Some(ref dir) = log_dir_path {
