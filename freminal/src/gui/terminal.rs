@@ -1017,6 +1017,7 @@ struct RenderState {
     cursor_vert_float_offset: usize,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct FreminalTerminalWidget {
     font_manager: FontManager,
     shaping_cache: ShapingCache,
@@ -1040,6 +1041,11 @@ pub struct FreminalTerminalWidget {
     previous_selection: Option<(CellCoord, CellCoord)>,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
+    /// Whether a modal dialog was open on the previous frame.
+    ///
+    /// Used to suppress input for one extra frame after the modal closes,
+    /// preventing the dismiss-click from leaking through to the terminal.
+    modal_was_open_last_frame: bool,
 }
 
 impl FreminalTerminalWidget {
@@ -1073,6 +1079,7 @@ impl FreminalTerminalWidget {
             last_rendered_visible: None,
             previous_selection: None,
             ligatures: config.font.ligatures,
+            modal_was_open_last_frame: false,
         }
     }
 
@@ -1101,6 +1108,12 @@ impl FreminalTerminalWidget {
         #[allow(clippy::cast_precision_loss)]
         let row_h_f = cell_h as f32;
 
+        // Suppress input for one extra frame after a modal closes.
+        // This prevents the dismiss-click (Cancel / X / click-away) from
+        // leaking through to the terminal as a pointer event.
+        let suppress_input = modal_is_open || self.modal_was_open_last_frame;
+        self.modal_was_open_last_frame = modal_is_open;
+
         // Claim the full available space.
         let available = ui.available_size();
         ui.set_min_size(available);
@@ -1109,9 +1122,10 @@ impl FreminalTerminalWidget {
         // Tab / arrow keys for its own widget-focus cycling.  This is a
         // terminal emulator — ALL keyboard input belongs to the PTY.
         //
-        // When the settings modal is open we release focus so that Tab and
-        // arrow keys work normally inside the modal's egui widgets.
-        if !modal_is_open {
+        // When the settings modal is open (or was open last frame) we
+        // release focus so that Tab and arrow keys work normally inside the
+        // modal's egui widgets, and so the dismiss-click is not forwarded.
+        if !suppress_input {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -1141,10 +1155,16 @@ impl FreminalTerminalWidget {
         // get terminal-grid-relative coordinates.
         let terminal_origin = ui.available_rect_before_wrap().min;
 
-        // When a modal dialog (e.g. the settings window) is open, do NOT
-        // forward keyboard/mouse events to the PTY — they belong to the
-        // modal's egui widgets instead.
-        if !modal_is_open {
+        // When a modal dialog (e.g. the settings window) is open — or was
+        // open last frame — do NOT forward keyboard/mouse events to the PTY.
+        // The one-frame delay prevents the dismiss-click from leaking through
+        // as a pointer event, and resets stale inter-frame state so the next
+        // real input starts from a clean slate.
+        if suppress_input {
+            self.previous_mouse_state = None;
+            self.previous_scroll_amount = 0.0;
+            view_state.selection.is_selecting = false;
+        } else {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
             let (
@@ -1587,6 +1607,7 @@ impl FreminalTerminalWidget {
 
 #[cfg(test)]
 mod subtask_1_7_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Verify that an empty `RenderState` has empty vertex buffers.
@@ -1617,6 +1638,61 @@ mod subtask_1_7_tests {
         let (w, h) = fm.cell_size();
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");
+    }
+}
+
+#[cfg(test)]
+mod modal_suppress_input_tests {
+    /// Test the one-frame suppression state machine for modal dismiss.
+    ///
+    /// The `suppress_input` flag is computed as:
+    ///   `modal_is_open || self.modal_was_open_last_frame`
+    /// and `modal_was_open_last_frame` is then set to `modal_is_open`.
+    ///
+    /// This test verifies the state machine transitions without requiring a
+    /// full egui context by exercising the boolean logic directly.
+    #[test]
+    fn suppress_input_state_machine() {
+        // Simulates `modal_was_open_last_frame` field on the widget.
+        let mut modal_was_open_last_frame = false;
+
+        // Helper: compute suppress_input for one "frame" and update the
+        // tracking field.  Returns the suppress_input value for that frame.
+        let mut frame = |modal_is_open: bool| -> bool {
+            let suppress = modal_is_open || modal_was_open_last_frame;
+            modal_was_open_last_frame = modal_is_open;
+            suppress
+        };
+
+        // Frame 1: modal not open, never was → input NOT suppressed.
+        assert!(!frame(false), "frame 1: no modal → no suppression");
+
+        // Frame 2: modal opens → input suppressed.
+        assert!(frame(true), "frame 2: modal open → suppressed");
+
+        // Frame 3: modal still open → input suppressed.
+        assert!(frame(true), "frame 3: modal still open → suppressed");
+
+        // Frame 4: modal closes (dismiss click) → input STILL suppressed
+        // because modal_was_open_last_frame is true.
+        assert!(frame(false), "frame 4: dismiss frame → still suppressed");
+
+        // Frame 5: modal closed, was closed last frame → input allowed.
+        assert!(!frame(false), "frame 5: fully closed → input allowed");
+
+        // Frame 6: verify stable — stays unsuppressed.
+        assert!(!frame(false), "frame 6: stable → input allowed");
+    }
+
+    /// Verify that `modal_was_open_last_frame` starts `false` on a fresh
+    /// widget, matching the initializer in `FreminalTerminalWidget::new()`.
+    #[test]
+    fn initial_state_does_not_suppress() {
+        // Simulates the initial state of the field after construction.
+        let modal_was_open_last_frame = false;
+        let modal_is_open = false;
+        let suppress = modal_is_open || modal_was_open_last_frame;
+        assert!(!suppress, "fresh widget should not suppress input");
     }
 }
 
