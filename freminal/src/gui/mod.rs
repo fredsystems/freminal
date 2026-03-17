@@ -543,9 +543,11 @@ impl eframe::App for FreminalGui {
         }
 
         // Menu bar at the top of the window.
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            self.show_menu_bar(ui, &snap);
-        });
+        if !self.config.ui.hide_menu_bar {
+            egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+                self.show_menu_bar(ui, &snap);
+            });
+        }
 
         let _panel_response = CentralPanel::default().show(ctx, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.

@@ -361,9 +361,9 @@ pub fn split_format_data_for_scrollback(
 
 pub struct TerminalEmulator {
     pub internal: TerminalState,
-    /// Kept alive for RAII (holds the terminfo `TempDir`).
+    /// PTY I/O layer (holds the terminfo `TempDir` and child-exit receiver).
     /// `None` in headless/benchmark mode where no PTY is started.
-    _io: Option<FreminalPtyInputOutput>,
+    pty_io: Option<FreminalPtyInputOutput>,
     write_tx: crossbeam_channel::Sender<PtyWrite>,
     /// Cached flat representation of the visible window from the last
     /// `build_snapshot` call.  `None` until the first snapshot is built.
@@ -401,7 +401,7 @@ impl TerminalEmulator {
 
         Self {
             internal: TerminalState::default(),
-            _io: None,
+            pty_io: None,
             write_tx,
             previous_visible_snap: None,
             previous_was_alternate: false,
@@ -424,7 +424,7 @@ impl TerminalEmulator {
 
         let emulator = Self {
             internal: TerminalState::new(write_tx.clone(), scrollback_limit),
-            _io: None,
+            pty_io: None,
             write_tx,
             previous_visible_snap: None,
             previous_was_alternate: false,
@@ -477,7 +477,7 @@ impl TerminalEmulator {
 
         let ret = Self {
             internal: TerminalState::new(write_tx.clone(), scrollback_limit),
-            _io: Some(io),
+            pty_io: Some(io),
             write_tx,
             previous_visible_snap: None,
             previous_was_alternate: false,
@@ -496,6 +496,19 @@ impl TerminalEmulator {
     #[must_use]
     pub fn clone_write_tx(&self) -> crossbeam_channel::Sender<PtyWrite> {
         self.write_tx.clone()
+    }
+
+    /// Return the child-exit receiver from the PTY I/O layer.
+    ///
+    /// Returns `Some(Receiver<()>)` in normal mode (where a real PTY child
+    /// process exists) or `None` in headless/benchmark/playback mode.
+    ///
+    /// Used by `main.rs` to add a third arm to the `select!` loop so the
+    /// consumer thread can detect child exit on platforms (Windows) where the
+    /// PTY read pipe does not close when the child exits.
+    #[must_use]
+    pub fn child_exit_rx(&self) -> Option<crossbeam_channel::Receiver<()>> {
+        self.pty_io.as_ref().map(|io| io.child_exit_rx.clone())
     }
 
     #[must_use]

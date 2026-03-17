@@ -19,7 +19,18 @@ use tempfile::TempDir;
 use thiserror::Error;
 
 pub struct FreminalPtyInputOutput {
-    _termcaps: TempDir,
+    /// Holds the extracted terminfo directory alive for the lifetime of the PTY.
+    /// `None` on Windows where terminfo is not used.
+    _termcaps: Option<TempDir>,
+    /// Receives a signal when the child process exits.
+    ///
+    /// On Unix the PTY reader thread detects child exit via `read() == 0` and
+    /// drops the `PtyRead` sender, which is sufficient.  On Windows the `ConPTY`
+    /// keeps the read pipe open after the child exits, so the reader thread
+    /// blocks indefinitely.  A dedicated watcher thread calls `child.wait()`
+    /// and sends `()` here when the child exits, giving the consumer thread a
+    /// reliable cross-platform shutdown signal.
+    pub child_exit_rx: Receiver<()>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -29,7 +40,10 @@ pub struct FreminalPtyInputOutput {
 /// Resolution order:
 /// 1. `XDG_RUNTIME_DIR` — per-user volatile dir guaranteed to exist on systemd
 ///    systems (typically `/run/user/<uid>`).
-/// 2. `/tmp` — universal fallback.
+/// 2. `std::env::temp_dir()` — platform-native fallback (`%TEMP%` on Windows,
+///    `/tmp` on Linux/macOS).  Validated with `.is_dir()` to catch poisoned
+///    environment variables (e.g. `TMPDIR=/build` in Nix sandboxes).
+/// 3. On Unix only: hardcoded `/tmp` as a last resort.
 fn safe_temp_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         let path = PathBuf::from(&xdg);
@@ -37,7 +51,22 @@ fn safe_temp_dir() -> PathBuf {
             return path;
         }
     }
-    PathBuf::from("/tmp")
+    let system_temp = std::env::temp_dir();
+    if system_temp.is_dir() {
+        return system_temp;
+    }
+    // On Unix, /tmp is virtually always available even when env vars are
+    // poisoned (e.g. inside Nix build sandboxes).
+    #[cfg(unix)]
+    {
+        let fallback = PathBuf::from("/tmp");
+        if fallback.is_dir() {
+            return fallback;
+        }
+    }
+    // All validation failed — return the system default anyway and let the
+    // caller surface the error when it tries to create a temp directory.
+    system_temp
 }
 
 fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
@@ -73,8 +102,8 @@ pub fn run_terminal(
     recording_path: Option<String>,
     command: Option<(String, Vec<String>)>,
     shell: Option<String>,
-    termcaps: &Path,
-) -> Result<()> {
+    termcaps: Option<&Path>,
+) -> Result<Receiver<()>> {
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
@@ -97,7 +126,9 @@ pub fn run_terminal(
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
     };
 
-    cmd.env("TERMINFO", termcaps);
+    if let Some(termcaps) = termcaps {
+        cmd.env("TERMINFO", termcaps);
+    }
     // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
     // "xterm-freminal" for maximum compatibility. Programs like neovim, tmux, and
     // many TUI apps have hardcoded behavior based on TERM — setting it to an
@@ -157,19 +188,44 @@ pub fn run_terminal(
     // shell that has `direnv` + Nix devshell active, several variables
     // may point to non-existent sandbox paths (e.g. TMPDIR=/build).
     // Removing them lets the child shell fall back to system defaults.
-    cmd.env_remove("TMPDIR");
-    cmd.env_remove("TEMP");
-    cmd.env_remove("TMP");
-    cmd.env_remove("TEMPDIR");
+    //
+    // On Windows, TEMP and TMP are essential system variables that must
+    // not be removed — many programs (and the OS itself) rely on them.
+    // TMPDIR and TEMPDIR are Unix conventions that don't exist on Windows.
+    if cfg!(not(target_os = "windows")) {
+        cmd.env_remove("TMPDIR");
+        cmd.env_remove("TEMP");
+        cmd.env_remove("TMP");
+        cmd.env_remove("TEMPDIR");
+    }
     cmd.env_remove("NIX_BUILD_TOP");
     cmd.env_remove("IN_NIX_SHELL");
     cmd.env_remove("TERMINFO_DIRS");
 
-    let _child = pair.slave.spawn_command(cmd)?;
+    let mut child = pair.slave.spawn_command(cmd)?;
 
     // Release any handles owned by the slave: we don't need it now
     // that we've spawned the child.
     drop(pair.slave);
+
+    // Spawn a child-watcher thread.  On Unix the PTY reader thread
+    // usually detects child exit via `read() == 0`, but on Windows the
+    // ConPTY keeps the read pipe open after the child exits so the
+    // reader blocks indefinitely.  This watcher provides a reliable
+    // cross-platform "child exited" signal.
+    let (child_exit_tx, child_exit_rx) = crossbeam_channel::bounded::<()>(1);
+    std::thread::spawn(move || {
+        // `child.wait()` blocks until the child process exits.
+        match child.wait() {
+            Ok(status) => {
+                info!("Child process exited with status: {status:?}");
+            }
+            Err(e) => {
+                error!("Failed to wait on child process: {e}");
+            }
+        }
+        let _ = child_exit_tx.send(());
+    });
 
     // Read the output in another thread.
     // This is important because it is easy to encounter a situation
@@ -291,7 +347,7 @@ pub fn run_terminal(
         });
     }
 
-    Ok(())
+    Ok(child_exit_rx)
 }
 
 impl FreminalPtyInputOutput {
@@ -306,21 +362,29 @@ impl FreminalPtyInputOutput {
         command: Option<(String, Vec<String>)>,
         shell: Option<String>,
     ) -> Result<Self> {
-        let termcaps = extract_terminfo().map_err(|e| {
-            error!("Failed to extract terminfo: {e}");
-            e
-        })?;
+        // Terminfo is a Unix concept — Windows programs (cmd.exe, PowerShell)
+        // don't use it.  Skip extraction entirely on Windows to avoid issues
+        // with symlinks in the tarball requiring elevated privileges.
+        let termcaps = if cfg!(target_os = "windows") {
+            None
+        } else {
+            Some(extract_terminfo().map_err(|e| {
+                error!("Failed to extract terminfo: {e}");
+                e
+            })?)
+        };
 
-        run_terminal(
+        let child_exit_rx = run_terminal(
             write_rx,
             send_tx,
             recording,
             command,
             shell,
-            termcaps.path(),
+            termcaps.as_ref().map(TempDir::path),
         )?;
         Ok(Self {
             _termcaps: termcaps,
+            child_exit_rx,
         })
     }
 }

@@ -6,6 +6,7 @@
 use eframe::egui::{self, ComboBox, DragValue, Slider, Ui};
 use freminal_common::config::{self, Config, CursorShapeConfig};
 use freminal_common::themes;
+use std::path::PathBuf;
 
 /// Which tab is currently active in the settings modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,17 +17,19 @@ pub enum SettingsTab {
     Shell,
     Scrollback,
     Logging,
+    Ui,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
         Self::Shell,
         Self::Scrollback,
         Self::Logging,
+        Self::Ui,
     ];
 
     const fn label(self) -> &'static str {
@@ -37,6 +40,7 @@ impl SettingsTab {
             Self::Shell => "Shell",
             Self::Scrollback => "Scrollback",
             Self::Logging => "Logging",
+            Self::Ui => "UI",
         }
     }
 }
@@ -71,17 +75,22 @@ pub struct SettingsModal {
 
     /// Path override for saving (from `--config` CLI flag). `None` means use
     /// the platform default.
-    config_path: Option<std::path::PathBuf>,
+    config_path: Option<PathBuf>,
 
     /// Cached log directory display string, computed once when the modal is
     /// opened rather than on every UI frame (avoids repeated filesystem calls).
     log_dir_display: String,
+
+    /// When `Some`, the settings modal is in read-only mode: all controls are
+    /// visible for browsing but Apply and Reset to Defaults are disabled.  The
+    /// string is displayed as a banner explaining why editing is disabled.
+    read_only_reason: Option<String>,
 }
 
 impl SettingsModal {
     /// Create a new (closed) settings modal.
     #[must_use]
-    pub fn new(config_path: Option<std::path::PathBuf>) -> Self {
+    pub fn new(config_path: Option<PathBuf>) -> Self {
         Self {
             is_open: false,
             draft: Config::default(),
@@ -89,6 +98,7 @@ impl SettingsModal {
             status_message: None,
             config_path,
             log_dir_display: String::new(),
+            read_only_reason: None,
         }
     }
 
@@ -101,6 +111,21 @@ impl SettingsModal {
             || "(unable to determine log directory)".to_string(),
             |p| p.display().to_string(),
         );
+
+        // Determine read-only status:
+        //   Layer 1: managed_by field set → HM-specific message
+        //   Layer 2: config file not writable → generic message
+        self.read_only_reason = if let Some(manager) = &live_config.managed_by {
+            Some(format!(
+                "Configuration is managed by {manager}. \
+                 Edit your {manager} configuration to change settings."
+            ))
+        } else if !config::config_is_writable(self.config_path.as_deref()) {
+            Some("Configuration file is read-only.".to_string())
+        } else {
+            None
+        };
+
         self.is_open = true;
     }
 
@@ -123,6 +148,19 @@ impl SettingsModal {
             .default_width(450.0)
             .open(&mut open)
             .show(ctx, |ui| {
+                // --- Read-only banner ---
+                let is_read_only = self.read_only_reason.is_some();
+                if let Some(reason) = &self.read_only_reason {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(80, 60, 20))
+                        .corner_radius(4.0)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.colored_label(egui::Color32::from_rgb(255, 220, 100), reason);
+                        });
+                    ui.add_space(4.0);
+                }
+
                 // --- Tab bar ---
                 ui.horizontal(|ui| {
                     for tab in SettingsTab::ALL {
@@ -135,13 +173,21 @@ impl SettingsModal {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .max_height(300.0)
-                    .show(ui, |ui| match self.active_tab {
-                        SettingsTab::Font => self.show_font_tab(ui),
-                        SettingsTab::Cursor => self.show_cursor_tab(ui),
-                        SettingsTab::Theme => self.show_theme_tab(ui),
-                        SettingsTab::Shell => self.show_shell_tab(ui),
-                        SettingsTab::Scrollback => self.show_scrollback_tab(ui),
-                        SettingsTab::Logging => self.show_logging_tab(ui),
+                    .show(ui, |ui| {
+                        // In read-only mode, disable all interactive widgets
+                        // so the user can browse but not edit.
+                        if is_read_only {
+                            ui.disable();
+                        }
+                        match self.active_tab {
+                            SettingsTab::Font => self.show_font_tab(ui),
+                            SettingsTab::Cursor => self.show_cursor_tab(ui),
+                            SettingsTab::Theme => self.show_theme_tab(ui),
+                            SettingsTab::Shell => self.show_shell_tab(ui),
+                            SettingsTab::Scrollback => self.show_scrollback_tab(ui),
+                            SettingsTab::Logging => self.show_logging_tab(ui),
+                            SettingsTab::Ui => self.show_ui_tab(ui),
+                        }
                     });
 
                 ui.separator();
@@ -153,14 +199,16 @@ impl SettingsModal {
 
                 // --- Bottom buttons ---
                 ui.horizontal(|ui| {
-                    if ui.button("Reset to Defaults").clicked() {
+                    let reset_btn = egui::Button::new("Reset to Defaults");
+                    if ui.add_enabled(!is_read_only, reset_btn).clicked() {
                         self.draft = Config::default();
                         self.status_message = Some("Reset to defaults (not saved yet)".to_string());
                     }
 
                     // Right-align Apply and Cancel.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Apply").clicked() {
+                        let apply_btn = egui::Button::new("Apply");
+                        if ui.add_enabled(!is_read_only, apply_btn).clicked() {
                             action = self.try_apply();
                         }
                         if ui.button("Cancel").clicked() {
@@ -320,6 +368,20 @@ impl SettingsModal {
         );
     }
 
+    fn show_ui_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When enabled, the menu bar at the top of the window is hidden.",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Can also be set via the --hide-menu-bar CLI flag.",
+        );
+    }
+
     // -------------------------------------------------------------------------
     //  Apply logic
     // -------------------------------------------------------------------------
@@ -387,6 +449,7 @@ fn show_theme_preview(ui: &mut Ui, theme: &themes::ThemePalette) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -437,6 +500,7 @@ mod tests {
         assert_eq!(SettingsTab::Shell.label(), "Shell");
         assert_eq!(SettingsTab::Scrollback.label(), "Scrollback");
         assert_eq!(SettingsTab::Logging.label(), "Logging");
+        assert_eq!(SettingsTab::Ui.label(), "UI");
     }
 
     #[test]
@@ -451,6 +515,80 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 6);
+        assert_eq!(SettingsTab::ALL.len(), 7);
+    }
+
+    #[test]
+    fn open_with_managed_by_sets_read_only_reason() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config {
+            managed_by: Some("home-manager".to_string()),
+            ..Config::default()
+        };
+        modal.open(&live);
+
+        assert!(modal.is_open);
+        assert!(modal.read_only_reason.is_some());
+        let reason = modal.read_only_reason.as_ref().unwrap();
+        assert!(
+            reason.contains("home-manager"),
+            "banner should mention the manager: {reason}"
+        );
+    }
+
+    #[test]
+    fn open_without_managed_by_writable_config_is_not_read_only() {
+        // Use a writable temp file as the config path so the writability
+        // check passes.
+        let dir = std::env::temp_dir().join("freminal_test_settings_writable");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "version = 1\n").unwrap();
+
+        let mut modal = SettingsModal::new(Some(path.clone()));
+        let live = Config::default();
+        modal.open(&live);
+
+        assert!(modal.is_open);
+        assert!(
+            modal.read_only_reason.is_none(),
+            "should not be read-only for a writable config"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_with_readonly_config_file_sets_read_only_reason() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("freminal_test_settings_readonly");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("readonly.toml");
+        std::fs::write(&path, "version = 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let mut modal = SettingsModal::new(Some(path.clone()));
+        let live = Config::default();
+        modal.open(&live);
+
+        assert!(modal.is_open);
+        assert!(
+            modal.read_only_reason.is_some(),
+            "should be read-only for a non-writable config file"
+        );
+        let reason = modal.read_only_reason.as_ref().unwrap();
+        assert!(
+            reason.contains("read-only"),
+            "banner should mention read-only: {reason}"
+        );
+
+        // Cleanup: restore permissions so we can delete
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

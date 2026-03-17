@@ -25,6 +25,19 @@ pub struct Config {
     pub shell: ShellConfig,
     pub logging: LoggingConfig,
     pub scrollback: ScrollbackConfig,
+    pub ui: UiConfig,
+
+    /// Indicates which external tool manages this config file.
+    ///
+    /// When set (e.g. `"home-manager"`), the settings modal opens in read-only
+    /// mode with a message explaining that changes must be made in the managing
+    /// tool.  This field is injected automatically by the Nix home-manager
+    /// module and should **not** be set manually by end users.
+    ///
+    /// Omitted from serialized output when `None` so that user-written configs
+    /// are not cluttered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
 }
 
 impl Default for Config {
@@ -37,6 +50,8 @@ impl Default for Config {
             shell: ShellConfig::default(),
             logging: LoggingConfig::default(),
             scrollback: ScrollbackConfig::default(),
+            ui: UiConfig::default(),
+            managed_by: None,
         }
     }
 }
@@ -155,6 +170,16 @@ impl Default for ScrollbackConfig {
 }
 
 /// ---------------------------------------------------------------------------------------------
+///  UI
+/// ---------------------------------------------------------------------------------------------
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Hide the menu bar at the top of the window. Default: `false`.
+    pub hide_menu_bar: bool,
+}
+
+/// ---------------------------------------------------------------------------------------------
 ///  Partial config (for layered merging)
 /// ---------------------------------------------------------------------------------------------
 #[derive(Debug, Default, Deserialize)]
@@ -167,6 +192,8 @@ struct ConfigPartial {
     pub shell: Option<ShellConfig>,
     pub logging: Option<LoggingConfig>,
     pub scrollback: Option<ScrollbackConfig>,
+    pub ui: Option<UiConfig>,
+    pub managed_by: Option<String>,
 }
 
 impl Config {
@@ -192,6 +219,12 @@ impl Config {
         if let Some(scrollback) = partial.scrollback {
             self.scrollback = scrollback;
         }
+        if let Some(ui) = partial.ui {
+            self.ui = ui;
+        }
+        if partial.managed_by.is_some() {
+            self.managed_by = partial.managed_by;
+        }
     }
 
     /// Apply CLI argument overrides on top of the loaded configuration.
@@ -201,13 +234,22 @@ impl Config {
     ///
     /// Only `Some` values override; `None` means the CLI flag was not specified
     /// and the TOML value (or default) is kept.
-    pub fn apply_cli_overrides(&mut self, shell: Option<&str>, _write_logs_to_file: Option<bool>) {
+    pub fn apply_cli_overrides(
+        &mut self,
+        shell: Option<&str>,
+        _write_logs_to_file: Option<bool>,
+        hide_menu_bar: bool,
+    ) {
         if let Some(shell_path) = shell {
             self.shell.path = Some(shell_path.to_owned());
         }
         // `write_logs_to_file` is intentionally ignored — file logging is always on.
         // The CLI flag is retained only for backwards compatibility (deprecation notice
         // is printed by the caller).
+
+        if hide_menu_bar {
+            self.ui.hide_menu_bar = true;
+        }
     }
 
     /// Returns the effective file log level as a string.
@@ -225,6 +267,13 @@ impl Config {
     #[must_use]
     pub fn shell_path(&self) -> Option<&str> {
         self.shell.path.as_deref()
+    }
+
+    /// Returns `true` when the config is managed by an external tool
+    /// (e.g. Nix home-manager).
+    #[must_use]
+    pub const fn is_managed(&self) -> bool {
+        self.managed_by.is_some()
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -377,6 +426,50 @@ pub fn save_config(config: &Config, path: Option<&Path>) -> Result<(), ConfigErr
     })
 }
 
+/// Check whether the effective config file is writable.
+///
+/// If `explicit_path` is `Some`, that path is tested. Otherwise the
+/// platform-specific user config path is resolved and tested.
+///
+/// Returns `true` when the file either does not yet exist (it can be created)
+/// or exists and is writable.  Returns `false` when the file exists but
+/// cannot be opened for writing, or when the config directory cannot be
+/// determined.
+#[must_use]
+pub fn config_is_writable(explicit_path: Option<&Path>) -> bool {
+    let path = match explicit_path {
+        Some(p) => p.to_path_buf(),
+        None => match user_config_path() {
+            Some(p) => p,
+            None => return false, // Can't determine config path — treat as non-writable.
+        },
+    };
+
+    if !path.exists() {
+        // File doesn't exist yet.  Check whether the parent directory is
+        // writable (i.e. we could create the file).
+        return path
+            .parent()
+            .is_some_and(|parent| !parent.exists() || is_dir_writable(parent));
+    }
+
+    // File exists — try opening it for writing (append mode so we don't
+    // truncate).
+    fs::OpenOptions::new().append(true).open(&path).is_ok()
+}
+
+/// Returns `true` when `dir` exists and we can write to it.
+fn is_dir_writable(dir: &Path) -> bool {
+    // Try creating and immediately removing a probe file.
+    let probe = dir.join(".freminal_write_probe");
+    if fs::write(&probe, b"").is_ok() {
+        let _ = fs::remove_file(&probe);
+        true
+    } else {
+        false
+    }
+}
+
 /// ---------------------------------------------------------------------------------------------
 ///  Helpers
 /// ---------------------------------------------------------------------------------------------
@@ -413,7 +506,8 @@ fn system_config_path() -> Option<PathBuf> {
 /// macOS:   ~/Library/Application Support/Freminal/config.toml
 /// Windows: %APPDATA%\Freminal\config.toml
 #[allow(unreachable_code)]
-fn user_config_path() -> Option<PathBuf> {
+#[must_use]
+pub fn user_config_path() -> Option<PathBuf> {
     let base = BaseDirs::new()?;
 
     #[cfg(target_os = "macos")]
@@ -592,5 +686,104 @@ size = 14.0
             cfg.validate()
                 .unwrap_or_else(|e| panic!("theme '{}' should be valid: {e}", theme.slug));
         }
+    }
+
+    // -----------------------------------------------------------------
+    //  managed_by
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_config_managed_by_is_none() {
+        let cfg = Config::default();
+        assert!(cfg.managed_by.is_none());
+        assert!(!cfg.is_managed());
+    }
+
+    #[test]
+    fn managed_by_deserializes_from_toml() {
+        let toml_str = r#"
+version = 1
+managed_by = "home-manager"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        assert_eq!(partial.managed_by.as_deref(), Some("home-manager"));
+    }
+
+    #[test]
+    fn managed_by_absent_in_toml_defaults_to_none() {
+        let toml_str = "version = 1\n";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        assert!(partial.managed_by.is_none());
+    }
+
+    #[test]
+    fn managed_by_applied_via_partial() {
+        let mut cfg = Config::default();
+        assert!(!cfg.is_managed());
+
+        let toml_str = r#"managed_by = "nix""#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.is_managed());
+        assert_eq!(cfg.managed_by.as_deref(), Some("nix"));
+    }
+
+    #[test]
+    fn managed_by_not_serialized_when_none() {
+        let cfg = Config::default();
+        let toml_str = toml::to_string_pretty(&cfg).expect("should serialize");
+        assert!(
+            !toml_str.contains("managed_by"),
+            "managed_by should be omitted when None: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn managed_by_round_trips_when_set() {
+        let cfg = Config {
+            managed_by: Some("home-manager".to_string()),
+            ..Config::default()
+        };
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("should serialize");
+        assert!(toml_str.contains("managed_by"));
+
+        let deserialized: Config = toml::from_str(&toml_str).expect("should deserialize");
+        assert_eq!(deserialized.managed_by.as_deref(), Some("home-manager"));
+    }
+
+    // -----------------------------------------------------------------
+    //  config_is_writable
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn config_is_writable_for_nonexistent_file_in_writable_dir() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("nonexistent.toml");
+        assert!(config_is_writable(Some(&path)));
+    }
+
+    #[test]
+    fn config_is_writable_for_existing_writable_file() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("writable.toml");
+        std::fs::write(&path, "version = 1\n").expect("write");
+        assert!(config_is_writable(Some(&path)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_is_not_writable_for_readonly_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("readonly.toml");
+        std::fs::write(&path, "version = 1\n").expect("write");
+
+        // Make the file read-only.
+        let perms = std::fs::Permissions::from_mode(0o444);
+        std::fs::set_permissions(&path, perms).expect("set permissions");
+
+        assert!(!config_is_writable(Some(&path)));
     }
 }
