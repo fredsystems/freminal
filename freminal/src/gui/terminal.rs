@@ -1105,6 +1105,36 @@ impl FreminalTerminalWidget {
         let available = ui.available_size();
         ui.set_min_size(available);
 
+        // Claim keyboard focus for the terminal area so egui does not use
+        // Tab / arrow keys for its own widget-focus cycling.  This is a
+        // terminal emulator — ALL keyboard input belongs to the PTY.
+        //
+        // When the settings modal is open we release focus so that Tab and
+        // arrow keys work normally inside the modal's egui widgets.
+        if !modal_is_open {
+            let terminal_id = ui.id().with("terminal_focus");
+            let focus_rect = ui.available_rect_before_wrap();
+            let response = ui.interact(
+                focus_rect,
+                terminal_id,
+                egui::Sense::focusable_noninteractive(),
+            );
+            if !response.has_focus() {
+                response.request_focus();
+            }
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    terminal_id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
+        }
+
         // Compute the terminal area origin BEFORE processing input events.
         // Pointer events from `input.raw.events` are in window coordinates,
         // so `encode_egui_mouse_pos_as_usize` must subtract this origin to
