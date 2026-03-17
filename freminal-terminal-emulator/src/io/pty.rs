@@ -22,6 +22,15 @@ pub struct FreminalPtyInputOutput {
     /// Holds the extracted terminfo directory alive for the lifetime of the PTY.
     /// `None` on Windows where terminfo is not used.
     _termcaps: Option<TempDir>,
+    /// Receives a signal when the child process exits.
+    ///
+    /// On Unix the PTY reader thread detects child exit via `read() == 0` and
+    /// drops the `PtyRead` sender, which is sufficient.  On Windows the `ConPTY`
+    /// keeps the read pipe open after the child exits, so the reader thread
+    /// blocks indefinitely.  A dedicated watcher thread calls `child.wait()`
+    /// and sends `()` here when the child exits, giving the consumer thread a
+    /// reliable cross-platform shutdown signal.
+    pub child_exit_rx: Receiver<()>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -77,7 +86,7 @@ pub fn run_terminal(
     command: Option<(String, Vec<String>)>,
     shell: Option<String>,
     termcaps: Option<&Path>,
-) -> Result<()> {
+) -> Result<Receiver<()>> {
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
@@ -176,11 +185,30 @@ pub fn run_terminal(
     cmd.env_remove("IN_NIX_SHELL");
     cmd.env_remove("TERMINFO_DIRS");
 
-    let _child = pair.slave.spawn_command(cmd)?;
+    let mut child = pair.slave.spawn_command(cmd)?;
 
     // Release any handles owned by the slave: we don't need it now
     // that we've spawned the child.
     drop(pair.slave);
+
+    // Spawn a child-watcher thread.  On Unix the PTY reader thread
+    // usually detects child exit via `read() == 0`, but on Windows the
+    // ConPTY keeps the read pipe open after the child exits so the
+    // reader blocks indefinitely.  This watcher provides a reliable
+    // cross-platform "child exited" signal.
+    let (child_exit_tx, child_exit_rx) = crossbeam_channel::bounded::<()>(1);
+    std::thread::spawn(move || {
+        // `child.wait()` blocks until the child process exits.
+        match child.wait() {
+            Ok(status) => {
+                info!("Child process exited with status: {status:?}");
+            }
+            Err(e) => {
+                error!("Failed to wait on child process: {e}");
+            }
+        }
+        let _ = child_exit_tx.send(());
+    });
 
     // Read the output in another thread.
     // This is important because it is easy to encounter a situation
@@ -302,7 +330,7 @@ pub fn run_terminal(
         });
     }
 
-    Ok(())
+    Ok(child_exit_rx)
 }
 
 impl FreminalPtyInputOutput {
@@ -329,7 +357,7 @@ impl FreminalPtyInputOutput {
             })?)
         };
 
-        run_terminal(
+        let child_exit_rx = run_terminal(
             write_rx,
             send_tx,
             recording,
@@ -339,6 +367,7 @@ impl FreminalPtyInputOutput {
         )?;
         Ok(Self {
             _termcaps: termcaps,
+            child_exit_rx,
         })
     }
 }

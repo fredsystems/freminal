@@ -297,6 +297,12 @@ fn main() {
                 // to the PTY without going through the emulator.
                 let pty_write_tx = terminal.clone_write_tx();
 
+                // Extract the child-exit receiver before the emulator is moved.
+                // On Windows the ConPTY keeps the read pipe open after the child
+                // exits, so the reader thread blocks indefinitely.  This channel
+                // provides a reliable cross-platform shutdown signal.
+                let child_exit_rx = terminal.child_exit_rx();
+
                 // Channel for GUI → PTY-consumer thread events (resize, key, focus).
                 let (input_tx, input_rx) = unbounded::<InputEvent>();
 
@@ -318,6 +324,13 @@ fn main() {
                 // No FairMutex. No shared lock.
                 std::thread::spawn(move || {
                     let mut emulator = terminal;
+
+                    // If the PTY I/O layer provided a child-exit receiver, use
+                    // it; otherwise use a channel that never fires.  On Unix
+                    // the PTY reader thread detects exit via read() == 0, but
+                    // on Windows the ConPTY keeps the pipe open after the child
+                    // exits, so this is the only reliable shutdown signal.
+                    let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
                     // Helper closure: drain window commands, publish snapshot,
                     // request repaint.  Called after every event in both loops.
@@ -403,7 +416,8 @@ fn main() {
                         true
                     };
 
-                    // Primary loop: service both PTY reads and GUI input events.
+                    // Primary loop: service PTY reads, GUI input events, and
+                    // child-exit signals.
                     loop {
                         crossbeam_channel::select! {
                             recv(pty_read_rx) -> msg => {
@@ -433,6 +447,22 @@ fn main() {
                                 if !handle_input(&mut emulator, msg, &clipboard_tx) {
                                     return;
                                 }
+                            }
+                            recv(child_exit) -> _ => {
+                                // The child process exited.  On Windows the PTY
+                                // read pipe may still be open (ConPTY does not
+                                // close it), so we cannot rely on `pty_read_rx`
+                                // closing.  Shut down cleanly here.
+                                info!("Child process exited; requesting GUI close");
+
+                                post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+
+                                if let Some(ctx) = egui_ctx_pty.get() {
+                                    ctx.send_viewport_cmd(
+                                        eframe::egui::ViewportCommand::Close,
+                                    );
+                                }
+                                return;
                             }
                         }
 
