@@ -101,6 +101,19 @@ limit = 4000
 # hide_menu_bar = false
 
 ################################################################################
+# MANAGED-BY MARKER (do not set manually)
+################################################################################
+# The `managed_by` field is injected automatically by external config managers
+# such as Nix home-manager.  When present, the settings modal opens in
+# read-only mode with a message explaining that changes must be made through
+# the managing tool.
+#
+# Do NOT set this field manually — it is only meaningful when a config manager
+# owns the file.
+#
+# managed_by = "home-manager"
+
+################################################################################
 # NIX / HOME-MANAGER USAGE
 ################################################################################
 # If you use Nix with home-manager, Freminal can generate this config file

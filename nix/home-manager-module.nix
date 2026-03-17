@@ -77,6 +77,7 @@ let
 
       result = {
         version = 1;
+        managed_by = "home-manager";
         cursor = cursorSection;
         theme = themeSection;
         scrollback = scrollbackSection;

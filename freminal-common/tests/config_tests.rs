@@ -4,7 +4,8 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_common::config::{
-    Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, load_config, save_config,
+    Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, config_is_writable,
+    load_config, save_config,
 };
 use std::io::Write;
 use std::path::Path;
@@ -756,4 +757,131 @@ fn log_dir_ends_with_expected_directory_name() {
             .unwrap_or_default();
         assert_eq!(parent_name, "Freminal");
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  managed_by — deserialization, is_managed(), round-trip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn managed_by_loads_from_toml() {
+    let toml = r#"
+        version = 1
+        managed_by = "home-manager"
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse managed_by");
+    assert!(cfg.is_managed());
+    assert_eq!(cfg.managed_by.as_deref(), Some("home-manager"));
+}
+
+#[test]
+fn managed_by_absent_defaults_to_none() {
+    let toml = r#"
+        version = 1
+    "#;
+    let cfg = load_from_toml(toml).expect("should parse");
+    assert!(!cfg.is_managed());
+    assert!(cfg.managed_by.is_none());
+}
+
+#[test]
+fn managed_by_not_serialized_when_none() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("managed_none.toml");
+
+    let cfg = Config::default();
+    save_config(&cfg, Some(&path)).expect("save should succeed");
+
+    let contents = std::fs::read_to_string(&path).expect("read file");
+    assert!(
+        !contents.contains("managed_by"),
+        "managed_by=None should be omitted from TOML"
+    );
+}
+
+#[test]
+fn managed_by_preserved_through_save_reload() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("managed_roundtrip.toml");
+
+    let cfg = Config {
+        managed_by: Some("home-manager".to_string()),
+        ..Config::default()
+    };
+    save_config(&cfg, Some(&path)).expect("save should succeed");
+
+    let loaded = load_config(Some(&path)).expect("reload");
+    assert_eq!(loaded.managed_by.as_deref(), Some("home-manager"));
+    assert!(loaded.is_managed());
+}
+
+#[test]
+fn managed_by_backward_compat_old_configs_load_fine() {
+    // Old config files (before managed_by existed) should still load fine.
+    let toml = r#"
+        version = 1
+        [font]
+        size = 14.0
+        [cursor]
+        shape = "bar"
+        blink = false
+        [theme]
+        name = "dracula"
+    "#;
+    let cfg = load_from_toml(toml).expect("old config should parse");
+    assert!(!cfg.is_managed());
+    assert!(cfg.managed_by.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  config_is_writable
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn config_is_writable_for_nonexistent_file_in_writable_dir() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("does_not_exist.toml");
+    assert!(config_is_writable(Some(&path)));
+}
+
+#[test]
+fn config_is_writable_for_existing_writable_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("writable.toml");
+    std::fs::write(&path, "version = 1\n").expect("write");
+    assert!(config_is_writable(Some(&path)));
+}
+
+#[cfg(unix)]
+#[test]
+fn config_is_not_writable_for_readonly_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("readonly.toml");
+    std::fs::write(&path, "version = 1\n").expect("write");
+
+    let perms = std::fs::Permissions::from_mode(0o444);
+    std::fs::set_permissions(&path, perms).expect("set permissions");
+
+    assert!(!config_is_writable(Some(&path)));
+}
+
+#[cfg(unix)]
+#[test]
+fn config_is_not_writable_for_nonexistent_file_in_readonly_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("cannot_create.toml");
+
+    // Make the directory read-only so the file cannot be created.
+    let perms = std::fs::Permissions::from_mode(0o555);
+    std::fs::set_permissions(dir.path(), perms).expect("set permissions");
+
+    assert!(!config_is_writable(Some(&path)));
+
+    // Restore permissions so the temp dir can be cleaned up.
+    let restore = std::fs::Permissions::from_mode(0o755);
+    std::fs::set_permissions(dir.path(), restore).expect("restore permissions");
 }
