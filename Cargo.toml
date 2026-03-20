@@ -67,7 +67,7 @@ rustybuzz = "0.20.1"
 serde = { version = "1.0.228", features = ["derive"] }
 swash = "0.2.6"
 sys-locale = "0.3.2"
-tar = "0.4.44"
+tar = "0.4.45"
 toml = "1.0.6"
 thiserror = "2.0.18"
 tracing = "0.1.44"
