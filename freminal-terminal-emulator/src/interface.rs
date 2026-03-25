@@ -579,11 +579,12 @@ impl TerminalEmulator {
         );
 
         if old_width != width_chars || old_height != height_chars {
+            // TIOCGWINSZ expects total window pixel dimensions, not per-cell.
             self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
                 width: width_chars,
                 height: height_chars,
-                pixel_width: font_pixel_width,
-                pixel_height: font_pixel_height,
+                pixel_width: font_pixel_width.saturating_mul(width_chars),
+                pixel_height: font_pixel_height.saturating_mul(height_chars),
             }))?;
         }
 
@@ -616,11 +617,15 @@ impl TerminalEmulator {
             font_pixel_height as u32,
         );
 
+        // The PTY's TIOCGWINSZ expects the *total* window pixel dimensions
+        // (ws_xpixel, ws_ypixel), not per-cell sizes.  Applications like nvim
+        // compute cell size as ws_xpixel/ws_col, so passing per-cell values here
+        // would give them a near-zero cell width.
         if let Err(e) = self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
             width: width_chars,
             height: height_chars,
-            pixel_width: font_pixel_width,
-            pixel_height: font_pixel_height,
+            pixel_width: font_pixel_width.saturating_mul(width_chars),
+            pixel_height: font_pixel_height.saturating_mul(height_chars),
         })) {
             error!("Failed to send resize to PTY: {e}");
         }

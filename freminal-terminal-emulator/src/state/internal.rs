@@ -238,7 +238,134 @@ impl TerminalState {
         debug!("Reported focus change to terminal");
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Sync a single `TerminalOutput` into `self.modes` when it carries a
+    /// mode flag that lives in `TerminalState` rather than `TerminalHandler`.
+    ///
+    /// Query variants are intercepted here: the current state is looked up
+    /// and a DECRPM response is sent.
+    fn sync_mode_flags(&mut self, output: &TerminalOutput) {
+        match output {
+            TerminalOutput::Mode(mode) => match mode {
+                // ── Query variants — respond with DECRPM ──────────
+                Mode::Decckm(Decckm::Query) => {
+                    let resp = self.modes.cursor_key.report(None);
+                    self.send_decrpm(&resp);
+                }
+                Mode::BracketedPaste(
+                    freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
+                ) => {
+                    let resp = self.modes.bracketed_paste.report(None);
+                    self.send_decrpm(&resp);
+                }
+                Mode::MouseMode(MouseTrack::Query(report_mode)) => {
+                    let override_mode = match *report_mode {
+                        1005 | 1006 | 1016 => {
+                            let active_enc_num = self.modes.mouse_encoding.mouse_mode_number();
+                            if active_enc_num == *report_mode
+                                && self.modes.mouse_encoding != MouseEncoding::X11
+                            {
+                                SetMode::DecSet
+                            } else {
+                                SetMode::DecRst
+                            }
+                        }
+                        _ => {
+                            let active_num = self.modes.mouse_tracking.mouse_mode_number();
+                            if active_num == *report_mode
+                                && self.modes.mouse_tracking != MouseTrack::NoTracking
+                            {
+                                SetMode::DecSet
+                            } else {
+                                SetMode::DecRst
+                            }
+                        }
+                    };
+                    let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
+                    self.send_decrpm(&resp);
+                }
+                Mode::XtMseWin(XtMseWin::Query) => {
+                    let resp = self.modes.focus_reporting.report(None);
+                    self.send_decrpm(&resp);
+                }
+                Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query) => {
+                    let resp = self.modes.invert_screen.report(None);
+                    self.send_decrpm(&resp);
+                }
+                Mode::Decarm(Decarm::Query) => {
+                    let resp = self.modes.repeat_keys.report(None);
+                    self.send_decrpm(&resp);
+                }
+                Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
+                    let resp = self.modes.reverse_wrap_around.report(None);
+                    self.send_decrpm(&resp);
+                }
+                Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
+                    let resp = self.modes.synchronized_updates.report(None);
+                    self.send_decrpm(&resp);
+                }
+                // ── Set/Reset variants — sync into self.modes ─────
+                Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
+                Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
+                Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
+                Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
+                Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
+                Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
+                Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
+                Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
+                Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
+                Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
+                // ── Modes handled entirely by TerminalHandler ──────
+                Mode::XtExtscrn(_)
+                | Mode::AltScreen47(_)
+                | Mode::SaveCursor1048(_)
+                | Mode::Decawm(_)
+                | Mode::Dectem(_)
+                | Mode::XtCBlink(_)
+                | Mode::Decom(_)
+                | Mode::Deccolm(_)
+                | Mode::AllowColumnModeSwitch(_)
+                | Mode::UnknownQuery(_) => {}
+                // ── Modes parsed but not yet acted on ─────────────
+                Mode::NoOp
+                | Mode::Decsclm(_)
+                | Mode::GraphemeClustering(_)
+                | Mode::Theming(_)
+                | Mode::Unknown(_) => {
+                    debug!("Mode not acted on by either layer: {mode}");
+                }
+            },
+            // DECPAM (ESC =) / DECPNM (ESC >)
+            TerminalOutput::ApplicationKeypadMode => {
+                self.modes.keypad_mode = KeypadMode::Application;
+            }
+            TerminalOutput::NormalKeypadMode => {
+                self.modes.keypad_mode = KeypadMode::Numeric;
+            }
+            _ => {}
+        }
+    }
+
+    /// Drain the tmux reparse queue, parsing and processing any queued
+    /// raw bytes (CSI/OSC sequences from DCS tmux passthrough).
+    fn drain_tmux_reparse_queue(&mut self) {
+        loop {
+            let reparse = self.handler.take_tmux_reparse_queue();
+            if reparse.is_empty() {
+                break;
+            }
+            for raw in reparse {
+                let reparsed = self.parser.push(&raw);
+                for output in &reparsed {
+                    trace!(%output, "reparsed tmux passthrough output");
+                }
+                self.handler.process_outputs(&reparsed);
+                for output in &reparsed {
+                    self.sync_mode_flags(output);
+                }
+            }
+        }
+    }
+
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         debug!("Handling Incoming Data");
         trace!(
@@ -328,143 +455,8 @@ impl TerminalState {
         self.handler.process_outputs(&parsed);
 
         // ── Sync mode flags that the handler doesn't own ─────────────
-        //
-        // The handler processes buffer-level modes (auto-wrap, alt screen,
-        // cursor visibility, cursor blink, LNM).  Every other mode flag
-        // lives in `self.modes` and is read by the snapshot / GUI layer.
-        // We iterate the parsed output and update `self.modes` for each
-        // relevant Mode variant.  Query variants are intercepted here:
-        // the current state is looked up and a DECRPM response is sent.
         for output in &parsed {
-            match output {
-                TerminalOutput::Mode(mode) => match mode {
-                    // ── Query variants — respond with DECRPM ──────────
-                    //
-                    // We compute the response string first (immutable borrow
-                    // of self.modes), then send it (shared borrow of
-                    // self.write_tx).  This avoids a simultaneous &mut self
-                    // + &self.modes borrow conflict.
-                    Mode::Decckm(Decckm::Query) => {
-                        let resp = self.modes.cursor_key.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::BracketedPaste(
-                        freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
-                    ) => {
-                        let resp = self.modes.bracketed_paste.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::MouseMode(MouseTrack::Query(report_mode)) => {
-                        // Determine whether the queried mode number matches
-                        // either the active mouse tracking level or the active
-                        // mouse encoding, and report accordingly via DECRPM.
-                        //
-                        // Encoding modes (?1005/?1006/?1016) are checked
-                        // against `mouse_encoding`; tracking modes
-                        // (?9/?1000/?1002/?1003) are checked against
-                        // `mouse_tracking`.
-                        let override_mode = match *report_mode {
-                            1005 | 1006 | 1016 => {
-                                let active_enc_num = self.modes.mouse_encoding.mouse_mode_number();
-                                if active_enc_num == *report_mode
-                                    && self.modes.mouse_encoding != MouseEncoding::X11
-                                {
-                                    SetMode::DecSet
-                                } else {
-                                    SetMode::DecRst
-                                }
-                            }
-                            _ => {
-                                let active_num = self.modes.mouse_tracking.mouse_mode_number();
-                                if active_num == *report_mode
-                                    && self.modes.mouse_tracking != MouseTrack::NoTracking
-                                {
-                                    SetMode::DecSet
-                                } else {
-                                    SetMode::DecRst
-                                }
-                            }
-                        };
-                        let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::XtMseWin(XtMseWin::Query) => {
-                        let resp = self.modes.focus_reporting.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::Decscnm(
-                        freminal_common::buffer_states::modes::decscnm::Decscnm::Query,
-                    ) => {
-                        let resp = self.modes.invert_screen.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::Decarm(Decarm::Query) => {
-                        let resp = self.modes.repeat_keys.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
-                        let resp = self.modes.reverse_wrap_around.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
-                        let resp = self.modes.synchronized_updates.report(None);
-                        self.send_decrpm(&resp);
-                    }
-                    // ── Set/Reset variants — sync into self.modes ─────
-                    // 7.7  — DECCKM (?1)
-                    Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
-                    // 7.8  — Bracketed paste (?2004)
-                    Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
-                    // 7.9a — Mouse tracking level (?9/?1000/?1002/?1003)
-                    Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
-                    // 7.9b — Mouse encoding format (?1005/?1006/?1016)
-                    Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
-                    // 7.10 — Focus events (?1004)
-                    Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
-                    // 7.15 — DECSCNM (?5) screen inversion
-                    Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
-                    // 7.15 — DECARM (?8) repeat keys
-                    Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
-                    // Reverse wrap around (?45)
-                    Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
-                    // Synchronized updates (?2026)
-                    Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-                    // LNM (20) — handler handles buffer-level, keep modes in sync
-                    Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
-                    // ── Modes handled entirely by TerminalHandler ──────
-                    // Buffer-level modes (auto-wrap, alt screen, cursor
-                    // visibility, cursor blink, origin, column mode, LNM
-                    // buffer-level, unknown query responses).  Listing them
-                    // explicitly silences spurious debug noise.
-                    Mode::XtExtscrn(_)
-                    | Mode::AltScreen47(_)
-                    | Mode::SaveCursor1048(_)
-                    | Mode::Decawm(_)
-                    | Mode::Dectem(_)
-                    | Mode::XtCBlink(_)
-                    | Mode::Decom(_)
-                    | Mode::Deccolm(_)
-                    | Mode::AllowColumnModeSwitch(_)
-                    | Mode::UnknownQuery(_) => {}
-
-                    // ── Modes parsed but not yet acted on ─────────────
-                    Mode::NoOp
-                    | Mode::Decsclm(_)
-                    | Mode::GraphemeClustering(_)
-                    | Mode::Theming(_)
-                    | Mode::Unknown(_) => {
-                        debug!("Mode not acted on by either layer: {mode}");
-                    }
-                },
-                // 7.14 — DECPAM (ESC =) / DECPNM (ESC >)
-                TerminalOutput::ApplicationKeypadMode => {
-                    self.modes.keypad_mode = KeypadMode::Application;
-                }
-                TerminalOutput::NormalKeypadMode => {
-                    self.modes.keypad_mode = KeypadMode::Numeric;
-                }
-                _ => {}
-            }
+            self.sync_mode_flags(output);
         }
 
         // ── RIS (ESC c) — full terminal reset ──────────────────────────
@@ -489,6 +481,17 @@ impl TerminalState {
         // can consume them.
         self.window_commands
             .extend(self.handler.take_window_commands());
+
+        // ── tmux passthrough reparse queue ─────────────────────────────
+        //
+        // tmux DCS passthrough can contain inner CSI or OSC sequences that
+        // the handler cannot parse (the ANSI parser lives here, not in the
+        // handler).  After process_outputs() returns, we drain any queued
+        // raw bytes, feed them through the parser, and process the resulting
+        // TerminalOutput items.  This loop runs until the queue is empty
+        // (inner sequences are unlikely to produce more reparse items, but
+        // we handle it for correctness).
+        self.drain_tmux_reparse_queue();
 
         let elapsed = now.elapsed();
         if elapsed.as_millis() > 0 {

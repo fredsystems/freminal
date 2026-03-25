@@ -54,6 +54,20 @@ pub struct InlineImage {
     pub display_rows: usize,
 }
 
+/// Which image protocol placed this image.
+///
+/// Used to decide whether text writes should clear the image (Sixel/iTerm2)
+/// or leave it alone (Kitty — cleared only via explicit `a=d` commands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageProtocol {
+    /// Sixel — images are cleared when text overwrites their cells.
+    Sixel,
+    /// Kitty graphics protocol — images persist until explicitly deleted.
+    Kitty,
+    /// iTerm2 inline image — images are cleared when text overwrites their cells.
+    ITerm2,
+}
+
 /// A reference to a portion of an image within a single cell.
 ///
 /// Each cell in the image's rectangular footprint carries one of these,
@@ -71,6 +85,18 @@ pub struct ImagePlacement {
     /// Row index of this cell within the image grid (0-indexed from the
     /// image's top edge).
     pub row_in_image: usize,
+
+    /// Which protocol placed this image.
+    pub protocol: ImageProtocol,
+
+    /// Kitty image number (`i=`), if any.
+    pub image_number: Option<u32>,
+
+    /// Kitty placement ID (`p=`), if any.
+    pub placement_id: Option<u32>,
+
+    /// Z-index for layering (Kitty `z=`).  Default 0.
+    pub z_index: i32,
 }
 
 /// Central storage for all inline images in a buffer.
@@ -256,16 +282,28 @@ mod tests {
             image_id: 1,
             col_in_image: 0,
             row_in_image: 0,
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
         };
         let p2 = ImagePlacement {
             image_id: 1,
             col_in_image: 0,
             row_in_image: 0,
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
         };
         let p3 = ImagePlacement {
             image_id: 1,
             col_in_image: 1,
             row_in_image: 0,
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
         };
 
         assert_eq!(p1, p2);
