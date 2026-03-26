@@ -1570,8 +1570,6 @@ pub fn build_foreground_verts(
 ///
 /// Returns a flat `Vec<f32>` with `IMG_VERTEX_FLOATS` floats per vertex,
 /// `VERTS_PER_QUAD` vertices per image quad.
-#[must_use]
-#[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 /// Per-image tracking: pixel bounding box and cell-grid extent within the
 /// image.  The cell-grid extent (min/max `col_in_image`, `row_in_image`) tells
 /// us which portion of the texture is visible, so we can compute UV
@@ -1589,7 +1587,7 @@ struct ImageBounds {
 }
 
 #[must_use]
-#[allow(clippy::implicit_hasher)]
+#[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub fn build_image_verts(
     placements: &[Option<ImagePlacement>],
     snap_images: &std::collections::HashMap<u64, InlineImage>,

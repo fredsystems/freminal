@@ -149,8 +149,8 @@ pub fn run_terminal(
     // `TerminalHandler::lookup_termcap` in freminal-buffer for the full list.
     //
     // The custom freminal.ti entry in res/ exists as a reference but is not used by
-    // child processes. The TERMINFO env var points to the extracted tarball so that
-    // programs that check for a valid TERMINFO directory find one.
+    // child processes. The TERMINFO_DIRS env var includes the extracted tarball so
+    // that programs that check for a valid TERMINFO directory find one.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 

@@ -273,7 +273,7 @@ fn dispatch_osc_target(
         }
         OscTarget::Unknown => {
             // Unknown OSC sequences are silently consumed (like
-            // xterm/VTE).  Downgraded from error!/Invalid to debug!
+            // xterm/VTE).  Downgraded from error!/Invalid to warn!
             // so they don't spam logs during normal usage.
             tracing::warn!(
                 "Unknown OSC Target (silently consumed): type_number={osc_internal_type:?}, recent='{}'",

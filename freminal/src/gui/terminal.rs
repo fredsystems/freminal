@@ -1567,7 +1567,7 @@ impl FreminalTerminalWidget {
     /// old and new configs and updates font/cursor/theme state as needed.
     ///
     /// Note: this does NOT send a Resize event. When the font changes, the cell
-    /// size changes too, and the normal resize detection in `FreminalGui::update()`
+    /// size changes too, and the normal resize detection in `FreminalGui::ui()`
     /// will detect the mismatch between `available_pixels / new_cell_size` and
     /// `view_state.last_sent_size` on the very next frame and send the correct
     /// `InputEvent::Resize` with proper character dimensions.
