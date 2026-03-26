@@ -782,6 +782,7 @@ fn write_input_to_terminal(
                 delta,
                 modifiers,
                 unit,
+                ..
             } => {
                 match unit {
                     egui::MouseWheelUnit::Point => {

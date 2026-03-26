@@ -10,7 +10,7 @@ default-members = [
   "freminal",
   "freminal-buffer",
   "freminal-common",
-  "freminal-terminal-emulator",
+  "freminal-terminal-emulator"
 ]
 resolver = "3"
 
@@ -18,14 +18,14 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 description = "A terminal emulator written in Rust"
-repository = "https://github.com/fredclausen/freminal"
-documentation = "https://github.com/fred/freminal/README.md"
-homepage = "https://github.com/fredclausen/freminal"
+repository = "https://github.com/fredsystems/freminal"
+documentation = "https://github.com/fredsystems/freminal/README.md"
+homepage = "https://github.com/fredsystems/freminal"
 readme = "README.md"
 rust-version = "1.92.0"
 keywords = ["terminal", "emulator", "vt100", "tty", "terminal-emulator"]
 categories = ["command-line-utilities", "development-tools"]
-version = "0.1.2"
+version = "0.1.3"
 
 [workspace.metadata.cargo-machete]
 ignored = ["vergen"]
@@ -33,6 +33,7 @@ ignored = ["vergen"]
 [workspace.dependencies]
 anyhow = "1.0.102"
 arc-swap = "1.9.0"
+assert_cmd = "2.2.0"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.0", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["cargo_metadata"] }
@@ -43,33 +44,37 @@ criterion = "0.8.2"
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
 duct = "1.1.1"
-eframe = { version = "0.33.3", default-features = false, features = [
+eframe = { version = "0.34.0", default-features = false, features = [
   "default_fonts",
   "glow",
   "persistence",
   "wayland",
   "x11",
 ] }
-egui = { version = "0.33.3", default-features = false, features = [
+egui = { version = "0.34.0", default-features = false, features = [
   "default_fonts",
   "persistence",
 ] }
 fontdb = "0.23.0"
-open = "5.3.3"
-image = { version = "0.25.10", default-features = false, features = [
-  "png",
-  "jpeg",
-  "gif",
-] }
 glow = "0.17.0"
+image = { version = "0.25.10", default-features = false, features = [
+  "gif",
+  "jpeg",
+  "png",
+] }
+open = "5.3.3"
 portable-pty = "0.9.0"
+predicates = "3.1.4"
+proptest = "1.11.0"
 rustybuzz = "0.20.1"
 serde = { version = "1.0.228", features = ["derive"] }
 swash = "0.2.6"
 sys-locale = "0.3.2"
 tar = "0.4.45"
-toml = "1.1.0"
+tempfile = "3.27.0"
+test-log = { version = "0.2.19", features = ["trace"] }
 thiserror = "2.0.18"
+toml = "1.1.0"
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
@@ -77,13 +82,6 @@ tracing-subscriber = { version = "0.3.23", features = [
   "env-filter",
   "parking_lot",
 ] }
-unicode-segmentation = "1.13.1"
+unicode-segmentation = "1.13.2"
 unicode-width = "0.2.2"
-test-log = { version = "0.2.19", features = ["trace"] }
-tempfile = "3.27.0"
 vergen = { version = "9.1.0", features = ["build", "cargo", "rustc", "si"] }
-
-# dev
-proptest = "1.11.0"
-assert_cmd = "2.2.0"
-predicates = "3.1.4"

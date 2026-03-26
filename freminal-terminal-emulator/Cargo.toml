@@ -15,24 +15,24 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
+conv2.workspace = true
 crossbeam-channel.workspace = true
 freminal-buffer = { path = "../freminal-buffer" }
 freminal-common = { path = "../freminal-common" }
+portable-pty.workspace = true
+sys-locale.workspace = true
+tar.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-portable-pty.workspace = true
-conv2.workspace = true
-tempfile.workspace = true
-tar.workspace = true
-sys-locale.workspace = true
 vergen.workspace = true
 
 # dev dependencies
 [dev-dependencies]
-criterion.workspace = true
-test-log.workspace = true
-proptest.workspace = true
 anyhow.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+test-log.workspace = true
 # assert_cmd.workspace = true
 # predicates.workspace = true
 

@@ -32,24 +32,23 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
 clap.workspace = true
+conv2.workspace = true
+crossbeam-channel.workspace = true
 eframe.workspace = true
 egui.workspace = true
-conv2.workspace = true
-anyhow.workspace = true
 fontdb.workspace = true
+freminal-common = { path = "../freminal-common" }
+freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
 glow.workspace = true
 open.workspace = true
-arc-swap.workspace = true
-crossbeam-channel.workspace = true
 rustybuzz.workspace = true
 swash.workspace = true
-
+tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
-tracing.workspace = true
-freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
-freminal-common = { path = "../freminal-common" }
 
 # dev dependencies
 [dev-dependencies]
