@@ -1570,6 +1570,22 @@ pub fn build_foreground_verts(
 ///
 /// Returns a flat `Vec<f32>` with `IMG_VERTEX_FLOATS` floats per vertex,
 /// `VERTS_PER_QUAD` vertices per image quad.
+/// Per-image tracking: pixel bounding box and cell-grid extent within the
+/// image.  The cell-grid extent (min/max `col_in_image`, `row_in_image`) tells
+/// us which portion of the texture is visible, so we can compute UV
+/// coordinates that preserve aspect ratio even when the image is partially
+/// clipped by the terminal edge.
+struct ImageBounds {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    min_col_in_image: usize,
+    min_row_in_image: usize,
+    max_col_in_image: usize,
+    max_row_in_image: usize,
+}
+
 #[must_use]
 #[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub fn build_image_verts(
@@ -1583,10 +1599,7 @@ pub fn build_image_verts(
         return Vec::new();
     }
 
-    // Compute per-image pixel bounding boxes from the placement cells.
-    // Key: image_id.  Value: (x0_px, y0_px, x1_px, y1_px).
-    let mut bounds: std::collections::HashMap<u64, (f32, f32, f32, f32)> =
-        std::collections::HashMap::new();
+    let mut bounds: std::collections::HashMap<u64, ImageBounds> = std::collections::HashMap::new();
 
     for (cell_idx, placement) in placements.iter().enumerate() {
         let Some(p) = placement else { continue };
@@ -1610,13 +1623,25 @@ pub fn build_image_verts(
         #[allow(clippy::cast_precision_loss)]
         let y1 = y0 + cell_height as f32;
 
-        let _ = p; // p used for image_id below
         let id = p.image_id;
-        let entry = bounds.entry(id).or_insert((x0, y0, x1, y1));
-        entry.0 = entry.0.min(x0);
-        entry.1 = entry.1.min(y0);
-        entry.2 = entry.2.max(x1);
-        entry.3 = entry.3.max(y1);
+        let entry = bounds.entry(id).or_insert(ImageBounds {
+            x0,
+            y0,
+            x1,
+            y1,
+            min_col_in_image: p.col_in_image,
+            min_row_in_image: p.row_in_image,
+            max_col_in_image: p.col_in_image,
+            max_row_in_image: p.row_in_image,
+        });
+        entry.x0 = entry.x0.min(x0);
+        entry.y0 = entry.y0.min(y0);
+        entry.x1 = entry.x1.max(x1);
+        entry.y1 = entry.y1.max(y1);
+        entry.min_col_in_image = entry.min_col_in_image.min(p.col_in_image);
+        entry.min_row_in_image = entry.min_row_in_image.min(p.row_in_image);
+        entry.max_col_in_image = entry.max_col_in_image.max(p.col_in_image);
+        entry.max_row_in_image = entry.max_row_in_image.max(p.row_in_image);
     }
 
     // Emit quads sorted by image ID (must match draw_images iteration order).
@@ -1626,20 +1651,56 @@ pub fn build_image_verts(
     let mut verts = Vec::with_capacity(sorted_ids.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
 
     for id in &sorted_ids {
-        let Some(&(x0, y0, x1, y1)) = bounds.get(id) else {
+        let Some(b) = bounds.get(id) else {
             continue;
         };
 
-        // Full image bounding box in pixel coords → UV (0,0)-(1,1).
-        let quad: [f32; 4 * VERTS_PER_QUAD] = [
-            // Triangle 1
-            x0, y0, 0.0, 0.0, x1, y0, 1.0, 0.0, x0, y1, 0.0, 1.0, // Triangle 2
-            x1, y0, 1.0, 0.0, x1, y1, 1.0, 1.0, x0, y1, 0.0, 1.0,
-        ];
+        let quad = compute_image_quad(b, snap_images.get(id));
         verts.extend_from_slice(&quad);
     }
 
     verts
+}
+
+/// Compute the 6-vertex textured quad for a single image.
+///
+/// UV coordinates are derived from the image's `display_cols` / `display_rows`
+/// — the cell-grid extent the Kitty protocol declared for this image.  The
+/// visible portion of the image (determined by `ImageBounds` min/max
+/// `col_in_image` / `row_in_image`) maps to the corresponding fraction of
+/// the texture.  The full texture (UV 0..1) covers the full `display_cols` ×
+/// `display_rows` grid; partial visibility (e.g. image clipped at the terminal
+/// edge) produces a UV sub-range.
+///
+/// The quad pixel size is determined by the bounding box `b`, which is already
+/// computed in renderer cell pixels.  This means the image is scaled to fill
+/// exactly the declared cell grid — matching the Kitty protocol intent.
+#[allow(clippy::cast_precision_loss)]
+fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * VERTS_PER_QUAD] {
+    let (u0, v0, u1, v1) = if let Some(img) = img
+        && img.display_cols > 0
+        && img.display_rows > 0
+    {
+        let dc = img.display_cols as f32;
+        let dr = img.display_rows as f32;
+
+        // Map the visible cell range to the corresponding UV sub-range.
+        let u0 = b.min_col_in_image as f32 / dc;
+        let v0 = b.min_row_in_image as f32 / dr;
+        let u1 = (b.max_col_in_image + 1) as f32 / dc;
+        let v1 = (b.max_row_in_image + 1) as f32 / dr;
+
+        (u0, v0, u1, v1)
+    } else {
+        // Fallback: map full texture if image metadata is unavailable.
+        (0.0, 0.0, 1.0, 1.0)
+    };
+
+    [
+        // Triangle 1
+        b.x0, b.y0, u0, v0, b.x1, b.y0, u1, v0, b.x0, b.y1, u0, v1, // Triangle 2
+        b.x1, b.y0, u1, v0, b.x1, b.y1, u1, v1, b.x0, b.y1, u0, v1,
+    ]
 }
 
 /// Emit a textured quad for a single shaped glyph.

@@ -82,9 +82,56 @@ impl StandardParser {
         }
     }
 
+    /// Returns `true` when the accumulated sequence ends with a real
+    /// String Terminator (`ESC \`).
+    ///
+    /// For **tmux DCS passthrough** (`\x1bPtmux;…\x1b\\`), every ESC in
+    /// the inner payload is doubled.  A naïve `ends_with(b"\x1b\\")` would
+    /// falsely detect `ESC ESC \` (a doubled-ESC followed by a literal
+    /// backslash) as the real ST.
+    ///
+    /// The algorithm counts consecutive ESC bytes immediately before the
+    /// trailing `\`:
+    ///
+    /// - **Odd count** (1, 3, …) → the final ESC is unpaired → real ST.
+    /// - **Even count** (2, 4, …) → all ESCs are doubled pairs, the `\` is
+    ///   inner content → **not** an ST.
+    ///
+    /// For non-tmux DCS and APC sequences the simple suffix check is used
+    /// (no doubling is expected there).
     #[must_use]
     pub fn contains_string_terminator(&self) -> bool {
-        self.sequence.ends_with(b"\x1b\\")
+        if !self.sequence.ends_with(b"\x1b\\") {
+            return false;
+        }
+
+        // Non-tmux sequences: the simple suffix check is sufficient.
+        if !self.is_tmux_passthrough() {
+            return true;
+        }
+
+        // Tmux passthrough: count consecutive ESC bytes before the final `\`.
+        // The `\` is at sequence[len - 1], so we walk backwards from
+        // sequence[len - 2].
+        let len = self.sequence.len();
+        let mut esc_count: usize = 0;
+        for &b in self.sequence[..len - 1].iter().rev() {
+            if b == 0x1b {
+                esc_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Odd count → real ST; even count → doubled inner content.
+        esc_count % 2 == 1
+    }
+
+    /// Returns `true` when this parser is accumulating a tmux DCS
+    /// passthrough sequence (the sequence buffer starts with `Ptmux;`).
+    #[must_use]
+    fn is_tmux_passthrough(&self) -> bool {
+        self.dcs && self.sequence.starts_with(b"Ptmux;")
     }
 
     /// Expose current sequence trace for testing and diagnostics.

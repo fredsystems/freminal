@@ -56,6 +56,12 @@ pub enum SettingsAction {
     /// The user clicked Apply — the new config has been saved to disk and
     /// should be adopted live.
     Applied,
+    /// The user changed the theme in the dropdown — apply it temporarily
+    /// so they can preview it in the terminal.  Carries the new theme slug.
+    PreviewTheme(String),
+    /// The modal was closed without Apply while a preview was active —
+    /// revert to the original theme.  Carries the original theme slug.
+    RevertTheme(String),
 }
 
 /// Persistent state for the settings modal.
@@ -85,6 +91,10 @@ pub struct SettingsModal {
     /// visible for browsing but Apply and Reset to Defaults are disabled.  The
     /// string is displayed as a banner explaining why editing is disabled.
     read_only_reason: Option<String>,
+
+    /// Theme slug when the modal was opened.  Used to detect whether a
+    /// preview is active and to revert on Cancel.
+    original_theme_slug: String,
 }
 
 impl SettingsModal {
@@ -99,6 +109,7 @@ impl SettingsModal {
             config_path,
             log_dir_display: String::new(),
             read_only_reason: None,
+            original_theme_slug: String::new(),
         }
     }
 
@@ -107,6 +118,7 @@ impl SettingsModal {
         self.draft = live_config.clone();
         self.active_tab = SettingsTab::Font;
         self.status_message = None;
+        self.original_theme_slug.clone_from(&live_config.theme.name);
         self.log_dir_display = config::log_dir().map_or_else(
             || "(unable to determine log directory)".to_string(),
             |p| p.display().to_string(),
@@ -141,6 +153,10 @@ impl SettingsModal {
 
         let mut action = SettingsAction::None;
         let mut open = self.is_open;
+
+        // Snapshot the draft theme slug before rendering so we can detect
+        // whether the user changed the theme dropdown this frame.
+        let theme_before = self.draft.theme.name.clone();
 
         egui::Window::new("Settings")
             .collapsible(false)
@@ -221,6 +237,20 @@ impl SettingsModal {
         // Handle the X button on the window title bar.
         if !open {
             self.is_open = false;
+        }
+
+        // If the modal just closed (Cancel or X) without Apply, and the
+        // theme was being previewed, revert to the original.
+        if !self.is_open && action != SettingsAction::Applied {
+            if self.original_theme_slug != theme_before {
+                return SettingsAction::RevertTheme(self.original_theme_slug.clone());
+            }
+            return action;
+        }
+
+        // If the theme dropdown changed this frame, signal a live preview.
+        if self.draft.theme.name != theme_before && action != SettingsAction::Applied {
+            return SettingsAction::PreviewTheme(self.draft.theme.name.clone());
         }
 
         action

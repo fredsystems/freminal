@@ -568,9 +568,9 @@ fn cli_write_logs_false_is_ignored_deprecated() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn file_log_level_defaults_to_debug() {
+fn file_log_level_defaults_to_info() {
     let cfg = Config::default();
-    assert_eq!(cfg.file_log_level(), "debug");
+    assert_eq!(cfg.file_log_level(), "info");
 }
 
 #[test]
@@ -585,13 +585,13 @@ fn file_log_level_reads_from_toml() {
 }
 
 #[test]
-fn file_log_level_absent_in_toml_defaults_to_debug() {
+fn file_log_level_absent_in_toml_defaults_to_info() {
     let toml = r#"
         version = 1
         [logging]
     "#;
     let cfg = load_from_toml(toml).expect("should parse");
-    assert_eq!(cfg.file_log_level(), "debug");
+    assert_eq!(cfg.file_log_level(), "info");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

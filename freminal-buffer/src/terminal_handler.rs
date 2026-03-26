@@ -48,7 +48,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::Buffer;
-use crate::image_store::{ImagePlacement, InlineImage, next_image_id};
+use crate::image_store::{ImagePlacement, ImageProtocol, InlineImage, next_image_id};
 
 /// In-progress state for an iTerm2 multipart file transfer.
 ///
@@ -182,6 +182,21 @@ pub struct TerminalHandler {
     /// dimensions to cell counts.  Defaults to 16 until the first resize
     /// event provides real font metrics.
     cell_pixel_height: u32,
+    /// Raw bytes queued for re-parsing by the emulator layer.
+    ///
+    /// tmux DCS passthrough can contain inner CSI or OSC sequences that
+    /// `TerminalHandler` cannot parse directly (the ANSI parser lives in
+    /// the `freminal-terminal-emulator` crate).  These bytes are queued here
+    /// and drained by `TerminalState::handle_incoming_data()` after
+    /// `process_outputs()` returns, fed back through the parser, and
+    /// processed as normal terminal output.
+    tmux_reparse_queue: Vec<Vec<u8>>,
+    /// True while dispatching an inner sequence from a tmux DCS passthrough.
+    ///
+    /// When set, [`write_to_pty`] wraps the outgoing response in a DCS tmux
+    /// passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`) so
+    /// that tmux can relay it back to the requesting client.
+    in_tmux_passthrough: bool,
 }
 
 impl TerminalHandler {
@@ -212,6 +227,8 @@ impl TerminalHandler {
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
+            tmux_reparse_queue: Vec::new(),
+            in_tmux_passthrough: false,
         }
     }
 
@@ -399,7 +416,7 @@ impl TerminalHandler {
             });
 
         let Some(_vp) = vp else {
-            tracing::debug!(
+            tracing::warn!(
                 "Kitty placeholder: no virtual placement for image_id={full_image_id}, \
                  placement_id={placement_id}; inserting space"
             );
@@ -414,6 +431,10 @@ impl TerminalHandler {
             image_id: full_image_id,
             col_in_image: usize::from(col),
             row_in_image: usize::from(row),
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: Some(placement_id),
+            z_index: 0,
         };
 
         let cursor_pos = self.buffer.get_cursor().pos;
@@ -774,6 +795,12 @@ impl TerminalHandler {
         std::mem::take(&mut self.window_commands)
     }
 
+    /// Drain and return all queued raw-byte sequences from tmux passthrough
+    /// that need to be re-parsed by the ANSI parser.
+    pub fn take_tmux_reparse_queue(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.tmux_reparse_queue)
+    }
+
     /// Return the current working directory reported by the shell via OSC 7, if any.
     #[must_use]
     pub fn current_working_directory(&self) -> Option<&str> {
@@ -793,9 +820,19 @@ impl TerminalHandler {
     }
 
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
+    ///
+    /// When [`Self::in_tmux_passthrough`] is `true`, the response is wrapped in
+    /// a DCS tmux passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`)
+    /// so that tmux can relay it back to the requesting client.
     fn write_to_pty(&self, text: &str) {
+        let bytes = if self.in_tmux_passthrough {
+            Self::wrap_tmux_passthrough(text.as_bytes())
+        } else {
+            text.as_bytes().to_vec()
+        };
+
         if let Some(tx) = &self.write_tx
-            && let Err(e) = tx.send(PtyWrite::Write(text.as_bytes().to_vec()))
+            && let Err(e) = tx.send(PtyWrite::Write(bytes))
         {
             tracing::error!("Failed to write to PTY: {e}");
         }
@@ -842,8 +879,10 @@ impl TerminalHandler {
     ///
     /// - **DECRQSS** (`$ q <Pt> ST`): Request Selection or Setting.
     /// - **XTGETTCAP** (`+ q <hex> ST`): xterm termcap/terminfo query.
+    /// - **tmux passthrough** (`tmux; <inner> ST`): un-doubles ESC bytes and
+    ///   dispatches the inner escape sequence to the appropriate handler.
     ///
-    /// Unknown or unsupported DCS sub-commands are logged at debug level and ignored.
+    /// Unknown or unsupported DCS sub-commands are logged at warn level.
     pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
         // Strip leading 'P' and trailing ESC '\' to get inner content.
         let inner = Self::strip_dcs_envelope(dcs);
@@ -854,9 +893,11 @@ impl TerminalHandler {
             self.handle_xtgettcap(hex_payload);
         } else if Self::is_sixel_sequence(inner) {
             self.handle_sixel(inner);
+        } else if let Some(payload) = inner.strip_prefix(b"tmux;") {
+            self.handle_tmux_passthrough(payload);
         } else {
-            tracing::debug!(
-                "DCS sub-command not recognized (ignored): {}",
+            tracing::warn!(
+                "DCS sub-command not recognized: {}",
                 String::from_utf8_lossy(dcs)
             );
         }
@@ -871,6 +912,469 @@ impl TerminalHandler {
             dcs.len()
         };
         if start <= end { &dcs[start..end] } else { &[] }
+    }
+
+    /// Un-double ESC bytes in a tmux passthrough payload.
+    ///
+    /// tmux DCS passthrough encodes the inner escape sequence with every `ESC`
+    /// (`0x1b`) byte doubled to `ESC ESC`.  This function reverses that
+    /// encoding: consecutive pairs of `0x1b` are collapsed to a single `0x1b`.
+    fn undouble_esc(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == 0x1b {
+                out.push(0x1b);
+                i += 2;
+            } else {
+                out.push(data[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Double every ESC byte in `data`.
+    ///
+    /// This is the inverse of [`undouble_esc`]: each `0x1b` in the input
+    /// becomes `0x1b 0x1b` in the output.  Used when wrapping a response
+    /// in a DCS tmux passthrough envelope.
+    fn double_esc(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len() + data.len() / 4);
+        for &b in data {
+            if b == 0x1b {
+                out.push(0x1b);
+            }
+            out.push(b);
+        }
+        out
+    }
+
+    /// Wrap raw response bytes in a DCS tmux passthrough envelope.
+    ///
+    /// Format: `ESC P tmux; <payload-with-doubled-ESCs> ESC \`
+    fn wrap_tmux_passthrough(data: &[u8]) -> Vec<u8> {
+        let doubled = Self::double_esc(data);
+        // \x1bPtmux; ... \x1b\\
+        let mut out = Vec::with_capacity(8 + doubled.len() + 2);
+        out.extend_from_slice(b"\x1bPtmux;");
+        out.extend_from_slice(&doubled);
+        out.extend_from_slice(b"\x1b\\");
+        out
+    }
+
+    /// Handle a tmux DCS passthrough payload.
+    ///
+    /// The `payload` is the content after the `tmux;` prefix, with ESC bytes
+    /// still doubled.  This method un-doubles the ESC bytes, identifies the
+    /// inner escape sequence type from its introducer byte, and dispatches to
+    /// the appropriate handler.
+    ///
+    /// Supported inner sequence types:
+    /// - **APC** (`ESC _`): dispatched to [`Self::handle_application_program_command`]
+    ///   (e.g. Kitty graphics protocol).
+    /// - **DCS** (`ESC P`): dispatched to [`Self::handle_device_control_string`]
+    ///   (recursive — the inner DCS is itself unwrapped).
+    /// - **OSC** (`ESC ]`): not yet supported (logged at warn level).
+    /// - **CSI** (`ESC [`): not yet supported (logged at warn level).
+    ///
+    /// Any other introducer byte is logged at warn level.
+    fn handle_tmux_passthrough(&mut self, payload: &[u8]) {
+        if payload.is_empty() {
+            tracing::warn!("DCS tmux passthrough: empty payload");
+            return;
+        }
+
+        let inner = Self::undouble_esc(payload);
+
+        if inner.len() < 2 || inner[0] != 0x1b {
+            tracing::warn!(
+                "DCS tmux passthrough: inner sequence does not start with ESC: {}",
+                String::from_utf8_lossy(&inner)
+            );
+            return;
+        }
+
+        // Set the flag so write_to_pty wraps responses in DCS tmux passthrough.
+        self.in_tmux_passthrough = true;
+
+        // The byte after ESC determines the sequence type.
+        match inner[1] {
+            // APC: ESC _ <content> ESC \   →  pass `_<content>ESC \` to APC handler
+            b'_' => {
+                tracing::debug!(
+                    "DCS tmux passthrough: dispatching APC ({} bytes)",
+                    inner.len()
+                );
+                // The APC handler expects the raw sequence starting with `_`
+                // (strip_apc_envelope will remove the `_` prefix and `ESC \` suffix).
+                self.handle_application_program_command(&inner[1..]);
+            }
+            // DCS: ESC P <content> ESC \   →  pass `P<content>ESC \` to DCS handler
+            b'P' => {
+                tracing::debug!(
+                    "DCS tmux passthrough: dispatching DCS ({} bytes)",
+                    inner.len()
+                );
+                // The DCS handler expects the raw sequence starting with `P`
+                // (strip_dcs_envelope will remove the `P` prefix and `ESC \` suffix).
+                self.handle_device_control_string(&inner[1..]);
+            }
+            // OSC: ESC ] <content> ESC \   →  queue for re-parsing
+            b']' => {
+                tracing::debug!(
+                    "DCS tmux passthrough: queuing OSC for re-parse ({} bytes)",
+                    inner.len()
+                );
+                self.tmux_reparse_queue.push(inner);
+            }
+            // CSI: ESC [ <params> <terminator>
+            //
+            // We dispatch common CSI commands (cursor movement, erase, etc.)
+            // directly to avoid ordering issues.  When a DCS-wrapped CUP and
+            // a DCS-wrapped APC Kitty Put arrive in the same PTY frame, the
+            // CUP must execute before the Put so the cursor is at the correct
+            // position.  If the CUP were queued to the reparse queue it would
+            // only run *after* all DCS items in the current batch, which is
+            // too late.
+            //
+            // Mode-setting commands (CSI ? ... h/l) and SGR (CSI ... m) are
+            // still queued because they need the full parser or
+            // TerminalState-level sync.
+            b'[' => {
+                // inner[0] = ESC, inner[1] = '[', CSI body starts at [2].
+                if !self.dispatch_tmux_csi(&inner[2..]) {
+                    // Unhandled CSI — fall back to the reparse queue.
+                    self.tmux_reparse_queue.push(inner);
+                }
+            }
+            other => {
+                tracing::warn!(
+                    "DCS tmux passthrough: unknown inner sequence type 0x{other:02x}: {}",
+                    String::from_utf8_lossy(&inner)
+                );
+            }
+        }
+
+        // Clear the flag after dispatch so subsequent direct writes are not wrapped.
+        self.in_tmux_passthrough = false;
+    }
+
+    /// Directly dispatch a CSI sequence from inside a tmux DCS passthrough.
+    ///
+    /// `csi_body` is the bytes *after* `ESC [` — i.e. the parameter bytes and
+    /// the terminator.  Returns `true` if the command was handled directly,
+    /// `false` if the caller should fall back to the reparse queue.
+    ///
+    /// This handles the subset of CSI commands that are purely buffer-level
+    /// (cursor movement, erase) so they execute immediately — critical for
+    /// correct ordering when a CUP precedes a Kitty Put in the same frame.
+    #[allow(clippy::too_many_lines)]
+    fn dispatch_tmux_csi(&mut self, csi_body: &[u8]) -> bool {
+        if csi_body.is_empty() {
+            return false;
+        }
+
+        // CSI parameters that start with '?' are DEC private modes (h/l).
+        // These need TerminalState-level sync, so fall back to the reparse queue.
+        if csi_body.first() == Some(&b'?') {
+            tracing::debug!("DCS tmux passthrough: queuing DEC private CSI for re-parse");
+            return false;
+        }
+
+        // Find the terminator: the last byte in 0x40..=0x7E range.
+        let Some(&terminator) = csi_body.last() else {
+            return false;
+        };
+        if !(0x40..=0x7e).contains(&terminator) {
+            return false;
+        }
+
+        // Param bytes are everything before the terminator.
+        let params = &csi_body[..csi_body.len() - 1];
+
+        // Check for intermediate bytes (0x20..=0x2F) — these indicate
+        // extended CSI commands that we don't handle directly.
+        if params.iter().any(|&b| (0x20..=0x2f).contains(&b)) {
+            tracing::debug!("DCS tmux passthrough: queuing CSI with intermediates for re-parse");
+            return false;
+        }
+
+        // Parse semicolon-delimited numeric parameters.
+        let numeric_params = Self::parse_csi_params(params);
+
+        match terminator {
+            // CUP — Cursor Position: ESC [ row ; col H  (or f)
+            b'H' | b'f' => {
+                let row = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                let col = numeric_params
+                    .get(1)
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                tracing::debug!(
+                    "DCS tmux passthrough: CSI CUP row={row} col={col} (direct dispatch)"
+                );
+                self.handle_cursor_pos(Some(col), Some(row));
+                true
+            }
+            // CUU — Cursor Up: ESC [ n A
+            b'A' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_cursor_up(n);
+                true
+            }
+            // CUD — Cursor Down: ESC [ n B
+            b'B' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_cursor_down(n);
+                true
+            }
+            // CUF — Cursor Forward: ESC [ n C
+            b'C' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_cursor_forward(n);
+                true
+            }
+            // CUB — Cursor Backward: ESC [ n D
+            b'D' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_cursor_backward(n);
+                true
+            }
+            // CNL — Cursor Next Line: ESC [ n E
+            b'E' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let n_i32 = n as i32;
+                self.handle_cursor_relative(0, n_i32);
+                self.handle_cursor_pos(Some(1), None);
+                true
+            }
+            // CPL — Cursor Previous Line: ESC [ n F
+            b'F' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let n_i32 = -(n as i32);
+                self.handle_cursor_relative(0, n_i32);
+                self.handle_cursor_pos(Some(1), None);
+                true
+            }
+            // CHA/HPA — Cursor Horizontal Absolute: ESC [ n G  (or `)
+            b'G' | b'`' => {
+                let col = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_cursor_pos(Some(col), None);
+                true
+            }
+            // VPA — Vertical Position Absolute: ESC [ n d
+            b'd' => {
+                let row = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_cursor_pos(None, Some(row));
+                true
+            }
+            // ED — Erase in Display: ESC [ n J
+            b'J' => {
+                let mode = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0);
+                self.handle_erase_in_display(mode);
+                true
+            }
+            // EL — Erase in Line: ESC [ n K
+            b'K' => {
+                let mode = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0);
+                self.handle_erase_in_line(mode);
+                true
+            }
+            // IL — Insert Lines: ESC [ n L
+            b'L' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_insert_lines(n);
+                true
+            }
+            // DL — Delete Lines: ESC [ n M
+            b'M' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_delete_lines(n);
+                true
+            }
+            // DCH — Delete Characters: ESC [ n P
+            b'P' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_delete_chars(n);
+                true
+            }
+            // ECH — Erase Characters: ESC [ n X
+            b'X' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_erase_chars(n);
+                true
+            }
+            // ICH — Insert Characters: ESC [ n @
+            b'@' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_insert_spaces(n);
+                true
+            }
+            // SU — Scroll Up: ESC [ n S
+            b'S' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_scroll_up(n);
+                true
+            }
+            // SD — Scroll Down: ESC [ n T
+            b'T' => {
+                let n = numeric_params
+                    .first()
+                    .copied()
+                    .unwrap_or(Some(1))
+                    .unwrap_or(1)
+                    .max(1);
+                self.handle_scroll_down(n);
+                true
+            }
+            // DECSTBM — Set Top and Bottom Margins: ESC [ top ; bottom r
+            b'r' => {
+                let top = numeric_params
+                    .first()
+                    .copied()
+                    .flatten()
+                    .unwrap_or(1)
+                    .max(1);
+                let bottom = numeric_params
+                    .get(1)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(usize::MAX);
+                self.handle_set_scroll_region(top, bottom);
+                true
+            }
+            // SCOSC — Save Cursor: ESC [ s
+            b's' if params.is_empty() => {
+                self.buffer.save_cursor();
+                true
+            }
+            // SCORC — Restore Cursor: ESC [ u
+            b'u' if params.is_empty() => {
+                self.buffer.restore_cursor();
+                true
+            }
+            // SGR and mode-setting (h/l) fall through to the reparse queue.
+            // SGR (m) needs the full SGR parser; mode set/reset (h/l) needs
+            // TerminalState-level sync.
+            _ => {
+                tracing::debug!(
+                    "DCS tmux passthrough: queuing unhandled CSI '{}'(0x{terminator:02x}) for re-parse",
+                    terminator as char,
+                );
+                false
+            }
+        }
+    }
+
+    /// Parse CSI parameter bytes into a list of `Option<usize>` values.
+    ///
+    /// Parameters are separated by `;`.  An empty field yields `None`.
+    /// For example, `b"1;42"` → `[Some(1), Some(42)]`,
+    /// `b""` → `[]`, `b";"` → `[None, None]`.
+    fn parse_csi_params(params: &[u8]) -> Vec<Option<usize>> {
+        if params.is_empty() {
+            return Vec::new();
+        }
+
+        let param_str = std::str::from_utf8(params).unwrap_or("");
+        param_str
+            .split(';')
+            .map(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    s.parse::<usize>().ok()
+                }
+            })
+            .collect()
     }
 
     /// Check whether a DCS inner payload is a Sixel sequence.
@@ -895,12 +1399,12 @@ impl TerminalHandler {
         use freminal_common::buffer_states::sixel::parse_sixel;
 
         let Some(sixel_image) = parse_sixel(inner) else {
-            tracing::debug!("Sixel: failed to decode image from DCS payload");
+            tracing::warn!("Sixel: failed to decode image from DCS payload");
             return;
         };
 
         if sixel_image.width == 0 || sixel_image.height == 0 {
-            tracing::debug!("Sixel: decoded image has zero dimensions");
+            tracing::warn!("Sixel: decoded image has zero dimensions");
             return;
         }
 
@@ -929,7 +1433,9 @@ impl TerminalHandler {
             display_rows,
         };
 
-        let _new_offset = self.buffer.place_image(inline_image, 0);
+        let _new_offset =
+            self.buffer
+                .place_image(inline_image, 0, ImageProtocol::Sixel, None, None, 0);
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -969,7 +1475,7 @@ impl TerminalHandler {
             _ => {
                 // Invalid / unrecognized query → DCS 0 $ r ST
                 self.write_to_pty("\x1bP0$r\x1b\\");
-                tracing::debug!(
+                tracing::warn!(
                     "DECRQSS: unrecognized setting query: {}",
                     String::from_utf8_lossy(pt)
                 );
@@ -1099,7 +1605,7 @@ impl TerminalHandler {
             }
 
             let Some(cap_name) = Self::hex_decode(hex_name) else {
-                tracing::debug!("XTGETTCAP: invalid hex encoding: {hex_name}");
+                tracing::warn!("XTGETTCAP: invalid hex encoding: {hex_name}");
                 self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
                 continue;
             };
@@ -1108,7 +1614,7 @@ impl TerminalHandler {
                 let hex_value = Self::hex_encode(value);
                 self.write_to_pty(&format!("\x1bP1+r{hex_name}={hex_value}\x1b\\"));
             } else {
-                tracing::debug!("XTGETTCAP: unknown capability: {cap_name}");
+                tracing::warn!("XTGETTCAP: unknown capability: {cap_name}");
                 self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
             }
         }
@@ -1199,13 +1705,13 @@ impl TerminalHandler {
         match parse_kitty_graphics(apc) {
             Ok(cmd) => self.handle_kitty_graphics(cmd),
             Err(KittyParseError::NotKittyGraphics) => {
-                tracing::debug!(
+                tracing::warn!(
                     "APC received (not Kitty graphics, ignored): {}",
                     String::from_utf8_lossy(apc)
                 );
             }
             Err(e) => {
-                tracing::debug!("Kitty graphics parse error: {e}");
+                tracing::warn!("Kitty graphics parse error: {e}");
             }
         }
     }
@@ -1215,11 +1721,32 @@ impl TerminalHandler {
         let action = cmd.control.action.unwrap_or(KittyAction::Transmit);
 
         // If this is a continuation chunk for an in-progress chunked transfer,
-        // append the payload regardless of the action field.
-        if self.kitty_state.is_some() && action != KittyAction::Query {
-            self.handle_kitty_chunk(&cmd);
-            return;
+        // append the payload.  Per the Kitty protocol spec, continuation chunks
+        // carry ONLY `m` and optionally `q` — no explicit `a=` key.  If the
+        // incoming command explicitly sets `a=`, it is a new command and any
+        // stale chunked state must be discarded.
+        if self.kitty_state.is_some() {
+            if cmd.control.action.is_none() {
+                // No explicit action → this is a continuation chunk.
+                self.handle_kitty_chunk(&cmd);
+                return;
+            }
+            // Explicit action on a new command while a chunked transfer is in
+            // progress — discard the stale accumulator.
+            tracing::warn!(
+                "Kitty graphics: discarding incomplete chunked transfer \
+                 (id={:?}) due to new command (a={action:?})",
+                self.kitty_state.as_ref().map(|s| s.control.image_id),
+            );
+            self.kitty_state = None;
         }
+
+        tracing::debug!(
+            "Kitty graphics: dispatch a={action:?} i={:?} m={} q={}",
+            cmd.control.image_id,
+            cmd.control.more_data,
+            cmd.control.quiet,
+        );
 
         match action {
             KittyAction::Query => self.handle_kitty_query(&cmd),
@@ -1238,7 +1765,7 @@ impl TerminalHandler {
             KittyAction::AnimationFrame
             | KittyAction::AnimationControl
             | KittyAction::AnimationCompose => {
-                tracing::debug!(
+                tracing::warn!(
                     "Kitty graphics: animation commands not yet supported (a={action:?})"
                 );
             }
@@ -1352,8 +1879,16 @@ impl TerminalHandler {
         let image_id_hint = cmd.control.image_id.unwrap_or(0);
         let quiet = cmd.control.quiet;
 
-        if cmd.payload.is_empty() && action != KittyAction::Put {
-            tracing::debug!("Kitty graphics: empty payload for a={action:?}; ignoring");
+        // `a=p` (Put) with an empty payload means "display a previously
+        // transmitted image by its ID."  Look up the image from the store
+        // instead of trying to decode an empty payload.
+        if action == KittyAction::Put && cmd.payload.is_empty() {
+            self.handle_kitty_put(cmd, image_id_hint, quiet);
+            return;
+        }
+
+        if cmd.payload.is_empty() {
+            tracing::warn!("Kitty graphics: empty payload for a={action:?}; ignoring");
             self.send_kitty_error(image_id_hint, quiet, "ENODATA:no payload");
             return;
         }
@@ -1377,7 +1912,117 @@ impl TerminalHandler {
         );
     }
 
+    /// Handle `a=p` (Put) — display a previously transmitted image.
+    ///
+    /// Looks up the image by `i=<image_id>` in the image store, applies any
+    /// display-size overrides (`c=`/`r=`) from the control data, and places
+    /// the image into the buffer.
+    fn handle_kitty_put(&mut self, cmd: &KittyGraphicsCommand, image_id: u32, quiet: u8) {
+        let id = u64::from(image_id);
+
+        // Look up the previously transmitted image.
+        let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
+            tracing::warn!(
+                "Kitty graphics: a=p for unknown image id={image_id} \
+                 (store has {} images: {:?})",
+                self.buffer.image_store().len(),
+                self.buffer
+                    .image_store()
+                    .iter()
+                    .map(|(k, _)| k)
+                    .collect::<Vec<_>>(),
+            );
+            self.send_kitty_error(image_id, quiet, "ENOENT:image not found");
+            return;
+        };
+
+        // Apply display-size overrides from the Put command, if present.
+        let (term_width, term_height) = self.get_win_size();
+
+        let display_cols = cmd
+            .control
+            .display_cols
+            .map_or(stored_image.display_cols, |c| {
+                #[allow(clippy::cast_possible_truncation)]
+                let cols = c as usize;
+                cols.min(term_width).max(1)
+            });
+
+        let display_rows = cmd
+            .control
+            .display_rows
+            .map_or(stored_image.display_rows, |r| {
+                #[allow(clippy::cast_possible_truncation)]
+                let rows = r as usize;
+                rows.min(term_height).max(1)
+            });
+
+        let image_to_place = InlineImage {
+            id: stored_image.id,
+            pixels: stored_image.pixels,
+            width_px: stored_image.width_px,
+            height_px: stored_image.height_px,
+            display_cols,
+            display_rows,
+        };
+
+        // Update the store with the possibly-resized image.
+        self.buffer.image_store_mut().insert(image_to_place.clone());
+
+        if cmd.control.unicode_placeholder {
+            let pid = cmd.control.placement_id.unwrap_or(0);
+            let vp = VirtualPlacement {
+                image_id: id,
+                placement_id: pid,
+                cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
+                rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
+            };
+            self.virtual_placements.insert((id, pid), vp);
+        } else {
+            // Save cursor position if `C=1` (no cursor movement).
+            let saved_cursor = if cmd.control.no_cursor_movement {
+                Some(self.buffer.get_cursor().pos)
+            } else {
+                None
+            };
+
+            let cursor = self.buffer.get_cursor().pos;
+            tracing::debug!(
+                "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
+                 {display_cols}x{display_rows} cells, C={}",
+                cursor.x,
+                cursor.y,
+                u8::from(cmd.control.no_cursor_movement),
+            );
+            let _new_offset = self.buffer.place_image(
+                image_to_place,
+                0,
+                ImageProtocol::Kitty,
+                cmd.control.image_number,
+                cmd.control.placement_id,
+                cmd.control.z_index.unwrap_or(0),
+            );
+
+            // Restore cursor if `C=1`.
+            if let Some(pos) = saved_cursor {
+                self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+            }
+        }
+
+        // Send OK response unless suppressed.
+        if quiet < 1 && id > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let response_id = id as u32;
+            let response = format_kitty_response(response_id, true, "");
+            self.write_to_pty(&response);
+        }
+    }
+
     /// Decode a Kitty graphics payload into RGBA pixel data.
+    ///
+    /// Handles the transmission medium (`t=d` direct, `t=f` file path,
+    /// `t=t` temp file, `t=s` shared memory) to resolve the raw image bytes,
+    /// then decodes according to the pixel format (`f=24`, `f=32`, `f=100`).
     ///
     /// Returns `None` if decoding fails (an error response is sent to the PTY).
     fn decode_kitty_payload(
@@ -1388,42 +2033,50 @@ impl TerminalHandler {
     ) -> Option<(Vec<u8>, u32, u32)> {
         use freminal_common::buffer_states::kitty_graphics::KittyFormat;
 
+        // Resolve the raw image bytes based on transmission medium.
+        let image_data = self.resolve_kitty_transmission(
+            &cmd.payload,
+            cmd.control.transmission,
+            image_id_hint,
+            quiet,
+        )?;
+
         let format = cmd.control.format.unwrap_or(KittyFormat::Rgba);
 
         match format {
             KittyFormat::Rgba => {
                 let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
                 let expected = (w as usize) * (h as usize) * 4;
-                if cmd.payload.len() != expected {
-                    tracing::debug!(
+                if image_data.len() != expected {
+                    tracing::warn!(
                         "Kitty RGBA: expected {expected} bytes, got {}",
-                        cmd.payload.len()
+                        image_data.len()
                     );
                     self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
                     return None;
                 }
-                Some((cmd.payload.clone(), w, h))
+                Some((image_data, w, h))
             }
             KittyFormat::Rgb => {
                 let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
                 let expected = (w as usize) * (h as usize) * 3;
-                if cmd.payload.len() != expected {
-                    tracing::debug!(
+                if image_data.len() != expected {
+                    tracing::warn!(
                         "Kitty RGB: expected {expected} bytes, got {}",
-                        cmd.payload.len()
+                        image_data.len()
                     );
                     self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
                     return None;
                 }
                 let pixel_count = (w as usize) * (h as usize);
                 let mut rgba = Vec::with_capacity(pixel_count * 4);
-                for chunk in cmd.payload.chunks_exact(3) {
+                for chunk in image_data.chunks_exact(3) {
                     rgba.extend_from_slice(chunk);
                     rgba.push(255);
                 }
                 Some((rgba, w, h))
             }
-            KittyFormat::Png => match image::load_from_memory(&cmd.payload) {
+            KittyFormat::Png => match image::load_from_memory(&image_data) {
                 Ok(img) => {
                     let rgba_img = img.to_rgba8();
                     let w = rgba_img.width();
@@ -1439,12 +2092,108 @@ impl TerminalHandler {
                     Some((rgba_img.into_raw(), w, h))
                 }
                 Err(e) => {
-                    tracing::debug!("Kitty PNG decode failed: {e}");
+                    tracing::warn!("Kitty PNG decode failed: {e}");
                     self.send_kitty_error(image_id_hint, quiet, "EINVAL:PNG decode failed");
                     None
                 }
             },
         }
+    }
+
+    /// Resolve Kitty transmission medium to raw image bytes.
+    ///
+    /// - `Direct` (default): payload is already the image data.
+    /// - `File`: payload is a UTF-8 file path; read the file from disk.
+    /// - `TempFile`: same as `File`, but delete the file after reading.
+    /// - `SharedMemory`: not supported.
+    fn resolve_kitty_transmission(
+        &self,
+        payload: &[u8],
+        transmission: Option<freminal_common::buffer_states::kitty_graphics::KittyTransmission>,
+        image_id_hint: u32,
+        quiet: u8,
+    ) -> Option<Vec<u8>> {
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
+
+        match transmission.unwrap_or(KittyTransmission::Direct) {
+            KittyTransmission::Direct => Some(payload.to_vec()),
+            KittyTransmission::File => self.read_kitty_file(payload, image_id_hint, quiet, false),
+            KittyTransmission::TempFile => {
+                self.read_kitty_file(payload, image_id_hint, quiet, true)
+            }
+            KittyTransmission::SharedMemory => {
+                tracing::warn!("Kitty graphics: shared memory transmission (t=s) is not supported");
+                self.send_kitty_error(
+                    image_id_hint,
+                    quiet,
+                    "ENOTSUP:shared memory transmission not supported",
+                );
+                None
+            }
+        }
+    }
+
+    /// Read a Kitty graphics file from disk.
+    ///
+    /// The payload bytes are interpreted as a UTF-8 file path. If `delete_after`
+    /// is true, the file is removed after reading (for `t=t` temp file mode).
+    fn read_kitty_file(
+        &self,
+        payload: &[u8],
+        image_id_hint: u32,
+        quiet: u8,
+        delete_after: bool,
+    ) -> Option<Vec<u8>> {
+        let path_str = match std::str::from_utf8(payload) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Kitty graphics file path is not valid UTF-8: {e}");
+                self.send_kitty_error(image_id_hint, quiet, "EINVAL:invalid file path encoding");
+                return None;
+            }
+        };
+
+        let path = std::path::Path::new(path_str);
+
+        // Security: reject non-absolute paths to prevent relative path traversal.
+        if !path.is_absolute() {
+            tracing::warn!("Kitty graphics: rejecting non-absolute file path: {path_str:?}");
+            self.send_kitty_error(image_id_hint, quiet, "EPERM:file path must be absolute");
+            return None;
+        }
+
+        tracing::debug!(
+            "Kitty graphics: reading image from file: {path_str} (delete_after={delete_after})"
+        );
+
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Kitty graphics: failed to read file {path_str:?}: {e}");
+                self.send_kitty_error(
+                    image_id_hint,
+                    quiet,
+                    &format!("EIO:failed to read file: {e}"),
+                );
+                return None;
+            }
+        };
+
+        tracing::debug!(
+            "Kitty graphics: read {} bytes from file: {path_str}",
+            data.len(),
+        );
+
+        if delete_after {
+            if let Err(e) = std::fs::remove_file(path) {
+                // Not fatal — we still have the data. Log the failure.
+                tracing::warn!("Kitty graphics: failed to delete temp file {path_str:?}: {e}");
+            } else {
+                tracing::debug!("Kitty graphics: deleted temp file {path_str}");
+            }
+        }
+
+        Some(data)
     }
 
     /// Extract required `s` (width) and `v` (height) from Kitty control data.
@@ -1545,7 +2294,23 @@ impl TerminalHandler {
             let should_display =
                 matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
             if should_display {
-                let _new_offset = self.buffer.place_image(inline_image, 0);
+                tracing::debug!(
+                    "Kitty graphics: placing image id={assigned_id} at cursor, \
+                     {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
+                );
+                let _new_offset = self.buffer.place_image(
+                    inline_image,
+                    0,
+                    ImageProtocol::Kitty,
+                    control.image_number,
+                    control.placement_id,
+                    control.z_index.unwrap_or(0),
+                );
+            } else {
+                tracing::debug!(
+                    "Kitty graphics: stored image id={assigned_id} (a={action:?}, not placing), \
+                     {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
+                );
             }
         }
 
@@ -1562,6 +2327,7 @@ impl TerminalHandler {
     fn send_kitty_error(&self, image_id: u32, quiet: u8, message: &str) {
         // quiet=2 suppresses all responses (including errors).
         if quiet >= 2 {
+            tracing::debug!("Kitty graphics: error suppressed by q=2: id={image_id} {message}");
             return;
         }
         let response = format_kitty_response(image_id, false, message);
@@ -1580,12 +2346,12 @@ impl TerminalHandler {
 
         match target {
             KittyDeleteTarget::All | KittyDeleteTarget::AllIncludingNonVisible => {
-                tracing::debug!("Kitty graphics: deleting all images");
-                // Clear all image placements from cells.
+                tracing::debug!(
+                    "Kitty graphics: deleting ALL images ({} in store)",
+                    self.buffer.image_store().len(),
+                );
                 self.buffer.clear_all_image_placements();
-                // Clear the image store.
                 self.buffer.image_store_mut().clear();
-                // Clear all virtual placements.
                 self.virtual_placements.clear();
             }
             KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter => {
@@ -1594,9 +2360,14 @@ impl TerminalHandler {
                     tracing::debug!("Kitty graphics: deleting image id={id}");
                     self.buffer.clear_image_placements_by_id(id);
                     self.buffer.image_store_mut().remove(id);
-                    // Remove virtual placements with matching image ID.
                     self.virtual_placements
                         .retain(|&(img_id, _), _| img_id != id);
+                }
+            }
+            KittyDeleteTarget::ByNumber | KittyDeleteTarget::ByNumberCursorOrAfter => {
+                if let Some(number) = cmd.control.image_number {
+                    tracing::debug!("Kitty graphics: deleting image number={number}");
+                    self.buffer.clear_image_placements_by_number(number);
                 }
             }
             KittyDeleteTarget::AtCursor => {
@@ -1607,10 +2378,39 @@ impl TerminalHandler {
                 tracing::debug!("Kitty graphics: deleting images at cursor and after");
                 self.buffer.clear_image_placements_at_cursor_and_after();
             }
-            other => {
-                tracing::debug!(
-                    "Kitty graphics: delete target {other:?} not yet implemented; ignoring"
-                );
+            KittyDeleteTarget::AtCellRange | KittyDeleteTarget::AtCellRangeAndAfter => {
+                // Uses the x and y from the control data to define the cell range.
+                // Per Kitty spec, x/y default to cursor position if not specified.
+                let cursor = self.buffer.get_cursor().pos;
+                let col = cmd.control.src_x.map_or(cursor.x, |v| v as usize);
+                let row = cmd.control.src_y.map_or(cursor.y, |v| v as usize);
+                tracing::debug!("Kitty graphics: deleting images at cell ({row},{col})");
+                // For the "and after" variant, clear from that position onward.
+                if matches!(target, KittyDeleteTarget::AtCellRangeAndAfter) {
+                    self.buffer
+                        .clear_image_placements_at_cell_and_after(row, col);
+                } else {
+                    self.buffer.clear_image_placements_at_cell(row, col);
+                }
+            }
+            KittyDeleteTarget::InColumnRange | KittyDeleteTarget::InColumnRangeAndAfter => {
+                // Delete images that intersect the specified column.
+                let cursor = self.buffer.get_cursor().pos;
+                let col = cmd.control.src_x.map_or(cursor.x, |v| v as usize);
+                tracing::debug!("Kitty graphics: deleting images in column {col}");
+                self.buffer.clear_image_placements_in_column(col);
+            }
+            KittyDeleteTarget::InRowRange | KittyDeleteTarget::InRowRangeAndAfter => {
+                // Delete images that intersect the specified row.
+                let cursor = self.buffer.get_cursor().pos;
+                let row = cmd.control.src_y.map_or(cursor.y, |v| v as usize);
+                tracing::debug!("Kitty graphics: deleting images in row {row}");
+                self.buffer.clear_image_placements_in_row(row);
+            }
+            KittyDeleteTarget::AtZIndex | KittyDeleteTarget::AtZIndexAndAfter => {
+                let z = cmd.control.z_index.unwrap_or(0);
+                tracing::debug!("Kitty graphics: deleting images at z-index {z}");
+                self.buffer.clear_image_placements_by_z_index(z);
             }
         }
     }
@@ -1742,6 +2542,11 @@ impl TerminalHandler {
                         self.last_exit_code = *exit_code;
                         self.ftcs_state = FtcsState::None;
                     }
+                    FtcsMarker::PromptProperty(_kind) => {
+                        // Prompt property is informational metadata — it annotates
+                        // the type of the next prompt (initial, continuation, right)
+                        // but does not change the FTCS state machine.
+                    }
                 }
             }
             AnsiOscType::ITerm2FileInline(data) => {
@@ -1757,7 +2562,7 @@ impl TerminalHandler {
                 self.handle_iterm2_file_end();
             }
             AnsiOscType::ITerm2Unknown => {
-                tracing::debug!("OSC 1337: unrecognised sub-command (ignored)");
+                tracing::warn!("OSC 1337: unrecognised sub-command (ignored)");
             }
 
             // Clipboard: forward to GUI via window_commands
@@ -1824,7 +2629,7 @@ impl TerminalHandler {
                 if let Some(rgb) = parse_color_spec(spec) {
                     self.bg_color_override = Some(rgb);
                 } else {
-                    tracing::debug!("OSC 11: unrecognised color spec: {spec:?}");
+                    tracing::warn!("OSC 11: unrecognised color spec: {spec:?}");
                 }
             }
             // OSC 10 set: store a dynamic foreground color override.
@@ -1832,7 +2637,7 @@ impl TerminalHandler {
                 if let Some(rgb) = parse_color_spec(spec) {
                     self.fg_color_override = Some(rgb);
                 } else {
-                    tracing::debug!("OSC 10: unrecognised color spec: {spec:?}");
+                    tracing::warn!("OSC 10: unrecognised color spec: {spec:?}");
                 }
             }
             // OSC 110: reset dynamic foreground color override.
@@ -1863,7 +2668,7 @@ impl TerminalHandler {
         let img = match image::load_from_memory(&data.data) {
             Ok(img) => img.to_rgba8(),
             Err(e) => {
-                tracing::debug!("OSC 1337 File=: image decode failed: {e}");
+                tracing::warn!("OSC 1337 File=: image decode failed: {e}");
                 return;
             }
         };
@@ -1872,7 +2677,7 @@ impl TerminalHandler {
         let img_height_px = img.height();
 
         if img_width_px == 0 || img_height_px == 0 {
-            tracing::debug!("OSC 1337 File=: decoded image has zero dimensions");
+            tracing::warn!("OSC 1337 File=: decoded image has zero dimensions");
             return;
         }
 
@@ -1912,7 +2717,7 @@ impl TerminalHandler {
         };
 
         if display_cols == 0 || display_rows == 0 {
-            tracing::debug!("OSC 1337 File=: computed display size is 0x0");
+            tracing::warn!("OSC 1337 File=: computed display size is 0x0");
             return;
         }
 
@@ -1936,7 +2741,9 @@ impl TerminalHandler {
 
         // Place the image into the buffer. Pass 0 for scroll_offset — the
         // PTY thread always operates at the live bottom.
-        let _new_offset = self.buffer.place_image(inline_image, 0);
+        let _new_offset =
+            self.buffer
+                .place_image(inline_image, 0, ImageProtocol::ITerm2, None, None, 0);
 
         // Restore cursor position if doNotMoveCursor was requested.
         if let Some(pos) = saved_cursor {
@@ -2000,7 +2807,7 @@ impl TerminalHandler {
         };
 
         if state.accumulated_data.is_empty() {
-            tracing::debug!("OSC 1337 FileEnd: transfer completed with empty payload; ignoring");
+            tracing::warn!("OSC 1337 FileEnd: transfer completed with empty payload; ignoring");
             return;
         }
 
@@ -2344,7 +3151,7 @@ impl TerminalHandler {
                 0 => self.buffer.clear_tab_stop_at_cursor(),
                 3 => self.buffer.clear_all_tab_stops(),
                 _ => {
-                    tracing::debug!("TBC with unsupported Ps={ps} (ignored)");
+                    tracing::warn!("TBC with unsupported Ps={ps} (ignored)");
                 }
             },
             TerminalOutput::CursorForwardTab(n) => {
@@ -2440,7 +3247,7 @@ impl TerminalHandler {
                 Mode::UnknownQuery(params) => {
                     // Unknown mode — respond with Ps=0 (not recognized)
                     let digits: String = params.iter().map(|&x| x as char).collect();
-                    tracing::debug!("DECRQM: unknown mode ?{digits}, responding not recognized");
+                    tracing::warn!("DECRQM: unknown mode ?{digits}, responding not recognized");
                     self.write_to_pty(&format!("\x1b[?{digits};0$y"));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
@@ -2527,7 +3334,7 @@ impl TerminalHandler {
                 | Mode::GraphemeClustering(_)
                 | Mode::Theming(_)
                 | Mode::Unknown(_) => {
-                    tracing::debug!("Mode not acted on by TerminalHandler: {mode}");
+                    tracing::warn!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },
             TerminalOutput::OscResponse(osc) => {
@@ -2555,31 +3362,31 @@ impl TerminalHandler {
                 self.handle_request_device_attributes();
             }
             TerminalOutput::EightBitControl => {
-                tracing::debug!("EightBitControl not yet implemented (ignored)");
+                tracing::warn!("EightBitControl not yet implemented (ignored)");
             }
             TerminalOutput::SevenBitControl => {
-                tracing::debug!("SevenBitControl not yet implemented (ignored)");
+                tracing::warn!("SevenBitControl not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelOne => {
-                tracing::debug!("AnsiConformanceLevelOne not yet implemented (ignored)");
+                tracing::warn!("AnsiConformanceLevelOne not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelTwo => {
-                tracing::debug!("AnsiConformanceLevelTwo not yet implemented (ignored)");
+                tracing::warn!("AnsiConformanceLevelTwo not yet implemented (ignored)");
             }
             TerminalOutput::AnsiConformanceLevelThree => {
-                tracing::debug!("AnsiConformanceLevelThree not yet implemented (ignored)");
+                tracing::warn!("AnsiConformanceLevelThree not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightTop => {
-                tracing::debug!("DoubleLineHeightTop not yet implemented (ignored)");
+                tracing::warn!("DoubleLineHeightTop not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightBottom => {
-                tracing::debug!("DoubleLineHeightBottom not yet implemented (ignored)");
+                tracing::warn!("DoubleLineHeightBottom not yet implemented (ignored)");
             }
             TerminalOutput::SingleWidthLine => {
-                tracing::debug!("SingleWidthLine not yet implemented (ignored)");
+                tracing::warn!("SingleWidthLine not yet implemented (ignored)");
             }
             TerminalOutput::DoubleWidthLine => {
-                tracing::debug!("DoubleWidthLine not yet implemented (ignored)");
+                tracing::warn!("DoubleWidthLine not yet implemented (ignored)");
             }
             TerminalOutput::ScreenAlignmentTest => {
                 self.buffer.screen_alignment_test();
@@ -2609,7 +3416,7 @@ impl TerminalHandler {
             | TerminalOutput::CharsetSpanish
             | TerminalOutput::CharsetSwedish
             | TerminalOutput::CharsetSwiss => {
-                tracing::debug!(
+                tracing::warn!(
                     "Charset/line-drawing designation not yet implemented (ignored): {output}"
                 );
             }
@@ -2620,16 +3427,16 @@ impl TerminalHandler {
                 self.handle_restore_cursor();
             }
             TerminalOutput::CursorToLowerLeftCorner => {
-                tracing::debug!("CursorToLowerLeftCorner not yet implemented (ignored)");
+                tracing::warn!("CursorToLowerLeftCorner not yet implemented (ignored)");
             }
             TerminalOutput::ResetDevice => {
                 self.full_reset();
             }
             TerminalOutput::MemoryLock => {
-                tracing::debug!("MemoryLock not yet implemented (ignored)");
+                tracing::warn!("MemoryLock not yet implemented (ignored)");
             }
             TerminalOutput::MemoryUnlock => {
-                tracing::debug!("MemoryUnlock not yet implemented (ignored)");
+                tracing::warn!("MemoryUnlock not yet implemented (ignored)");
             }
             TerminalOutput::DeviceControlString(dcs) => {
                 self.handle_device_control_string(dcs);
@@ -4225,6 +5032,315 @@ mod tests {
         assert_eq!(inner, b"$qm");
     }
 
+    // ── undouble_esc tests ────────────────────────────────────────────────
+
+    #[test]
+    fn undouble_esc_no_esc_bytes() {
+        let data = b"hello world";
+        let result = TerminalHandler::undouble_esc(data);
+        assert_eq!(result, b"hello world");
+    }
+
+    #[test]
+    fn undouble_esc_single_pair() {
+        // ESC ESC → ESC
+        let data = b"\x1b\x1b";
+        let result = TerminalHandler::undouble_esc(data);
+        assert_eq!(result, b"\x1b");
+    }
+
+    #[test]
+    fn undouble_esc_multiple_pairs() {
+        // Two doubled pairs with content between
+        let data = b"\x1b\x1b_G\x1b\x1b\\";
+        let result = TerminalHandler::undouble_esc(data);
+        assert_eq!(result, b"\x1b_G\x1b\\");
+    }
+
+    #[test]
+    fn undouble_esc_lone_esc_at_end() {
+        // A single ESC at the end (not doubled) stays as-is
+        let data = b"abc\x1b";
+        let result = TerminalHandler::undouble_esc(data);
+        assert_eq!(result, b"abc\x1b");
+    }
+
+    #[test]
+    fn undouble_esc_empty() {
+        let result = TerminalHandler::undouble_esc(b"");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn undouble_esc_triple_esc() {
+        // Three consecutive ESC bytes: first two form a pair → ESC, the third
+        // remains as a lone ESC.
+        let data = b"\x1b\x1b\x1b";
+        let result = TerminalHandler::undouble_esc(data);
+        assert_eq!(result, b"\x1b\x1b");
+    }
+
+    // ── double_esc tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn double_esc_no_esc_bytes() {
+        let data = b"hello world";
+        let result = TerminalHandler::double_esc(data);
+        assert_eq!(result, b"hello world");
+    }
+
+    #[test]
+    fn double_esc_single_esc() {
+        let data = b"\x1b";
+        let result = TerminalHandler::double_esc(data);
+        assert_eq!(result, b"\x1b\x1b");
+    }
+
+    #[test]
+    fn double_esc_apc_sequence() {
+        // ESC _ G i=1;OK ESC \  → ESC ESC _ G i=1;OK ESC ESC backslash
+        let data = b"\x1b_Gi=1;OK\x1b\\";
+        let result = TerminalHandler::double_esc(data);
+        assert_eq!(result, b"\x1b\x1b_Gi=1;OK\x1b\x1b\\");
+    }
+
+    #[test]
+    fn double_esc_empty() {
+        let result = TerminalHandler::double_esc(b"");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn double_esc_roundtrip() {
+        // undouble(double(x)) == x for any input
+        let original = b"\x1b_Ga=q,i=1;\x1b\\";
+        let doubled = TerminalHandler::double_esc(original);
+        let undoubled = TerminalHandler::undouble_esc(&doubled);
+        assert_eq!(undoubled, original.to_vec());
+    }
+
+    // ── wrap_tmux_passthrough tests ───────────────────────────────────────
+
+    #[test]
+    fn wrap_tmux_passthrough_kitty_response() {
+        // A Kitty OK response should be wrapped correctly
+        let response = b"\x1b_Gi=1;OK\x1b\\";
+        let wrapped = TerminalHandler::wrap_tmux_passthrough(response);
+        // Expected: ESC P tmux; ESC ESC _ G i=1;OK ESC ESC \ ESC \
+        let expected = b"\x1bPtmux;\x1b\x1b_Gi=1;OK\x1b\x1b\\\x1b\\";
+        assert_eq!(wrapped, expected.to_vec());
+    }
+
+    #[test]
+    fn wrap_tmux_passthrough_plain_text() {
+        // Plain text (no ESC) should pass through with just the envelope
+        let data = b"hello";
+        let wrapped = TerminalHandler::wrap_tmux_passthrough(data);
+        assert_eq!(wrapped, b"\x1bPtmux;hello\x1b\\".to_vec());
+    }
+
+    // ── tmux passthrough dispatch tests ───────────────────────────────────
+
+    #[test]
+    fn tmux_passthrough_empty_payload_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"");
+        // Success = no panic
+    }
+
+    #[test]
+    fn tmux_passthrough_no_esc_prefix_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Payload that does not start with doubled ESC
+        handler.handle_tmux_passthrough(b"junk data");
+        // Success = no panic
+    }
+
+    #[test]
+    fn tmux_passthrough_too_short_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Payload is just a doubled ESC with no type byte
+        handler.handle_tmux_passthrough(b"\x1b\x1b");
+        // After un-doubling: [0x1b] — length < 2 → warn and return
+    }
+
+    #[test]
+    fn tmux_passthrough_dispatches_apc_kitty_query() {
+        // Build a tmux-wrapped Kitty graphics query:
+        //   Inner (un-doubled): ESC _ G a=q,i=1; ESC \
+        //   Doubled for tmux:   ESC ESC _ G a=q,i=1; ESC ESC \
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // The tmux payload (after "tmux;" prefix has been stripped):
+        // doubled-ESC _ G a=q,i=1; doubled-ESC backslash
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"\x1b\x1b_Ga=q,i=1;\x1b\x1b\\");
+
+        handler.handle_tmux_passthrough(&payload);
+
+        // The Kitty query handler should respond with a tmux-wrapped APC response
+        let response = rx.try_recv();
+        assert!(
+            response.is_ok(),
+            "Expected a Kitty graphics query response via PTY write"
+        );
+        let PtyWrite::Write(bytes) = response.unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        let resp_str = String::from_utf8_lossy(&bytes);
+        // Response should be wrapped in DCS tmux passthrough
+        assert!(
+            resp_str.starts_with("\x1bPtmux;"),
+            "Expected tmux-wrapped response, got: {resp_str}"
+        );
+        // The inner content (after un-doubling) should be a Kitty APC response
+        let inner = resp_str
+            .strip_prefix("\x1bPtmux;")
+            .and_then(|s| s.strip_suffix("\x1b\\"))
+            .expect("Expected DCS tmux envelope");
+        let inner_bytes = TerminalHandler::undouble_esc(inner.as_bytes());
+        let inner_str = String::from_utf8_lossy(&inner_bytes);
+        assert!(
+            inner_str.starts_with("\x1b_G"),
+            "Expected inner Kitty APC response, got: {inner_str}"
+        );
+
+        // The passthrough flag should be cleared after dispatch
+        assert!(
+            !handler.in_tmux_passthrough,
+            "in_tmux_passthrough should be false after dispatch"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_dispatches_nested_dcs() {
+        // Build a tmux-wrapped DCS DECRQSS query for SGR:
+        //   Inner (un-doubled): ESC P $ q m ESC \
+        //   Doubled for tmux:   ESC ESC P $ q m ESC ESC \
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"\x1b\x1bP$qm\x1b\x1b\\");
+
+        handler.handle_tmux_passthrough(&payload);
+
+        // The DECRQSS handler should respond with a tmux-wrapped DCS response
+        let response = rx.try_recv();
+        assert!(
+            response.is_ok(),
+            "Expected a DECRQSS response via PTY write"
+        );
+        let PtyWrite::Write(bytes) = response.unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        let resp_str = String::from_utf8_lossy(&bytes);
+        // Response should be wrapped in DCS tmux passthrough
+        assert!(
+            resp_str.starts_with("\x1bPtmux;"),
+            "Expected tmux-wrapped response, got: {resp_str}"
+        );
+        // The inner content should be a DECRQSS response
+        let inner = resp_str
+            .strip_prefix("\x1bPtmux;")
+            .and_then(|s| s.strip_suffix("\x1b\\"))
+            .expect("Expected DCS tmux envelope");
+        let inner_bytes = TerminalHandler::undouble_esc(inner.as_bytes());
+        let inner_str = String::from_utf8_lossy(&inner_bytes);
+        assert!(
+            inner_str.contains("$r"),
+            "Expected DECRQSS response, got: {inner_str}"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_unknown_type_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Inner: ESC Z (unknown type)
+        let payload = b"\x1b\x1bZ";
+        handler.handle_tmux_passthrough(payload);
+        // Success = no panic; flag should be cleared
+        assert!(!handler.in_tmux_passthrough);
+    }
+
+    #[test]
+    fn tmux_passthrough_via_full_dcs_handler() {
+        // End-to-end: feed a complete DCS tmux passthrough through
+        // handle_device_control_string (the normal entry point).
+        //
+        // Format: P tmux; <doubled-payload> ESC \
+        // Payload: Kitty graphics query: ESC ESC _ G a=q,i=1; ESC ESC \
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let mut dcs = vec![b'P'];
+        dcs.extend_from_slice(b"tmux;");
+        dcs.extend_from_slice(b"\x1b\x1b_Ga=q,i=1;\x1b\x1b\\");
+        dcs.extend_from_slice(b"\x1b\\");
+
+        handler.handle_device_control_string(&dcs);
+
+        // Should have dispatched to the Kitty query handler with tmux wrapping
+        let response = rx.try_recv();
+        assert!(
+            response.is_ok(),
+            "Expected a Kitty graphics query response from full DCS tmux passthrough"
+        );
+        let PtyWrite::Write(bytes) = response.unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        let resp_str = String::from_utf8_lossy(&bytes);
+        // Response should be wrapped in DCS tmux passthrough
+        assert!(
+            resp_str.starts_with("\x1bPtmux;"),
+            "Expected tmux-wrapped response, got: {resp_str}"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_flag_cleared_after_early_return() {
+        // Even when the payload is invalid and we return early,
+        // the flag should not be left set.
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"");
+        assert!(!handler.in_tmux_passthrough);
+        handler.handle_tmux_passthrough(b"junk");
+        assert!(!handler.in_tmux_passthrough);
+    }
+
+    #[test]
+    fn direct_write_not_wrapped() {
+        // When a Kitty query arrives directly (not via tmux passthrough),
+        // the response should be a bare APC, not wrapped.
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Direct APC (no tmux wrapping)
+        let apc = b"_Ga=q,i=1;\x1b\\";
+        handler.handle_application_program_command(apc);
+
+        let response = rx.try_recv();
+        assert!(response.is_ok(), "Expected a Kitty response");
+        let PtyWrite::Write(bytes) = response.unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        let resp_str = String::from_utf8_lossy(&bytes);
+        // Should be a bare APC, NOT wrapped in tmux passthrough
+        assert!(
+            resp_str.starts_with("\x1b_G"),
+            "Expected bare APC response, got: {resp_str}"
+        );
+        assert!(
+            !resp_str.starts_with("\x1bPtmux;"),
+            "Direct query should NOT produce tmux-wrapped response"
+        );
+    }
+
     // ── XTGETTCAP tests ──────────────────────────────────────────────────
 
     #[test]
@@ -5052,14 +6168,9 @@ mod tests {
 
         // After placement, cursor should have moved down by display_rows (2).
         // The buffer should contain image cells.
-        let buf = handler.buffer();
-        let rows = buf.get_rows();
 
-        // Check that at least one cell has an image placement.
-        let has_image_cell = rows.iter().any(|row| {
-            let cells = row.cells();
-            cells.iter().any(crate::cell::Cell::has_image)
-        });
+        // Check that at least one image overlay has been placed.
+        let has_image_cell = handler.buffer().has_any_image_cell();
         assert!(has_image_cell, "Expected at least one image cell in buffer");
     }
 
@@ -5135,11 +6246,7 @@ mod tests {
         );
 
         // But the image should still have been placed.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(has_image, "Image should still be placed");
     }
 
@@ -5187,11 +6294,7 @@ mod tests {
         handler.handle_osc(&AnsiOscType::ITerm2MultipartBegin(begin_data));
 
         // Verify no image placed yet
-        let has_image_before = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image_before = handler.buffer().has_any_image_cell();
         assert!(
             !has_image_before,
             "No image should be placed before FileEnd"
@@ -5206,11 +6309,7 @@ mod tests {
         handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
 
         // Verify image was placed
-        let has_image_after = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image_after = handler.buffer().has_any_image_cell();
         assert!(has_image_after, "Image should be placed after FileEnd");
 
         // Verify multipart state was cleared
@@ -5242,11 +6341,7 @@ mod tests {
         handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
         handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             has_image,
             "Image should be placed after single-chunk transfer"
@@ -5329,11 +6424,7 @@ mod tests {
         handler.handle_osc(&AnsiOscType::ITerm2FilePart(png_data));
         handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(has_image, "Second transfer should produce an image");
     }
 
@@ -5358,11 +6449,7 @@ mod tests {
         handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
 
         // No image should be placed (empty payload)
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             !has_image,
             "Empty multipart transfer should not place an image"
@@ -5405,11 +6492,7 @@ mod tests {
             "Cursor should not move for non-inline"
         );
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             !has_image,
             "Non-inline multipart transfer should not place an image"
@@ -5465,11 +6548,7 @@ mod tests {
         handler.handle_kitty_graphics(cmd);
 
         // Image should be placed in the buffer.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             has_image,
             "Expected image cells after Kitty TransmitAndDisplay"
@@ -5497,11 +6576,7 @@ mod tests {
             "Expected image id=42 in the store after Transmit"
         );
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(!has_image, "Transmit-only should not place image cells");
     }
 
@@ -6047,11 +7122,7 @@ mod tests {
             "Image should appear after final chunk"
         );
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(has_image, "Chunked TransmitAndDisplay should place image");
     }
 
@@ -6401,6 +7472,527 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Kitty graphics file path transmission tests (t=f, t=t, t=s)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kitty_file_transmission_reads_png_from_disk() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Write a minimal valid 1x1 red PNG to a temp file.
+        let dir = std::env::temp_dir();
+        let path = dir.join("freminal_test_kitty_file.png");
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        img.save(&path).expect("failed to write test PNG");
+
+        let path_bytes = path
+            .to_str()
+            .expect("non-UTF-8 temp path")
+            .as_bytes()
+            .to_vec();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(999),
+                ..KittyControlData::default()
+            },
+            payload: path_bytes,
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be in the store.
+        assert!(
+            handler.buffer().image_store().get(999).is_some(),
+            "Expected image id=999 in the store after t=f transmission"
+        );
+
+        // Image should be placed in cells.
+        let has_image = handler.buffer().has_any_image_cell();
+        assert!(
+            has_image,
+            "Expected image cells after t=f Kitty TransmitAndDisplay"
+        );
+
+        // Clean up.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn kitty_temp_file_transmission_reads_and_deletes() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Write a minimal valid 1x1 PNG to a temp file.
+        let dir = std::env::temp_dir();
+        let path = dir.join("freminal_test_kitty_tempfile.png");
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        img.save(&path).expect("failed to write test PNG");
+
+        let path_bytes = path
+            .to_str()
+            .expect("non-UTF-8 temp path")
+            .as_bytes()
+            .to_vec();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::TempFile),
+                image_id: Some(998),
+                ..KittyControlData::default()
+            },
+            payload: path_bytes,
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Image should be in the store.
+        assert!(
+            handler.buffer().image_store().get(998).is_some(),
+            "Expected image id=998 in the store after t=t transmission"
+        );
+
+        // The temp file should have been deleted.
+        assert!(
+            !path.exists(),
+            "Temp file should be deleted after t=t transmission"
+        );
+    }
+
+    #[test]
+    fn kitty_file_transmission_nonexistent_file_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(997),
+                ..KittyControlData::default()
+            },
+            payload: b"/tmp/freminal_this_file_does_not_exist_12345.png".to_vec(),
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Should NOT be in the store.
+        assert!(
+            handler.buffer().image_store().get(997).is_none(),
+            "No image should be stored for a nonexistent file"
+        );
+
+        // An error response should have been sent.
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains("EIO") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            found_error,
+            "Expected an EIO error response for missing file"
+        );
+    }
+
+    #[test]
+    fn kitty_file_transmission_relative_path_rejected() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(996),
+                ..KittyControlData::default()
+            },
+            payload: b"../../../etc/passwd".to_vec(),
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Should NOT be in the store.
+        assert!(
+            handler.buffer().image_store().get(996).is_none(),
+            "No image should be stored for a relative path"
+        );
+
+        // An EPERM error response should have been sent.
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains("EPERM") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            found_error,
+            "Expected an EPERM error response for relative path"
+        );
+    }
+
+    #[test]
+    fn kitty_shared_memory_transmission_unsupported() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(995),
+                ..KittyControlData::default()
+            },
+            payload: b"shm_name".to_vec(),
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Should NOT be in the store.
+        assert!(
+            handler.buffer().image_store().get(995).is_none(),
+            "No image should be stored for shared memory transmission"
+        );
+
+        // An ENOTSUP error response should have been sent.
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains("ENOTSUP") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            found_error,
+            "Expected an ENOTSUP error response for shared memory"
+        );
+    }
+
+    #[test]
+    fn kitty_direct_transmission_still_works() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // 1x1 RGBA = 4 bytes, explicit t=d.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::Direct),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(994),
+                ..KittyControlData::default()
+            },
+            payload: vec![255, 0, 0, 255],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(
+            handler.buffer().image_store().get(994).is_some(),
+            "Expected image id=994 in the store with explicit t=d"
+        );
+    }
+
+    #[test]
+    fn kitty_file_invalid_utf8_path_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Invalid UTF-8 bytes.
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(993),
+                ..KittyControlData::default()
+            },
+            payload: vec![0xFF, 0xFE, 0x80, 0x00],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(
+            handler.buffer().image_store().get(993).is_none(),
+            "No image should be stored for invalid UTF-8 path"
+        );
+
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains("EINVAL") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            found_error,
+            "Expected an EINVAL error response for invalid UTF-8 path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Kitty `a=p` (Put) tests — transmit then place by image ID
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kitty_put_places_previously_transmitted_image() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Step 1: Transmit a 2x2 RGBA image (store only, no display).
+        let transmit_cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(transmit_cmd);
+
+        // Image should be in the store but not placed.
+        assert!(handler.buffer().image_store().get(42).is_some());
+        let has_image_before = handler.buffer().has_any_image_cell();
+        assert!(
+            !has_image_before,
+            "Transmit-only should not place image cells"
+        );
+
+        // Step 2: Put (display the previously transmitted image).
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(), // Put has no payload — references by ID.
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        // Image should now be placed in buffer cells.
+        let has_image_after = handler.buffer().has_any_image_cell();
+        assert!(
+            has_image_after,
+            "Put should place previously transmitted image into cells"
+        );
+    }
+
+    #[test]
+    fn kitty_put_with_display_size_overrides() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Transmit a 2x2 RGBA image.
+        let transmit_cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(transmit_cmd);
+
+        // Put with display size overrides: c=10 columns, r=5 rows.
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                display_cols: Some(10),
+                display_rows: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        // Check the image in the store was updated with new display dimensions.
+        let img = handler.buffer().image_store().get(42).unwrap();
+        assert_eq!(
+            img.display_cols, 10,
+            "display_cols should be overridden to 10"
+        );
+        assert_eq!(
+            img.display_rows, 5,
+            "display_rows should be overridden to 5"
+        );
+
+        // Verify image cells were placed.
+        let has_image = handler.buffer().has_any_image_cell();
+        assert!(has_image, "Put with overrides should place image cells");
+    }
+
+    #[test]
+    fn kitty_put_with_no_cursor_movement() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Transmit a 2x2 RGBA image.
+        let transmit_cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(transmit_cmd);
+
+        // Move cursor to a known position.
+        handler.buffer_mut().set_cursor_pos(Some(5), Some(3));
+        let cursor_before = handler.cursor_pos();
+
+        // Put with C=1 (no cursor movement).
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let cursor_after = handler.cursor_pos();
+        assert_eq!(
+            cursor_before, cursor_after,
+            "Cursor should not move when C=1 is set on Put"
+        );
+    }
+
+    #[test]
+    fn kitty_put_nonexistent_image_sends_error() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Put for an image ID that was never transmitted.
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(999),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        // No image cells should be placed.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Put for nonexistent image should not place cells"
+        );
+
+        // An error response should be sent.
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains("ENOENT") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            found_error,
+            "Expected ENOENT error for Put with nonexistent image ID"
+        );
+    }
+
+    #[test]
+    fn kitty_put_quiet_2_suppresses_error_for_missing_image() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Put for nonexistent image with q=2 (suppress all responses).
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(999),
+                quiet: 2,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        // With q=2, no error response should be sent.
+        let has_response = rx.try_recv().is_ok();
+        assert!(
+            !has_response,
+            "q=2 should suppress all responses including errors"
+        );
+    }
+
+    #[test]
+    fn kitty_put_default_action_is_transmit_not_put() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        // When `a=` is not specified, default is Transmit (not Put).
+        // This means a command with no `a=` parameter and image data
+        // should store but not display.
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        // Re-create with action=None to simulate missing `a=` parameter.
+        let cmd_no_action = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: None,
+                ..cmd.control
+            },
+            payload: cmd.payload,
+        };
+        handler.handle_kitty_graphics(cmd_no_action);
+
+        // Should be stored.
+        assert!(handler.buffer().image_store().get(42).is_some());
+
+        // Should NOT be placed.
+        let has_image = handler
+            .buffer()
+            .get_rows()
+            .iter()
+            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        assert!(
+            !has_image,
+            "Default action (None → Transmit) should not place image cells"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Sixel integration tests
     // -----------------------------------------------------------------------
 
@@ -6430,11 +8022,7 @@ mod tests {
         let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
         handler.handle_device_control_string(&dcs);
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             has_image,
             "Sixel DCS should place image cells in the buffer"
@@ -6470,11 +8058,7 @@ mod tests {
         let dcs = build_sixel_dcs(b"", b"");
         handler.handle_device_control_string(&dcs);
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             !has_image,
             "Empty Sixel body should not produce image cells"
@@ -6493,11 +8077,7 @@ mod tests {
         let dcs = build_sixel_dcs(b"", sixel_body);
         handler.handle_device_control_string(&dcs);
 
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().has_any_image_cell();
         assert!(
             has_image,
             "Sixel with repeat operator should place image cells"
@@ -6657,5 +8237,209 @@ mod tests {
             !TerminalHandler::is_sixel_sequence(b"abcq~"),
             "letters before q is not sixel"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // dispatch_tmux_csi unit tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tmux_csi_cup_dispatches_directly() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI 5;10H → move cursor to row 5, col 10 (1-based)
+        let dispatched = handler.dispatch_tmux_csi(b"5;10H");
+        assert!(dispatched, "CUP should be handled directly");
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 9, "col should be 10 - 1 = 9 (0-based)");
+        assert_eq!(cursor.y, 4, "row should be 5 - 1 = 4 (0-based)");
+    }
+
+    #[test]
+    fn tmux_csi_cup_default_params() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI H → move cursor to row 1, col 1 (default)
+        let dispatched = handler.dispatch_tmux_csi(b"H");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 0);
+        assert_eq!(cursor.y, 0);
+    }
+
+    #[test]
+    fn tmux_csi_cup_with_f_terminator() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI 3;7f → same as H
+        let dispatched = handler.dispatch_tmux_csi(b"3;7f");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 6);
+        assert_eq!(cursor.y, 2);
+    }
+
+    #[test]
+    fn tmux_csi_cursor_up() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(10));
+        let dispatched = handler.dispatch_tmux_csi(b"3A");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.y, 6, "should move up 3 from row 9 → row 6");
+    }
+
+    #[test]
+    fn tmux_csi_cursor_down() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(1), Some(5));
+        let dispatched = handler.dispatch_tmux_csi(b"2B");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.y, 6, "should move down 2 from row 4 → row 6");
+    }
+
+    #[test]
+    fn tmux_csi_cursor_forward() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(1));
+        let dispatched = handler.dispatch_tmux_csi(b"5C");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 14, "should move forward 5 from col 9 → col 14");
+    }
+
+    #[test]
+    fn tmux_csi_cursor_backward() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(1));
+        let dispatched = handler.dispatch_tmux_csi(b"3D");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 6, "should move backward 3 from col 9 → col 6");
+    }
+
+    #[test]
+    fn tmux_csi_cha() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(1), Some(5));
+        let dispatched = handler.dispatch_tmux_csi(b"20G");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 19, "CHA should set col to 20 - 1 = 19");
+        assert_eq!(cursor.y, 4, "CHA should not change row");
+    }
+
+    #[test]
+    fn tmux_csi_vpa() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(1));
+        let dispatched = handler.dispatch_tmux_csi(b"15d");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.y, 14, "VPA should set row to 15 - 1 = 14");
+    }
+
+    #[test]
+    fn tmux_csi_dec_private_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI ? 1049 h — DEC private mode, should not be handled directly
+        let dispatched = handler.dispatch_tmux_csi(b"?1049h");
+        assert!(
+            !dispatched,
+            "DEC private modes should fall through to reparse queue"
+        );
+    }
+
+    #[test]
+    fn tmux_csi_sgr_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI 1;32 m — SGR bold green, should fall through
+        let dispatched = handler.dispatch_tmux_csi(b"1;32m");
+        assert!(!dispatched, "SGR should fall through to reparse queue");
+    }
+
+    #[test]
+    fn tmux_csi_erase_in_display() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Write some text first
+        handler.handle_data(b"Hello");
+        // CSI 2 J — erase display
+        let dispatched = handler.dispatch_tmux_csi(b"2J");
+        assert!(dispatched, "ED should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_erase_in_line() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"Hello");
+        let dispatched = handler.dispatch_tmux_csi(b"0K");
+        assert!(dispatched, "EL should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_empty_body_returns_false() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.dispatch_tmux_csi(b""));
+    }
+
+    #[test]
+    fn tmux_csi_intermediates_fall_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI with intermediate byte (space + p = DECRQM)
+        assert!(!handler.dispatch_tmux_csi(b"?1049$p"));
+    }
+
+    #[test]
+    fn parse_csi_params_basic() {
+        assert_eq!(
+            TerminalHandler::parse_csi_params(b"1;42"),
+            vec![Some(1), Some(42)]
+        );
+    }
+
+    #[test]
+    fn parse_csi_params_empty() {
+        assert_eq!(
+            TerminalHandler::parse_csi_params(b""),
+            Vec::<Option<usize>>::new()
+        );
+    }
+
+    #[test]
+    fn parse_csi_params_missing_field() {
+        assert_eq!(
+            TerminalHandler::parse_csi_params(b";42"),
+            vec![None, Some(42)]
+        );
+    }
+
+    #[test]
+    fn parse_csi_params_single() {
+        assert_eq!(TerminalHandler::parse_csi_params(b"5"), vec![Some(5)]);
+    }
+
+    /// Integration test: simulate the exact nvim tmux passthrough scenario
+    /// where CUP and Kitty Put arrive as separate DCS tmux items in the same
+    /// `process_outputs()` batch.  With the direct CSI dispatch, the CUP
+    /// should execute immediately so the Put reads the correct cursor position.
+    #[test]
+    fn tmux_passthrough_cup_then_kitty_put_ordering() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Start cursor at 0,0
+        assert_eq!(handler.buffer.get_cursor().pos.x, 0);
+        assert_eq!(handler.buffer.get_cursor().pos.y, 0);
+
+        // Simulate: DCS tmux passthrough containing CSI 1;42H (CUP row 1, col 42)
+        // The tmux DCS wrapper has already been stripped; the inner content is
+        // ESC [ 1 ; 4 2 H with doubled ESC bytes.
+        // undouble_esc would produce: ESC [ 1 ; 4 2 H
+        // handle_tmux_passthrough would match inner[1] == '[' and call dispatch_tmux_csi
+        // with "1;42H".
+        let dispatched = handler.dispatch_tmux_csi(b"1;42H");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 41, "col should be 42 - 1 = 41 (0-based)");
+        assert_eq!(cursor.y, 0, "row should be 1 - 1 = 0 (0-based)");
+
+        // Now the APC Kitty Put would execute, reading cursor.pos correctly.
     }
 }

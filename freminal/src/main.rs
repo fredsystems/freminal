@@ -119,13 +119,13 @@ fn main() {
         filter
     };
 
-    // File filter: config level (default DEBUG), framework silencers.
+    // File filter: config level (default INFO), framework silencers.
     let file_log_level = cfg.file_log_level();
     let file_default_directive: Directive = file_log_level.parse().unwrap_or_else(|_| {
         early_warnings.push(format!(
-            "invalid log level \"{file_log_level}\" in config; falling back to debug"
+            "invalid log level \"{file_log_level}\" in config; falling back to info"
         ));
-        Level::DEBUG.into()
+        Level::INFO.into()
     });
 
     let file_filter = if args.show_all_debug {

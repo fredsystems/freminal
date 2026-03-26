@@ -126,8 +126,16 @@ pub fn run_terminal(
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
     };
 
+    // Use TERMINFO_DIRS (colon-separated search path) instead of TERMINFO
+    // (single exclusive directory).  TERMINFO is exclusive: if set, ncurses
+    // ONLY looks there — and our tarball only contains `freminal` /
+    // `xterm-freminal`, not `xterm-256color`.  With TERMINFO_DIRS, ncurses
+    // checks our directory first but falls back to the system terminfo so
+    // readline and other programs can find xterm-256color capabilities.
     if let Some(termcaps) = termcaps {
-        cmd.env("TERMINFO", termcaps);
+        let termcaps_str = termcaps.display();
+        cmd.env("TERMINFO_DIRS", format!("{termcaps_str}:"));
+        cmd.env_remove("TERMINFO");
     }
     // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
     // "xterm-freminal" for maximum compatibility. Programs like neovim, tmux, and
@@ -141,8 +149,8 @@ pub fn run_terminal(
     // `TerminalHandler::lookup_termcap` in freminal-buffer for the full list.
     //
     // The custom freminal.ti entry in res/ exists as a reference but is not used by
-    // child processes. The TERMINFO env var points to the extracted tarball so that
-    // programs that check for a valid TERMINFO directory find one.
+    // child processes. The TERMINFO_DIRS env var includes the extracted tarball so
+    // that programs that check for a valid TERMINFO directory find one.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
@@ -200,7 +208,6 @@ pub fn run_terminal(
     }
     cmd.env_remove("NIX_BUILD_TOP");
     cmd.env_remove("IN_NIX_SHELL");
-    cmd.env_remove("TERMINFO_DIRS");
 
     let mut child = pair.slave.spawn_command(cmd)?;
 

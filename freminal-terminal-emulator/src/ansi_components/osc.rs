@@ -67,7 +67,7 @@ impl AnsiOscParser {
     /// Expose current sequence trace for testing and diagnostics.
     #[must_use]
     pub fn trace_str(&self) -> String {
-        info!("current buffer trace: {}", self.seq_trace.as_str());
+        trace!("current buffer trace: {}", self.seq_trace.as_str());
         self.seq_trace.as_str()
     }
 
@@ -231,7 +231,7 @@ fn dispatch_osc_target(
             if let Some(marker) = parse_ftcs_params(&ftcs_strs) {
                 output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
             } else {
-                tracing::debug!(
+                tracing::warn!(
                     "OSC 133: unrecognised FTCS params: recent='{}'",
                     seq_trace.as_str()
                 );
@@ -273,9 +273,9 @@ fn dispatch_osc_target(
         }
         OscTarget::Unknown => {
             // Unknown OSC sequences are silently consumed (like
-            // xterm/VTE).  Downgraded from error!/Invalid to debug!
+            // xterm/VTE).  Downgraded from error!/Invalid to warn!
             // so they don't spam logs during normal usage.
-            tracing::debug!(
+            tracing::warn!(
                 "Unknown OSC Target (silently consumed): type_number={osc_internal_type:?}, recent='{}'",
                 seq_trace.as_str()
             );
@@ -310,11 +310,11 @@ fn handle_osc_clipboard(
                 )));
             }
             Err(e) => {
-                tracing::debug!("OSC 52: invalid base64 payload: {e}");
+                tracing::warn!("OSC 52: invalid base64 payload: {e}");
             }
         },
         _ => {
-            tracing::debug!(
+            tracing::warn!(
                 "OSC 52: missing or invalid payload: recent='{}'",
                 seq_trace.as_str()
             );
@@ -337,7 +337,7 @@ fn handle_osc_palette_color(
     let index = match params.get(1) {
         Some(Some(AnsiOscToken::OscValue(v))) => {
             if *v > 255 {
-                tracing::debug!("OSC 4: index out of range: {v}");
+                tracing::warn!("OSC 4: index out of range: {v}");
                 return;
             }
             #[allow(clippy::cast_possible_truncation)]
@@ -347,11 +347,11 @@ fn handle_osc_palette_color(
         }
         Some(Some(AnsiOscToken::String(s))) => {
             let Ok(v) = s.parse::<u16>() else {
-                tracing::debug!("OSC 4: invalid index string: {s}");
+                tracing::warn!("OSC 4: invalid index string: {s}");
                 return;
             };
             if v > 255 {
-                tracing::debug!("OSC 4: index out of range: {v}");
+                tracing::warn!("OSC 4: index out of range: {v}");
                 return;
             }
             #[allow(clippy::cast_possible_truncation)]
@@ -360,7 +360,7 @@ fn handle_osc_palette_color(
             }
         }
         _ => {
-            tracing::debug!("OSC 4: missing index: recent='{}'", seq_trace.as_str());
+            tracing::warn!("OSC 4: missing index: recent='{}'", seq_trace.as_str());
             return;
         }
     };
@@ -368,7 +368,7 @@ fn handle_osc_palette_color(
     let spec = if let Some(Some(AnsiOscToken::String(s))) = params.get(2) {
         s.as_str()
     } else {
-        tracing::debug!("OSC 4: missing color spec: recent='{}'", seq_trace.as_str());
+        tracing::warn!("OSC 4: missing color spec: recent='{}'", seq_trace.as_str());
         return;
     };
 
@@ -384,7 +384,7 @@ fn handle_osc_palette_color(
             index, rgb.0, rgb.1, rgb.2,
         )));
     } else {
-        tracing::debug!("OSC 4: invalid color spec: {spec}");
+        tracing::warn!("OSC 4: invalid color spec: {spec}");
     }
 }
 
@@ -407,7 +407,7 @@ fn handle_osc_reset_palette(params: &[Option<AnsiOscToken>], output: &mut Vec<Te
                     Some(*v as u8),
                 )));
             } else {
-                tracing::debug!("OSC 104: index out of range: {v}");
+                tracing::warn!("OSC 104: index out of range: {v}");
             }
         }
         Some(Some(AnsiOscToken::String(s))) => {
@@ -418,10 +418,10 @@ fn handle_osc_reset_palette(params: &[Option<AnsiOscToken>], output: &mut Vec<Te
                         Some(v as u8),
                     )));
                 } else {
-                    tracing::debug!("OSC 104: index out of range: {v}");
+                    tracing::warn!("OSC 104: index out of range: {v}");
                 }
             } else {
-                tracing::debug!("OSC 104: invalid index: {s}");
+                tracing::warn!("OSC 104: invalid index: {s}");
             }
         }
     }
@@ -452,7 +452,7 @@ fn handle_osc_iterm2(
     //
     // Find the first ';' to skip past "1337".
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
-        tracing::debug!(
+        tracing::warn!(
             "OSC 1337: missing sub-command: recent='{}'",
             seq_trace.as_str()
         );
@@ -486,7 +486,7 @@ fn handle_osc_iterm2(
     }
 
     // Not a recognised sub-command — silently consume, like xterm/VTE.
-    tracing::debug!(
+    tracing::warn!(
         "OSC 1337: unrecognised sub-command: recent='{}'",
         seq_trace.as_str()
     );
@@ -560,7 +560,7 @@ fn handle_osc_iterm2_file(
     // `after_file` is: b"inline=1;width=auto:BASE64DATA"
     // Split on ':' to separate key=value args from the base64 payload.
     let Some(colon_pos) = after_file.iter().position(|&b| b == b':') else {
-        tracing::debug!(
+        tracing::warn!(
             "OSC 1337 File=: missing ':' separator: recent='{}'",
             seq_trace.as_str()
         );
@@ -571,7 +571,7 @@ fn handle_osc_iterm2_file(
     let b64_bytes = &after_file[colon_pos + 1..];
 
     let Ok(args_str) = std::str::from_utf8(args_bytes) else {
-        tracing::debug!("OSC 1337 File=: non-UTF-8 args");
+        tracing::warn!("OSC 1337 File=: non-UTF-8 args");
         return;
     };
 
@@ -579,20 +579,20 @@ fn handle_osc_iterm2_file(
 
     // Decode base64 payload.
     let Ok(b64_str) = std::str::from_utf8(b64_bytes) else {
-        tracing::debug!("OSC 1337 File=: non-UTF-8 base64 payload");
+        tracing::warn!("OSC 1337 File=: non-UTF-8 base64 payload");
         return;
     };
 
     let data = match freminal_common::base64::decode(b64_str) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::debug!("OSC 1337 File=: base64 decode failed: {e}");
+            tracing::warn!("OSC 1337 File=: base64 decode failed: {e}");
             return;
         }
     };
 
     if data.is_empty() {
-        tracing::debug!("OSC 1337 File=: empty payload after base64 decode");
+        tracing::warn!("OSC 1337 File=: empty payload after base64 decode");
         return;
     }
 
@@ -612,12 +612,12 @@ fn handle_osc_iterm2_multipart_begin(
     output: &mut Vec<TerminalOutput>,
 ) {
     let Ok(args_str) = std::str::from_utf8(after_mp) else {
-        tracing::debug!("OSC 1337 MultipartFile=: non-UTF-8 args");
+        tracing::warn!("OSC 1337 MultipartFile=: non-UTF-8 args");
         return;
     };
 
     if args_str.is_empty() {
-        tracing::debug!(
+        tracing::warn!(
             "OSC 1337 MultipartFile=: empty args: recent='{}'",
             seq_trace.as_str()
         );
@@ -638,14 +638,14 @@ fn handle_osc_iterm2_file_part(
     output: &mut Vec<TerminalOutput>,
 ) {
     let Ok(b64_str) = std::str::from_utf8(after_part) else {
-        tracing::debug!("OSC 1337 FilePart=: non-UTF-8 base64 payload");
+        tracing::warn!("OSC 1337 FilePart=: non-UTF-8 base64 payload");
         return;
     };
 
     let data = match freminal_common::base64::decode(b64_str) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 "OSC 1337 FilePart=: base64 decode failed: {e}: recent='{}'",
                 seq_trace.as_str()
             );

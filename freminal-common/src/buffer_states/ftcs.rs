@@ -5,18 +5,40 @@
 
 //! OSC 133 — `FinalTerm` / Shell Integration (FTCS) protocol.
 //!
-//! These types represent the four FTCS markers that shells emit to delineate
+//! These types represent the FTCS markers that shells emit to delineate
 //! prompt, command, and output regions:
 //!
 //! - `OSC 133 ; A ST` — Prompt start
 //! - `OSC 133 ; B ST` — Prompt end / command input start
 //! - `OSC 133 ; C ST` — Command end / output start (pre-execution)
 //! - `OSC 133 ; D [; exitcode] ST` — Command finished (with optional exit code)
+//! - `OSC 133 ; P ; k=<kind> ST` — Prompt property (kind: `i`=initial, `c`=continuation, `r`=right)
 //!
 //! The terminal stores these as `FtcsMarker` values alongside cursor positions
 //! to track prompt/command/output boundaries.
 
 use std::fmt;
+
+/// The kind of prompt annotated by an `OSC 133 ; P ; k=<kind>` marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// `i` — Initial / primary prompt (PS1).
+    Initial,
+    /// `c` — Continuation prompt (PS2).
+    Continuation,
+    /// `r` — Right-aligned prompt (RPROMPT).
+    Right,
+}
+
+impl fmt::Display for PromptKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Initial => write!(f, "i"),
+            Self::Continuation => write!(f, "c"),
+            Self::Right => write!(f, "r"),
+        }
+    }
+}
 
 /// A single FTCS marker, as emitted by the shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +55,9 @@ pub enum FtcsMarker {
 
     /// `D` — Command finished.  Carries an optional exit code (`0` = success).
     CommandFinished(Option<i32>),
+
+    /// `P` — Prompt property.  Annotates the kind of prompt that follows.
+    PromptProperty(PromptKind),
 }
 
 impl fmt::Display for FtcsMarker {
@@ -43,6 +68,7 @@ impl fmt::Display for FtcsMarker {
             Self::OutputStart => write!(f, "C"),
             Self::CommandFinished(Some(code)) => write!(f, "D;{code}"),
             Self::CommandFinished(None) => write!(f, "D"),
+            Self::PromptProperty(kind) => write!(f, "P;k={kind}"),
         }
     }
 }
@@ -84,8 +110,9 @@ impl fmt::Display for FtcsState {
 ///
 /// The input `params` contains the portions after the `133` prefix, split on
 /// `;`.  For example:
-/// - `OSC 133 ; A ST`       → `params = ["A"]`
-/// - `OSC 133 ; D ; 0 ST`   → `params = ["D", "0"]`
+/// - `OSC 133 ; A ST`           → `params = ["A"]`
+/// - `OSC 133 ; D ; 0 ST`       → `params = ["D", "0"]`
+/// - `OSC 133 ; P ; k=i ST`     → `params = ["P", "k=i"]`
 ///
 /// Returns `None` for unrecognised or empty parameter lists.
 #[must_use]
@@ -98,6 +125,22 @@ pub fn parse_ftcs_params(params: &[&str]) -> Option<FtcsMarker> {
         "D" => {
             let exit_code = params.get(1).and_then(|s| s.parse::<i32>().ok());
             Some(FtcsMarker::CommandFinished(exit_code))
+        }
+        "P" => {
+            // Parse the `k=<kind>` parameter if present.
+            let kind = params.get(1).and_then(|s| {
+                let value = s.strip_prefix("k=")?;
+                match value {
+                    "i" => Some(PromptKind::Initial),
+                    "c" => Some(PromptKind::Continuation),
+                    "r" => Some(PromptKind::Right),
+                    _ => None,
+                }
+            });
+            // Accept `P` even without a recognized `k=` value, defaulting to Initial.
+            Some(FtcsMarker::PromptProperty(
+                kind.unwrap_or(PromptKind::Initial),
+            ))
         }
         _ => None,
     }
@@ -134,6 +177,37 @@ mod tests {
     #[test]
     fn display_command_finished_without_code() {
         assert_eq!(FtcsMarker::CommandFinished(None).to_string(), "D");
+    }
+
+    #[test]
+    fn display_prompt_property_initial() {
+        assert_eq!(
+            FtcsMarker::PromptProperty(PromptKind::Initial).to_string(),
+            "P;k=i"
+        );
+    }
+
+    #[test]
+    fn display_prompt_property_continuation() {
+        assert_eq!(
+            FtcsMarker::PromptProperty(PromptKind::Continuation).to_string(),
+            "P;k=c"
+        );
+    }
+
+    #[test]
+    fn display_prompt_property_right() {
+        assert_eq!(
+            FtcsMarker::PromptProperty(PromptKind::Right).to_string(),
+            "P;k=r"
+        );
+    }
+
+    #[test]
+    fn display_prompt_kind() {
+        assert_eq!(PromptKind::Initial.to_string(), "i");
+        assert_eq!(PromptKind::Continuation.to_string(), "c");
+        assert_eq!(PromptKind::Right.to_string(), "r");
     }
 
     // ── FtcsState Display ───────────────────────────────────────────────
@@ -212,5 +286,58 @@ mod tests {
         assert_eq!(parse_ftcs_params(&["X"]), None);
         assert_eq!(parse_ftcs_params(&["E"]), None);
         assert_eq!(parse_ftcs_params(&["a"]), None); // lowercase
+    }
+
+    // ── parse P (PromptProperty) ────────────────────────────────────────
+
+    #[test]
+    fn parse_prompt_property_initial() {
+        assert_eq!(
+            parse_ftcs_params(&["P", "k=i"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Initial))
+        );
+    }
+
+    #[test]
+    fn parse_prompt_property_continuation() {
+        assert_eq!(
+            parse_ftcs_params(&["P", "k=c"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Continuation))
+        );
+    }
+
+    #[test]
+    fn parse_prompt_property_right() {
+        assert_eq!(
+            parse_ftcs_params(&["P", "k=r"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Right))
+        );
+    }
+
+    #[test]
+    fn parse_prompt_property_without_kind_defaults_to_initial() {
+        // `P` without `k=` still parses, defaulting to Initial
+        assert_eq!(
+            parse_ftcs_params(&["P"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Initial))
+        );
+    }
+
+    #[test]
+    fn parse_prompt_property_unknown_kind_defaults_to_initial() {
+        // `P` with an unknown `k=` value defaults to Initial
+        assert_eq!(
+            parse_ftcs_params(&["P", "k=z"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Initial))
+        );
+    }
+
+    #[test]
+    fn parse_prompt_property_non_kind_param_defaults_to_initial() {
+        // `P` with a non-k parameter defaults to Initial
+        assert_eq!(
+            parse_ftcs_params(&["P", "x=1"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Initial))
+        );
     }
 }

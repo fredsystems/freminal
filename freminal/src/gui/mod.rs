@@ -10,7 +10,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use conv2::ConvUtil;
 use crossbeam_channel::{Receiver, Sender};
-use eframe::egui::{self, CentralPanel, Pos2, Vec2, ViewportCommand};
+use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
 use freminal_common::pty_write::PtyWrite;
@@ -32,7 +32,7 @@ pub mod terminal;
 pub mod view_state;
 
 fn set_egui_options(ctx: &egui::Context) {
-    ctx.style_mut(|style| {
+    ctx.global_style_mut(|style| {
         style.visuals.window_fill = internal_color_to_egui(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
@@ -51,7 +51,7 @@ fn set_egui_options(ctx: &egui::Context) {
 
 /// Update egui chrome colors (window/panel fill) to match a new theme.
 fn update_egui_theme(ctx: &egui::Context, theme: &freminal_common::themes::ThemePalette) {
-    ctx.style_mut(|style| {
+    ctx.global_style_mut(|style| {
         style.visuals.window_fill = internal_color_to_egui(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
@@ -527,7 +527,7 @@ fn handle_window_manipulation(
 
 impl eframe::App for FreminalGui {
     #[allow(clippy::too_many_lines)]
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         debug!("Starting new frame");
         let now = std::time::Instant::now();
 
@@ -544,12 +544,12 @@ impl eframe::App for FreminalGui {
 
         // Menu bar at the top of the window.
         if !self.config.ui.hide_menu_bar {
-            egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            Panel::top("menu_bar").show_inside(ui, |ui| {
                 self.show_menu_bar(ui, &snap);
             });
         }
 
-        let _panel_response = CentralPanel::default().show(ctx, |ui| {
+        let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.
             // `cell_size()` returns integer pixel dimensions from swash font metrics.
             let (cell_w_u, cell_height_u) = self.terminal_widget.cell_size();
@@ -594,7 +594,7 @@ impl eframe::App for FreminalGui {
                 }
             }
 
-            let window_width = ctx.input(|i: &egui::InputState| i.content_rect());
+            let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
             handle_window_manipulation(
                 ui,
@@ -609,7 +609,7 @@ impl eframe::App for FreminalGui {
             // Update background color based on whether the terminal is in
             // normal (non-inverted) display mode.
             if snap.is_normal_display {
-                ui.ctx().style_mut(|style| {
+                ui.ctx().global_style_mut(|style| {
                     style.visuals.window_fill = internal_color_to_egui(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
@@ -622,7 +622,7 @@ impl eframe::App for FreminalGui {
                     );
                 });
             } else {
-                ui.ctx().style_mut(|style| {
+                ui.ctx().global_style_mut(|style| {
                     style.visuals.window_fill = egui::Color32::WHITE;
                     style.visuals.panel_fill = egui::Color32::WHITE;
                 });
@@ -664,25 +664,41 @@ impl eframe::App for FreminalGui {
         });
 
         // Show the settings modal (if open) above everything else.
-        let settings_action = self.settings_modal.show(ctx);
-        if settings_action == SettingsAction::Applied {
-            let new_cfg = self.settings_modal.applied_config().clone();
+        let settings_action = self.settings_modal.show(ui.ctx());
+        match settings_action {
+            SettingsAction::Applied => {
+                let new_cfg = self.settings_modal.applied_config().clone();
 
-            // If the theme slug changed, look it up and notify the PTY thread
-            // so the next snapshot carries the new palette.
-            if new_cfg.theme.name != self.config.theme.name
-                && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
-            {
-                if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
-                    error!("Failed to send ThemeChange to PTY thread: {e}");
+                // If the theme slug changed, look it up and notify the PTY thread
+                // so the next snapshot carries the new palette.
+                if new_cfg.theme.name != self.config.theme.name
+                    && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
+                {
+                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                        error!("Failed to send ThemeChange to PTY thread: {e}");
+                    }
+                    update_egui_theme(ui.ctx(), theme);
+                    // Force a full vertex rebuild on the next frame so
+                    // foreground/background colors are re-resolved against
+                    // the new palette.  Without this, the preview's rebuild
+                    // may be the last one, and the Apply-frame snapshot
+                    // (with content_changed=false) would skip the rebuild.
+                    self.terminal_widget.invalidate_theme_cache();
                 }
-                // Update egui chrome colors immediately.
-                update_egui_theme(ctx, theme);
-            }
 
-            self.terminal_widget
-                .apply_config_changes(ctx, &self.config, &new_cfg, &self.input_tx);
-            self.config = new_cfg;
+                self.terminal_widget
+                    .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                self.config = new_cfg;
+            }
+            SettingsAction::PreviewTheme(ref slug) | SettingsAction::RevertTheme(ref slug) => {
+                if let Some(theme) = freminal_common::themes::by_slug(slug) {
+                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                        error!("Failed to send theme preview/revert to PTY thread: {e}");
+                    }
+                    update_egui_theme(ui.ctx(), theme);
+                }
+            }
+            SettingsAction::None => {}
         }
 
         let elapsed = now.elapsed();

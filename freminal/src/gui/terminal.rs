@@ -16,6 +16,7 @@ use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{modes::mouse::MouseTrack, modes::rl_bracket::RlBracket, tchar::TChar},
     config::Config,
+    themes::ThemePalette,
 };
 use freminal_terminal_emulator::{
     InlineImage,
@@ -781,6 +782,7 @@ fn write_input_to_terminal(
                 delta,
                 modifiers,
                 unit,
+                ..
             } => {
                 match unit {
                     egui::MouseWheelUnit::Point => {
@@ -1036,6 +1038,10 @@ pub struct FreminalTerminalWidget {
     /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
     /// where a later snapshot overwrites `content_changed` before the GUI wakes.
     last_rendered_visible: Option<Arc<Vec<TChar>>>,
+    /// Theme pointer from the last full vertex rebuild.  When this changes,
+    /// we must force a full rebuild so foreground/background vertex colors
+    /// are re-resolved against the new palette.
+    previous_theme: Option<&'static ThemePalette>,
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild.
     previous_selection: Option<(CellCoord, CellCoord)>,
@@ -1077,6 +1083,7 @@ impl FreminalTerminalWidget {
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_show_cursor: false,
             last_rendered_visible: None,
+            previous_theme: None,
             previous_selection: None,
             ligatures: config.font.ligatures,
             modal_was_open_last_frame: false,
@@ -1230,7 +1237,14 @@ impl FreminalTerminalWidget {
             // "clean" one before the GUI wakes up.  If the `visible_chars` arc
             // is a different allocation from the one we last rendered, the
             // content has changed regardless of the `content_changed` flag.
+            //
+            // Also force a full rebuild when the theme palette changes, since
+            // foreground/background colors are baked into the vertex buffers.
+            let theme_changed = self
+                .previous_theme
+                .is_none_or(|prev| !std::ptr::eq(prev, snap.theme));
             let content_changed = snap.content_changed
+                || theme_changed
                 || self
                     .last_rendered_visible
                     .as_ref()
@@ -1423,6 +1437,7 @@ impl FreminalTerminalWidget {
                 // Remember which `visible_chars` allocation we rendered, so
                 // the next frame can detect changes via `Arc::ptr_eq`.
                 self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+                self.previous_theme = Some(snap.theme);
                 self.previous_selection = current_selection;
             }
             // If neither path applies (content unchanged, cursor unchanged,
@@ -1550,12 +1565,17 @@ impl FreminalTerminalWidget {
     ///
     /// Called when the user clicks "Apply" in the settings modal. Compares the
     /// old and new configs and updates font/cursor/theme state as needed.
+    ///
+    /// Note: this does NOT send a Resize event. When the font changes, the cell
+    /// size changes too, and the normal resize detection in `FreminalGui::ui()`
+    /// will detect the mismatch between `available_pixels / new_cell_size` and
+    /// `view_state.last_sent_size` on the very next frame and send the correct
+    /// `InputEvent::Resize` with proper character dimensions.
     pub fn apply_config_changes(
         &mut self,
         ctx: &egui::Context,
         old_config: &Config,
         new_config: &Config,
-        input_tx: &Sender<InputEvent>,
     ) {
         let rebuild_result = self.font_manager.rebuild(new_config);
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
@@ -1583,26 +1603,16 @@ impl FreminalTerminalWidget {
             };
             setup_font_files(ctx, &new_font_config);
         }
+    }
 
-        // When the font changes, cell size may change too.  If the cell size
-        // differs from the last-known value, send a Resize event so the PTY
-        // thread can reflow the buffer to the new column/row count.
-        //
-        // We pass zero pixel dimensions here because the exact pixel size will
-        // be re-computed from the new cell metrics on the next frame.  The PTY
-        // thread ignores pixel dimensions when the char dimensions are non-zero.
-        if rebuild_result.font_changed() {
-            // Cell size has been updated by `font_manager.rebuild()`; read the
-            // freshly computed dimensions.
-            let (new_cell_w, new_cell_h) = self.font_manager.cell_size();
-            #[allow(clippy::cast_possible_truncation)]
-            let _ = input_tx.send(freminal_terminal_emulator::io::InputEvent::Resize(
-                0,
-                0,
-                new_cell_w as usize,
-                new_cell_h as usize,
-            ));
-        }
+    /// Invalidate the cached theme pointer so the next frame forces a full
+    /// vertex rebuild with the new palette colors.
+    ///
+    /// Called when a theme change is applied (not just previewed) to guarantee
+    /// the vertex data is rebuilt even if the preview already set the same
+    /// theme pointer.
+    pub const fn invalidate_theme_cache(&mut self) {
+        self.previous_theme = None;
     }
 }
 
