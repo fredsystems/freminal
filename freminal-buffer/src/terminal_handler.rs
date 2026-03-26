@@ -1741,7 +1741,7 @@ impl TerminalHandler {
             self.kitty_state = None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Kitty graphics: dispatch a={action:?} i={:?} m={} q={}",
             cmd.control.image_id,
             cmd.control.more_data,
@@ -1987,7 +1987,7 @@ impl TerminalHandler {
             };
 
             let cursor = self.buffer.get_cursor().pos;
-            tracing::info!(
+            tracing::debug!(
                 "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
                  {display_cols}x{display_rows} cells, C={}",
                 cursor.x,
@@ -2162,7 +2162,7 @@ impl TerminalHandler {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Kitty graphics: reading image from file: {path_str} (delete_after={delete_after})"
         );
 
@@ -2179,7 +2179,7 @@ impl TerminalHandler {
             }
         };
 
-        tracing::info!(
+        tracing::debug!(
             "Kitty graphics: read {} bytes from file: {path_str}",
             data.len(),
         );
@@ -2294,7 +2294,7 @@ impl TerminalHandler {
             let should_display =
                 matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
             if should_display {
-                tracing::info!(
+                tracing::debug!(
                     "Kitty graphics: placing image id={assigned_id} at cursor, \
                      {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
                 );
@@ -2307,7 +2307,7 @@ impl TerminalHandler {
                     control.z_index.unwrap_or(0),
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     "Kitty graphics: stored image id={assigned_id} (a={action:?}, not placing), \
                      {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
                 );
@@ -2327,7 +2327,7 @@ impl TerminalHandler {
     fn send_kitty_error(&self, image_id: u32, quiet: u8, message: &str) {
         // quiet=2 suppresses all responses (including errors).
         if quiet >= 2 {
-            tracing::info!("Kitty graphics: error suppressed by q=2: id={image_id} {message}");
+            tracing::debug!("Kitty graphics: error suppressed by q=2: id={image_id} {message}");
             return;
         }
         let response = format_kitty_response(image_id, false, message);
@@ -2346,7 +2346,7 @@ impl TerminalHandler {
 
         match target {
             KittyDeleteTarget::All | KittyDeleteTarget::AllIncludingNonVisible => {
-                tracing::info!(
+                tracing::debug!(
                     "Kitty graphics: deleting ALL images ({} in store)",
                     self.buffer.image_store().len(),
                 );
@@ -2357,7 +2357,7 @@ impl TerminalHandler {
             KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter => {
                 if let Some(image_id) = cmd.control.image_id {
                     let id = u64::from(image_id);
-                    tracing::info!("Kitty graphics: deleting image id={id}");
+                    tracing::debug!("Kitty graphics: deleting image id={id}");
                     self.buffer.clear_image_placements_by_id(id);
                     self.buffer.image_store_mut().remove(id);
                     self.virtual_placements
@@ -2366,7 +2366,7 @@ impl TerminalHandler {
             }
             KittyDeleteTarget::ByNumber | KittyDeleteTarget::ByNumberCursorOrAfter => {
                 if let Some(number) = cmd.control.image_number {
-                    tracing::info!("Kitty graphics: deleting image number={number}");
+                    tracing::debug!("Kitty graphics: deleting image number={number}");
                     self.buffer.clear_image_placements_by_number(number);
                 }
             }

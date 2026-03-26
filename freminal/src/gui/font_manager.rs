@@ -491,14 +491,20 @@ impl FontManager {
         let new_family = config.font.family.as_deref();
         let new_size = config.font.size;
 
-        let family_changed = new_family != self.current_family.as_deref();
+        let requested_family_differs = new_family != self.current_family.as_deref();
         let size_changed = (new_size - self.font_size_pt).abs() > f32::EPSILON;
 
-        if !family_changed && !size_changed {
+        if !requested_family_differs && !size_changed {
             return RebuildResult::NoChange;
         }
 
-        if family_changed {
+        // Track whether the effective font family actually changed (as opposed
+        // to the config requesting a font that fails to load and falls back to
+        // the same bundled MesloLGS that was already active).
+        let old_effective = self.current_family.clone();
+        let mut effective_family_changed = false;
+
+        if requested_family_differs {
             let bundled = load_bundled_faces();
 
             let (primary, bundled_fallback, current_family) = if let Some(family) = new_family {
@@ -516,6 +522,7 @@ impl FontManager {
                 (bundled, None, None)
             };
 
+            effective_family_changed = current_family != old_effective;
             self.primary = primary;
             self.bundled_fallback = bundled_fallback;
             self.current_family = current_family;
@@ -537,10 +544,15 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
 
-        if family_changed {
+        if effective_family_changed {
             RebuildResult::FamilyChanged
-        } else {
+        } else if size_changed {
             RebuildResult::SizeChanged
+        } else {
+            // The config requested a different family, but after attempting to
+            // load it, the effective font is the same (e.g. both old and new
+            // fell back to bundled MesloLGS).  No observable change.
+            RebuildResult::NoChange
         }
     }
 
@@ -1197,7 +1209,7 @@ mod tests {
         );
     }
 
-    // --- Test 12: rebuild() with family change ---
+    // --- Test 12: rebuild() with family change to invalid font ---
 
     #[test]
     fn rebuild_family_change_with_invalid_font() {
@@ -1208,7 +1220,9 @@ mod tests {
         new_config.font.family = Some("/nonexistent/font.ttf".to_owned());
         let result = fm.rebuild(&new_config);
 
-        assert_eq!(result, RebuildResult::FamilyChanged);
+        // The requested font fails to load, so the effective family stays as
+        // bundled MesloLGS (None → None).  No observable change.
+        assert_eq!(result, RebuildResult::NoChange);
         // Should have gracefully fallen back to bundled.
         assert!(fm.cell_width > 0);
     }

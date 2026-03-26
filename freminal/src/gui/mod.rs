@@ -665,24 +665,40 @@ impl eframe::App for FreminalGui {
 
         // Show the settings modal (if open) above everything else.
         let settings_action = self.settings_modal.show(ctx);
-        if settings_action == SettingsAction::Applied {
-            let new_cfg = self.settings_modal.applied_config().clone();
+        match settings_action {
+            SettingsAction::Applied => {
+                let new_cfg = self.settings_modal.applied_config().clone();
 
-            // If the theme slug changed, look it up and notify the PTY thread
-            // so the next snapshot carries the new palette.
-            if new_cfg.theme.name != self.config.theme.name
-                && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
-            {
-                if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
-                    error!("Failed to send ThemeChange to PTY thread: {e}");
+                // If the theme slug changed, look it up and notify the PTY thread
+                // so the next snapshot carries the new palette.
+                if new_cfg.theme.name != self.config.theme.name
+                    && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
+                {
+                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                        error!("Failed to send ThemeChange to PTY thread: {e}");
+                    }
+                    update_egui_theme(ctx, theme);
+                    // Force a full vertex rebuild on the next frame so
+                    // foreground/background colors are re-resolved against
+                    // the new palette.  Without this, the preview's rebuild
+                    // may be the last one, and the Apply-frame snapshot
+                    // (with content_changed=false) would skip the rebuild.
+                    self.terminal_widget.invalidate_theme_cache();
                 }
-                // Update egui chrome colors immediately.
-                update_egui_theme(ctx, theme);
-            }
 
-            self.terminal_widget
-                .apply_config_changes(ctx, &self.config, &new_cfg, &self.input_tx);
-            self.config = new_cfg;
+                self.terminal_widget
+                    .apply_config_changes(ctx, &self.config, &new_cfg);
+                self.config = new_cfg;
+            }
+            SettingsAction::PreviewTheme(ref slug) | SettingsAction::RevertTheme(ref slug) => {
+                if let Some(theme) = freminal_common::themes::by_slug(slug) {
+                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                        error!("Failed to send theme preview/revert to PTY thread: {e}");
+                    }
+                    update_egui_theme(ctx, theme);
+                }
+            }
+            SettingsAction::None => {}
         }
 
         let elapsed = now.elapsed();

@@ -67,7 +67,7 @@ impl AnsiOscParser {
     /// Expose current sequence trace for testing and diagnostics.
     #[must_use]
     pub fn trace_str(&self) -> String {
-        info!("current buffer trace: {}", self.seq_trace.as_str());
+        trace!("current buffer trace: {}", self.seq_trace.as_str());
         self.seq_trace.as_str()
     }
 

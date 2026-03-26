@@ -351,35 +351,39 @@ pub enum ConfigError {
 pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> {
     let mut cfg = Config::default();
 
-    // 1. System config (Linux only)
-    if let Some(system_path) = system_config_path()
-        && system_path.is_file()
-    {
-        let partial = load_partial(&system_path)?;
-        cfg.apply_partial(partial);
-    }
-
-    // 2. Platform-specific user config
-    if let Some(user_path) = user_config_path()
-        && user_path.is_file()
-    {
-        let partial = load_partial(&user_path)?;
-        cfg.apply_partial(partial);
-    }
-
-    // 3. FREMINAL_CONFIG= override
-    if let Ok(env_path) = env::var("FREMINAL_CONFIG") {
-        let path = PathBuf::from(env_path);
-        if path.is_file() {
-            let partial = load_partial(&path)?;
-            cfg.apply_partial(partial);
-        }
-    }
-
-    // 4. Explicit CLI override — if the user specified --config, the file MUST exist.
     if let Some(path) = explicit_path {
+        // Explicit --config: use ONLY this file on top of defaults.
+        // Skip system, user, and env-var layers so the file is fully
+        // isolated (no contamination from e.g. a home-manager managed config).
         let partial = load_partial(path)?;
         cfg.apply_partial(partial);
+    } else {
+        // Normal layered loading: system → user → env var.
+
+        // 1. System config (Linux only)
+        if let Some(system_path) = system_config_path()
+            && system_path.is_file()
+        {
+            let partial = load_partial(&system_path)?;
+            cfg.apply_partial(partial);
+        }
+
+        // 2. Platform-specific user config
+        if let Some(user_path) = user_config_path()
+            && user_path.is_file()
+        {
+            let partial = load_partial(&user_path)?;
+            cfg.apply_partial(partial);
+        }
+
+        // 3. FREMINAL_CONFIG= override
+        if let Ok(env_path) = env::var("FREMINAL_CONFIG") {
+            let path = PathBuf::from(env_path);
+            if path.is_file() {
+                let partial = load_partial(&path)?;
+                cfg.apply_partial(partial);
+            }
+        }
     }
 
     cfg.validate()?;
