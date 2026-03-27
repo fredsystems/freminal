@@ -310,10 +310,20 @@ impl FontManager {
                     info!("Loaded user font '{}' as primary", family);
                     (user_primary, Some(bundled), Some(family.to_owned()))
                 } else {
-                    warn!(
-                        "Failed to load user font '{}'; falling back to bundled MesloLGS",
-                        family
-                    );
+                    let suggestions = suggest_similar_families(family, &font_db);
+                    if suggestions.is_empty() {
+                        warn!(
+                            "Failed to load user font '{}'; falling back to bundled MesloLGS",
+                            family
+                        );
+                    } else {
+                        warn!(
+                            "Failed to load user font '{}'; falling back to bundled MesloLGS. \
+                             Similar families found: {}",
+                            family,
+                            suggestions.join(", ")
+                        );
+                    }
                     (bundled, None, None)
                 }
             } else {
@@ -825,7 +835,20 @@ fn load_user_faces_by_name(name: &str, font_db: &Database) -> Option<PrimaryFace
     })
 }
 
+/// Remove all whitespace from a string (for fuzzy font name matching).
+fn strip_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// Search the fontdb for a font matching a family name, weight, and style.
+///
+/// Matching strategy (in order):
+/// 1. Exact case-insensitive match on any family name
+/// 2. Case-insensitive substring match (font family contains the query)
+/// 3. Whitespace-normalised match: strip all whitespace from both the query and
+///    the font family name, then compare case-insensitively.  This handles
+///    naming variations like "Caskaydia Cove Nerd Font" vs "`CaskaydiaCove` Nerd
+///    Font" that fontconfig resolves via aliases but fontdb does not.
 fn find_system_font_data(
     font_db: &Database,
     name: &str,
@@ -833,10 +856,16 @@ fn find_system_font_data(
     style: fontdb::Style,
 ) -> Option<Vec<u8>> {
     let lower_name = name.to_lowercase();
+    let stripped_name = strip_whitespace(&lower_name);
 
     for face in font_db.faces() {
         let family_match = face.families.iter().any(|fam| {
-            fam.0.eq_ignore_ascii_case(name) || fam.0.to_lowercase().contains(&lower_name)
+            // 1. Exact case-insensitive
+            fam.0.eq_ignore_ascii_case(name)
+                // 2. Substring (font family contains query)
+                || fam.0.to_lowercase().contains(&lower_name)
+                // 3. Whitespace-stripped case-insensitive
+                || strip_whitespace(&fam.0).eq_ignore_ascii_case(&stripped_name)
         });
 
         if !family_match {
@@ -859,6 +888,40 @@ fn find_system_font_data(
     }
 
     None
+}
+
+/// Suggest system font family names similar to the given query.
+///
+/// Returns up to 5 family names that share at least one word with the query.
+/// Useful for diagnostic warnings when font lookup fails.
+fn suggest_similar_families(query: &str, font_db: &Database) -> Vec<String> {
+    let query_words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut suggestions = Vec::new();
+
+    for face in font_db.faces() {
+        for (family_name, _) in &face.families {
+            if seen.contains(family_name) {
+                continue;
+            }
+
+            let family_lower = family_name.to_lowercase();
+            let shares_word = query_words
+                .iter()
+                .any(|qw| family_lower.contains(qw.as_str()));
+
+            if shares_word {
+                seen.insert(family_name.clone());
+                suggestions.push(family_name.clone());
+                if suggestions.len() >= 5 {
+                    return suggestions;
+                }
+            }
+        }
+    }
+
+    suggestions
 }
 
 /// Discover the best available system emoji font.
@@ -1364,6 +1427,38 @@ mod tests {
         assert!(
             fm_large.cell_height > fm_small.cell_height,
             "Larger font size should produce larger cell height"
+        );
+    }
+
+    #[test]
+    fn strip_whitespace_removes_all_whitespace() {
+        assert_eq!(
+            strip_whitespace("Caskaydia Cove Nerd Font"),
+            "CaskaydiaCoveNerdFont"
+        );
+        assert_eq!(
+            strip_whitespace("CaskaydiaCove Nerd Font"),
+            "CaskaydiaCoveNerdFont"
+        );
+        assert_eq!(strip_whitespace("  A  B  "), "AB");
+        assert_eq!(strip_whitespace("NoSpaces"), "NoSpaces");
+        assert_eq!(strip_whitespace(""), "");
+    }
+
+    #[test]
+    fn strip_whitespace_matching_detects_nerd_font_variants() {
+        // Simulates the matching logic: user queries "Caskaydia Cove Nerd Font",
+        // font family is "CaskaydiaCove Nerd Font". Whitespace-stripped comparison
+        // should match.
+        let query = "Caskaydia Cove Nerd Font";
+        let family = "CaskaydiaCove Nerd Font";
+
+        let stripped_query = strip_whitespace(&query.to_lowercase());
+        let stripped_family = strip_whitespace(family);
+
+        assert!(
+            stripped_family.eq_ignore_ascii_case(&stripped_query),
+            "Whitespace-stripped comparison should match: '{stripped_family}' vs '{stripped_query}'"
         );
     }
 }

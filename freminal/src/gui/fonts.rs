@@ -215,11 +215,22 @@ fn find_system_font_by_name(name: &str) -> Option<Vec<u8>> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
 
-    // Match family name case-insensitively
+    let lower_name = name.to_lowercase();
+    let stripped_name: String = lower_name.chars().filter(|c| !c.is_whitespace()).collect();
+
+    // Match family name: exact case-insensitive, substring, or
+    // whitespace-stripped comparison (handles "Caskaydia Cove" vs
+    // "CaskaydiaCove" style naming variations).
     for face in db.faces() {
-        // Check family names
         let matches = face.families.iter().any(|fam| {
-            fam.0.eq_ignore_ascii_case(name) || fam.0.to_lowercase().contains(&name.to_lowercase())
+            fam.0.eq_ignore_ascii_case(name)
+                || fam.0.to_lowercase().contains(&lower_name)
+                || fam
+                    .0
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>()
+                    .eq_ignore_ascii_case(&stripped_name)
         });
 
         if !matches {
