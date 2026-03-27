@@ -551,26 +551,30 @@ impl eframe::App for FreminalGui {
 
         let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
             // Compute char size once and reuse for both PTY sizing and widget layout.
-            // `cell_size()` returns integer pixel dimensions from swash font metrics.
+            // `cell_size()` returns integer pixel dimensions (physical) from swash
+            // font metrics.  egui's coordinate system uses logical points, so we
+            // convert with `pixels_per_point` when doing layout math.
             let (cell_w_u, cell_height_u) = self.terminal_widget.cell_size();
             #[allow(clippy::cast_possible_truncation)]
             let font_width = cell_w_u as usize;
             #[allow(clippy::cast_possible_truncation)]
             let font_height = cell_height_u as usize;
+
+            let ppp = ui.ctx().pixels_per_point();
             #[allow(clippy::cast_precision_loss)]
-            let char_w = cell_w_u as f32;
+            let logical_char_w = cell_w_u as f32 / ppp;
             #[allow(clippy::cast_precision_loss)]
-            let char_h = cell_height_u as f32;
+            let logical_char_h = cell_height_u as f32 / ppp;
 
             let available = ui.available_size();
-            let width_chars = (available.x / char_w)
+            let width_chars = (available.x / logical_char_w)
                 .floor()
                 .approx_as::<usize>()
                 .unwrap_or_else(|e| {
                     error!("Failed to calculate width chars: {e}");
                     10
                 });
-            let height_chars = ((available.y / char_h).floor())
+            let height_chars = ((available.y / logical_char_h).floor())
                 .approx_as::<usize>()
                 .unwrap_or_else(|e| {
                     error!("Failed to calculate height chars: {e}");

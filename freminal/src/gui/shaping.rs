@@ -657,7 +657,7 @@ mod tests {
 
     /// Helper: create a default `FontManager` for tests.
     fn test_font_manager() -> FontManager {
-        FontManager::new(&Config::default())
+        FontManager::new(&Config::default(), 1.0)
     }
 
     /// Helper: create a simple format tag covering a range.

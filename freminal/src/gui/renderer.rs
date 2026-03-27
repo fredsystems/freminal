@@ -2339,7 +2339,7 @@ mod tests {
         let verts = build_foreground_verts(
             &[],
             &mut GlyphAtlas::default(),
-            &FontManager::new(&Config::default()),
+            &FontManager::new(&Config::default(), 1.0),
             16,
             13.0,
             None,
@@ -2350,7 +2350,7 @@ mod tests {
 
     #[test]
     fn fg_verts_produces_quads_for_ascii_glyphs() {
-        let mut fm = FontManager::new(&Config::default());
+        let mut fm = FontManager::new(&Config::default(), 1.0);
         let mut atlas = GlyphAtlas::new(256, 1024);
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;

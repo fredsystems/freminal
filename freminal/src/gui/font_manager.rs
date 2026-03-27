@@ -270,8 +270,14 @@ pub struct FontManager {
     /// Scaled stroke thickness in pixels.
     stroke_size: f32,
 
-    /// Font size in points. Drives rasterisation size in the atlas.
+    /// Font size in points (as specified by the user in config).
     font_size_pt: f32,
+
+    /// Display scale factor (`egui::Context::pixels_per_point()`).
+    ///
+    /// Used together with `font_size_pt` to compute the correct ppem value
+    /// for swash metric queries: `ppem = font_size_pt × (96/72) × pixels_per_point`.
+    pixels_per_point: f32,
 
     /// The currently-active font family name (or `None` for bundled default).
     current_family: Option<String>,
@@ -285,8 +291,13 @@ impl FontManager {
     ///
     /// Loads the primary faces (user font or bundled `MesloLGS`), discovers a
     /// system emoji font, and computes the authoritative cell size.
+    ///
+    /// `pixels_per_point` is the display scale factor from
+    /// `egui::Context::pixels_per_point()`. It is used together with the
+    /// configured font size (in typographic points) to compute the correct
+    /// ppem value for swash metric queries.
     #[must_use]
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, pixels_per_point: f32) -> Self {
         let mut font_db = Database::new();
         font_db.load_system_fonts();
 
@@ -316,6 +327,7 @@ impl FontManager {
             warn!("No system emoji font found");
         }
 
+        let font_size_ppem = pt_to_ppem(font_size_pt, pixels_per_point);
         let (
             cell_width,
             cell_height,
@@ -324,7 +336,7 @@ impl FontManager {
             underline_offset,
             strikeout_offset,
             stroke_size,
-        ) = compute_cell_metrics(&primary.regular, font_size_pt);
+        ) = compute_cell_metrics(&primary.regular, font_size_ppem);
 
         Self {
             primary,
@@ -341,6 +353,7 @@ impl FontManager {
             strikeout_offset,
             stroke_size,
             font_size_pt,
+            pixels_per_point,
             current_family,
             font_db,
         }
@@ -487,14 +500,19 @@ impl FontManager {
     ///
     /// Returns a [`RebuildResult`] indicating what changed so the caller can
     /// invalidate the glyph atlas and shaping cache if necessary.
-    pub fn rebuild(&mut self, config: &Config) -> RebuildResult {
+    ///
+    /// `pixels_per_point` is the current display scale factor; it may have
+    /// changed since the last rebuild (e.g. the window was dragged to a
+    /// different monitor).
+    pub fn rebuild(&mut self, config: &Config, pixels_per_point: f32) -> RebuildResult {
         let new_family = config.font.family.as_deref();
         let new_size = config.font.size;
 
         let requested_family_differs = new_family != self.current_family.as_deref();
         let size_changed = (new_size - self.font_size_pt).abs() > f32::EPSILON;
+        let ppp_changed = (pixels_per_point - self.pixels_per_point).abs() > f32::EPSILON;
 
-        if !requested_family_differs && !size_changed {
+        if !requested_family_differs && !size_changed && !ppp_changed {
             return RebuildResult::NoChange;
         }
 
@@ -529,8 +547,10 @@ impl FontManager {
         }
 
         self.font_size_pt = new_size;
+        self.pixels_per_point = pixels_per_point;
+        let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
         let (cw, ch, ascent, descent, uo, so, ss) =
-            compute_cell_metrics(&self.primary.regular, self.font_size_pt);
+            compute_cell_metrics(&self.primary.regular, font_size_ppem);
         self.cell_width = cw;
         self.cell_height = ch;
         self.ascent = ascent;
@@ -546,7 +566,7 @@ impl FontManager {
 
         if effective_family_changed {
             RebuildResult::FamilyChanged
-        } else if size_changed {
+        } else if size_changed || ppp_changed {
             RebuildResult::SizeChanged
         } else {
             // The config requested a different family, but after attempting to
@@ -554,6 +574,38 @@ impl FontManager {
             // fell back to bundled MesloLGS).  No observable change.
             RebuildResult::NoChange
         }
+    }
+
+    /// Check whether `pixels_per_point` has changed and recompute cell metrics
+    /// if so.  Returns `true` when metrics were recomputed (callers should
+    /// invalidate the glyph atlas and shaping cache).
+    ///
+    /// This is a lightweight per-frame check intended to handle monitor DPI
+    /// changes (e.g. dragging the window to a `HiDPI` display) without requiring
+    /// a full config reload.
+    pub fn update_pixels_per_point(&mut self, pixels_per_point: f32) -> bool {
+        if (pixels_per_point - self.pixels_per_point).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        self.pixels_per_point = pixels_per_point;
+        let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
+        let (cw, ch, ascent, descent, uo, so, ss) =
+            compute_cell_metrics(&self.primary.regular, font_size_ppem);
+        self.cell_width = cw;
+        self.cell_height = ch;
+        self.ascent = ascent;
+        self.descent = descent;
+        self.underline_offset = uo;
+        self.strikeout_offset = so;
+        self.stroke_size = ss;
+
+        // Clear caches — glyph sizes differ at new ppem.
+        self.glyph_cache.clear();
+        self.system_fallback_cache.clear();
+        self.system_faces.clear();
+
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -648,7 +700,7 @@ impl FontManager {
 
 impl Default for FontManager {
     fn default() -> Self {
-        Self::new(&Config::default())
+        Self::new(&Config::default(), 1.0)
     }
 }
 
@@ -858,7 +910,24 @@ fn read_os2_win_metrics(os2_data: &[u8]) -> Option<(u16, u16)> {
     Some((win_ascent, win_descent))
 }
 
-/// Compute cell metrics from the regular face at the given font size.
+/// Convert a font size in typographic points to pixels-per-em (ppem).
+///
+/// The standard conversion is `ppem = pt × DPI / 72`.  On Linux and Windows
+/// the reference DPI is 96 (CSS reference pixel), so `96 / 72 = 4/3`.
+/// `pixels_per_point` (from egui) converts from logical pixels to physical
+/// pixels for `HiDPI` displays.
+///
+/// This matches how `WezTerm`, Ghostty, and other terminals interpret font
+/// size: a configured size of 12 pt on a 96 DPI display yields 16 ppem.
+fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
+    font_size_pt * (96.0 / 72.0) * pixels_per_point
+}
+
+/// Compute cell metrics from the regular face at the given ppem size.
+///
+/// `font_size_ppem` is in pixels-per-em — the value passed directly to
+/// swash's `Metrics::scale()`. Callers must convert from typographic points
+/// using [`pt_to_ppem`] before calling this function.
 ///
 /// Returns `(cell_width, cell_height, baseline_offset, descent, underline_offset,
 /// strikeout_offset, stroke_size)`.
@@ -882,7 +951,7 @@ fn read_os2_win_metrics(os2_data: &[u8]) -> Option<(u16, u16)> {
 /// vertically centred within the cell.
 fn compute_cell_metrics(
     face: &LoadedFace,
-    font_size_pt: f32,
+    font_size_ppem: f32,
 ) -> (u32, u32, f32, f32, f32, f32, f32) {
     use swash::{TableProvider, tag_from_bytes};
 
@@ -890,7 +959,7 @@ fn compute_cell_metrics(
         .as_font_ref()
         .unwrap_or_else(|| unreachable!("primary regular face data is corrupt"));
 
-    let metrics = font_ref.metrics(&[]).scale(font_size_pt);
+    let metrics = font_ref.metrics(&[]).scale(font_size_ppem);
 
     // Determine cell width from the advance width of a representative ASCII
     // glyph ('0').  For a true monospace font every glyph has the same advance,
@@ -900,7 +969,7 @@ fn compute_cell_metrics(
     let glyph_id = font_ref.charmap().map('0');
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let cell_width = if glyph_id != 0 {
-        let gm = font_ref.glyph_metrics(&[]).scale(font_size_pt);
+        let gm = font_ref.glyph_metrics(&[]).scale(font_size_ppem);
         let advance = gm.advance_width(glyph_id);
         if advance > 0.0 {
             advance.ceil() as u32
@@ -935,7 +1004,7 @@ fn compute_cell_metrics(
     } else {
         1.0
     };
-    let scale_fdu = font_size_pt / upem_f;
+    let scale_fdu = font_size_ppem / upem_f;
 
     let os2_tag = tag_from_bytes(b"OS/2");
     let win_height = font_ref
@@ -990,8 +1059,10 @@ mod tests {
     use super::*;
 
     /// Helper to create a default `FontManager` with bundled fonts.
+    ///
+    /// Uses `pixels_per_point = 1.0` (standard non-HiDPI).
     fn default_manager() -> FontManager {
-        FontManager::new(&Config::default())
+        FontManager::new(&Config::default(), 1.0)
     }
 
     // --- Test 1: Bundled font loading produces non-zero metrics ---
@@ -1040,6 +1111,7 @@ mod tests {
 
         let config = Config::default();
         let font_size_pt = config.font.size;
+        let font_size_ppem = pt_to_ppem(font_size_pt, 1.0);
 
         let unscaled = font_ref.metrics(&[]);
         let upem_f = if unscaled.units_per_em != 0 {
@@ -1047,7 +1119,7 @@ mod tests {
         } else {
             1.0
         };
-        let scale_fdu = font_size_pt / upem_f;
+        let scale_fdu = font_size_ppem / upem_f;
 
         let os2_tag = tag_from_bytes(b"OS/2");
         let os2_data = font_ref.table_by_tag(os2_tag);
@@ -1157,7 +1229,7 @@ mod tests {
     fn user_font_failure_falls_back_to_bundled() {
         let mut config = Config::default();
         config.font.family = Some("/nonexistent/path/to/font.ttf".to_owned());
-        let fm = FontManager::new(&config);
+        let fm = FontManager::new(&config, 1.0);
 
         // Should have fallen back to bundled MesloLGS as primary.
         assert!(
@@ -1173,8 +1245,8 @@ mod tests {
     #[test]
     fn rebuild_no_change() {
         let config = Config::default();
-        let mut fm = FontManager::new(&config);
-        let result = fm.rebuild(&config);
+        let mut fm = FontManager::new(&config, 1.0);
+        let result = fm.rebuild(&config, 1.0);
         assert_eq!(result, RebuildResult::NoChange);
     }
 
@@ -1183,7 +1255,7 @@ mod tests {
     #[test]
     fn rebuild_size_change() {
         let config = Config::default();
-        let mut fm = FontManager::new(&config);
+        let mut fm = FontManager::new(&config, 1.0);
 
         // Pre-populate the glyph cache.
         let style = GlyphStyle::new(false, false);
@@ -1195,7 +1267,7 @@ mod tests {
 
         let mut new_config = config;
         new_config.font.size = 24.0;
-        let result = fm.rebuild(&new_config);
+        let result = fm.rebuild(&new_config, 1.0);
 
         assert_eq!(result, RebuildResult::SizeChanged);
         assert!(fm.glyph_cache.is_empty(), "cache should be cleared");
@@ -1214,11 +1286,11 @@ mod tests {
     #[test]
     fn rebuild_family_change_with_invalid_font() {
         let config = Config::default();
-        let mut fm = FontManager::new(&config);
+        let mut fm = FontManager::new(&config, 1.0);
 
         let mut new_config = config;
         new_config.font.family = Some("/nonexistent/font.ttf".to_owned());
-        let result = fm.rebuild(&new_config);
+        let result = fm.rebuild(&new_config, 1.0);
 
         // The requested font fails to load, so the effective family stays as
         // bundled MesloLGS (None → None).  No observable change.
@@ -1279,11 +1351,11 @@ mod tests {
     fn cell_size_scales_with_font_size() {
         let mut config_small = Config::default();
         config_small.font.size = 8.0;
-        let fm_small = FontManager::new(&config_small);
+        let fm_small = FontManager::new(&config_small, 1.0);
 
         let mut config_large = Config::default();
         config_large.font.size = 32.0;
-        let fm_large = FontManager::new(&config_large);
+        let fm_large = FontManager::new(&config_large, 1.0);
 
         assert!(
             fm_large.cell_width > fm_small.cell_width,
