@@ -744,6 +744,24 @@ pub fn run(
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.icon = Some(Arc::new(icon));
 
+    // Disable client-side vsync so that eglSwapBuffers is non-blocking.
+    //
+    // eframe 0.34 does not call winit's pre_present_notify() before
+    // swap_buffers(), which means winit's Wayland frame-callback pacing
+    // is never activated.  With EGL_SWAP_INTERVAL=1 (the vsync=true
+    // default), eglSwapBuffers blocks until the compositor signals a
+    // frame — but on a hidden workspace the compositor never signals,
+    // so the call blocks indefinitely.  While blocked, the Wayland
+    // event loop cannot dispatch protocol events, so xdg_wm_base pings
+    // go unanswered and the compositor declares the app hung.
+    //
+    // With vsync=false the swap returns immediately.  Wayland compositors
+    // do their own compositing pass at the display refresh rate, so
+    // client-side tearing is not visible.  Freminal's repaint-request
+    // intervals (8 ms during PTY activity, 500 ms for cursor blink)
+    // act as a soft frame-rate cap.
+    native_options.vsync = false;
+
     match eframe::run_native(
         "Freminal",
         native_options,
