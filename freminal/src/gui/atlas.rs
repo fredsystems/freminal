@@ -618,7 +618,7 @@ mod tests {
 
     /// Helper to get a `FontManager` for tests.
     fn test_font_manager() -> FontManager {
-        FontManager::new(&Config::default())
+        FontManager::new(&Config::default(), 1.0)
     }
 
     /// Helper to create a standard glyph key.

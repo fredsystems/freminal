@@ -1064,8 +1064,10 @@ impl FreminalTerminalWidget {
         };
         setup_font_files(ctx, &font_config);
 
+        let pixels_per_point = ctx.pixels_per_point();
+
         Self {
-            font_manager: FontManager::new(config),
+            font_manager: FontManager::new(config, pixels_per_point),
             shaping_cache: ShapingCache::new(),
             render_state: Arc::new(Mutex::new(RenderState {
                 renderer: TerminalRenderer::new(),
@@ -1098,6 +1100,29 @@ impl FreminalTerminalWidget {
         self.font_manager.cell_size()
     }
 
+    /// Synchronise the font manager's `pixels_per_point` with the current
+    /// display scale factor.  If the value changed (e.g. the window moved to a
+    /// monitor with a different DPI), cell metrics are recomputed and all
+    /// render caches are invalidated.
+    ///
+    /// **Must be called before [`cell_size()`] each frame** so that resize
+    /// calculations in `FreminalGui::ui()` use up-to-date metrics.
+    pub fn sync_pixels_per_point(&mut self, ppp: f32) {
+        if self.font_manager.update_pixels_per_point(ppp) {
+            let mut rs = self
+                .render_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rs.atlas.clear();
+            drop(rs);
+            self.shaping_cache.clear();
+            // Force a full vertex rebuild on the next frame.  The existing
+            // VBO data was built for the old cell pixel size and must not be
+            // reused.
+            self.last_rendered_visible = None;
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn show(
         &mut self,
@@ -1109,11 +1134,22 @@ impl FreminalTerminalWidget {
         modal_is_open: bool,
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
+
+        // `sync_pixels_per_point()` has already been called by
+        // `FreminalGui::ui()` before this method, so font metrics are
+        // up-to-date.  We just read `ppp` for logical-pixel conversions.
+        let ppp = ui.ctx().pixels_per_point();
+
         let (cell_w, cell_h) = self.font_manager.cell_size();
+        // Physical pixel dimensions (for vertex building / OpenGL renderer).
         #[allow(clippy::cast_precision_loss)]
         let cell_w_f = cell_w as f32;
         #[allow(clippy::cast_precision_loss)]
         let row_h_f = cell_h as f32;
+
+        // Logical point dimensions (for egui layout, mouse hit-testing, scroll).
+        let logical_cell_w = cell_w_f / ppp;
+        let logical_cell_h = row_h_f / ppp;
 
         // Suppress input for one extra frame after a modal closes.
         // This prevents the dismiss-click (Cancel / X / click-away) from
@@ -1187,8 +1223,8 @@ impl FreminalTerminalWidget {
                     snap,
                     input_tx,
                     view_state,
-                    cell_w_f,
-                    row_h_f,
+                    logical_cell_w,
+                    logical_cell_h,
                     terminal_origin,
                     self.previous_mouse_state.clone(),
                     repeat_characters,
@@ -1450,11 +1486,11 @@ impl FreminalTerminalWidget {
         self.previous_cursor_pos = snap.cursor_pos;
         self.previous_show_cursor = snap.show_cursor;
 
-        // Allocate the exact terminal rect.
+        // Allocate the exact terminal rect (in logical points for egui).
         #[allow(clippy::cast_precision_loss)]
         let desired_size = egui::Vec2::new(
-            snap.term_width as f32 * cell_w_f,
-            snap.height as f32 * row_h_f,
+            snap.term_width as f32 * logical_cell_w,
+            snap.height as f32 * logical_cell_h,
         );
         let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
 
@@ -1511,7 +1547,7 @@ impl FreminalTerminalWidget {
         if let Some(mouse_position) = view_state.mouse_position {
             let (col, row) = encode_egui_mouse_pos_as_usize(
                 mouse_position,
-                (cell_w_f, row_h_f),
+                (logical_cell_w, logical_cell_h),
                 terminal_origin,
             );
 
@@ -1577,7 +1613,8 @@ impl FreminalTerminalWidget {
         old_config: &Config,
         new_config: &Config,
     ) {
-        let rebuild_result = self.font_manager.rebuild(new_config);
+        let pixels_per_point = ctx.pixels_per_point();
+        let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         if rebuild_result.font_changed() || ligatures_changed {
             let mut rs = self
@@ -1645,7 +1682,7 @@ mod subtask_1_7_tests {
     #[test]
     fn cell_size_from_font_manager_is_nonzero() {
         let config = freminal_common::config::Config::default();
-        let fm = FontManager::new(&config);
+        let fm = FontManager::new(&config, 1.0);
         let (w, h) = fm.cell_size();
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");

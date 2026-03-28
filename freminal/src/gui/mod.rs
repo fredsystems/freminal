@@ -550,27 +550,35 @@ impl eframe::App for FreminalGui {
         }
 
         let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
+            // Synchronise font metrics with the current display scale *before*
+            // reading `cell_size()`.  Without this, the first frame after a DPI
+            // change would use stale pixel metrics for the resize calculation.
+            let ppp = ui.ctx().pixels_per_point();
+            self.terminal_widget.sync_pixels_per_point(ppp);
+
             // Compute char size once and reuse for both PTY sizing and widget layout.
-            // `cell_size()` returns integer pixel dimensions from swash font metrics.
+            // `cell_size()` returns integer pixel dimensions (physical) from swash
+            // font metrics.  egui's coordinate system uses logical points, so we
+            // convert with `pixels_per_point` when doing layout math.
             let (cell_w_u, cell_height_u) = self.terminal_widget.cell_size();
             #[allow(clippy::cast_possible_truncation)]
             let font_width = cell_w_u as usize;
             #[allow(clippy::cast_possible_truncation)]
             let font_height = cell_height_u as usize;
             #[allow(clippy::cast_precision_loss)]
-            let char_w = cell_w_u as f32;
+            let logical_char_w = cell_w_u as f32 / ppp;
             #[allow(clippy::cast_precision_loss)]
-            let char_h = cell_height_u as f32;
+            let logical_char_h = cell_height_u as f32 / ppp;
 
             let available = ui.available_size();
-            let width_chars = (available.x / char_w)
+            let width_chars = (available.x / logical_char_w)
                 .floor()
                 .approx_as::<usize>()
                 .unwrap_or_else(|e| {
                     error!("Failed to calculate width chars: {e}");
                     10
                 });
-            let height_chars = ((available.y / char_h).floor())
+            let height_chars = ((available.y / logical_char_h).floor())
                 .approx_as::<usize>()
                 .unwrap_or_else(|e| {
                     error!("Failed to calculate height chars: {e}");
@@ -710,6 +718,26 @@ impl eframe::App for FreminalGui {
 
         debug!("{}", frame_time);
     }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Override egui's predicted frame time to zero.
+        //
+        // egui's `request_repaint_after(delay)` subtracts `predicted_dt`
+        // (~16.7 ms at the default 1/60) from the requested delay to avoid
+        // "overshooting" into the next frame.  With vsync disabled (see the
+        // `native_options.vsync = false` below), this subtraction collapses
+        // any delay ≤ 16.7 ms to zero — turning every repaint request into
+        // an immediate repaint and driving the frame rate to hundreds of FPS
+        // during active PTY output.
+        //
+        // Setting `predicted_dt = 0` disables the subtraction, so our delays
+        // are honoured exactly:
+        //   - 8 ms  (PTY thread after each batch)  → ~120 FPS cap
+        //   - 16 ms (GUI on content_changed)        → ~60 FPS cap
+        //   - 500 ms (cursor blink)                 → ~2 FPS
+        //   - no request (true idle, steady cursor)  → 0 FPS
+        raw_input.predicted_dt = 0.0;
+    }
 }
 
 /// Run the GUI
@@ -739,6 +767,26 @@ pub fn run(
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.icon = Some(Arc::new(icon));
+
+    // Disable client-side vsync so that eglSwapBuffers is non-blocking.
+    //
+    // eframe 0.34 does not call winit's pre_present_notify() before
+    // swap_buffers(), which means winit's Wayland frame-callback pacing
+    // is never activated.  With EGL_SWAP_INTERVAL=1 (the vsync=true
+    // default), eglSwapBuffers blocks until the compositor signals a
+    // frame — but on a hidden workspace the compositor never signals,
+    // so the call blocks indefinitely.  While blocked, the Wayland
+    // event loop cannot dispatch protocol events, so xdg_wm_base pings
+    // go unanswered and the compositor declares the app hung.
+    //
+    // With vsync=false the swap returns immediately.  Wayland compositors
+    // do their own compositing pass at the display refresh rate, so
+    // client-side tearing is not visible.  The `raw_input_hook` override
+    // of `predicted_dt = 0.0` (see above) ensures our repaint-request
+    // delays are honoured exactly, so the effective frame rate is capped
+    // by the repaint intervals (8 ms / 16 ms / 500 ms) rather than
+    // spinning at hundreds of FPS.
+    native_options.vsync = false;
 
     match eframe::run_native(
         "Freminal",

@@ -347,7 +347,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("shape_visible", label), |b| {
             b.iter_batched(
                 || {
-                    let fm = FontManager::new(&Config::default());
+                    let fm = FontManager::new(&Config::default(), 1.0);
                     let cache = ShapingCache::new();
                     (fm, cache)
                 },
@@ -365,7 +365,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
 
     // Also benchmark cache hit path (second call with same data).
     group.bench_function("shape_visible_cache_hit", |b| {
-        let mut fm = FontManager::new(&Config::default());
+        let mut fm = FontManager::new(&Config::default(), 1.0);
         let mut cache = ShapingCache::new();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
