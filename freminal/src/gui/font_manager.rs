@@ -1461,4 +1461,65 @@ mod tests {
             "Whitespace-stripped comparison should match: '{stripped_family}' vs '{stripped_query}'"
         );
     }
+
+    // --- Test: update_pixels_per_point returns false when unchanged ---
+
+    #[test]
+    fn update_ppp_unchanged_returns_false() {
+        let mut fm = default_manager();
+        // The manager was created with ppp = 1.0; updating with the same
+        // value must be a no-op.
+        assert!(
+            !fm.update_pixels_per_point(1.0),
+            "Same pixels_per_point should return false"
+        );
+    }
+
+    // --- Test: update_pixels_per_point returns true and updates metrics ---
+
+    #[test]
+    fn update_ppp_changed_updates_cell_size() {
+        let mut fm = default_manager();
+        let old_w = fm.cell_width;
+        let old_h = fm.cell_height;
+
+        // Switching to 2.0 (simulating a HiDPI monitor) must return true
+        // and produce different cell metrics.
+        assert!(
+            fm.update_pixels_per_point(2.0),
+            "Different pixels_per_point should return true"
+        );
+        assert_ne!(
+            (fm.cell_width, fm.cell_height),
+            (old_w, old_h),
+            "Cell size must change after DPI scale change"
+        );
+        // At 2x DPI the ppem doubles, so cell size should roughly double.
+        assert!(
+            fm.cell_width > old_w,
+            "Cell width should increase at higher DPI"
+        );
+        assert!(
+            fm.cell_height > old_h,
+            "Cell height should increase at higher DPI"
+        );
+    }
+
+    // --- Test: update_pixels_per_point clears glyph cache ---
+
+    #[test]
+    fn update_ppp_changed_clears_caches() {
+        let mut fm = default_manager();
+
+        // Populate the glyph cache.
+        let style = GlyphStyle::new(false, false);
+        let _ = fm.resolve_glyph('A', style);
+        assert!(!fm.glyph_cache.is_empty(), "cache should be populated");
+
+        fm.update_pixels_per_point(2.0);
+        assert!(
+            fm.glyph_cache.is_empty(),
+            "glyph cache must be cleared after DPI change"
+        );
+    }
 }

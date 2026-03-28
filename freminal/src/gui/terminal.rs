@@ -1100,6 +1100,29 @@ impl FreminalTerminalWidget {
         self.font_manager.cell_size()
     }
 
+    /// Synchronise the font manager's `pixels_per_point` with the current
+    /// display scale factor.  If the value changed (e.g. the window moved to a
+    /// monitor with a different DPI), cell metrics are recomputed and all
+    /// render caches are invalidated.
+    ///
+    /// **Must be called before [`cell_size()`] each frame** so that resize
+    /// calculations in `FreminalGui::ui()` use up-to-date metrics.
+    pub fn sync_pixels_per_point(&mut self, ppp: f32) {
+        if self.font_manager.update_pixels_per_point(ppp) {
+            let mut rs = self
+                .render_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rs.atlas.clear();
+            drop(rs);
+            self.shaping_cache.clear();
+            // Force a full vertex rebuild on the next frame.  The existing
+            // VBO data was built for the old cell pixel size and must not be
+            // reused.
+            self.last_rendered_visible = None;
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn show(
         &mut self,
@@ -1112,18 +1135,10 @@ impl FreminalTerminalWidget {
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
-        // Detect HiDPI changes (e.g. window dragged to a different monitor)
-        // and recompute font metrics if needed.
+        // `sync_pixels_per_point()` has already been called by
+        // `FreminalGui::ui()` before this method, so font metrics are
+        // up-to-date.  We just read `ppp` for logical-pixel conversions.
         let ppp = ui.ctx().pixels_per_point();
-        if self.font_manager.update_pixels_per_point(ppp) {
-            let mut rs = self
-                .render_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            rs.atlas.clear();
-            drop(rs);
-            self.shaping_cache.clear();
-        }
 
         let (cell_w, cell_h) = self.font_manager.cell_size();
         // Physical pixel dimensions (for vertex building / OpenGL renderer).

@@ -550,6 +550,12 @@ impl eframe::App for FreminalGui {
         }
 
         let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
+            // Synchronise font metrics with the current display scale *before*
+            // reading `cell_size()`.  Without this, the first frame after a DPI
+            // change would use stale pixel metrics for the resize calculation.
+            let ppp = ui.ctx().pixels_per_point();
+            self.terminal_widget.sync_pixels_per_point(ppp);
+
             // Compute char size once and reuse for both PTY sizing and widget layout.
             // `cell_size()` returns integer pixel dimensions (physical) from swash
             // font metrics.  egui's coordinate system uses logical points, so we
@@ -559,8 +565,6 @@ impl eframe::App for FreminalGui {
             let font_width = cell_w_u as usize;
             #[allow(clippy::cast_possible_truncation)]
             let font_height = cell_height_u as usize;
-
-            let ppp = ui.ctx().pixels_per_point();
             #[allow(clippy::cast_precision_loss)]
             let logical_char_w = cell_w_u as f32 / ppp;
             #[allow(clippy::cast_precision_loss)]
