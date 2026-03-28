@@ -714,6 +714,26 @@ impl eframe::App for FreminalGui {
 
         debug!("{}", frame_time);
     }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Override egui's predicted frame time to zero.
+        //
+        // egui's `request_repaint_after(delay)` subtracts `predicted_dt`
+        // (~16.7 ms at the default 1/60) from the requested delay to avoid
+        // "overshooting" into the next frame.  With vsync disabled (see the
+        // `native_options.vsync = false` below), this subtraction collapses
+        // any delay ≤ 16.7 ms to zero — turning every repaint request into
+        // an immediate repaint and driving the frame rate to hundreds of FPS
+        // during active PTY output.
+        //
+        // Setting `predicted_dt = 0` disables the subtraction, so our delays
+        // are honoured exactly:
+        //   - 8 ms  (PTY thread after each batch)  → ~120 FPS cap
+        //   - 16 ms (GUI on content_changed)        → ~60 FPS cap
+        //   - 500 ms (cursor blink)                 → ~2 FPS
+        //   - no request (true idle, steady cursor)  → 0 FPS
+        raw_input.predicted_dt = 0.0;
+    }
 }
 
 /// Run the GUI
@@ -757,9 +777,11 @@ pub fn run(
     //
     // With vsync=false the swap returns immediately.  Wayland compositors
     // do their own compositing pass at the display refresh rate, so
-    // client-side tearing is not visible.  Freminal's repaint-request
-    // intervals (8 ms during PTY activity, 500 ms for cursor blink)
-    // act as a soft frame-rate cap.
+    // client-side tearing is not visible.  The `raw_input_hook` override
+    // of `predicted_dt = 0.0` (see above) ensures our repaint-request
+    // delays are honoured exactly, so the effective frame rate is capped
+    // by the repaint intervals (8 ms / 16 ms / 500 ms) rather than
+    // spinning at hundreds of FPS.
     native_options.vsync = false;
 
     match eframe::run_native(
