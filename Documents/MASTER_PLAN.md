@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates thirteen major development tasks for Freminal. Each task has a dedicated
+This document orchestrates nineteen major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -23,25 +23,27 @@ and plan document maintenance rules.
 
 ## Task Summary
 
-| #   | Task                                     | Plan Document                               | Status   | Dependencies |
-| --- | ---------------------------------------- | ------------------------------------------- | -------- | ------------ |
-| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                    | Complete | None         |
-| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                     | Complete | None         |
-| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                 | Complete | Task 2       |
-| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`               | Complete | Task 2       |
-| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                 | Complete | Task 1       |
-| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                      | Complete | None         |
-| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`               | Complete | None         |
-| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                     | Complete | None         |
-| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`        | Complete | None         |
-| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`         | Complete | None         |
-| 11  | Theming                                  | `PLAN_11_THEMING.md`                        | Complete | Tasks 2, 3   |
-| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                       | Complete | None         |
-| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                 | Complete | Task 1       |
-| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | Complete | None         |
-| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`        | Complete | None         |
-| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                 | Complete | None         |
-| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                  | Complete | None         |
+| #   | Task                                     | Plan Document                               | Status   | Dependencies         |
+| --- | ---------------------------------------- | ------------------------------------------- | -------- | -------------------- |
+| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                    | Complete | None                 |
+| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                     | Complete | None                 |
+| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                 | Complete | Task 2               |
+| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`               | Complete | Task 2               |
+| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                 | Complete | Task 1               |
+| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                      | Complete | None                 |
+| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`               | Complete | None                 |
+| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                     | Complete | None                 |
+| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`        | Complete | None                 |
+| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`         | Complete | None                 |
+| 11  | Theming                                  | `PLAN_11_THEMING.md`                        | Complete | Tasks 2, 3           |
+| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                       | Complete | None                 |
+| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                 | Complete | Task 1               |
+| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` | Complete | None                 |
+| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`        | Complete | None                 |
+| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                 | Complete | None                 |
+| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                  | Complete | None                 |
+| 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`               | Pending  | Tasks 2, 3, 16       |
+| 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`     | Pending  | None (separate repo) |
 
 ---
 
@@ -67,6 +69,10 @@ Task 10 (vttest Cursor Movement) ── independent, can run any time
 Task 12 (Terminfo Audit) ── independent, can run any time
 
 Task 1 (Custom Terminal Renderer) ──► Task 13 (Image Protocol Support)
+
+Tasks 2, 3, 16 ──► Task 18 (Client-Side Update Mechanism)
+
+Task 19 (Update Service & Website) ── independent (separate repo, shares API contract with Task 18)
 ```
 
 ### Dependency Details
@@ -116,6 +122,20 @@ images (Phase 1), Kitty graphics protocol minimal subset (Phase 2), Sixel (Phase
 Requires the custom OpenGL renderer from Task 1 for GPU-side image textures. Medium-high scope
 (9 subtasks across 3 phases).
 
+**Task 18:** Depends on Tasks 2, 3, and 16. Adds a client-side update mechanism: background HTTP
+check against `updates.freminal.dev`, version comparison via `semver`, menu bar indicator, and a
+modal dialog for downloading updates. Requires the config system (Task 2) for the `[update]`
+section, the settings modal infrastructure (Task 3) as the UI pattern template, and the GitHub
+Actions release pipeline (Task 16) for compressed assets and SHA256 checksums. Also extends the
+deploy workflow to produce `.tar.gz`/`.zip` compressed assets and a `SHA256SUMS.txt` manifest.
+Medium scope (11 subtasks).
+
+**Task 19:** Independent of the freminal repo. Lives in a separate `freminal-updates` repository.
+Implements a Cloudflare Worker at `updates.freminal.dev` that proxies the GitHub Releases API with
+1-hour KV cache, plus a project website at `freminal.dev`. Shares an API contract with Task 18
+(the client-side consumer). Can be developed in parallel with Task 18 as long as the API contract
+(defined in both plan documents) is respected. Medium scope (10 subtasks).
+
 ---
 
 ## Recommended Execution Order
@@ -143,6 +163,14 @@ Run after Task 5 completes. These are independent of each other and can run in p
 
 - **Task 4** — Deployment Flake (run last; benefits from a stable config schema and feature set)
 
+### Phase 7 — Update Mechanism
+
+Run after Phase 6. Task 18 depends on Tasks 2, 3, and 16 (all complete). Task 19 is independent
+and can be developed in a separate repo in parallel with Task 18.
+
+- **Task 18** — Client-Side Update Mechanism (unblocked by Tasks 2 + 3 + 16)
+- **Task 19** — Update Service & Website (independent, separate repo; shares API contract with 18)
+
 ```text
 Complete:     Tasks 1, 2, 3, 7, 8, 9, 10
               │
@@ -155,6 +183,9 @@ Phase 4:      │                        ├── Task 11 (Theming)    ┤
 Phase 5:      │                        ├── Task 6  (Test Gaps) ──┤
               │                                                   │
 Phase 6:      │                        ├── Task 4  (Deployment) ──┤
+              │                                                    │
+Phase 7:      │                        ├── Task 18 (Update Client) ┤
+              │                        ├── Task 19 (Update Service) ┤ (parallel, separate repo)
 ```
 
 ---
@@ -179,14 +210,15 @@ intra-task parallelism guidance. Cross-task parallelism follows the dependency g
 
 ### Config Schema Evolution
 
-Tasks 2, 3, 4, and 11 all interact with the config schema:
+Tasks 2, 3, 4, 11, and 18 all interact with the config schema:
 
 - Task 2 defines the schema (Rust structs + TOML format)
 - Task 3 reads and writes the schema (settings UI + persistence)
 - Task 4 mirrors the schema (Nix attrs → TOML generation)
 - Task 11 extends the schema (theme name in `[theme]` section, persisted on Apply)
+- Task 18 extends the schema (`[update]` section with `check_enabled` and `check_interval_hours`)
 
-Any config schema changes after Task 2 is complete must be propagated to Tasks 3, 4, and 11.
+Any config schema changes after Task 2 is complete must be propagated to Tasks 3, 4, 11, and 18.
 
 ### Rendering Pipeline
 
@@ -235,6 +267,8 @@ Update this section as tasks complete:
 | 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17      |
 | 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17      |
 | 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17      |
+| 18   |            |            |                                                |
+| 19   |            |            |                                                |
 
 ---
 
@@ -251,4 +285,6 @@ Update this section as tasks complete:
 - `Documents/PLAN_12_TERMINFO.md` — Terminfo audit, build.rs fix, XTGETTCAP audit
 - `Documents/PLAN_13_IMAGE_PROTOCOL.md` — Image protocol support (iTerm2, Kitty, Sixel)
 - `Documents/PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` — Mode noise, URL hover, scrollback selection
+- `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism
+- `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (separate repo)
 - `config_example.toml` — Current config format

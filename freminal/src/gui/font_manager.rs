@@ -618,6 +618,40 @@ impl FontManager {
         true
     }
 
+    /// Return a sorted, deduplicated list of all monospaced font family names
+    /// installed on the system.
+    ///
+    /// The list is computed fresh from the `fontdb` database each time it is
+    /// called. For the settings modal this is only invoked once when the modal
+    /// opens, so the cost is negligible.
+    #[must_use]
+    pub fn enumerate_monospace_families(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut families: Vec<String> = self
+            .font_db
+            .faces()
+            .filter(|f| f.monospaced)
+            .flat_map(|f| f.families.iter().map(|(name, _)| name.clone()))
+            .filter(|name| seen.insert(name.clone()))
+            .collect();
+        families.sort_unstable();
+        families
+    }
+
+    /// Load the raw font file bytes for a given system font family name.
+    ///
+    /// Returns `None` if the family is not found in the `fontdb` database.
+    /// Looks for a regular-weight, normal-style face first.
+    #[must_use]
+    pub fn load_font_bytes_for_family(&self, family: &str) -> Option<Vec<u8>> {
+        find_system_font_data(
+            &self.font_db,
+            family,
+            fontdb::Weight::NORMAL,
+            fontdb::Style::Normal,
+        )
+    }
+
     // -----------------------------------------------------------------------
     //  Internal helpers
     // -----------------------------------------------------------------------
@@ -1520,6 +1554,38 @@ mod tests {
         assert!(
             fm.glyph_cache.is_empty(),
             "glyph cache must be cleared after DPI change"
+        );
+    }
+
+    // --- Test: enumerate_monospace_families returns sorted, deduplicated list ---
+
+    #[test]
+    fn enumerate_monospace_families_returns_sorted_deduplicated_list() {
+        let fm = default_manager();
+        let families = fm.enumerate_monospace_families();
+
+        // The list may be empty on minimal CI/Docker environments where no
+        // system fonts are installed — the bundled MesloLGS is loaded via
+        // swash, not registered in fontdb.  We only assert structural
+        // properties (sorted, deduplicated) here.
+
+        // Verify sorted order.
+        for pair in families.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "Families must be sorted, but found {:?} before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Verify no duplicates.
+        let mut deduped = families.clone();
+        deduped.dedup();
+        assert_eq!(
+            families.len(),
+            deduped.len(),
+            "enumerate_monospace_families must not contain duplicates"
         );
     }
 }
