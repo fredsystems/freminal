@@ -69,7 +69,8 @@ impl Default for FontConfig {
 //  Public entry point: set up all fonts
 // -------------------------------------------------------------------------------------------------
 
-pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) {
+#[must_use]
+pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
 
     // 1. Load bundled primary font family (Meslo Nerd)
@@ -93,7 +94,18 @@ pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) {
         system_fallback::add_last_resort_system_fonts(&mut defs);
     }
 
-    ctx.set_fonts(defs);
+    // 6. Register a placeholder "settings-preview" family pointing at the
+    //    bundled primary regular font.  This ensures that
+    //    `FontFamily::Name("settings-preview")` is always valid — even before
+    //    the settings modal loads a real preview font.  When the modal loads a
+    //    preview, it replaces the font data behind this key.
+    defs.families.insert(
+        FontFamily::Name("settings-preview".into()),
+        vec![PRIMARY_REGULAR.to_owned()],
+    );
+
+    ctx.set_fonts(defs.clone());
+    defs
 }
 
 // -------------------------------------------------------------------------------------------------
