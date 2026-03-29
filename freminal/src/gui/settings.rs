@@ -339,9 +339,11 @@ impl SettingsModal {
 
         // Choose the font family for the preview text:
         //   - Default selected → use egui's Monospace (bundled MesloLGS)
-        //   - Custom font selected and registered → use the preview font
-        //   - Custom font selected but not yet loaded → fall back to Monospace
-        let preview_font = if self.draft.font.family.is_some() && self.preview_registered.is_some()
+        //   - Custom font selected AND the registered preview matches → use the preview font
+        //   - Custom font selected but preview not yet loaded or stale → fall back to Monospace
+        let preview_font = if self.preview_registered.as_deref()
+            == self.draft.font.family.as_deref()
+            && self.draft.font.family.is_some()
         {
             FontFamily::Name("settings-preview".into())
         } else {

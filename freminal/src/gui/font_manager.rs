@@ -1564,12 +1564,10 @@ mod tests {
         let fm = default_manager();
         let families = fm.enumerate_monospace_families();
 
-        // The list must not be empty — at minimum the bundled MesloLGS
-        // (which is monospaced) is loaded into fontdb.
-        assert!(
-            !families.is_empty(),
-            "enumerate_monospace_families must return at least one entry"
-        );
+        // The list may be empty on minimal CI/Docker environments where no
+        // system fonts are installed — the bundled MesloLGS is loaded via
+        // swash, not registered in fontdb.  We only assert structural
+        // properties (sorted, deduplicated) here.
 
         // Verify sorted order.
         for pair in families.windows(2) {

@@ -674,9 +674,13 @@ impl eframe::App for FreminalGui {
             }
         });
 
-        // If the settings modal is open and the user changed the font dropdown,
-        // load the new font's bytes and register them with egui so the preview
-        // renders in the actual selected font.
+        // Show the settings modal (if open) above everything else.
+        let modal_was_open = self.settings_modal.is_open;
+        let settings_action = self.settings_modal.show(ui.ctx());
+
+        // After show() processes the dropdown change, load the new font's
+        // bytes and register them with egui so the preview renders in the
+        // actual selected font on the next frame.
         if self.settings_modal.is_open
             && let Some(family) = self.settings_modal.needed_preview_family()
         {
@@ -685,10 +689,6 @@ impl eframe::App for FreminalGui {
             self.settings_modal
                 .register_preview_font(ui.ctx(), &family, bytes, base);
         }
-
-        // Show the settings modal (if open) above everything else.
-        let modal_was_open = self.settings_modal.is_open;
-        let settings_action = self.settings_modal.show(ui.ctx());
 
         // If the modal just closed (any reason), restore the original egui
         // font set to remove the preview font registration.
