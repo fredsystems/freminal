@@ -138,7 +138,10 @@ impl FreminalGui {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Terminal", |ui| {
                 if ui.button("Settings...").clicked() {
-                    self.settings_modal.open(&self.config);
+                    let families = self.terminal_widget.monospace_families();
+                    self.settings_modal.open(&self.config, families);
+                    self.settings_modal
+                        .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
                     ui.close();
                 }
 
@@ -671,8 +674,28 @@ impl eframe::App for FreminalGui {
             }
         });
 
+        // If the settings modal is open and the user changed the font dropdown,
+        // load the new font's bytes and register them with egui so the preview
+        // renders in the actual selected font.
+        if self.settings_modal.is_open
+            && let Some(family) = self.settings_modal.needed_preview_family()
+        {
+            let bytes = self.terminal_widget.load_font_bytes(&family);
+            let base = self.terminal_widget.base_font_defs();
+            self.settings_modal
+                .register_preview_font(ui.ctx(), &family, bytes, base);
+        }
+
         // Show the settings modal (if open) above everything else.
+        let modal_was_open = self.settings_modal.is_open;
         let settings_action = self.settings_modal.show(ui.ctx());
+
+        // If the modal just closed (any reason), restore the original egui
+        // font set to remove the preview font registration.
+        if modal_was_open && !self.settings_modal.is_open {
+            self.settings_modal.restore_base_fonts(ui.ctx());
+        }
+
         match settings_action {
             SettingsAction::Applied => {
                 let new_cfg = self.settings_modal.applied_config().clone();

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui::{self, ComboBox, DragValue, Slider, Ui};
+use eframe::egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
 use freminal_common::config::{self, Config, CursorShapeConfig};
 use freminal_common::themes;
 use std::path::PathBuf;
@@ -95,6 +95,19 @@ pub struct SettingsModal {
     /// Theme slug when the modal was opened.  Used to detect whether a
     /// preview is active and to revert on Cancel.
     original_theme_slug: String,
+
+    /// Sorted list of monospaced font family names available on the system.
+    /// Populated once when the modal is opened via [`Self::open()`].
+    monospace_families: Vec<String>,
+
+    /// Base egui `FontDefinitions` (without any preview font registered).
+    /// Saved when the modal opens so we can restore the original font set
+    /// when the modal closes.
+    base_font_defs: Option<FontDefinitions>,
+
+    /// Which font family is currently registered as the preview font in egui.
+    /// `None` means no preview font has been registered (or the default is selected).
+    preview_registered: Option<String>,
 }
 
 impl SettingsModal {
@@ -110,14 +123,21 @@ impl SettingsModal {
             log_dir_display: String::new(),
             read_only_reason: None,
             original_theme_slug: String::new(),
+            monospace_families: Vec::new(),
+            base_font_defs: None,
+            preview_registered: None,
         }
     }
 
     /// Open the modal, cloning the live config into the draft for editing.
-    pub fn open(&mut self, live_config: &Config) {
+    ///
+    /// `monospace_families` is the sorted, deduplicated list of monospaced font
+    /// family names available on the system (from [`FontManager::enumerate_monospace_families`]).
+    pub fn open(&mut self, live_config: &Config, monospace_families: Vec<String>) {
         self.draft = live_config.clone();
         self.active_tab = SettingsTab::Font;
         self.status_message = None;
+        self.monospace_families = monospace_families;
         self.original_theme_slug.clone_from(&live_config.theme.name);
         self.log_dir_display = config::log_dir().map_or_else(
             || "(unable to determine log directory)".to_string(),
@@ -267,22 +287,78 @@ impl SettingsModal {
     //  Tab implementations
     // -------------------------------------------------------------------------
 
+    const DEFAULT_LABEL: &str = "Default (MesloLGS Nerd Font)";
+
     fn show_font_tab(&mut self, ui: &mut Ui) {
+        // --- Font Family dropdown ---
         ui.label("Font Family:");
-        let mut family_text = self.draft.font.family.clone().unwrap_or_default();
-        let response = ui.text_edit_singleline(&mut family_text);
-        if response.changed() {
-            self.draft.font.family = if family_text.is_empty() {
-                None
-            } else {
-                Some(family_text)
-            };
-        }
-        ui.label("Leave empty to use the bundled default font.");
+
+        let selected_label = self
+            .draft
+            .font
+            .family
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_LABEL);
+
+        ComboBox::from_id_salt("font_family")
+            .selected_text(selected_label)
+            .width(300.0)
+            .show_ui(ui, |ui| {
+                // "Default" entry at the top.
+                ui.selectable_value(&mut self.draft.font.family, None, Self::DEFAULT_LABEL);
+                ui.separator();
+
+                // All installed monospace families.
+                for name in &self.monospace_families {
+                    ui.selectable_value(
+                        &mut self.draft.font.family,
+                        Some(name.clone()),
+                        name.as_str(),
+                    );
+                }
+            });
         ui.add_space(8.0);
 
+        // --- Font Size slider ---
         ui.label("Font Size:");
         ui.add(Slider::new(&mut self.draft.font.size, 4.0..=96.0).step_by(0.5));
+        ui.add_space(8.0);
+
+        // --- Ligatures toggle ---
+        ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures");
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Render multi-character ligatures (e.g. =>, !=, ->).",
+        );
+        ui.add_space(8.0);
+
+        // --- Font Preview ---
+        ui.separator();
+        ui.label("Preview:");
+        let preview_text = "The quick brown fox 0O1lI| {}[]() => !=";
+
+        // Choose the font family for the preview text:
+        //   - Default selected → use egui's Monospace (bundled MesloLGS)
+        //   - Custom font selected and registered → use the preview font
+        //   - Custom font selected but not yet loaded → fall back to Monospace
+        let preview_font = if self.draft.font.family.is_some() && self.preview_registered.is_some()
+        {
+            FontFamily::Name("settings-preview".into())
+        } else {
+            FontFamily::Monospace
+        };
+
+        egui::Frame::NONE
+            .fill(egui::Color32::from_gray(30))
+            .corner_radius(4.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(preview_text)
+                        .family(preview_font)
+                        .size(self.draft.font.size),
+                );
+            });
     }
 
     fn show_cursor_tab(&mut self, ui: &mut Ui) {
@@ -413,6 +489,72 @@ impl SettingsModal {
     }
 
     // -------------------------------------------------------------------------
+    //  Font preview helpers
+    // -------------------------------------------------------------------------
+
+    /// Return the font family name that needs to be loaded as a preview, if it
+    /// differs from what is currently registered. Returns `None` when the
+    /// default (bundled) font is selected or when the requested family is
+    /// already registered.
+    #[must_use]
+    pub fn needed_preview_family(&self) -> Option<String> {
+        let wanted = self.draft.font.family.as_deref()?;
+        if self.preview_registered.as_deref() == Some(wanted) {
+            return None;
+        }
+        Some(wanted.to_owned())
+    }
+
+    /// Register a preview font in egui's font system so `show_font_tab()` can
+    /// render sample text in the user's chosen font.
+    ///
+    /// `family` is the family name being previewed, `font_bytes` are the raw
+    /// TTF/OTF bytes (or `None` if the font could not be loaded), and
+    /// `base_defs` are the original `FontDefinitions` without any preview font.
+    pub fn register_preview_font(
+        &mut self,
+        ctx: &egui::Context,
+        family: &str,
+        font_bytes: Option<Vec<u8>>,
+        base_defs: &FontDefinitions,
+    ) {
+        let Some(bytes) = font_bytes else {
+            // Font could not be loaded — clear any previous preview.
+            self.preview_registered = None;
+            ctx.set_fonts(base_defs.clone());
+            return;
+        };
+
+        let mut defs = base_defs.clone();
+        defs.font_data.insert(
+            "settings-preview".to_owned(),
+            FontData::from_owned(bytes).into(),
+        );
+        defs.families.insert(
+            FontFamily::Name("settings-preview".into()),
+            vec!["settings-preview".to_owned()],
+        );
+        ctx.set_fonts(defs);
+
+        self.preview_registered = Some(family.to_owned());
+    }
+
+    /// Save the base font definitions when the modal opens.
+    pub fn set_base_font_defs(&mut self, defs: FontDefinitions) {
+        self.base_font_defs = Some(defs);
+    }
+
+    /// Restore the original egui font set (removing any preview font).
+    /// Called when the modal closes (Cancel, X, or Apply).
+    pub fn restore_base_fonts(&mut self, ctx: &egui::Context) {
+        if let Some(base) = &self.base_font_defs {
+            ctx.set_fonts(base.clone());
+        }
+        self.preview_registered = None;
+        self.base_font_defs = None;
+    }
+
+    // -------------------------------------------------------------------------
     //  Apply logic
     // -------------------------------------------------------------------------
 
@@ -495,7 +637,7 @@ mod tests {
         let mut live = Config::default();
         live.font.size = 20.0;
         live.scrollback.limit = 500;
-        modal.open(&live);
+        modal.open(&live, Vec::new());
 
         assert!(modal.is_open);
         assert!((modal.draft.font.size - 20.0).abs() < f32::EPSILON);
@@ -507,7 +649,7 @@ mod tests {
         let mut modal = SettingsModal::new(None);
         let mut live = Config::default();
         live.font.size = 42.0;
-        modal.open(&live);
+        modal.open(&live, Vec::new());
 
         // Simulate clicking "Reset to Defaults" by resetting the draft.
         modal.draft = Config::default();
@@ -555,7 +697,7 @@ mod tests {
             managed_by: Some("home-manager".to_string()),
             ..Config::default()
         };
-        modal.open(&live);
+        modal.open(&live, Vec::new());
 
         assert!(modal.is_open);
         assert!(modal.read_only_reason.is_some());
@@ -577,7 +719,7 @@ mod tests {
 
         let mut modal = SettingsModal::new(Some(path.clone()));
         let live = Config::default();
-        modal.open(&live);
+        modal.open(&live, Vec::new());
 
         assert!(modal.is_open);
         assert!(
@@ -603,7 +745,7 @@ mod tests {
 
         let mut modal = SettingsModal::new(Some(path.clone()));
         let live = Config::default();
-        modal.open(&live);
+        modal.open(&live, Vec::new());
 
         assert!(modal.is_open);
         assert!(
@@ -620,5 +762,19 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn open_stores_monospace_families() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        let families = vec![
+            "Courier New".to_string(),
+            "Fira Code".to_string(),
+            "JetBrains Mono".to_string(),
+        ];
+        modal.open(&live, families.clone());
+
+        assert_eq!(modal.monospace_families, families);
     }
 }

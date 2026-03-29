@@ -1052,6 +1052,11 @@ pub struct FreminalTerminalWidget {
     /// Used to suppress input for one extra frame after the modal closes,
     /// preventing the dismiss-click from leaking through to the terminal.
     modal_was_open_last_frame: bool,
+    /// The base egui `FontDefinitions` (without any preview font registered).
+    /// Captured at construction and updated on `apply_config_changes`. Used by
+    /// the settings modal to register a temporary preview font without losing
+    /// the original font set.
+    base_font_defs: eframe::egui::FontDefinitions,
 }
 
 impl FreminalTerminalWidget {
@@ -1062,7 +1067,7 @@ impl FreminalTerminalWidget {
             user_font: config.font.family.clone(),
             ..FontConfig::default()
         };
-        setup_font_files(ctx, &font_config);
+        let base_font_defs = setup_font_files(ctx, &font_config);
 
         let pixels_per_point = ctx.pixels_per_point();
 
@@ -1089,6 +1094,7 @@ impl FreminalTerminalWidget {
             previous_selection: None,
             ligatures: config.font.ligatures,
             modal_was_open_last_frame: false,
+            base_font_defs,
         }
     }
 
@@ -1098,6 +1104,28 @@ impl FreminalTerminalWidget {
     #[must_use]
     pub const fn cell_size(&self) -> (u32, u32) {
         self.font_manager.cell_size()
+    }
+
+    /// Return a sorted, deduplicated list of all monospaced font family names
+    /// installed on the system.  Delegates to [`FontManager::enumerate_monospace_families`].
+    #[must_use]
+    pub fn monospace_families(&self) -> Vec<String> {
+        self.font_manager.enumerate_monospace_families()
+    }
+
+    /// Load the raw font file bytes for a system font family name.
+    /// Delegates to [`FontManager::load_font_bytes_for_family`].
+    #[must_use]
+    pub fn load_font_bytes(&self, family: &str) -> Option<Vec<u8>> {
+        self.font_manager.load_font_bytes_for_family(family)
+    }
+
+    /// Return a reference to the base egui `FontDefinitions` (without any
+    /// preview font). Used by the settings modal to register a temporary
+    /// preview font.
+    #[must_use]
+    pub const fn base_font_defs(&self) -> &eframe::egui::FontDefinitions {
+        &self.base_font_defs
     }
 
     /// Synchronise the font manager's `pixels_per_point` with the current
@@ -1638,7 +1666,7 @@ impl FreminalTerminalWidget {
                 user_font: new_config.font.family.clone(),
                 ..FontConfig::default()
             };
-            setup_font_files(ctx, &new_font_config);
+            self.base_font_defs = setup_font_files(ctx, &new_font_config);
         }
     }
 
