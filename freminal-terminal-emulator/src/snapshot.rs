@@ -182,8 +182,9 @@ pub struct TerminalSnapshot {
 
     /// Current xterm `modifyOtherKeys` level (0, 1, or 2).
     ///
-    /// Carried in the snapshot so the GUI can encode modified character keys
-    /// using the xterm `CSI 27 ; MOD ; CODE ~` format when level > 0.
+    /// Carried in the snapshot so the GUI can encode modified character keys.
+    /// At present, level 2 uses the xterm `CSI 27 ; MOD ; CODE ~` format for
+    /// modified keys, while levels 0 and 1 both emit the usual C0 control bytes.
     pub modify_other_keys: u8,
 
     /// Whether Application Escape Key mode (`?7727`) is active.

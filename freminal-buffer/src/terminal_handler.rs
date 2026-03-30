@@ -202,8 +202,10 @@ pub struct TerminalHandler {
     /// Current xterm `modifyOtherKeys` level (0, 1, or 2).
     ///
     /// Set by `CSI > 4 ; Pv m`.  Level 0 is the default (disabled).
-    /// Level 1: modified keys that would produce control chars get extended format.
-    /// Level 2: ALL modified keys get extended format.
+    /// Level 1: currently behaves like level 0 in this implementation
+    /// (Ctrl-key combinations still send C0 control bytes; no extended format).
+    /// Level 2: ALL modified keys use the extended-format encoding as implemented
+    /// by `TerminalInput::to_payload`.
     modify_other_keys_level: u8,
     /// Whether Application Escape Key mode (`?7727`) is active.
     ///

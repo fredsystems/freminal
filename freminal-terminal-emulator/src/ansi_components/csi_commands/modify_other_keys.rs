@@ -7,15 +7,18 @@
 //!
 //! The sequence `CSI > Ps ; Pv m` sets the `modifyOtherKeys` level:
 //!
-//! | Pv | Level                                                    |
-//! |----|----------------------------------------------------------|
-//! | 0  | Disable (same as `CSI > 4 m` with no value)             |
-//! | 1  | Modified keys that would produce control chars get CSI u |
-//! | 2  | ALL modified keys get extended format                    |
+//! | Pv | Level                                                                                 |
+//! |----|-----------------------------------------------------------------------------------------|
+//! | 0  | Disable (same as `CSI > 4 m` with no value)                                          |
+//! | 1  | Modified keys that would produce control chars use the extended `CSI 27;…~` encoding |
+//! | 2  | ALL modified keys use the extended encoding (e.g. `CSI 27;…~`)                       |
 //!
 //! The `Ps` parameter selects *which* xterm resource to modify.  Only
 //! `Ps = 4` (`modifyOtherKeys`) is supported here; other values are
 //! silently ignored.
+//!
+//! Note: `CSI u` sequences are parsed separately as SCORC/Kitty (see `scorc`
+//! handling) and are not used by `modifyOtherKeys` in this module.
 //!
 //! `CSI > 4 m` (no `Pv`, i.e. only one parameter) resets the resource to
 //! its default value (level 0).
