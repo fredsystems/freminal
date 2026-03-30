@@ -70,7 +70,7 @@ use super::csi_commands::{
     el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
     il::ansi_parser_inner_csi_finished_set_position_l, rep::ansi_parser_inner_csi_finished_rep,
     report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
-    sd::ansi_parser_inner_csi_finished_sd,
+    scorc::ansi_parser_inner_csi_finished_u, sd::ansi_parser_inner_csi_finished_sd,
     send_device_attributes::ansi_parser_inner_csi_finished_send_da,
     sgr::ansi_parser_inner_csi_finished_sgr_ansi, su::ansi_parser_inner_csi_finished_su,
     tbc::ansi_parser_inner_csi_finished_tbc, vpa::ansi_parser_inner_csi_finished_vpa,
@@ -313,11 +313,7 @@ impl AnsiCsiParser {
                 push_result
             }
             AnsiCsiParserState::Finished(b'u') => {
-                // SCORC — Restore Cursor Position
-                // Note: Kitty keyboard protocol also uses CSI u, but with
-                // different parameter patterns (CSI > flags u). Plain CSI u
-                // (no intermediates/params or numeric params) is SCORC.
-                output.push(TerminalOutput::RestoreCursor);
+                ansi_parser_inner_csi_finished_u(&self.params, output);
                 push_result
             }
             AnsiCsiParserState::Finished(_esc) => push_result,
