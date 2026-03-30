@@ -167,11 +167,32 @@ pub struct TerminalSnapshot {
     /// consulting the emulator.
     pub cursor_key_app_mode: bool,
 
+    /// Whether the keypad is in application mode (`DECPAM`).
+    ///
+    /// Needed by the GUI to encode keypad key presses correctly: application
+    /// mode sends escape sequences (`ESC O …`) while numeric mode sends the
+    /// literal digit/operator character.
+    pub keypad_app_mode: bool,
+
     /// Whether the terminal has requested that rendering be suppressed
     /// (Synchronized Output / `DEC 2026`).
     ///
     /// When `true` the GUI skips the render pass entirely for this frame.
     pub skip_draw: bool,
+
+    /// Current xterm `modifyOtherKeys` level (0, 1, or 2).
+    ///
+    /// Carried in the snapshot so the GUI can encode modified character keys
+    /// using the xterm `CSI 27 ; MOD ; CODE ~` format when level > 0.
+    pub modify_other_keys: u8,
+
+    /// Whether Application Escape Key mode (`?7727`) is active.
+    ///
+    /// When set, pressing the Escape key should send `CSI 27 ; 1 ; 27 ~`
+    /// (unambiguous CSI format) instead of bare `ESC` (`0x1b`), allowing
+    /// tmux to instantly distinguish the Escape key from the start of an
+    /// escape sequence.
+    pub application_escape_key: bool,
 
     /// Current working directory reported by the shell via OSC 7, if any.
     ///
@@ -249,7 +270,10 @@ impl TerminalSnapshot {
             mouse_encoding: MouseEncoding::default(),
             repeat_keys: true,
             cursor_key_app_mode: false,
+            keypad_app_mode: false,
             skip_draw: false,
+            modify_other_keys: 0,
+            application_escape_key: false,
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
@@ -258,5 +282,20 @@ impl TerminalSnapshot {
             visible_image_placements: Arc::new(Vec::new()),
             playback_info: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_modify_other_keys_is_zero() {
+        assert_eq!(TerminalSnapshot::empty().modify_other_keys, 0);
+    }
+
+    #[test]
+    fn empty_application_escape_key_is_false() {
+        assert!(!TerminalSnapshot::empty().application_escape_key);
     }
 }

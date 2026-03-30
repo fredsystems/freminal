@@ -206,6 +206,9 @@ fn handle_scroll_fallback(
                 std::slice::from_ref(&key),
                 input_tx,
                 snap.cursor_key_app_mode,
+                snap.keypad_app_mode,
+                snap.modify_other_keys,
+                snap.application_escape_key,
             );
         }
     } else {
@@ -246,21 +249,32 @@ fn handle_scroll_fallback(
 /// them to be interpreted as literal typed text.
 ///
 /// The `cursor_key_app_mode` flag from the snapshot drives `DECCKM`-sensitive
-/// key encoding (arrow keys, home, end).
+/// key encoding (arrow keys, home, end).  `keypad_app_mode` drives `DECPAM` /
+/// `DECPNM` encoding for keypad keys.  `modify_other_keys` carries the
+/// xterm `modifyOtherKeys` level (0/1/2) for extended Ctrl+letter encoding.
+/// `application_escape_key` drives the `?7727` escape key encoding.
 fn send_terminal_inputs(
     inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
     cursor_key_app_mode: bool,
+    keypad_app_mode: bool,
+    modify_other_keys: u8,
+    application_escape_key: bool,
 ) {
     let bytes: Vec<u8> = inputs
         .iter()
-        .flat_map(
-            |input| match input.to_payload(cursor_key_app_mode, cursor_key_app_mode) {
+        .flat_map(|input| {
+            match input.to_payload(
+                cursor_key_app_mode,
+                keypad_app_mode,
+                modify_other_keys,
+                application_escape_key,
+            ) {
                 TerminalInputPayload::Single(b) => vec![b],
                 TerminalInputPayload::Many(bs) => bs.to_vec(),
                 TerminalInputPayload::Owned(bs) => bs,
-            },
-        )
+            }
+        })
         .collect();
     if bytes.is_empty() {
         return;
@@ -853,6 +867,9 @@ fn write_input_to_terminal(
                                     response.as_ref(),
                                     input_tx,
                                     snap.cursor_key_app_mode,
+                                    snap.keypad_app_mode,
+                                    snap.modify_other_keys,
+                                    snap.application_escape_key,
                                 );
                             }
                         }
@@ -878,7 +895,14 @@ fn write_input_to_terminal(
 
         if !inputs.is_empty() {
             state_changed = true;
-            send_terminal_inputs(inputs.as_ref(), input_tx, snap.cursor_key_app_mode);
+            send_terminal_inputs(
+                inputs.as_ref(),
+                input_tx,
+                snap.cursor_key_app_mode,
+                snap.keypad_app_mode,
+                snap.modify_other_keys,
+                snap.application_escape_key,
+            );
         }
     }
 

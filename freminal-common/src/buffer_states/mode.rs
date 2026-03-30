@@ -8,6 +8,7 @@ use std::fmt;
 use crate::buffer_states::modes::{
     ReportMode,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    application_escape_key::ApplicationEscapeKey,
     decarm::Decarm,
     decawm::Decawm,
     decckm::Decckm,
@@ -19,6 +20,7 @@ use crate::buffer_states::modes::{
     grapheme::GraphemeClustering,
     keypad::KeypadMode,
     lnm::Lnm,
+    modify_other_keys_mode::ModifyOtherKeysMode,
     mouse::{MouseEncoding, MouseTrack},
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
@@ -98,6 +100,8 @@ pub enum Mode {
     SynchronizedUpdates(SynchronizedUpdates),
     GraphemeClustering(GraphemeClustering),
     Theming(Theming),
+    ApplicationEscapeKey(ApplicationEscapeKey),
+    ModifyOtherKeysMode(ModifyOtherKeysMode),
     UnknownQuery(Vec<u8>),
     Unknown(UnknownMode),
 }
@@ -155,6 +159,8 @@ impl Mode {
             b"?2026" => Self::SynchronizedUpdates(SynchronizedUpdates::new(&mode)),
             b"?2027" => Self::GraphemeClustering(GraphemeClustering::new(&mode)),
             b"?2031" => Self::Theming(Theming::new(&mode)),
+            b"?7727" => Self::ApplicationEscapeKey(ApplicationEscapeKey::new(&mode)),
+            b"?2048" => Self::ModifyOtherKeysMode(ModifyOtherKeysMode::new(&mode)),
             _ => {
                 let output_params = params
                     .to_vec()
@@ -205,6 +211,8 @@ impl ReportMode for Mode {
                 grapheme_clustering.report(override_mode)
             }
             Self::Theming(theming) => theming.report(override_mode),
+            Self::ApplicationEscapeKey(aek) => aek.report(override_mode),
+            Self::ModifyOtherKeysMode(mok) => mok.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
             Self::UnknownQuery(v) => {
                 // convert each digit to a char
@@ -245,8 +253,89 @@ impl fmt::Display for Mode {
             Self::SynchronizedUpdates(sync_updates) => write!(f, "{sync_updates}"),
             Self::GraphemeClustering(grapheme_clustering) => write!(f, "{grapheme_clustering}"),
             Self::Theming(theming) => write!(f, "{theming}"),
+            Self::ApplicationEscapeKey(aek) => write!(f, "{aek}"),
+            Self::ModifyOtherKeysMode(mok) => write!(f, "{mok}"),
             Self::Unknown(params) => write!(f, "{params}"),
             Self::UnknownQuery(v) => write!(f, "Unknown Query({v:?})"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ?7727 (Application Escape Key) ──────────────────────────────
+
+    #[test]
+    fn parse_7727_dec_set() {
+        let mode = Mode::terminal_mode_from_params(b"?7727", SetMode::DecSet);
+        assert_eq!(mode, Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set));
+    }
+
+    #[test]
+    fn parse_7727_dec_rst() {
+        let mode = Mode::terminal_mode_from_params(b"?7727", SetMode::DecRst);
+        assert_eq!(
+            mode,
+            Mode::ApplicationEscapeKey(ApplicationEscapeKey::Reset)
+        );
+    }
+
+    #[test]
+    fn parse_7727_dec_query() {
+        let mode = Mode::terminal_mode_from_params(b"?7727", SetMode::DecQuery);
+        assert_eq!(
+            mode,
+            Mode::ApplicationEscapeKey(ApplicationEscapeKey::Query)
+        );
+    }
+
+    // ── ?2048 (ModifyOtherKeysMode) ─────────────────────────────────
+
+    #[test]
+    fn parse_2048_dec_set() {
+        let mode = Mode::terminal_mode_from_params(b"?2048", SetMode::DecSet);
+        assert_eq!(mode, Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Set));
+    }
+
+    #[test]
+    fn parse_2048_dec_rst() {
+        let mode = Mode::terminal_mode_from_params(b"?2048", SetMode::DecRst);
+        assert_eq!(mode, Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset));
+    }
+
+    #[test]
+    fn parse_2048_dec_query() {
+        let mode = Mode::terminal_mode_from_params(b"?2048", SetMode::DecQuery);
+        assert_eq!(mode, Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Query));
+    }
+
+    // ── Report round-trips ──────────────────────────────────────────
+
+    #[test]
+    fn report_application_escape_key_set() {
+        let mode = Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set);
+        assert_eq!(mode.report(None), "\x1b[?7727;1$y");
+    }
+
+    #[test]
+    fn report_modify_other_keys_mode_set() {
+        let mode = Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Set);
+        assert_eq!(mode.report(None), "\x1b[?2048;1$y");
+    }
+
+    // ── Display ─────────────────────────────────────────────────────
+
+    #[test]
+    fn display_application_escape_key() {
+        let s = format!("{}", Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_modify_other_keys_mode() {
+        let s = format!("{}", Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset));
+        assert!(!s.is_empty());
     }
 }

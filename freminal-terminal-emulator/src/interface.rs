@@ -175,10 +175,26 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
 impl TerminalInput {
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn to_payload(&self, decckm_mode: bool, keypad_mode: bool) -> TerminalInputPayload {
+    pub fn to_payload(
+        &self,
+        decckm_mode: bool,
+        keypad_mode: bool,
+        modify_other_keys: u8,
+        application_escape_key: bool,
+    ) -> TerminalInputPayload {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
-            Self::Ctrl(c) => TerminalInputPayload::Single(char_to_ctrl_code(*c)),
+            Self::Ctrl(c) => {
+                // modifyOtherKeys level 2: encode Ctrl+<letter> as
+                // CSI 27 ; 5 ; <ASCII code of letter> ~
+                // instead of the traditional C0 control code.
+                if modify_other_keys >= 2 {
+                    let code = u32::from(c.to_ascii_uppercase());
+                    TerminalInputPayload::Owned(format!("\x1b[27;5;{code}~").into_bytes())
+                } else {
+                    TerminalInputPayload::Single(char_to_ctrl_code(*c))
+                }
+            }
             // I have NO idea why this is the case, but just sending a '\n' fucks up some things
             // For instance nvim and lazygit will not response to an enter key press with \n
             // The shell itself is fine with \n. So who knows.
@@ -187,7 +203,16 @@ impl TerminalInput {
             Self::LineFeed => TerminalInputPayload::Single(b'\n'),
             // Hard to tie back, but check default VERASE in terminfo definition
             Self::Backspace => TerminalInputPayload::Single(char_to_ctrl_code(b'H')),
-            Self::Escape => TerminalInputPayload::Single(0x1b),
+            Self::Escape => {
+                // Mode 7727 (Application Escape Key): send CSI 27 ; 1 ; 27 ~
+                // instead of bare ESC so tmux can instantly distinguish the
+                // Escape key from the start of an escape sequence.
+                if application_escape_key {
+                    TerminalInputPayload::Owned(b"\x1b[27;1;27~".to_vec())
+                } else {
+                    TerminalInputPayload::Single(0x1b)
+                }
+            }
             // https://vt100.net/docs/vt100-ug/chapter3.html
             // Table 3-6
             //
@@ -794,7 +819,13 @@ impl TerminalEmulator {
             use freminal_common::buffer_states::modes::decckm::Decckm;
             self.internal.get_cursor_key_mode() == Decckm::Application
         };
+        let keypad_app_mode = {
+            use freminal_common::buffer_states::modes::keypad::KeypadMode;
+            self.internal.modes.keypad_mode == KeypadMode::Application
+        };
         let skip_draw = self.internal.skip_draw_always();
+        let modify_other_keys = self.internal.handler.modify_other_keys_level();
+        let application_escape_key = self.internal.handler.application_escape_key();
         let cwd = self
             .internal
             .handler
@@ -831,7 +862,10 @@ impl TerminalEmulator {
             mouse_encoding,
             repeat_keys,
             cursor_key_app_mode,
+            keypad_app_mode,
             skip_draw,
+            modify_other_keys,
+            application_escape_key,
             cwd,
             ftcs_state,
             last_exit_code,

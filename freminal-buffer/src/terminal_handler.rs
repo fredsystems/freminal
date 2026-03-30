@@ -18,11 +18,13 @@ use freminal_common::{
         mode::{Mode, SetMode},
         modes::ReportMode,
         modes::allow_column_mode_switch::AllowColumnModeSwitch,
+        modes::application_escape_key::ApplicationEscapeKey,
         modes::decawm::Decawm,
         modes::deccolm::Deccolm,
         modes::decom::Decom,
         modes::dectcem::Dectcem,
         modes::lnm::Lnm,
+        modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::{
@@ -197,6 +199,18 @@ pub struct TerminalHandler {
     /// passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`) so
     /// that tmux can relay it back to the requesting client.
     in_tmux_passthrough: bool,
+    /// Current xterm `modifyOtherKeys` level (0, 1, or 2).
+    ///
+    /// Set by `CSI > 4 ; Pv m`.  Level 0 is the default (disabled).
+    /// Level 1: modified keys that would produce control chars get extended format.
+    /// Level 2: ALL modified keys get extended format.
+    modify_other_keys_level: u8,
+    /// Whether Application Escape Key mode (`?7727`) is active.
+    ///
+    /// When set, pressing Escape sends `CSI 27 ; 1 ; 27 ~` instead of bare
+    /// `ESC` (`0x1b`), allowing tmux to instantly distinguish the Escape key
+    /// from the start of an escape sequence.
+    application_escape_key: bool,
 }
 
 impl TerminalHandler {
@@ -229,6 +243,8 @@ impl TerminalHandler {
             cell_pixel_height: 16,
             tmux_reparse_queue: Vec::new(),
             in_tmux_passthrough: false,
+            modify_other_keys_level: 0,
+            application_escape_key: false,
         }
     }
 
@@ -283,6 +299,8 @@ impl TerminalHandler {
         self.allow_column_mode_switch = true;
         self.virtual_placements.clear();
         self.prev_placeholder = None;
+        self.modify_other_keys_level = 0;
+        self.application_escape_key = false;
     }
 
     /// Get a reference to the underlying buffer
@@ -817,6 +835,18 @@ impl TerminalHandler {
     #[must_use]
     pub const fn last_exit_code(&self) -> Option<i32> {
         self.last_exit_code
+    }
+
+    /// Return the current xterm `modifyOtherKeys` level (0, 1, or 2).
+    #[must_use]
+    pub const fn modify_other_keys_level(&self) -> u8 {
+        self.modify_other_keys_level
+    }
+
+    /// Return whether Application Escape Key mode (`?7727`) is active.
+    #[must_use]
+    pub const fn application_escape_key(&self) -> bool {
+        self.application_escape_key
     }
 
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
@@ -1693,6 +1723,18 @@ impl TerminalHandler {
             "Smulx" => Some("\x1b[4:%p1%dm"),
             // Setulc — set underline color
             "Setulc" => Some("\x1b[58;2;%p1%d;%p2%d;%p3%dm"),
+            // khome — Home key
+            "khome" => Some("\x1bOH"),
+            // kend — End key
+            "kend" => Some("\x1bOF"),
+            // kHOM — Shift+Home
+            "kHOM" => Some("\x1b[1;2H"),
+            // kEND — Shift+End
+            "kEND" => Some("\x1b[1;2F"),
+            // smkx — enter keypad transmit (application) mode
+            "smkx" => Some("\x1b[?1h\x1b="),
+            // rmkx — exit keypad transmit mode (back to numeric)
+            "rmkx" => Some("\x1b[?1l\x1b>"),
             _ => None,
         }
     }
@@ -3328,6 +3370,40 @@ impl TerminalHandler {
                 | Mode::ReverseWrapAround(_)
                 | Mode::SynchronizedUpdates(_) => {}
 
+                // ── Application Escape Key (?7727) ────────────────────
+                Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set) => {
+                    self.application_escape_key = true;
+                }
+                Mode::ApplicationEscapeKey(ApplicationEscapeKey::Reset) => {
+                    self.application_escape_key = false;
+                }
+                Mode::ApplicationEscapeKey(ApplicationEscapeKey::Query) => {
+                    let mode = if self.application_escape_key {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&ApplicationEscapeKey::Set.report(Some(mode)));
+                }
+
+                // ── ModifyOtherKeys via DEC mode (?2048) ──────────────
+                Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Set) => {
+                    // DECSET ?2048 → enable modifyOtherKeys level 1
+                    self.modify_other_keys_level = 1;
+                }
+                Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset) => {
+                    // DECRST ?2048 → disable modifyOtherKeys (level 0)
+                    self.modify_other_keys_level = 0;
+                }
+                Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Query) => {
+                    let mode = if self.modify_other_keys_level > 0 {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&ModifyOtherKeysMode::Set.report(Some(mode)));
+                }
+
                 // ── Modes parsed but not yet acted on ─────────────────
                 Mode::NoOp
                 | Mode::Decsclm(_)
@@ -3449,6 +3525,13 @@ impl TerminalHandler {
             }
             TerminalOutput::RequestSecondaryDeviceAttributes { param: _param } => {
                 self.handle_secondary_device_attributes();
+            }
+            TerminalOutput::KittyKeyboardQuery => {
+                // Respond with CSI ? 0 u (Kitty keyboard protocol not active).
+                self.write_to_pty("\x1b[?0u");
+            }
+            TerminalOutput::ModifyOtherKeys(level) => {
+                self.modify_other_keys_level = *level;
             }
             // Silently ignore invalid, skipped, and any future variants
             TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {
