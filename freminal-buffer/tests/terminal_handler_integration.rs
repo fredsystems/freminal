@@ -4,6 +4,9 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_buffer::terminal_handler::TerminalHandler;
+use freminal_common::buffer_states::mode::Mode;
+use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
+use freminal_common::buffer_states::modes::modify_other_keys_mode::ModifyOtherKeysMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::pty_write::PtyWrite;
 
@@ -4338,4 +4341,242 @@ fn alt_buffer_lf_works_after_width_shrink() {
         TChar::Space,
         "new bottom row should be blank after LF scroll"
     );
+}
+
+// ===========================================================================
+// modifyOtherKeys + Application Escape Key handler dispatch tests
+// ===========================================================================
+
+// ── Default state ────────────────────────────────────────────────────────
+
+#[test]
+fn handler_default_modify_other_keys_level_is_zero() {
+    let handler = TerminalHandler::new(80, 24);
+    assert_eq!(handler.modify_other_keys_level(), 0);
+}
+
+#[test]
+fn handler_default_application_escape_key_is_false() {
+    let handler = TerminalHandler::new(80, 24);
+    assert!(!handler.application_escape_key());
+}
+
+// ── ModifyOtherKeys via CSI > 4 ; Pv m (TerminalOutput variant) ─────────
+
+#[test]
+fn handler_modify_other_keys_set_level_2() {
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+    assert_eq!(handler.modify_other_keys_level(), 2);
+}
+
+#[test]
+fn handler_modify_other_keys_set_level_1() {
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(1)]);
+    assert_eq!(handler.modify_other_keys_level(), 1);
+}
+
+#[test]
+fn handler_modify_other_keys_set_level_0() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // First set to 2, then reset to 0
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(0)]);
+    assert_eq!(handler.modify_other_keys_level(), 0);
+}
+
+// ── Application Escape Key (?7727) via Mode dispatch ────────────────────
+
+#[test]
+fn handler_application_escape_key_set() {
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Set,
+    ))]);
+    assert!(handler.application_escape_key());
+}
+
+#[test]
+fn handler_application_escape_key_reset() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set then reset
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Set,
+    ))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Reset,
+    ))]);
+    assert!(!handler.application_escape_key());
+}
+
+#[test]
+fn handler_application_escape_key_query_when_false() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Query,
+    ))]);
+
+    let msg = rx.try_recv().expect("expected DECRQM response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?7727;2$y",
+                "query when false should report mode 2 (reset)"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+}
+
+#[test]
+fn handler_application_escape_key_query_when_true() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Set first
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Set,
+    ))]);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Query,
+    ))]);
+
+    let msg = rx.try_recv().expect("expected DECRQM response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?7727;1$y",
+                "query when true should report mode 1 (set)"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+}
+
+// ── ModifyOtherKeysMode (?2048) via Mode dispatch ───────────────────────
+
+#[test]
+fn handler_modify_other_keys_mode_dec_set() {
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
+        ModifyOtherKeysMode::Set,
+    ))]);
+    assert_eq!(handler.modify_other_keys_level(), 1);
+}
+
+#[test]
+fn handler_modify_other_keys_mode_dec_rst() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set via CSI then reset via DEC mode
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
+        ModifyOtherKeysMode::Reset,
+    ))]);
+    assert_eq!(handler.modify_other_keys_level(), 0);
+}
+
+#[test]
+fn handler_modify_other_keys_mode_query_when_level_zero() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
+        ModifyOtherKeysMode::Query,
+    ))]);
+
+    let msg = rx.try_recv().expect("expected DECRQM response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?2048;2$y",
+                "query when level=0 should report mode 2 (reset)"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+}
+
+#[test]
+fn handler_modify_other_keys_mode_query_when_level_nonzero() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Set level to 2 via CSI > 4 ; 2 m
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
+        ModifyOtherKeysMode::Query,
+    ))]);
+
+    let msg = rx.try_recv().expect("expected DECRQM response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?2048;1$y",
+                "query when level>0 should report mode 1 (set)"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+}
+
+// ── Cross-path interaction ──────────────────────────────────────────────
+
+#[test]
+fn handler_csi_set_then_dec_mode_reset_interaction() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set via CSI > 4 ; 2 m
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+    assert_eq!(handler.modify_other_keys_level(), 2);
+
+    // Reset via DECRST ?2048
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
+        ModifyOtherKeysMode::Reset,
+    ))]);
+    assert_eq!(handler.modify_other_keys_level(), 0);
+}
+
+// ── full_reset clears both fields ───────────────────────────────────────
+
+#[test]
+fn handler_full_reset_clears_modify_other_keys() {
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Set,
+    ))]);
+    assert_eq!(handler.modify_other_keys_level(), 2);
+    assert!(handler.application_escape_key());
+
+    handler.full_reset();
+
+    assert_eq!(handler.modify_other_keys_level(), 0);
+    assert!(!handler.application_escape_key());
+}
+
+// ── Query with no write_tx does not panic ───────────────────────────────
+
+#[test]
+fn handler_query_without_write_tx_does_not_panic() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // No set_write_tx — query should be silently dropped
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+        ApplicationEscapeKey::Query,
+    ))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
+        ModifyOtherKeysMode::Query,
+    ))]);
+    // If we get here without panicking, the test passes
 }
