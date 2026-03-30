@@ -6,6 +6,7 @@
 use super::mode::SetMode;
 
 pub mod allow_column_mode_switch;
+pub mod application_escape_key;
 pub mod decarm;
 pub mod decawm;
 pub mod decckm;
@@ -17,6 +18,7 @@ pub mod dectcem;
 pub mod grapheme;
 pub mod keypad;
 pub mod lnm;
+pub mod modify_other_keys_mode;
 pub mod mouse;
 pub mod reverse_wrap_around;
 pub mod rl_bracket;

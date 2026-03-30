@@ -175,6 +175,15 @@ pub enum TerminalOutput {
     CursorBackwardTab(usize),
     /// CSI Ps b — REP (Repeat): repeat the preceding graphic character Ps times
     RepeatCharacter(usize),
+    /// CSI ? u — Kitty keyboard protocol query.
+    /// Respond with `CSI ? 0 u` (mode flags = 0, protocol not active).
+    KittyKeyboardQuery,
+    /// CSI > 4 ; Pv m — xterm `modifyOtherKeys` resource.
+    ///
+    /// Level 0: disabled (default).
+    /// Level 1: modified keys that would produce control chars get extended format.
+    /// Level 2: ALL modified keys get extended format.
+    ModifyOtherKeys(u8),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -298,6 +307,8 @@ impl std::fmt::Display for TerminalOutput {
             Self::CursorForwardTab(n) => write!(f, "CursorForwardTab({n})"),
             Self::CursorBackwardTab(n) => write!(f, "CursorBackwardTab({n})"),
             Self::RepeatCharacter(n) => write!(f, "RepeatCharacter({n})"),
+            Self::KittyKeyboardQuery => write!(f, "KittyKeyboardQuery"),
+            Self::ModifyOtherKeys(level) => write!(f, "ModifyOtherKeys({level})"),
         }
     }
 }

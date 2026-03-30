@@ -324,7 +324,9 @@ impl TerminalState {
                 | Mode::Decom(_)
                 | Mode::Deccolm(_)
                 | Mode::AllowColumnModeSwitch(_)
-                | Mode::UnknownQuery(_) => {}
+                | Mode::UnknownQuery(_)
+                | Mode::ApplicationEscapeKey(_)
+                | Mode::ModifyOtherKeysMode(_) => {}
                 // ── Modes parsed but not yet acted on ─────────────
                 Mode::NoOp
                 | Mode::Decsclm(_)
@@ -510,7 +512,14 @@ impl TerminalState {
     pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
         let decckm = self.get_cursor_key_mode() == Decckm::Application;
         let keypad_app = self.modes.keypad_mode == KeypadMode::Application;
-        match to_write.to_payload(decckm, keypad_app) {
+        let modify_other_keys = self.handler.modify_other_keys_level();
+        let application_escape_key = self.handler.application_escape_key();
+        match to_write.to_payload(
+            decckm,
+            keypad_app,
+            modify_other_keys,
+            application_escape_key,
+        ) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;
             }
