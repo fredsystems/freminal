@@ -108,6 +108,10 @@ pub enum TerminalOutput {
     CursorVisualStyle(CursorVisualStyle),
     WindowManipulation(WindowManipulation),
     RequestDeviceAttributes,
+    SetLeftAndRightMargins {
+        left_margin: usize,
+        right_margin: usize,
+    },
     SetTopAndBottomMargins {
         top_margin: usize,
         bottom_margin: usize,
@@ -236,6 +240,12 @@ impl std::fmt::Display for TerminalOutput {
             }
             Self::WindowManipulation(window_manipulation) => {
                 write!(f, "WindowManipulation({window_manipulation:?})")
+            }
+            Self::SetLeftAndRightMargins {
+                left_margin,
+                right_margin,
+            } => {
+                write!(f, "SetLeftAndRightMargins({left_margin}, {right_margin})")
             }
             Self::SetTopAndBottomMargins {
                 top_margin,

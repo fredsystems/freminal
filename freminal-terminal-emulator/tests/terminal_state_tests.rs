@@ -16,7 +16,8 @@
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        decarm::Decarm, decscnm::Decscnm, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decscnm::Decscnm,
+        keypad::KeypadMode, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
     },
     pty_write::PtyWrite,
 };
@@ -308,5 +309,396 @@ fn test_key_modifiers_none_is_empty() {
     assert!(
         KeyModifiers::NONE.is_empty(),
         "KeyModifiers::NONE must report is_empty() == true"
+    );
+}
+
+// ─── DECNKM (?66) — Numeric Keypad Mode ─────────────────────────────────────
+
+/// Default keypad mode is Numeric.
+#[test]
+fn test_decnkm_default_is_numeric() {
+    let (state, _rx) = make_state();
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Numeric,
+        "Default keypad mode must be Numeric"
+    );
+}
+
+/// `CSI ? 66 h` (DECSET) sets keypad to Application mode.
+#[test]
+fn test_decnkm_set_switches_to_application() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Send DECSET ?66
+    state.handle_incoming_data(b"\x1b[?66h");
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Application,
+        "DECSET ?66 must switch keypad to Application"
+    );
+}
+
+/// `CSI ? 66 l` (DECRST) sets keypad back to Numeric mode.
+#[test]
+fn test_decnkm_reset_switches_to_numeric() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // First set to Application
+    state.handle_incoming_data(b"\x1b[?66h");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    // Then reset to Numeric
+    state.handle_incoming_data(b"\x1b[?66l");
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Numeric,
+        "DECRST ?66 must switch keypad to Numeric"
+    );
+}
+
+/// `CSI ? 66 h` (DECSET ?66) produces the same effect as `ESC =` (DECKPAM).
+#[test]
+fn test_decnkm_set_matches_deckpam() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Use ESC = (DECKPAM) first
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    // Reset via ESC > (DECKPNM)
+    state.handle_incoming_data(b"\x1b>");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+
+    // Now use DECSET ?66 — same effect
+    state.handle_incoming_data(b"\x1b[?66h");
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Application,
+        "DECSET ?66 must produce the same effect as ESC ="
+    );
+}
+
+/// DECRQM query for ?66 returns the correct DECRPM response.
+#[test]
+fn test_decnkm_decrqm_default_is_numeric() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Query in default (Numeric) state
+    state.handle_incoming_data(b"\x1b[?66$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?66;2$y",
+        "DECRQM ?66 in Numeric state must return Ps=2 (reset)"
+    );
+}
+
+/// DECRQM query for ?66 after DECSET returns Ps=1 (set).
+#[test]
+fn test_decnkm_decrqm_after_set_is_application() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Set to Application
+    state.handle_incoming_data(b"\x1b[?66h");
+
+    // Drain any writes from the set operation
+    drain(&rx);
+
+    // Query
+    state.handle_incoming_data(b"\x1b[?66$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?66;1$y",
+        "DECRQM ?66 in Application state must return Ps=1 (set)"
+    );
+}
+
+// ─── DECBKM (?67) — Backarrow Key Mode ──────────────────────────────────────
+
+/// Default backarrow key mode is `BackarrowSendsBs` (set state).
+#[test]
+fn test_decbkm_default_is_bs() {
+    let (state, _rx) = make_state();
+    assert_eq!(
+        state.modes.backarrow_key_mode,
+        Decbkm::BackarrowSendsBs,
+        "Default backarrow key mode must be BackarrowSendsBs"
+    );
+}
+
+/// `CSI ? 67 h` (DECSET) sets backarrow to send BS.
+#[test]
+fn test_decbkm_set_sends_bs() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // First reset to DEL, then set back to BS
+    state.handle_incoming_data(b"\x1b[?67l");
+    assert_eq!(state.modes.backarrow_key_mode, Decbkm::BackarrowSendsDel);
+
+    state.handle_incoming_data(b"\x1b[?67h");
+    assert_eq!(
+        state.modes.backarrow_key_mode,
+        Decbkm::BackarrowSendsBs,
+        "DECSET ?67 must switch backarrow to send BS"
+    );
+}
+
+/// `CSI ? 67 l` (DECRST) sets backarrow to send DEL.
+#[test]
+fn test_decbkm_reset_sends_del() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67l");
+    assert_eq!(
+        state.modes.backarrow_key_mode,
+        Decbkm::BackarrowSendsDel,
+        "DECRST ?67 must switch backarrow to send DEL"
+    );
+}
+
+/// DECRQM query for ?67 returns Ps=1 in default (set/BS) state.
+#[test]
+fn test_decbkm_decrqm_default_is_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?67;1$y",
+        "DECRQM ?67 in default (BS) state must return Ps=1 (set)"
+    );
+}
+
+/// DECRQM query for ?67 after DECRST returns Ps=2 (reset/DEL).
+#[test]
+fn test_decbkm_decrqm_after_reset_is_del() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67l");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?67;2$y",
+        "DECRQM ?67 in DEL state must return Ps=2 (reset)"
+    );
+}
+
+// ─── Grapheme Clustering (?2027) — permanently set ───────────────────────────
+
+/// DECRQM query for ?2027 always returns Ps=3 (permanently set).
+#[test]
+fn test_grapheme_clustering_decrqm_permanently_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?2027$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "DECRQM ?2027 must return Ps=3 (permanently set)"
+    );
+}
+
+/// DECRQM query for ?2027 still returns Ps=3 after DECRST.
+#[test]
+fn test_grapheme_clustering_decrqm_after_reset_still_permanently_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Send DECRST for ?2027 — silently accepted
+    state.handle_incoming_data(b"\x1b[?2027l");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?2027$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "DECRQM ?2027 must return Ps=3 even after DECRST"
+    );
+}
+
+/// DECSET ?2027 is silently accepted (no error, no state change).
+#[test]
+fn test_grapheme_clustering_set_silently_accepted() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // DECSET ?2027 — should not produce any PTY output
+    state.handle_incoming_data(b"\x1b[?2027h");
+    // No DECRPM response expected for DECSET
+    assert!(
+        rx.try_recv().is_err(),
+        "DECSET ?2027 must not produce a PTY response"
+    );
+}
+
+// ─── Alternate Scroll Mode (?1007) ──────────────────────────────────────────
+
+/// Default alternate scroll mode is `Disabled` (reset state).
+#[test]
+fn test_alternate_scroll_default_is_disabled() {
+    let (state, _rx) = make_state();
+    assert_eq!(
+        state.modes.alternate_scroll,
+        AlternateScroll::Disabled,
+        "Default alternate scroll mode must be Disabled"
+    );
+}
+
+/// `CSI ? 1007 h` (DECSET) enables alternate scroll mode.
+#[test]
+fn test_alternate_scroll_set_enables() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007h");
+    assert_eq!(
+        state.modes.alternate_scroll,
+        AlternateScroll::Enabled,
+        "DECSET ?1007 must enable alternate scroll mode"
+    );
+}
+
+/// `CSI ? 1007 l` (DECRST) disables alternate scroll mode.
+#[test]
+fn test_alternate_scroll_reset_disables() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // First enable, then reset
+    state.handle_incoming_data(b"\x1b[?1007h");
+    assert_eq!(state.modes.alternate_scroll, AlternateScroll::Enabled);
+
+    state.handle_incoming_data(b"\x1b[?1007l");
+    assert_eq!(
+        state.modes.alternate_scroll,
+        AlternateScroll::Disabled,
+        "DECRST ?1007 must disable alternate scroll mode"
+    );
+}
+
+/// DECRQM query for ?1007 returns Ps=2 in default (reset/disabled) state.
+#[test]
+fn test_alternate_scroll_decrqm_default_is_reset() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1007;2$y",
+        "DECRQM ?1007 in default (disabled) state must return Ps=2 (reset)"
+    );
+}
+
+/// DECRQM query for ?1007 after DECSET returns Ps=1 (set/enabled).
+#[test]
+fn test_alternate_scroll_decrqm_after_set_is_enabled() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007h");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1007;1$y",
+        "DECRQM ?1007 after DECSET must return Ps=1 (set)"
+    );
+}
+
+// ─── Hilite Mouse Tracking (?1001) ──────────────────────────────────────────
+
+/// `CSI ? 1001 h` (DECSET) sets mouse tracking to `XtMseHilite`.
+#[test]
+fn test_hilite_mouse_tracking_set() {
+    use freminal_common::buffer_states::modes::mouse::MouseTrack;
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001h");
+    assert_eq!(
+        state.modes.mouse_tracking,
+        MouseTrack::XtMseHilite,
+        "DECSET ?1001 must set mouse tracking to XtMseHilite"
+    );
+}
+
+/// `CSI ? 1001 l` (DECRST) resets mouse tracking to `NoTracking`.
+#[test]
+fn test_hilite_mouse_tracking_reset() {
+    use freminal_common::buffer_states::modes::mouse::MouseTrack;
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001h");
+    state.handle_incoming_data(b"\x1b[?1001l");
+    assert_eq!(
+        state.modes.mouse_tracking,
+        MouseTrack::NoTracking,
+        "DECRST ?1001 must reset mouse tracking to NoTracking"
+    );
+}
+
+/// DECRQM `?1001` returns Ps=2 in default (no-tracking) state.
+#[test]
+fn test_hilite_mouse_tracking_decrqm_default_is_reset() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1001;2$y",
+        "DECRQM ?1001 in default (no-tracking) state must return Ps=2 (reset)"
+    );
+}
+
+/// DECRQM `?1001` returns Ps=1 after DECSET.
+#[test]
+fn test_hilite_mouse_tracking_decrqm_after_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001h");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1001;1$y",
+        "DECRQM ?1001 after DECSET must return Ps=1 (set)"
     );
 }

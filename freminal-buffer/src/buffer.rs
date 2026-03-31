@@ -84,6 +84,17 @@ pub struct Buffer {
     scroll_region_top: usize,
     scroll_region_bottom: usize,
 
+    /// DECLRMM left and right margins, 0-indexed, inclusive.
+    /// When DECLRMM is disabled these are ignored.
+    /// Default: [0, width-1] (full screen).
+    scroll_region_left: usize,
+    scroll_region_right: usize,
+
+    /// Whether DECLRMM (`?69`) is currently enabled.
+    /// When false, `scroll_region_left`/`scroll_region_right` are ignored by
+    /// all buffer operations that would otherwise respect them.
+    declrmm_enabled: bool,
+
     /// Tab stops as a boolean vector indexed by column.
     /// `tab_stops[c] == true` means column `c` is a tab stop.
     /// Default: every 8 columns (8, 16, 24, ...).
@@ -110,6 +121,8 @@ pub struct SavedPrimaryState {
     pub scroll_offset: usize,
     pub scroll_region_top: usize,
     pub scroll_region_bottom: usize,
+    pub scroll_region_left: usize,
+    pub scroll_region_right: usize,
     /// Saved DECSC cursor carried across alternate-screen round-trips.
     pub saved_cursor: Option<CursorState>,
     /// Saved image store from the primary buffer.
@@ -153,6 +166,9 @@ impl Buffer {
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
             scroll_region_bottom: height.saturating_sub(1),
+            scroll_region_left: 0,
+            scroll_region_right: width.saturating_sub(1),
+            declrmm_enabled: false,
             tab_stops: Self::default_tab_stops(width),
             decom_enabled: false,
             image_store: ImageStore::new(),
@@ -193,6 +209,9 @@ impl Buffer {
         self.preserve_scrollback_anchor = false;
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
+        self.scroll_region_left = 0;
+        self.scroll_region_right = self.width.saturating_sub(1);
+        self.declrmm_enabled = false;
         self.tab_stops = Self::default_tab_stops(self.width);
         self.decom_enabled = false;
         self.image_store.clear();
@@ -313,6 +332,20 @@ impl Buffer {
         &self.cursor
     }
 
+    /// Set the cursor to an absolute buffer position without any DECOM or
+    /// screen-relative translation.
+    ///
+    /// The position is clamped to the current buffer dimensions.  Used by
+    /// DECSDM to restore the cursor after `place_image` moves it.
+    pub fn set_cursor_pos_raw(&mut self, pos: CursorPos) {
+        self.cursor.pos.x = if self.width > 0 {
+            pos.x.min(self.width - 1)
+        } else {
+            0
+        };
+        self.cursor.pos.y = pos.y.min(self.rows.len().saturating_sub(1));
+    }
+
     /// Advance the cursor by one column, wrapping to the next line if needed.
     ///
     /// Used after inserting a placeholder image cell that occupies one column.
@@ -400,6 +433,15 @@ impl Buffer {
         let mut row_idx = self.cursor.pos.y;
         let mut col = self.cursor.pos.x;
 
+        // When DECLRMM is active the effective right wrap column is
+        // scroll_region_right + 1; wrapping starts a new row at
+        // scroll_region_left rather than column 0.
+        let (wrap_col, wrap_start_col) = if self.declrmm_enabled {
+            (self.scroll_region_right + 1, self.scroll_region_left)
+        } else {
+            (self.width, 0)
+        };
+
         // FIX #3: first write into row 0 turns it into a real logical line
         if row_idx == 0 && self.rows[0].origin == RowOrigin::ScrollFill {
             let row = &mut self.rows[0];
@@ -409,14 +451,14 @@ impl Buffer {
 
         loop {
             // ┌─────────────────────────────────────────────┐
-            // │ PRE-WRAP: if we're already at/past width,   │
+            // │ PRE-WRAP: if we're already at/past wrap_col,│
             // │ move to the next row as a soft-wrap row.    │
             // └─────────────────────────────────────────────┘
-            if col >= self.width {
+            if col >= wrap_col {
                 if !self.wrap_enabled {
                     // DECAWM NoAutoWrap: clamp cursor to last column and discard
                     // all remaining text.
-                    self.cursor.pos.x = self.width.saturating_sub(1);
+                    self.cursor.pos.x = wrap_col.saturating_sub(1);
                     self.cursor.pos.y = row_idx;
                     // PTY always at scroll_offset=0; return value is always 0 here.
                     let _ = self.enforce_scrollback_limit(0);
@@ -424,7 +466,7 @@ impl Buffer {
                 }
 
                 row_idx += 1;
-                col = 0;
+                col = wrap_start_col;
 
                 if row_idx >= self.rows.len() {
                     // brand new soft-wrap continuation row
@@ -444,11 +486,11 @@ impl Buffer {
             // ┌─────────────────────────────────────────────┐
             // │ Ensure the target row exists.               │
             // │ If we got here without PRE-WRAP, it's a     │
-            // │ normal new logical line. If col == 0 and    │
+            // │ normal new logical line. If col == left and  │
             // │ row_idx > 0, we are in a wrap continuation. │
             // └─────────────────────────────────────────────┘
             if row_idx >= self.rows.len() {
-                let is_wrap_continuation = col == 0 && row_idx > 0;
+                let is_wrap_continuation = col == wrap_start_col && row_idx > 0;
 
                 let origin = if is_wrap_continuation {
                     RowOrigin::SoftWrap
@@ -480,9 +522,9 @@ impl Buffer {
             self.clear_images_overwritten_by_text(row_idx, col, text.len() - start);
 
             // ┌─────────────────────────────────────────────┐
-            // │ Try to insert into this row.                │
+            // │ Try to insert into this row (up to wrap_col)│
             // └─────────────────────────────────────────────┘
-            match self.rows[row_idx].insert_text(col, &text[start..], &tag) {
+            match self.rows[row_idx].insert_text_with_limit(col, &text[start..], &tag, wrap_col) {
                 InsertResponse::Consumed(final_col) => {
                     // All text fit on this row.
                     self.cursor.pos.x = final_col;
@@ -504,7 +546,7 @@ impl Buffer {
                     if !self.wrap_enabled {
                         // DECAWM NoAutoWrap: clamp cursor to last column and discard
                         // the overflow — do not continue onto the next row.
-                        self.cursor.pos.x = self.width.saturating_sub(1);
+                        self.cursor.pos.x = wrap_col.saturating_sub(1);
                         // PTY always at scroll_offset=0; return value is always 0 here.
                         let _ = self.enforce_scrollback_limit(0);
                         return;
@@ -516,7 +558,7 @@ impl Buffer {
 
                     // Move to next row for continuation.
                     row_idx += 1;
-                    col = 0;
+                    col = wrap_start_col;
 
                     // POST-WRAP: we now know a wrap actually occurred.
                     if row_idx >= self.rows.len() {
@@ -532,7 +574,7 @@ impl Buffer {
                     }
 
                     self.cursor.pos.y = row_idx;
-                    // `col` stays 0; next loop iteration writes at start of continuation row.
+                    // `col` stays wrap_start_col; next iteration writes there.
                 }
             }
         }
@@ -918,13 +960,17 @@ impl Buffer {
     /// - Move cursor left by one cell.
     /// - If the cell to the left is a continuation cell of a wide glyph,
     ///   skip left until the glyph head.
-    /// - If cursor is at column 0, do nothing.
-    /// - Never moves vertically and never deletes characters.
-    pub fn handle_backspace(&mut self) {
-        // Backspace is a purely local operation. Do NOT perform scrollback
-        // enforcement or invariants after this function.
-
+    /// - If cursor is at column 0 and `reverse_wrap` is false, do nothing.
+    /// - If cursor is at column 0 and `reverse_wrap` is true, wrap to the
+    ///   last column of the previous line (within the visible screen, or
+    ///   into scrollback if `xt_rev_wrap2` is also true).
+    /// - Never deletes characters.
+    pub fn handle_backspace(&mut self, reverse_wrap: bool, xt_rev_wrap2: bool) {
         if self.cursor.pos.x == 0 {
+            if !reverse_wrap {
+                return;
+            }
+            self.reverse_wrap_up(xt_rev_wrap2);
             return;
         }
 
@@ -955,6 +1001,27 @@ impl Buffer {
         // This MUST be the only post-condition for backspace.
         debug_assert!(self.cursor.pos.y < self.rows.len());
         debug_assert!(self.cursor.pos.x < self.width);
+    }
+
+    /// Move the cursor up one row and to the last column (reverse wrap).
+    ///
+    /// If the cursor is already at the top of the visible screen and
+    /// `into_scrollback` is true, the cursor enters the scrollback region.
+    /// If at the top and `into_scrollback` is false, the cursor stays put.
+    fn reverse_wrap_up(&mut self, into_scrollback: bool) {
+        let visible_start = self.visible_window_start(0);
+
+        if self.cursor.pos.y > visible_start {
+            // Not at the top of the visible screen — wrap to previous row.
+            self.cursor.pos.y -= 1;
+            self.cursor.pos.x = self.width.saturating_sub(1);
+        } else if into_scrollback && self.cursor.pos.y > 0 {
+            // At top of visible screen, but scrollback exists and
+            // extended reverse-wrap is enabled.
+            self.cursor.pos.y -= 1;
+            self.cursor.pos.x = self.width.saturating_sub(1);
+        }
+        // Otherwise: at absolute top or scrollback not allowed — no-op.
     }
 
     /// Advance the cursor to the next tab stop (HT / 0x09).
@@ -1266,8 +1333,15 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                for _ in 0..count {
-                    self.scroll_slice_down(y, self.scroll_region_bottom);
+                if self.declrmm_enabled {
+                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                    for _ in 0..count {
+                        self.scroll_slice_down_columns(y, self.scroll_region_bottom, left, right);
+                    }
+                } else {
+                    for _ in 0..count {
+                        self.scroll_slice_down(y, self.scroll_region_bottom);
+                    }
                 }
 
                 self.debug_assert_invariants();
@@ -1284,8 +1358,15 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                for _ in 0..count {
-                    self.scroll_slice_down(row, b);
+                if self.declrmm_enabled {
+                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                    for _ in 0..count {
+                        self.scroll_slice_down_columns(row, b, left, right);
+                    }
+                } else {
+                    for _ in 0..count {
+                        self.scroll_slice_down(row, b);
+                    }
                 }
 
                 self.debug_assert_invariants();
@@ -1311,8 +1392,15 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                for _ in 0..count {
-                    self.scroll_slice_up(y, self.scroll_region_bottom);
+                if self.declrmm_enabled {
+                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                    for _ in 0..count {
+                        self.scroll_slice_up_columns(y, self.scroll_region_bottom, left, right);
+                    }
+                } else {
+                    for _ in 0..count {
+                        self.scroll_slice_up(y, self.scroll_region_bottom);
+                    }
                 }
 
                 self.debug_assert_invariants();
@@ -1329,8 +1417,15 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                for _ in 0..count {
-                    self.scroll_slice_up(row, b);
+                if self.declrmm_enabled {
+                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                    for _ in 0..count {
+                        self.scroll_slice_up_columns(row, b, left, right);
+                    }
+                } else {
+                    for _ in 0..count {
+                        self.scroll_slice_up(row, b);
+                    }
                 }
 
                 self.debug_assert_invariants();
@@ -1375,7 +1470,18 @@ impl Buffer {
         }
 
         let tag = self.current_tag.clone();
-        self.rows[row].insert_spaces_at(col, n, &tag);
+        if self.declrmm_enabled {
+            // ICH: shift only within [col, scroll_region_right]; cells that
+            // fall off the right margin are discarded.
+            self.rows[row].insert_spaces_at_with_right_limit(
+                col,
+                n,
+                &tag,
+                self.scroll_region_right + 1,
+            );
+        } else {
+            self.rows[row].insert_spaces_at(col, n, &tag);
+        }
 
         // Cursor does NOT move for ICH
     }
@@ -1386,7 +1492,12 @@ impl Buffer {
     /// the cells to the right of the deleted range left to fill the gap. Cells
     /// shifted off the right edge are discarded.  The cursor does not move.
     ///
-    /// Wide-glyph cleanup is delegated to [`Row::delete_cells_at`].
+    /// When DECLRMM is active, the operation is confined to
+    /// `[col, scroll_region_right]`; cells outside the right margin are
+    /// unaffected.
+    ///
+    /// Wide-glyph cleanup is delegated to [`Row::delete_cells_at`] /
+    /// [`Row::delete_cells_at_with_right_limit`].
     pub fn delete_chars(&mut self, n: usize) {
         let row = self.cursor.pos.y;
         let col = self.cursor.pos.x;
@@ -1396,7 +1507,16 @@ impl Buffer {
             return;
         }
 
-        self.rows[row].delete_cells_at(col, n);
+        if self.declrmm_enabled {
+            self.rows[row].delete_cells_at_with_right_limit(
+                col,
+                n,
+                self.scroll_region_right + 1,
+                &self.current_tag.clone(),
+            );
+        } else {
+            self.rows[row].delete_cells_at(col, n);
+        }
 
         self.debug_assert_invariants();
     }
@@ -1406,6 +1526,9 @@ impl Buffer {
     /// Replaces `n` cells starting at the cursor column with blanks using the current
     /// format tag.  Cells to the right of the erased range are **not** shifted.
     /// The cursor does not move.
+    ///
+    /// When DECLRMM is active, `n` is clamped so the erase never crosses the
+    /// right margin.
     ///
     /// Wide-glyph cleanup is delegated to [`Row::erase_cells_at`].
     pub fn erase_chars(&mut self, n: usize) {
@@ -1417,11 +1540,19 @@ impl Buffer {
             return;
         }
 
+        // Clamp erase count to right margin when DECLRMM is active.
+        let effective_n = if self.declrmm_enabled {
+            let max_erase = self.scroll_region_right.saturating_sub(col) + 1;
+            n.min(max_erase)
+        } else {
+            n
+        };
+
         // Sweep image cells that are about to be erased.
-        self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(col + n));
+        self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(col + effective_n));
 
         let tag = self.current_tag.clone();
-        self.rows[row].erase_cells_at(col, n, &tag);
+        self.rows[row].erase_cells_at(col, effective_n, &tag);
 
         self.debug_assert_invariants();
     }
@@ -1467,6 +1598,64 @@ impl Buffer {
     #[must_use]
     pub const fn scroll_region(&self) -> (usize, usize) {
         (self.scroll_region_top, self.scroll_region_bottom)
+    }
+
+    /// Reset left/right margins to the full terminal width.
+    /// Public so `TerminalHandler` can call it when DECLRMM is reset.
+    pub const fn reset_scroll_region_left_right(&mut self) {
+        self.scroll_region_left = 0;
+        self.scroll_region_right = self.width.saturating_sub(1);
+    }
+
+    /// Enable or disable DECLRMM (`?69`).
+    ///
+    /// When disabled, left/right margins are also reset to full-screen.
+    pub const fn set_declrmm(&mut self, enabled: bool) {
+        self.declrmm_enabled = enabled;
+        if !enabled {
+            self.reset_scroll_region_left_right();
+        }
+    }
+
+    /// Returns `true` if DECLRMM (`?69`) is currently active.
+    #[must_use]
+    pub const fn is_declrmm_enabled(&self) -> bool {
+        self.declrmm_enabled
+    }
+
+    /// Set DECSLRM left/right margins (1-based inclusive).
+    ///
+    /// Only effective when DECLRMM (`?69`) is active; the caller
+    /// (`TerminalHandler::handle_set_left_right_margins`) must gate on that flag.
+    /// If parameters are invalid, resets to full-width.
+    pub fn set_left_right_margins(&mut self, left1: usize, right1: usize) {
+        // 0 → treat as 1 (reset)
+        if left1 == 0 || right1 == 0 {
+            self.reset_scroll_region_left_right();
+            self.set_cursor_pos(Some(0), Some(0));
+            return;
+        }
+
+        let left = left1.saturating_sub(1);
+        let right = right1.saturating_sub(1);
+
+        if left >= right || right >= self.width {
+            self.reset_scroll_region_left_right();
+            self.set_cursor_pos(Some(0), Some(0));
+            return;
+        }
+
+        self.scroll_region_left = left;
+        self.scroll_region_right = right;
+
+        // DECSLRM homes the cursor to (col 0, row 0) — just like DECSTBM.
+        self.set_cursor_pos(Some(0), Some(0));
+    }
+
+    /// Return the current left/right margins as 0-based inclusive `(left, right)`.
+    #[must_use]
+    pub const fn left_right_margins(&self) -> (usize, usize) {
+        (self.scroll_region_left, self.scroll_region_right)
     }
 
     /// Index in `rows` of the first visible line.
@@ -1670,6 +1859,95 @@ impl Buffer {
         self.row_cache[first] = None;
     }
 
+    /// Column-selective scroll-up: shifts cells within `[left_col, right_col]`
+    /// on rows `[first, last]` up by one, without touching cells outside that
+    /// horizontal range.  Used by `insert_lines` / `delete_lines` when DECLRMM
+    /// is active.
+    fn scroll_slice_up_columns(
+        &mut self,
+        first: usize,
+        last: usize,
+        left_col: usize,
+        right_col: usize,
+    ) {
+        if first >= last || last >= self.rows.len() || left_col > right_col {
+            return;
+        }
+        let tag = self.current_tag.clone();
+        for row_idx in first..last {
+            // Copy cells [left_col, right_col] from row_idx+1 into row_idx.
+            // Use resolve_cell to handle sparse rows correctly — columns
+            // beyond the stored cell count are treated as implicit blanks.
+            let src_cells: Vec<_> = (left_col..=right_col)
+                .map(|col| self.rows[row_idx + 1].resolve_cell(col))
+                .collect();
+            let row = &mut self.rows[row_idx];
+            // Ensure storage.
+            if row.cells_mut().len() < right_col + 1 {
+                let width = row.width();
+                while row.cells_mut().len() < (right_col + 1).min(width) {
+                    row.cells_mut_push(Cell::blank_with_tag(FormatTag::default()));
+                }
+            }
+            for (offset, cell) in src_cells.into_iter().enumerate() {
+                let dst = left_col + offset;
+                if dst <= right_col && dst < row.cells().len() {
+                    row.cells_mut()[dst] = cell;
+                }
+            }
+            row.mark_dirty();
+            self.row_cache[row_idx] = None;
+        }
+        // Blank [left_col, right_col] on the last row.
+        let row = &mut self.rows[last];
+        row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
+        self.row_cache[last] = None;
+    }
+
+    /// Column-selective scroll-down: shifts cells within `[left_col, right_col]`
+    /// on rows `[first, last]` down by one, without touching cells outside that
+    /// horizontal range.  Used by `insert_lines` / `delete_lines` when DECLRMM
+    /// is active.
+    fn scroll_slice_down_columns(
+        &mut self,
+        first: usize,
+        last: usize,
+        left_col: usize,
+        right_col: usize,
+    ) {
+        if first >= last || last >= self.rows.len() || left_col > right_col {
+            return;
+        }
+        let tag = self.current_tag.clone();
+        for row_idx in (first + 1..=last).rev() {
+            // Copy cells [left_col, right_col] from row_idx-1 into row_idx.
+            // Use resolve_cell to handle sparse rows correctly — columns
+            // beyond the stored cell count are treated as implicit blanks.
+            let src_cells: Vec<_> = (left_col..=right_col)
+                .map(|col| self.rows[row_idx - 1].resolve_cell(col))
+                .collect();
+            let row = &mut self.rows[row_idx];
+            if row.cells_mut().len() < right_col + 1 {
+                let width = row.width();
+                while row.cells_mut().len() < (right_col + 1).min(width) {
+                    row.cells_mut_push(Cell::blank_with_tag(FormatTag::default()));
+                }
+            }
+            for (offset, cell) in src_cells.into_iter().enumerate() {
+                let dst = left_col + offset;
+                if dst <= right_col && dst < row.cells().len() {
+                    row.cells_mut()[dst] = cell;
+                }
+            }
+            row.mark_dirty();
+            self.row_cache[row_idx] = None;
+        }
+        // Blank [left_col, right_col] on the first row.
+        let row = &mut self.rows[first];
+        row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
+        self.row_cache[first] = None;
+    }
+
     // ----------------------------------------------------------
     // Scrollback: only valid in the PRIMARY buffer
     // ----------------------------------------------------------
@@ -1800,9 +2078,26 @@ impl Buffer {
         clippy::cast_sign_loss
     )]
     pub fn move_cursor_relative(&mut self, dx: i32, dy: i32) {
-        let new_x = (self.cursor.pos.x as i32 + dx)
-            .max(0)
-            .min(self.width.saturating_sub(1) as i32) as usize;
+        // When DECLRMM is active and moving horizontally, clamp to the
+        // left/right margins if the cursor is currently within the margin zone.
+        let new_x = if self.declrmm_enabled && dx != 0 {
+            let cx = self.cursor.pos.x;
+            if cx >= self.scroll_region_left && cx <= self.scroll_region_right {
+                // Cursor is inside the margin zone: clamp to [left, right].
+                (cx as i32 + dx)
+                    .max(self.scroll_region_left as i32)
+                    .min(self.scroll_region_right as i32) as usize
+            } else {
+                // Cursor is outside the margin zone: use normal full-width clamp.
+                (cx as i32 + dx)
+                    .max(0)
+                    .min(self.width.saturating_sub(1) as i32) as usize
+            }
+        } else {
+            (self.cursor.pos.x as i32 + dx)
+                .max(0)
+                .min(self.width.saturating_sub(1) as i32) as usize
+        };
 
         let current_screen_y = self.cursor_screen_y();
         let new_screen_y = (current_screen_y as i32 + dy)
@@ -2396,6 +2691,8 @@ impl Buffer {
             scroll_offset,
             scroll_region_top: self.scroll_region_top,
             scroll_region_bottom: self.scroll_region_bottom,
+            scroll_region_left: self.scroll_region_left,
+            scroll_region_right: self.scroll_region_right,
             saved_cursor: self.saved_cursor.clone(),
             image_store: self.image_store.clone(),
         };
@@ -2442,6 +2739,8 @@ impl Buffer {
             self.cursor = saved.cursor;
             self.scroll_region_top = saved.scroll_region_top;
             self.scroll_region_bottom = saved.scroll_region_bottom;
+            self.scroll_region_left = saved.scroll_region_left;
+            self.scroll_region_right = saved.scroll_region_right;
             self.saved_cursor = saved.saved_cursor;
             self.image_store = saved.image_store;
 
@@ -3796,17 +4095,17 @@ mod backspace_tests {
         buf.insert_text(&"abc".chars().map(TChar::from).collect::<Vec<_>>());
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 2);
 
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 1);
 
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // stays at 0
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
@@ -3823,16 +4122,16 @@ mod backspace_tests {
         // "b" (col 3)
         assert_eq!(buf.cursor.pos.x, 4);
 
-        buf.handle_backspace(); // over b → x=3
+        buf.handle_backspace(false, false); // over b → x=3
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace(); // over wide glyph (continuation cell)
+        buf.handle_backspace(false, false); // over wide glyph (continuation cell)
         assert_eq!(buf.cursor.pos.x, 1);
 
-        buf.handle_backspace(); // over 'a'
+        buf.handle_backspace(false, false); // over 'a'
         assert_eq!(buf.cursor.pos.x, 0);
 
-        buf.handle_backspace(); // can't go lower
+        buf.handle_backspace(false, false); // can't go lower
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
@@ -3847,13 +4146,120 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 1);
 
-        // backspace never moves Y
-        buf.handle_backspace();
+        // backspace never moves Y (without reverse wrap)
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // at col 0 → stays there
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    // ── Reverse-wrap tests (?45 and ?1045) ────────────────────────────
+
+    #[test]
+    fn reverse_wrap_at_col0_wraps_to_previous_row() {
+        let mut buf = Buffer::new(10, 5);
+
+        // Write two rows of content
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        buf.insert_text(&"K".chars().map(TChar::from).collect::<Vec<_>>());
+
+        // cursor is at row 1, col 1
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 1);
+
+        // Move to col 0
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 0);
+
+        // With reverse_wrap=true, at col 0 → wraps to last col of row 0
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, 0);
+        assert_eq!(buf.cursor.pos.x, 9); // last column (width - 1)
+    }
+
+    #[test]
+    fn reverse_wrap_at_top_of_visible_no_scrollback_stays_put() {
+        let mut buf = Buffer::new(10, 5);
+
+        // Only one row — cursor at (0, 0)
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 0;
+
+        // reverse_wrap is on but no row above → stays put
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, 0);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    #[test]
+    fn reverse_wrap_disabled_never_wraps() {
+        let mut buf = Buffer::new(10, 5);
+
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        buf.insert_text(&"K".chars().map(TChar::from).collect::<Vec<_>>());
+
+        // Move to col 0 of row 1
+        buf.cursor.pos.x = 0;
+        assert_eq!(buf.cursor.pos.y, 1);
+
+        // reverse_wrap=false → stays at col 0
+        buf.handle_backspace(false, false);
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    #[test]
+    fn reverse_wrap_into_scrollback_with_xt_rev_wrap2() {
+        // Create a buffer with scrollback: fill enough rows to push some
+        // above the visible window.
+        let mut buf = Buffer::new(10, 3);
+
+        // Fill 5 rows of data; height is 3, so 2 rows are in scrollback.
+        for line in &[
+            "aaaaaaaaaa",
+            "bbbbbbbbbb",
+            "cccccccccc",
+            "dddddddddd",
+            "eeeeeeeeee",
+        ] {
+            buf.insert_text(&line.chars().map(TChar::from).collect::<Vec<_>>());
+            buf.handle_lf();
+        }
+
+        // Cursor is now at the bottom of visible window.
+        // Move cursor to col 0 at the top of the visible window.
+        let vis_start = buf.visible_window_start(0);
+        buf.cursor.pos.y = vis_start;
+        buf.cursor.pos.x = 0;
+
+        // Without xt_rev_wrap2: stays put at top of visible screen
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, vis_start);
+        assert_eq!(buf.cursor.pos.x, 0);
+
+        // With xt_rev_wrap2=true: wraps into scrollback
+        buf.handle_backspace(true, true);
+        assert_eq!(buf.cursor.pos.y, vis_start - 1);
+        assert_eq!(buf.cursor.pos.x, 9); // last column
+    }
+
+    #[test]
+    fn xt_rev_wrap2_without_reverse_wrap_does_nothing() {
+        let mut buf = Buffer::new(10, 5);
+
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        buf.insert_text(&"K".chars().map(TChar::from).collect::<Vec<_>>());
+
+        buf.cursor.pos.x = 0;
+        assert_eq!(buf.cursor.pos.y, 1);
+
+        // reverse_wrap=false, xt_rev_wrap2=true → no wrap (reverse_wrap gate is checked first)
+        buf.handle_backspace(false, true);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
     }
@@ -5916,5 +6322,270 @@ mod extract_text_tests {
 
         let result = buf.extract_text(0, 0, 0, 9);
         assert_eq!(result, "Ｗx");
+    }
+}
+
+// ============================================================================
+// DECLRMM / DECSLRM tests
+// ============================================================================
+
+#[cfg(test)]
+mod declrmm_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(ascii).collect()
+    }
+
+    /// Create a 10-wide, 5-tall buffer with DECLRMM enabled and margins [2, 7].
+    fn buf_with_margins() -> Buffer {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(true);
+        buf.set_left_right_margins(3, 8); // 1-based: cols 3..8 → 0-based: 2..7
+        buf
+    }
+
+    /// Create a 10-wide, 5-tall buffer, fill row 0 starting at `start_col` with
+    /// `content` (DECLRMM off so no margin wrap), then enable DECLRMM with
+    /// margins [2, 7] and home the cursor to (col=0, row=0).
+    fn buf_with_content_then_margins(start_col: usize, content: &str) -> Buffer {
+        let mut buf = Buffer::new(10, 5);
+        // Fill without margin restrictions.
+        buf.set_cursor_pos(Some(start_col), Some(0));
+        buf.insert_text(&text(content));
+        // Now enable DECLRMM + margins; set_left_right_margins homes cursor.
+        buf.set_declrmm(true);
+        buf.set_left_right_margins(3, 8); // 1-based → 0-based [2, 7]
+        buf
+    }
+
+    // --- set_declrmm / is_declrmm_enabled ---
+
+    #[test]
+    fn set_declrmm_enables_mode() {
+        let mut buf = Buffer::new(10, 5);
+        assert!(!buf.is_declrmm_enabled());
+        buf.set_declrmm(true);
+        assert!(buf.is_declrmm_enabled());
+    }
+
+    #[test]
+    fn set_declrmm_false_resets_margins() {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(true);
+        buf.set_left_right_margins(3, 8); // 0-based: 2..7
+        assert_eq!(buf.left_right_margins(), (2, 7));
+
+        buf.set_declrmm(false);
+        assert!(!buf.is_declrmm_enabled());
+        // Margins should be reset to full width.
+        assert_eq!(buf.left_right_margins(), (0, 9));
+    }
+
+    // --- set_left_right_margins ---
+
+    #[test]
+    fn set_margins_valid() {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(true);
+        buf.set_left_right_margins(2, 8); // 0-based: 1..7
+        assert_eq!(buf.left_right_margins(), (1, 7));
+        // Cursor homed to (0, 0).
+        assert_eq!(buf.get_cursor_screen_pos(), CursorPos { x: 0, y: 0 });
+    }
+
+    #[test]
+    fn set_margins_invalid_left_ge_right_resets() {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(true);
+        buf.set_left_right_margins(5, 5); // left == right → invalid
+        assert_eq!(buf.left_right_margins(), (0, 9));
+    }
+
+    #[test]
+    fn set_margins_right_beyond_width_resets() {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(true);
+        buf.set_left_right_margins(1, 11); // right >= width → invalid
+        assert_eq!(buf.left_right_margins(), (0, 9));
+    }
+
+    // --- insert_text wraps at right margin when DECLRMM active ---
+
+    #[test]
+    fn insert_text_wraps_at_right_margin() {
+        // 10-wide buffer, margins cols 2..7 (0-based).
+        // Write 7 chars starting at col 2 — they should fill 2..7 (6 cells)
+        // and then the 7th char wraps to the next row starting at col 2.
+        let mut buf = buf_with_margins();
+        // Set cursor to col=2, row=0.
+        buf.set_cursor_pos(Some(2), Some(0));
+        // Margin is [2, 7] → wrap_col = 8.  6 chars fit before wrapping.
+        buf.insert_text(&text("ABCDEFG")); // 7 chars: ABCDEF + G wraps
+
+        // First row: cols 2..7 should be ABCDEF.
+        let row0 = buf.get_rows()[0].cells();
+        assert_eq!(row0.get(2).map(Cell::tchar), Some(&ascii('A')));
+        assert_eq!(row0.get(7).map(Cell::tchar), Some(&ascii('F')));
+        // Col 8 should be untouched (outside margin).
+        assert!(row0.get(8).is_none_or(|c| c.tchar() == &TChar::Space));
+
+        // Second row: wrap starts at col 2 (scroll_region_left).
+        let row1 = buf.get_rows()[1].cells();
+        assert_eq!(row1.get(2).map(Cell::tchar), Some(&ascii('G')));
+    }
+
+    #[test]
+    fn insert_text_no_wrap_outside_margins_when_declrmm_disabled() {
+        // With DECLRMM disabled, normal full-width wrap.
+        let mut buf = Buffer::new(10, 5);
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.insert_text(&text("ABCDEFGHIJK")); // 11 chars → wraps at col 10
+        // Row 0 must have all 10 chars ABCDEFGHIJ.
+        let row0 = buf.get_rows()[0].cells();
+        for (i, ch) in "ABCDEFGHIJ".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "col {i}");
+        }
+        // K wraps to row 1, col 0.
+        let row1 = buf.get_rows()[1].cells();
+        assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('K')));
+    }
+
+    // --- move_cursor_relative clamps to margins when DECLRMM active ---
+
+    #[test]
+    fn move_cursor_right_clamped_to_right_margin() {
+        let mut buf = buf_with_margins(); // margins [2, 7]
+        // Set cursor to col=5, row=0 (inside margin), then move right by 10.
+        buf.set_cursor_pos(Some(5), Some(0));
+        buf.move_cursor_relative(10, 0);
+        // Should clamp at scroll_region_right = 7.
+        assert_eq!(buf.get_cursor_screen_pos().x, 7);
+    }
+
+    #[test]
+    fn move_cursor_left_clamped_to_left_margin() {
+        let mut buf = buf_with_margins(); // margins [2, 7]
+        // Set cursor to col=5, row=0 (inside margin), then move left by 10.
+        buf.set_cursor_pos(Some(5), Some(0));
+        buf.move_cursor_relative(-10, 0);
+        // Should clamp at scroll_region_left = 2.
+        assert_eq!(buf.get_cursor_screen_pos().x, 2);
+    }
+
+    #[test]
+    fn move_cursor_outside_margin_not_clamped_to_margin() {
+        let mut buf = buf_with_margins(); // margins [2, 7]
+        // Start at col=0, row=0 (outside left margin), move right by 1.
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.move_cursor_relative(1, 0);
+        // Outside margin: uses normal full-width clamp, not margin clamp.
+        assert_eq!(buf.get_cursor_screen_pos().x, 1);
+    }
+
+    // --- erase_chars clamps to right margin ---
+
+    #[test]
+    fn erase_chars_clamped_to_right_margin() {
+        // Fill row 0 fully with 'X' *before* enabling DECLRMM, so all 10 cols get X.
+        let mut buf = buf_with_content_then_margins(0, "XXXXXXXXXX");
+        // Set cursor to col=5, row=0, then erase 10 chars.
+        // With DECLRMM margins [2,7], only cols 5..=7 should be erased.
+        buf.set_cursor_pos(Some(5), Some(0));
+        buf.erase_chars(10);
+
+        let row = buf.get_rows()[0].cells();
+        // Cols 5, 6, 7 should be blank.
+        for col in 5..=7 {
+            let cell = row.get(col);
+            assert!(
+                cell.is_none_or(|c| c.tchar() == &TChar::Space),
+                "col {col} should be blank"
+            );
+        }
+        // Cols 8, 9 should still be 'X' (outside right margin).
+        for col in 8..=9 {
+            assert_eq!(
+                row.get(col).map(Cell::tchar),
+                Some(&ascii('X')),
+                "col {col} should still be X"
+            );
+        }
+    }
+
+    // --- insert_spaces respects right margin (ICH) ---
+
+    #[test]
+    fn insert_spaces_stays_within_right_margin() {
+        // Fill cols 2..9 with distinct letters *before* enabling DECLRMM.
+        let mut buf = buf_with_content_then_margins(2, "ABCDEFGH"); // cols 2..9
+        // Set cursor to col=2, row=0, then insert 2 spaces.
+        // ICH with DECLRMM [2,7]: cells in [2,7] shift right; overflow is discarded.
+        // G and H (at cols 8,9) are outside the margin and stay untouched.
+        buf.set_cursor_pos(Some(2), Some(0));
+        buf.insert_spaces(2);
+
+        let row = buf.get_rows()[0].cells();
+        // Cols 2, 3 → blank (inserted spaces).
+        for col in 2..=3 {
+            assert!(
+                row.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "col {col} should be blank"
+            );
+        }
+        // Col 4 → 'A', col 5 → 'B', col 6 → 'C', col 7 → 'D' (shifted right within margin).
+        assert_eq!(row[4].tchar(), &ascii('A'), "col 4");
+        assert_eq!(row[5].tchar(), &ascii('B'), "col 5");
+        assert_eq!(row[6].tchar(), &ascii('C'), "col 6");
+        assert_eq!(row[7].tchar(), &ascii('D'), "col 7");
+        // Cols 8, 9 → 'G', 'H' (outside margin, untouched).
+        assert_eq!(row[8].tchar(), &ascii('G'), "col 8");
+        assert_eq!(row[9].tchar(), &ascii('H'), "col 9");
+    }
+
+    // --- delete_chars respects right margin (DCH) ---
+
+    #[test]
+    fn delete_chars_stays_within_right_margin() {
+        // Fill cols 2..9 with distinct letters *before* enabling DECLRMM.
+        let mut buf = buf_with_content_then_margins(2, "ABCDEFGH"); // cols 2..9
+        // Set cursor to col=2, row=0, then delete 2 chars.
+        // DCH with DECLRMM [2,7]: cols 2,3 removed; 4..7 shifts left; blanks at 6,7.
+        // Cols 8,9 ('G','H') are outside the margin and stay untouched.
+        buf.set_cursor_pos(Some(2), Some(0));
+        buf.delete_chars(2);
+
+        let row = buf.get_rows()[0].cells();
+        // Col 2 → 'C', col 3 → 'D', col 4 → 'E', col 5 → 'F'.
+        assert_eq!(row[2].tchar(), &ascii('C'), "col 2");
+        assert_eq!(row[3].tchar(), &ascii('D'), "col 3");
+        assert_eq!(row[4].tchar(), &ascii('E'), "col 4");
+        assert_eq!(row[5].tchar(), &ascii('F'), "col 5");
+        // Cols 6, 7 → blanks (filled from right of margin zone).
+        for col in 6..=7 {
+            assert!(
+                row.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "col {col} should be blank"
+            );
+        }
+        // Cols 8, 9 → 'G', 'H' (outside margin, untouched).
+        assert_eq!(row[8].tchar(), &ascii('G'), "col 8");
+        assert_eq!(row[9].tchar(), &ascii('H'), "col 9");
+    }
+
+    // --- Full-reset clears DECLRMM state ---
+
+    #[test]
+    fn full_reset_clears_declrmm() {
+        let mut buf = buf_with_margins();
+        assert!(buf.is_declrmm_enabled());
+        buf.full_reset();
+        assert!(!buf.is_declrmm_enabled());
+        assert_eq!(buf.left_right_margins(), (0, 9));
     }
 }

@@ -4580,3 +4580,570 @@ fn handler_query_without_write_tx_does_not_panic() {
     ))]);
     // If we get here without panicking, the test passes
 }
+
+// ── Grapheme Clustering (?2027) — permanently set ───────────────────────
+
+#[test]
+fn decrpm_grapheme_clustering_always_permanently_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::grapheme::GraphemeClustering,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::GraphemeClustering(GraphemeClustering::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "Grapheme clustering is permanently set → Ps=3"
+    );
+}
+
+#[test]
+fn decrpm_grapheme_clustering_after_reset_still_permanently_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::grapheme::GraphemeClustering,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Send DECRST — should be silently accepted
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::GraphemeClustering(
+        GraphemeClustering::new(&SetMode::DecRst),
+    ))]);
+    // Query should still report permanently set
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::GraphemeClustering(GraphemeClustering::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "Grapheme clustering remains permanently set even after DECRST"
+    );
+}
+
+// ── DECSDM (?80) — Sixel Display Mode ──────────────────────────────────
+
+#[test]
+fn decrpm_decsdm_default_is_scrolling() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decsdm::Decsdm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?80;2$y",
+        "DECSDM default (ScrollingMode) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_decsdm_after_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decsdm::Decsdm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set DECSDM (Display Mode)
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?80;1$y",
+        "DECSDM after DECSET (DisplayMode) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_decsdm_after_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decsdm::Decsdm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set then reset
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?80;2$y",
+        "DECSDM after DECRST (ScrollingMode) → Ps=2"
+    );
+}
+
+// ── AllowAltScreen (?1046) — Allow Alternate Screen Switching ──────────
+
+#[test]
+fn decrpm_allow_alt_screen_default_is_allow() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_alt_screen::AllowAltScreen,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::AllowAltScreen(AllowAltScreen::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1046;1$y",
+        "AllowAltScreen default (Allow) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_allow_alt_screen_after_disallow() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_alt_screen::AllowAltScreen,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecRst),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::AllowAltScreen(AllowAltScreen::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1046;2$y",
+        "AllowAltScreen after DECRST (Disallow) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_allow_alt_screen_after_re_enable() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_alt_screen::AllowAltScreen,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Disallow then re-allow
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecRst),
+    ))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecSet),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::AllowAltScreen(AllowAltScreen::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1046;1$y",
+        "AllowAltScreen after re-enable → Ps=1"
+    );
+}
+
+#[test]
+fn allow_alt_screen_blocks_enter_alternate_when_disallowed() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::{allow_alt_screen::AllowAltScreen, xtextscrn::XtExtscrn},
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Disallow alternate screen
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecRst),
+    ))]);
+    // Try to enter alternate screen — should be a no-op
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        !handler.is_alternate_screen(),
+        "Alternate screen should not be entered when AllowAltScreen is Disallow"
+    );
+}
+
+#[test]
+fn allow_alt_screen_permits_enter_alternate_when_allowed() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Default is Allow — entering alternate screen should succeed
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        handler.is_alternate_screen(),
+        "Alternate screen should be entered when AllowAltScreen is Allow (default)"
+    );
+}
+
+// ── PrivateColorRegisters (?1070) — Private Color Registers for Sixel ─────
+
+#[test]
+fn decrpm_private_color_registers_default_is_private() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::PrivateColorRegisters(PrivateColorRegisters::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1070;1$y",
+        "PrivateColorRegisters default (Private) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_private_color_registers_after_reset_to_shared() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecRst),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::PrivateColorRegisters(PrivateColorRegisters::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1070;2$y",
+        "PrivateColorRegisters after DECRST (Shared) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_private_color_registers_after_reset_then_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecRst),
+    ))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecSet),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::PrivateColorRegisters(PrivateColorRegisters::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1070;1$y",
+        "PrivateColorRegisters after re-enable (Private) → Ps=1"
+    );
+}
+
+/// Build a raw DCS sixel sequence: `P<params>q<sixel_body>ESC\`
+///
+/// Mirrors the private `build_sixel_dcs` helper in the unit tests of
+/// `terminal_handler.rs`; duplicated here so integration tests can call
+/// `handler.handle_device_control_string()` directly.
+fn build_sixel_dcs_bytes(params: &[u8], sixel_body: &[u8]) -> Vec<u8> {
+    let mut v = vec![b'P'];
+    v.extend_from_slice(params);
+    v.push(b'q');
+    v.extend_from_slice(sixel_body);
+    v.extend_from_slice(b"\x1b\\");
+    v
+}
+
+#[test]
+fn sixel_shared_palette_persists_color_definition_across_images() {
+    // In shared-register mode (?1070 l), a colour defined in one Sixel image
+    // should be available under the same index in the next image.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.handle_resize(80, 24, 8, 16);
+    let (tx, _rx) = crossbeam_channel::unbounded::<freminal_common::pty_write::PtyWrite>();
+    handler.set_write_tx(tx);
+
+    // Switch to shared palette mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecRst),
+    ))]);
+
+    // Image 1: define colour index 10 as pure red (RGB 100,0,0) and paint one pixel.
+    let body1 = b"#10;2;100;0;0#10~";
+    let dcs1 = build_sixel_dcs_bytes(b"0;0;0", body1);
+    handler.handle_device_control_string(&dcs1);
+
+    // Image 2: select colour index 10 without redefining it, paint one pixel.
+    let body2 = b"#10~";
+    let dcs2 = build_sixel_dcs_bytes(b"0;0;0", body2);
+    handler.handle_device_control_string(&dcs2);
+
+    // Two images should now be in the image store.
+    let mut images: Vec<_> = handler.buffer().image_store().iter().collect();
+    assert_eq!(images.len(), 2, "expected two images in the store");
+    // Sort by image id (monotonically increasing) so images[0] is image 1 and
+    // images[1] is image 2, regardless of HashMap iteration order.
+    images.sort_by_key(|(id, _)| *id);
+
+    // The second image's top-left pixel should be red because colour 10 was
+    // inherited from the first image's palette definition.
+    let (_, img2) = images[1];
+    assert_eq!(
+        img2.pixels[0], 255,
+        "R of pixel (0,0) in image 2 should be 255 (red)"
+    );
+    assert_eq!(img2.pixels[1], 0, "G of pixel (0,0) in image 2 should be 0");
+    assert_eq!(img2.pixels[2], 0, "B of pixel (0,0) in image 2 should be 0");
+}
+
+#[test]
+fn sixel_private_palette_does_not_persist_color_definition() {
+    // In private-register mode (?1070 h, default), each image gets a fresh
+    // palette.  A colour defined in image 1 must NOT appear in image 2.
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.handle_resize(80, 24, 8, 16);
+    let (tx, _rx) = crossbeam_channel::unbounded::<freminal_common::pty_write::PtyWrite>();
+    handler.set_write_tx(tx);
+
+    // Private mode is the default — no need to set it explicitly.
+
+    // Image 1: define colour index 10 as pure red and paint.
+    let body1 = b"#10;2;100;0;0#10~";
+    let dcs1 = build_sixel_dcs_bytes(b"0;0;0", body1);
+    handler.handle_device_control_string(&dcs1);
+
+    // Image 2: select colour index 10 without redefining; should use the
+    // default VT340 palette entry for index 10 (light red ≈ (255,85,85)).
+    let body2 = b"#10~";
+    let dcs2 = build_sixel_dcs_bytes(b"0;0;0", body2);
+    handler.handle_device_control_string(&dcs2);
+
+    let mut images: Vec<_> = handler.buffer().image_store().iter().collect();
+    assert_eq!(images.len(), 2, "expected two images in the store");
+    // Sort by image id (monotonically increasing) so images[0]/[1] are stable.
+    images.sort_by_key(|(id, _)| *id);
+
+    // The second image should NOT be pure red — it should be the default
+    // VT340 palette index 10 (≈ light red, R=255 G=85 B=85).
+    let (_, img2) = images[1];
+    // The green channel distinguishes pure red (G=0) from VT340 index 10 (G=85).
+    assert_ne!(
+        img2.pixels[1], 0,
+        "G channel should not be 0 in private mode (pure red should not persist)"
+    );
+}
+
+// ── DECNRCM (?42) — National Replacement Character Set Mode ───────────
+
+#[test]
+fn decrpm_decnrcm_default_is_disabled() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decnrcm::Decnrcm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(resp, "\x1b[?42;2$y", "DECNRCM default (NrcDisabled) → Ps=2");
+}
+
+#[test]
+fn decrpm_decnrcm_after_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decnrcm::Decnrcm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?42;1$y",
+        "DECNRCM after DECSET (NrcEnabled) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_decnrcm_after_set_then_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decnrcm::Decnrcm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?42;2$y",
+        "DECNRCM after DECRST (NrcDisabled) → Ps=2"
+    );
+}
+
+// ── XTREVWRAP2 (?1045) — Extended Reverse Wraparound Mode ────────────
+
+#[test]
+fn decrpm_xt_rev_wrap2_default_is_disabled() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xt_rev_wrap2::XtRevWrap2,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1045;2$y",
+        "XTREVWRAP2 default (Disabled) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_xt_rev_wrap2_after_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xt_rev_wrap2::XtRevWrap2,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1045;1$y",
+        "XTREVWRAP2 after DECSET (Enabled) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_xt_rev_wrap2_after_set_then_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xt_rev_wrap2::XtRevWrap2,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1045;2$y",
+        "XTREVWRAP2 after DECRST (Disabled) → Ps=2"
+    );
+}
+
+// ── Reverse Wrap (?45) — DECRPM via handler ───────────────────────────
+
+#[test]
+fn decrpm_reverse_wrap_default_is_enabled() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::reverse_wrap_around::ReverseWrapAround,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::ReverseWrapAround(ReverseWrapAround::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?45;1$y",
+        "Reverse wrap default (WrapAround/enabled) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_reverse_wrap_after_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::reverse_wrap_around::ReverseWrapAround,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ReverseWrapAround(
+        ReverseWrapAround::new(&SetMode::DecRst),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::ReverseWrapAround(ReverseWrapAround::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?45;2$y",
+        "Reverse wrap after DECRST (DontWrap/disabled) → Ps=2"
+    );
+}

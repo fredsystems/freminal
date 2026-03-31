@@ -14,7 +14,10 @@ use crate::{
 
 use crate::ansi_components::tracer::SequenceTracer;
 use anyhow::Result;
-use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::buffer_states::{
+    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm,
+    terminal_output::TerminalOutput,
+};
 
 /// Represents the high-level result of feeding one byte to the parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +95,11 @@ pub enum ParserInner {
     Csi(AnsiCsiParser),
     Osc(AnsiOscParser),
     Standard(StandardParser),
+    /// VT52: waiting for the command byte after ESC.
+    Vt52Escape,
+    /// VT52: `ESC Y` cursor address — waiting for row and column bytes.
+    /// First `Option` is the row byte (if received); second call fills column.
+    Vt52CursorAddress(Option<u8>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -101,6 +109,9 @@ pub struct FreminalAnsiParser {
     // reducing per-call allocations and enabling coalesced Data emissions.
     pending_data: Vec<u8>,
     seq_trace: SequenceTracer,
+    /// When `true`, the parser uses the reduced VT52 escape set instead of
+    /// standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
+    pub vt52_mode: bool,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -127,6 +138,7 @@ impl FreminalAnsiParser {
             inner: ParserInner::Empty,
             pending_data: Vec::new(),
             seq_trace: SequenceTracer::new(),
+            vt52_mode: false,
         }
     }
 
@@ -137,7 +149,11 @@ impl FreminalAnsiParser {
         output: &mut Vec<TerminalOutput>,
     ) -> Result<(), ()> {
         if b == b'\x1b' {
-            self.inner = ParserInner::Escape;
+            if self.vt52_mode {
+                self.inner = ParserInner::Vt52Escape;
+            } else {
+                self.inner = ParserInner::Escape;
+            }
             return Err(());
         }
 
@@ -363,6 +379,30 @@ impl FreminalAnsiParser {
                         self.inner = ParserInner::Empty;
                     }
                 },
+                ParserInner::Vt52Escape => {
+                    push_data_if_non_empty(&mut data_output, &mut output);
+                    self.handle_vt52_escape(b, &mut output);
+                }
+                ParserInner::Vt52CursorAddress(row_opt) => {
+                    push_data_if_non_empty(&mut data_output, &mut output);
+                    match row_opt {
+                        None => {
+                            // First parameter byte: row
+                            *row_opt = Some(b);
+                        }
+                        Some(row_byte) => {
+                            // Second parameter byte: col — emit the cursor position.
+                            // Both are offset by 0x20; 1-indexed for SetCursorPos.
+                            let row = usize::from(row_byte.saturating_sub(0x1F));
+                            let col = usize::from(b.saturating_sub(0x1F));
+                            output.push(TerminalOutput::SetCursorPos {
+                                x: Some(col),
+                                y: Some(row),
+                            });
+                            self.inner = ParserInner::Empty;
+                        }
+                    }
+                }
             }
         }
 
@@ -375,6 +415,116 @@ impl FreminalAnsiParser {
         self.pending_data = data_output;
 
         output
+    }
+
+    /// Handle a single byte after ESC in VT52 mode.
+    ///
+    /// VT52 escape sequences are all single-byte commands except `ESC Y` (cursor
+    /// address) which takes two additional parameter bytes.
+    fn handle_vt52_escape(&mut self, b: u8, output: &mut Vec<TerminalOutput>) {
+        match b {
+            // ESC A — Cursor up
+            b'A' => {
+                output.push(TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1),
+                });
+                self.inner = ParserInner::Empty;
+            }
+            // ESC B — Cursor down
+            b'B' => {
+                output.push(TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(1),
+                });
+                self.inner = ParserInner::Empty;
+            }
+            // ESC C — Cursor right (forward)
+            b'C' => {
+                output.push(TerminalOutput::SetCursorPosRel {
+                    x: Some(1),
+                    y: None,
+                });
+                self.inner = ParserInner::Empty;
+            }
+            // ESC D — Cursor left (backward)
+            b'D' => {
+                output.push(TerminalOutput::SetCursorPosRel {
+                    x: Some(-1),
+                    y: None,
+                });
+                self.inner = ParserInner::Empty;
+            }
+            // ESC F — Enter graphics mode (DEC special graphics)
+            b'F' => {
+                output.push(TerminalOutput::DecSpecialGraphics(
+                    DecSpecialGraphics::Replace,
+                ));
+                self.inner = ParserInner::Empty;
+            }
+            // ESC G — Exit graphics mode
+            b'G' => {
+                output.push(TerminalOutput::DecSpecialGraphics(
+                    DecSpecialGraphics::DontReplace,
+                ));
+                self.inner = ParserInner::Empty;
+            }
+            // ESC H — Cursor home (row 1, col 1)
+            b'H' => {
+                output.push(TerminalOutput::SetCursorPos {
+                    x: Some(1),
+                    y: Some(1),
+                });
+                self.inner = ParserInner::Empty;
+            }
+            // ESC I — Reverse line feed (reverse index)
+            b'I' => {
+                output.push(TerminalOutput::ReverseIndex);
+                self.inner = ParserInner::Empty;
+            }
+            // ESC J — Erase to end of screen
+            b'J' => {
+                output.push(TerminalOutput::ClearDisplayfromCursortoEndofDisplay);
+                self.inner = ParserInner::Empty;
+            }
+            // ESC K — Erase to end of line
+            b'K' => {
+                output.push(TerminalOutput::ClearLineForwards);
+                self.inner = ParserInner::Empty;
+            }
+            // ESC Y — Direct cursor address (two parameter bytes follow)
+            b'Y' => {
+                self.inner = ParserInner::Vt52CursorAddress(None);
+            }
+            // ESC Z — Identify (handler responds with ESC / Z when vt52_mode)
+            b'Z' => {
+                output.push(TerminalOutput::RequestDeviceAttributes);
+                self.inner = ParserInner::Empty;
+            }
+            // ESC = — Enter alternate keypad mode
+            b'=' => {
+                output.push(TerminalOutput::ApplicationKeypadMode);
+                self.inner = ParserInner::Empty;
+            }
+            // ESC > — Exit alternate keypad mode
+            b'>' => {
+                output.push(TerminalOutput::NormalKeypadMode);
+                self.inner = ParserInner::Empty;
+            }
+            // ESC < — Exit VT52 mode, return to ANSI mode
+            b'<' => {
+                output.push(TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)));
+                self.inner = ParserInner::Empty;
+            }
+            _ => {
+                debug!(
+                    "Unknown VT52 escape: 0x{b:02x}; recent={}",
+                    self.current_trace_str()
+                );
+                output.push(TerminalOutput::Invalid);
+                self.inner = ParserInner::Empty;
+            }
+        }
     }
 
     /// Retrieve a snapshot of the currently active parser's trace buffer.
@@ -823,5 +973,309 @@ mod tests {
         } else {
             panic!("Expected Ok result");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // VT52 mode parser tests (subtask 20.8)
+    // -------------------------------------------------------------------------
+
+    /// Helper: create a parser already in VT52 mode.
+    fn vt52_parser() -> FreminalAnsiParser {
+        let mut p = FreminalAnsiParser::new();
+        p.vt52_mode = true;
+        p
+    }
+
+    #[test]
+    fn vt52_esc_routes_to_vt52_escape_state() {
+        let mut p = vt52_parser();
+        let mut out = Vec::new();
+        let mut data = Vec::new();
+        let r = p.ansi_parser_inner_empty(b'\x1b', &mut data, &mut out);
+        assert!(r.is_err());
+        assert_eq!(p.inner, ParserInner::Vt52Escape);
+    }
+
+    #[test]
+    fn vt52_cursor_up() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bA");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_down() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bB");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_right() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bC");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPosRel {
+                x: Some(1),
+                y: None
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_left() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bD");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPosRel {
+                x: Some(-1),
+                y: None
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_enter_graphics_mode() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bF");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::DecSpecialGraphics(
+                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
+            )]
+        );
+    }
+
+    #[test]
+    fn vt52_exit_graphics_mode() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bG");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::DecSpecialGraphics(
+                freminal_common::buffer_states::line_draw::DecSpecialGraphics::DontReplace
+            )]
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_home() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bH");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_reverse_line_feed() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bI");
+        assert_eq!(result, vec![TerminalOutput::ReverseIndex]);
+    }
+
+    #[test]
+    fn vt52_erase_to_end_of_screen() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bJ");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::ClearDisplayfromCursortoEndofDisplay]
+        );
+    }
+
+    #[test]
+    fn vt52_erase_to_end_of_line() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bK");
+        assert_eq!(result, vec![TerminalOutput::ClearLineForwards]);
+    }
+
+    #[test]
+    fn vt52_identify() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bZ");
+        assert_eq!(result, vec![TerminalOutput::RequestDeviceAttributes]);
+    }
+
+    #[test]
+    fn vt52_enter_alternate_keypad() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b=");
+        assert_eq!(result, vec![TerminalOutput::ApplicationKeypadMode]);
+    }
+
+    #[test]
+    fn vt52_exit_alternate_keypad() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b>");
+        assert_eq!(result, vec![TerminalOutput::NormalKeypadMode]);
+    }
+
+    #[test]
+    fn vt52_exit_vt52_mode() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b<");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi))]
+        );
+    }
+
+    #[test]
+    fn vt52_direct_cursor_address() {
+        let mut p = vt52_parser();
+        // ESC Y <row+0x20> <col+0x20>: row=5, col=10 → 0x20+5-1=0x24, 0x20+10-1=0x29
+        // SetCursorPos uses 1-indexed: row = (0x24 - 0x1F) = 5, col = (0x29 - 0x1F) = 10
+        let result = p.push(b"\x1bY\x24\x29");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_address_row1_col1() {
+        let mut p = vt52_parser();
+        // Row 1, Col 1: both = 0x20 → (0x20 - 0x1F) = 1
+        let result = p.push(b"\x1bY\x20\x20");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_address_split_across_chunks() {
+        let mut p = vt52_parser();
+        // First chunk: ESC Y <row>
+        let result1 = p.push(b"\x1bY\x24");
+        assert!(result1.is_empty(), "Should have no output yet: {result1:?}");
+        assert!(matches!(
+            p.inner,
+            ParserInner::Vt52CursorAddress(Some(0x24))
+        ));
+        // Second chunk: <col>
+        let result2 = p.push(b"\x29");
+        assert_eq!(
+            result2,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_unknown_escape_produces_invalid() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1bX");
+        assert_eq!(result, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
+    fn vt52_data_between_escapes() {
+        let mut p = vt52_parser();
+        let result = p.push(b"Hello\x1bAWorld");
+        // Expect: Data("Hello"), CursorUp, Data("World")
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], TerminalOutput::Data(b"Hello".to_vec()));
+        assert_eq!(
+            result[1],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }
+        );
+        assert_eq!(result[2], TerminalOutput::Data(b"World".to_vec()));
+    }
+
+    #[test]
+    fn vt52_ansi_roundtrip() {
+        // Start in ANSI mode, switch to VT52 via CSI, then back via ESC <
+        let mut p = FreminalAnsiParser::new();
+        assert!(!p.vt52_mode);
+
+        // Enter VT52 mode via the mode change (parser flag set externally,
+        // as sync_mode would do after processing Mode::Decanm(Decanm::Vt52))
+        p.vt52_mode = true;
+
+        // VT52 cursor up should work
+        let result = p.push(b"\x1bA");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }]
+        );
+
+        // ESC < should emit Mode::Decanm(Decanm::Ansi)
+        let result = p.push(b"\x1b<");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi))]
+        );
+
+        // After sync_mode processes it, parser.vt52_mode would be set to false.
+        // Simulate that:
+        p.vt52_mode = false;
+
+        // Now ANSI escape sequences should work again
+        let result = p.push(b"\x1b[1A"); // CSI 1A = cursor up 1
+        let has_cursor_up = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                }
+            )
+        });
+        assert!(
+            has_cursor_up,
+            "ANSI CSI should work after ESC <: {result:?}"
+        );
+    }
+
+    #[test]
+    fn vt52_c0_controls_still_work() {
+        // C0 controls (CR, LF, BS, BEL, TAB) should work in VT52 mode
+        let mut p = vt52_parser();
+        let result = p.push(b"\r\n\x08\x07\x09");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::CarriageReturn,
+                TerminalOutput::Newline,
+                TerminalOutput::Backspace,
+                TerminalOutput::Bell,
+                TerminalOutput::Tab,
+            ]
+        );
     }
 }

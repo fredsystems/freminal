@@ -5,26 +5,36 @@
 
 use super::mode::SetMode;
 
+pub mod allow_alt_screen;
 pub mod allow_column_mode_switch;
+pub mod alternate_scroll;
 pub mod application_escape_key;
+pub mod decanm;
 pub mod decarm;
 pub mod decawm;
+pub mod decbkm;
 pub mod decckm;
 pub mod deccolm;
+pub mod declrmm;
+pub mod decnkm;
+pub mod decnrcm;
 pub mod decom;
 pub mod decsclm;
 pub mod decscnm;
+pub mod decsdm;
 pub mod dectcem;
 pub mod grapheme;
 pub mod keypad;
 pub mod lnm;
 pub mod modify_other_keys_mode;
 pub mod mouse;
+pub mod private_color_registers;
 pub mod reverse_wrap_around;
 pub mod rl_bracket;
 pub mod sync_updates;
 pub mod theme;
 pub mod unknown;
+pub mod xt_rev_wrap2;
 pub mod xtcblink;
 pub mod xtextscrn;
 pub mod xtmsewin;

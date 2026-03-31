@@ -7,23 +7,33 @@
 
 use freminal_common::buffer_states::mode::{Mode, SetMode};
 use freminal_common::buffer_states::modes::{
+    allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alternate_scroll::AlternateScroll,
+    decanm::Decanm,
     decarm::Decarm,
     decawm::Decawm,
+    decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
+    declrmm::Declrmm,
+    decnkm::Decnkm,
+    decnrcm::Decnrcm,
     decom::Decom,
     decsclm::Decsclm,
     decscnm::Decscnm,
+    decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
     lnm::Lnm,
     mouse::{MouseEncoding, MouseTrack},
+    private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::UnknownMode,
+    xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
@@ -142,6 +152,54 @@ fn decset_q45_returns_reverse_wrap_around_wrap_around() {
     assert_eq!(
         dispatch(b"?45", SetMode::DecSet),
         Mode::ReverseWrapAround(ReverseWrapAround::WrapAround)
+    );
+}
+
+#[test]
+fn decset_q66_returns_decnkm_application() {
+    assert_eq!(
+        dispatch(b"?66", SetMode::DecSet),
+        Mode::Decnkm(Decnkm::Application)
+    );
+}
+
+#[test]
+fn decrst_q66_returns_decnkm_numeric() {
+    assert_eq!(
+        dispatch(b"?66", SetMode::DecRst),
+        Mode::Decnkm(Decnkm::Numeric)
+    );
+}
+
+#[test]
+fn decquery_q66_returns_decnkm_query() {
+    assert_eq!(
+        dispatch(b"?66", SetMode::DecQuery),
+        Mode::Decnkm(Decnkm::Query)
+    );
+}
+
+#[test]
+fn decset_q67_returns_decbkm_backarrow_sends_bs() {
+    assert_eq!(
+        dispatch(b"?67", SetMode::DecSet),
+        Mode::Decbkm(Decbkm::BackarrowSendsBs)
+    );
+}
+
+#[test]
+fn decrst_q67_returns_decbkm_backarrow_sends_del() {
+    assert_eq!(
+        dispatch(b"?67", SetMode::DecRst),
+        Mode::Decbkm(Decbkm::BackarrowSendsDel)
+    );
+}
+
+#[test]
+fn decquery_q67_returns_decbkm_query() {
+    assert_eq!(
+        dispatch(b"?67", SetMode::DecQuery),
+        Mode::Decbkm(Decbkm::Query)
     );
 }
 
@@ -315,6 +373,14 @@ fn decrst_q1000_returns_mouse_mode_no_tracking() {
     );
 }
 
+#[test]
+fn decrst_q2027_returns_grapheme_clustering_unicode() {
+    assert_eq!(
+        dispatch(b"?2027", SetMode::DecRst),
+        Mode::GraphemeClustering(GraphemeClustering::Unicode)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Group 3: Known params with DecQuery
 // ---------------------------------------------------------------------------
@@ -404,6 +470,14 @@ fn decquery_q2004_returns_bracketed_paste_query() {
     );
 }
 
+#[test]
+fn decquery_q2027_returns_grapheme_clustering_query() {
+    assert_eq!(
+        dispatch(b"?2027", SetMode::DecQuery),
+        Mode::GraphemeClustering(GraphemeClustering::Query)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Group 4: Unknown params — fallback behaviour
 // ---------------------------------------------------------------------------
@@ -490,4 +564,226 @@ fn both_q47_and_q1047_map_to_altscreen47_decquery() {
     assert_eq!(via_47, Mode::AltScreen47(AltScreen47::Query));
     assert_eq!(via_1047, Mode::AltScreen47(AltScreen47::Query));
     assert_eq!(via_47, via_1047);
+}
+
+#[test]
+fn decset_q1007_returns_alternate_scroll_enabled() {
+    assert_eq!(
+        dispatch(b"?1007", SetMode::DecSet),
+        Mode::AlternateScroll(AlternateScroll::Enabled)
+    );
+}
+
+#[test]
+fn decrst_q1007_returns_alternate_scroll_disabled() {
+    assert_eq!(
+        dispatch(b"?1007", SetMode::DecRst),
+        Mode::AlternateScroll(AlternateScroll::Disabled)
+    );
+}
+
+#[test]
+fn decquery_q1007_returns_alternate_scroll_query() {
+    assert_eq!(
+        dispatch(b"?1007", SetMode::DecQuery),
+        Mode::AlternateScroll(AlternateScroll::Query)
+    );
+}
+
+#[test]
+fn decset_q80_returns_decsdm_display_mode() {
+    assert_eq!(
+        dispatch(b"?80", SetMode::DecSet),
+        Mode::Decsdm(Decsdm::DisplayMode)
+    );
+}
+
+#[test]
+fn decrst_q80_returns_decsdm_scrolling_mode() {
+    assert_eq!(
+        dispatch(b"?80", SetMode::DecRst),
+        Mode::Decsdm(Decsdm::ScrollingMode)
+    );
+}
+
+#[test]
+fn decquery_q80_returns_decsdm_query() {
+    assert_eq!(
+        dispatch(b"?80", SetMode::DecQuery),
+        Mode::Decsdm(Decsdm::Query)
+    );
+}
+
+#[test]
+fn decset_q1046_returns_allow_alt_screen() {
+    assert_eq!(
+        dispatch(b"?1046", SetMode::DecSet),
+        Mode::AllowAltScreen(AllowAltScreen::Allow)
+    );
+}
+
+#[test]
+fn decrst_q1046_returns_disallow_alt_screen() {
+    assert_eq!(
+        dispatch(b"?1046", SetMode::DecRst),
+        Mode::AllowAltScreen(AllowAltScreen::Disallow)
+    );
+}
+
+#[test]
+fn decquery_q1046_returns_allow_alt_screen_query() {
+    assert_eq!(
+        dispatch(b"?1046", SetMode::DecQuery),
+        Mode::AllowAltScreen(AllowAltScreen::Query)
+    );
+}
+
+// ── ?1001 (Hilite Mouse Tracking) ─────────────────────────────────────────
+
+#[test]
+fn decset_q1001_returns_mouse_mode_xtmsehilite() {
+    assert_eq!(
+        dispatch(b"?1001", SetMode::DecSet),
+        Mode::MouseMode(MouseTrack::XtMseHilite)
+    );
+}
+
+#[test]
+fn decrst_q1001_returns_mouse_mode_no_tracking() {
+    assert_eq!(
+        dispatch(b"?1001", SetMode::DecRst),
+        Mode::MouseMode(MouseTrack::NoTracking)
+    );
+}
+
+#[test]
+fn decquery_q1001_returns_mouse_mode_query_1001() {
+    assert_eq!(
+        dispatch(b"?1001", SetMode::DecQuery),
+        Mode::MouseMode(MouseTrack::Query(1001))
+    );
+}
+
+// ── ?1070 (Private Color Registers for Sixel) ─────────────────────────────
+
+#[test]
+fn decset_q1070_returns_private_color_registers_private() {
+    assert_eq!(
+        dispatch(b"?1070", SetMode::DecSet),
+        Mode::PrivateColorRegisters(PrivateColorRegisters::Private)
+    );
+}
+
+#[test]
+fn decrst_q1070_returns_private_color_registers_shared() {
+    assert_eq!(
+        dispatch(b"?1070", SetMode::DecRst),
+        Mode::PrivateColorRegisters(PrivateColorRegisters::Shared)
+    );
+}
+
+#[test]
+fn decquery_q1070_returns_private_color_registers_query() {
+    assert_eq!(
+        dispatch(b"?1070", SetMode::DecQuery),
+        Mode::PrivateColorRegisters(PrivateColorRegisters::Query)
+    );
+}
+
+// ── ?42 (DECNRCM — National Replacement Character Set Mode) ───────────────
+
+#[test]
+fn decset_q42_returns_decnrcm_enabled() {
+    assert_eq!(
+        dispatch(b"?42", SetMode::DecSet),
+        Mode::Decnrcm(Decnrcm::NrcEnabled)
+    );
+}
+
+#[test]
+fn decrst_q42_returns_decnrcm_disabled() {
+    assert_eq!(
+        dispatch(b"?42", SetMode::DecRst),
+        Mode::Decnrcm(Decnrcm::NrcDisabled)
+    );
+}
+
+#[test]
+fn decquery_q42_returns_decnrcm_query() {
+    assert_eq!(
+        dispatch(b"?42", SetMode::DecQuery),
+        Mode::Decnrcm(Decnrcm::Query)
+    );
+}
+
+// ── ?1045 (XTREVWRAP2 — Extended Reverse Wraparound Mode) ─────────────
+
+#[test]
+fn decset_q1045_returns_xt_rev_wrap2_enabled() {
+    assert_eq!(
+        dispatch(b"?1045", SetMode::DecSet),
+        Mode::XtRevWrap2(XtRevWrap2::Enabled)
+    );
+}
+
+#[test]
+fn decrst_q1045_returns_xt_rev_wrap2_disabled() {
+    assert_eq!(
+        dispatch(b"?1045", SetMode::DecRst),
+        Mode::XtRevWrap2(XtRevWrap2::Disabled)
+    );
+}
+
+#[test]
+fn decquery_q1045_returns_xt_rev_wrap2_query() {
+    assert_eq!(
+        dispatch(b"?1045", SetMode::DecQuery),
+        Mode::XtRevWrap2(XtRevWrap2::Query)
+    );
+}
+
+// ── ?2 (DECANM — ANSI/VT52 Mode) ─────────────────────────────────────────
+
+#[test]
+fn decset_q2_returns_decanm_ansi() {
+    assert_eq!(dispatch(b"?2", SetMode::DecSet), Mode::Decanm(Decanm::Ansi));
+}
+
+#[test]
+fn decrst_q2_returns_decanm_vt52() {
+    assert_eq!(dispatch(b"?2", SetMode::DecRst), Mode::Decanm(Decanm::Vt52));
+}
+
+#[test]
+fn decquery_q2_returns_decanm_query() {
+    assert_eq!(
+        dispatch(b"?2", SetMode::DecQuery),
+        Mode::Decanm(Decanm::Query)
+    );
+}
+
+// ── ?69 (DECLRMM — Left/Right Margin Mode) ───────────────────────────────
+
+#[test]
+fn decset_q69_returns_declrmm_enabled() {
+    assert_eq!(
+        dispatch(b"?69", SetMode::DecSet),
+        Mode::Declrmm(Declrmm::Enabled)
+    );
+}
+
+#[test]
+fn decrst_q69_returns_declrmm_disabled() {
+    assert_eq!(
+        dispatch(b"?69", SetMode::DecRst),
+        Mode::Declrmm(Declrmm::Disabled)
+    );
+}
+
+#[test]
+fn decquery_q69_returns_declrmm_query() {
+    assert_eq!(
+        dispatch(b"?69", SetMode::DecQuery),
+        Mode::Declrmm(Declrmm::Query)
+    );
 }

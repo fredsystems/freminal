@@ -8,14 +8,21 @@
 use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::modes::{
     ReportMode,
+    allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alternate_scroll::AlternateScroll,
+    decanm::Decanm,
     decarm::Decarm,
     decawm::Decawm,
+    decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
+    declrmm::Declrmm,
+    decnkm::Decnkm,
     decom::Decom,
     decsclm::Decsclm,
     decscnm::Decscnm,
+    decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
     keypad::KeypadMode,
@@ -24,6 +31,7 @@ use freminal_common::buffer_states::modes::{
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
+    xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
@@ -227,6 +235,20 @@ test_mode_type!(
     "Focus Reporting Mode (XT_MSE_WIN) Query"
 );
 
+// AllowAltScreen (?1046): default=Allow, Set=Allow, Reset=Disallow
+test_mode_type!(
+    allow_alt_screen_tests,
+    AllowAltScreen,
+    1046,
+    AllowAltScreen::Allow,
+    AllowAltScreen::Allow,
+    AllowAltScreen::Disallow,
+    AllowAltScreen::Query,
+    "Allow Alternate Screen Switching (?1046)",
+    "Disallow Alternate Screen Switching (?1046)",
+    "Query Allow Alternate Screen Switching (?1046)"
+);
+
 // AllowColumnModeSwitch (?40): default=AllowColumnModeSwitch, Set=AllowColumnModeSwitch,
 //                               Reset=NoAllowColumnModeSwitch
 test_mode_type!(
@@ -352,6 +374,104 @@ test_mode_type!(
     "Bracketed Paste Mode (DEC 2004) Enabled",
     "Bracketed Paste Mode (DEC 2004) Disabled",
     "Bracketed Paste Mode (DEC 2004) Query"
+);
+
+// Decnkm (?66): default=Numeric, Set=Application, Reset=Numeric
+test_mode_type!(
+    decnkm_tests,
+    Decnkm,
+    66,
+    Decnkm::Numeric,
+    Decnkm::Application,
+    Decnkm::Numeric,
+    Decnkm::Query,
+    "Keypad Application Mode (DECNKM)",
+    "Keypad Numeric Mode (DECNKM)",
+    "Query Keypad Mode (DECNKM)"
+);
+
+// Decbkm (?67): default=BackarrowSendsBs, Set=BackarrowSendsBs, Reset=BackarrowSendsDel
+test_mode_type!(
+    decbkm_tests,
+    Decbkm,
+    67,
+    Decbkm::BackarrowSendsBs,
+    Decbkm::BackarrowSendsBs,
+    Decbkm::BackarrowSendsDel,
+    Decbkm::Query,
+    "Backarrow sends BS (DECBKM set)",
+    "Backarrow sends DEL (DECBKM reset)",
+    "Query Backarrow Key Mode (DECBKM)"
+);
+
+// AlternateScroll (?1007): default=Disabled, Set=Enabled, Reset=Disabled
+test_mode_type!(
+    alternate_scroll_tests,
+    AlternateScroll,
+    1007,
+    AlternateScroll::Disabled,
+    AlternateScroll::Enabled,
+    AlternateScroll::Disabled,
+    AlternateScroll::Query,
+    "Alternate Scroll Enabled (?1007)",
+    "Alternate Scroll Disabled (?1007)",
+    "Query Alternate Scroll Mode (?1007)"
+);
+
+// Decsdm (?80): default=ScrollingMode, Set=DisplayMode, Reset=ScrollingMode
+test_mode_type!(
+    decsdm_tests,
+    Decsdm,
+    80,
+    Decsdm::ScrollingMode,
+    Decsdm::DisplayMode,
+    Decsdm::ScrollingMode,
+    Decsdm::Query,
+    "Sixel Display Mode (DECSDM)",
+    "Sixel Scrolling Mode (DECSDM)",
+    "Query Sixel Display Mode (DECSDM)"
+);
+
+// XtRevWrap2 (?1045): default=Disabled, Set=Enabled, Reset=Disabled
+test_mode_type!(
+    xt_rev_wrap2_tests,
+    XtRevWrap2,
+    1045,
+    XtRevWrap2::Disabled,
+    XtRevWrap2::Enabled,
+    XtRevWrap2::Disabled,
+    XtRevWrap2::Query,
+    "Extended Reverse Wrap Enabled",
+    "Extended Reverse Wrap Disabled",
+    "Query Extended Reverse Wrap"
+);
+
+// Decanm (?2): default=Ansi, Set=Ansi, Reset=Vt52
+test_mode_type!(
+    decanm_tests,
+    Decanm,
+    2,
+    Decanm::Ansi,
+    Decanm::Ansi,
+    Decanm::Vt52,
+    Decanm::Query,
+    "ANSI Mode (DECANM)",
+    "VT52 Mode (DECANM)",
+    "Query ANSI/VT52 Mode (DECANM)"
+);
+
+// Declrmm (?69): default=Disabled, Set=Enabled, Reset=Disabled
+test_mode_type!(
+    declrmm_tests,
+    Declrmm,
+    69,
+    Declrmm::Disabled,
+    Declrmm::Enabled,
+    Declrmm::Disabled,
+    Declrmm::Query,
+    "Left/Right Margin Mode (DECLRMM) Enabled",
+    "Left/Right Margin Mode (DECLRMM) Disabled",
+    "Left/Right Margin Mode (DECLRMM) Query"
 );
 
 // ===========================================================================

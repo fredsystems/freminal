@@ -46,6 +46,8 @@ pub enum ParserFailures {
     UnhandledDECSLPPCommand(String),
     #[error("Invalid set margins (DECSTBM) set position sequence: {0}")]
     UnhandledDECSTBMCommand(String),
+    #[error("Invalid set left/right margins (DECSLRM) sequence: {0}")]
+    UnhandledDECSLRMCommand(String),
     #[error("Invalid set margins (DECRQM) set position sequence: {0:?}")]
     UnhandledDECRQMCommand(Vec<u8>),
     #[error("Invalid send device attributes (DA) set position sequence: {0}")]
