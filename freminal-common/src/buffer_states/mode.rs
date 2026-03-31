@@ -11,6 +11,7 @@ use crate::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey,
     decarm::Decarm,
     decawm::Decawm,
+    decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
     decnkm::Decnkm,
@@ -70,6 +71,7 @@ pub struct TerminalModes {
     pub reverse_wrap_around: ReverseWrapAround,
     pub line_feed_mode: Lnm,
     pub keypad_mode: KeypadMode,
+    pub backarrow_key_mode: Decbkm,
 }
 
 #[derive(Eq, PartialEq, Debug, Default, Clone)]
@@ -85,6 +87,7 @@ pub enum Mode {
     Deccolm(Deccolm),
     Decsclm(Decsclm),
     Decnkm(Decnkm),
+    Decbkm(Decbkm),
     Decscnm(Decscnm),
     Decom(Decom),
     Decarm(Decarm),
@@ -145,6 +148,7 @@ impl Mode {
             b"?40" => Self::AllowColumnModeSwitch(AllowColumnModeSwitch::new(&mode)),
             b"?45" => Self::ReverseWrapAround(ReverseWrapAround::new(&mode)),
             b"?66" => Self::Decnkm(Decnkm::new(&mode)),
+            b"?67" => Self::Decbkm(Decbkm::new(&mode)),
             b"?1000" => Self::mouse_mode(mode, MouseTrack::XtMseX11, 1000),
             b"?1002" => Self::mouse_mode(mode, MouseTrack::XtMseBtn, 1002),
             b"?1003" => Self::mouse_mode(mode, MouseTrack::XtMseAny, 1003),
@@ -194,6 +198,7 @@ impl ReportMode for Mode {
             Self::Decom(decom) => decom.report(override_mode),
             Self::Deccolm(deccolm) => deccolm.report(override_mode),
             Self::Decnkm(decnkm) => decnkm.report(override_mode),
+            Self::Decbkm(decbkm) => decbkm.report(override_mode),
             Self::Decsclm(decsclm) => decsclm.report(override_mode),
             Self::Decawm(decawm) => decawm.report(override_mode),
             Self::Dectem(dectem) => dectem.report(override_mode),
@@ -243,6 +248,7 @@ impl fmt::Display for Mode {
             Self::Decsclm(decsclm) => write!(f, "{decsclm}"),
             Self::Deccolm(deccolm) => write!(f, "{deccolm}"),
             Self::Decnkm(decnkm) => write!(f, "{decnkm}"),
+            Self::Decbkm(decbkm) => write!(f, "{decbkm}"),
             Self::LineFeedMode(lnm) => write!(f, "{lnm}"),
             Self::XtCBlink(xt_cblink) => write!(f, "{xt_cblink}"),
             Self::MouseMode(mouse_mode) => write!(f, "{mouse_mode}"),

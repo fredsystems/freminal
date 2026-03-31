@@ -3407,7 +3407,8 @@ impl TerminalHandler {
                 | Mode::Decarm(_)
                 | Mode::ReverseWrapAround(_)
                 | Mode::SynchronizedUpdates(_)
-                | Mode::Decnkm(_) => {}
+                | Mode::Decnkm(_)
+                | Mode::Decbkm(_) => {}
 
                 // ── Application Escape Key (?7727) ────────────────────
                 Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set) => {

@@ -33,11 +33,31 @@ use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::buffer_states::modes::{
+    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
+};
 
 use freminal_common::{
     args::Args, buffer_states::tchar::TChar, cursor::CursorVisualStyle,
     terminal_size::DEFAULT_HEIGHT, terminal_size::DEFAULT_WIDTH,
 };
+
+/// Mode-related fields extracted from the emulator state for a snapshot.
+///
+/// Factored out so `build_snapshot` stays within Clippy's 100-line limit.
+#[allow(clippy::struct_excessive_bools)]
+struct SnapshotModeFields {
+    bracketed_paste: RlBracket,
+    mouse_tracking: MouseTrack,
+    mouse_encoding: MouseEncoding,
+    repeat_keys: bool,
+    cursor_key_app_mode: bool,
+    keypad_app_mode: bool,
+    skip_draw: bool,
+    modify_other_keys: u8,
+    application_escape_key: bool,
+    backarrow_sends_bs: bool,
+}
 
 const fn char_to_ctrl_code(c: u8) -> u8 {
     // https://catern.com/posts/terminal_quirks.html
@@ -174,13 +194,14 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
 
 impl TerminalInput {
     #[must_use]
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
     pub fn to_payload(
         &self,
         decckm_mode: bool,
         keypad_mode: bool,
         modify_other_keys: u8,
         application_escape_key: bool,
+        backarrow_sends_bs: bool,
     ) -> TerminalInputPayload {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
@@ -202,8 +223,14 @@ impl TerminalInput {
             // TODO: investigate further — the tty driver should be handling this.
             Self::Enter => TerminalInputPayload::Single(char_to_ctrl_code(b'm')),
             Self::LineFeed => TerminalInputPayload::Single(b'\n'),
-            // Hard to tie back, but check default VERASE in terminfo definition
-            Self::Backspace => TerminalInputPayload::Single(char_to_ctrl_code(b'H')),
+            // DECBKM (?67): set → BS (0x08), reset → DEL (0x7F).
+            Self::Backspace => {
+                if backarrow_sends_bs {
+                    TerminalInputPayload::Single(char_to_ctrl_code(b'H'))
+                } else {
+                    TerminalInputPayload::Single(0x7F)
+                }
+            }
             Self::Escape => {
                 // Mode 7727 (Application Escape Key): send CSI 27 ; 1 ; 27 ~
                 // instead of bare ESC so tmux can instantly distinguish the
@@ -805,6 +832,7 @@ impl TerminalEmulator {
         };
 
         // ── Remaining cheap reads ────────────────────────────────────────────
+        let mode_fields = self.collect_mode_fields();
         let cursor_pos = self.internal.cursor_pos();
         // Hide the cursor when the user is scrolled back into history —
         // the live cursor line is not visible on screen.
@@ -812,21 +840,6 @@ impl TerminalEmulator {
         let cursor_visual_style = self.internal.get_cursor_visual_style();
         let is_normal_display = self.internal.is_normal_display();
 
-        let bracketed_paste = self.internal.modes.bracketed_paste.clone();
-        let mouse_tracking = self.internal.modes.mouse_tracking.clone();
-        let mouse_encoding = self.internal.modes.mouse_encoding.clone();
-        let repeat_keys = self.internal.should_repeat_keys();
-        let cursor_key_app_mode = {
-            use freminal_common::buffer_states::modes::decckm::Decckm;
-            self.internal.get_cursor_key_mode() == Decckm::Application
-        };
-        let keypad_app_mode = {
-            use freminal_common::buffer_states::modes::keypad::KeypadMode;
-            self.internal.modes.keypad_mode == KeypadMode::Application
-        };
-        let skip_draw = self.internal.skip_draw_always();
-        let modify_other_keys = self.internal.handler.modify_other_keys_level();
-        let application_escape_key = self.internal.handler.application_escape_key();
         let cwd = self
             .internal
             .handler
@@ -858,15 +871,16 @@ impl TerminalEmulator {
             total_rows,
             content_changed,
             scroll_changed,
-            bracketed_paste,
-            mouse_tracking,
-            mouse_encoding,
-            repeat_keys,
-            cursor_key_app_mode,
-            keypad_app_mode,
-            skip_draw,
-            modify_other_keys,
-            application_escape_key,
+            bracketed_paste: mode_fields.bracketed_paste,
+            mouse_tracking: mode_fields.mouse_tracking,
+            mouse_encoding: mode_fields.mouse_encoding,
+            repeat_keys: mode_fields.repeat_keys,
+            cursor_key_app_mode: mode_fields.cursor_key_app_mode,
+            keypad_app_mode: mode_fields.keypad_app_mode,
+            skip_draw: mode_fields.skip_draw,
+            modify_other_keys: mode_fields.modify_other_keys,
+            application_escape_key: mode_fields.application_escape_key,
+            backarrow_sends_bs: mode_fields.backarrow_sends_bs,
             cwd,
             ftcs_state,
             last_exit_code,
@@ -875,6 +889,26 @@ impl TerminalEmulator {
             visible_image_placements,
             playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),
+        }
+    }
+
+    /// Collect all mode flags needed by the snapshot in a single pass.
+    fn collect_mode_fields(&self) -> SnapshotModeFields {
+        use freminal_common::buffer_states::modes::{
+            decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode,
+        };
+
+        SnapshotModeFields {
+            bracketed_paste: self.internal.modes.bracketed_paste.clone(),
+            mouse_tracking: self.internal.modes.mouse_tracking.clone(),
+            mouse_encoding: self.internal.modes.mouse_encoding.clone(),
+            repeat_keys: self.internal.should_repeat_keys(),
+            cursor_key_app_mode: self.internal.get_cursor_key_mode() == Decckm::Application,
+            keypad_app_mode: self.internal.modes.keypad_mode == KeypadMode::Application,
+            skip_draw: self.internal.skip_draw_always(),
+            modify_other_keys: self.internal.handler.modify_other_keys_level(),
+            application_escape_key: self.internal.handler.application_escape_key(),
+            backarrow_sends_bs: self.internal.modes.backarrow_key_mode == Decbkm::BackarrowSendsBs,
         }
     }
 

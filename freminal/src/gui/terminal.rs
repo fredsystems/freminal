@@ -209,6 +209,7 @@ fn handle_scroll_fallback(
                 snap.keypad_app_mode,
                 snap.modify_other_keys,
                 snap.application_escape_key,
+                snap.backarrow_sends_bs,
             );
         }
     } else {
@@ -253,6 +254,8 @@ fn handle_scroll_fallback(
 /// `DECPNM` encoding for keypad keys.  `modify_other_keys` carries the
 /// xterm `modifyOtherKeys` level (0/1/2) for extended Ctrl+letter encoding.
 /// `application_escape_key` drives the `?7727` escape key encoding.
+/// `backarrow_sends_bs` drives the DECBKM (`?67`) backspace key encoding.
+#[allow(clippy::fn_params_excessive_bools)]
 fn send_terminal_inputs(
     inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
@@ -260,6 +263,7 @@ fn send_terminal_inputs(
     keypad_app_mode: bool,
     modify_other_keys: u8,
     application_escape_key: bool,
+    backarrow_sends_bs: bool,
 ) {
     let bytes: Vec<u8> = inputs
         .iter()
@@ -269,6 +273,7 @@ fn send_terminal_inputs(
                 keypad_app_mode,
                 modify_other_keys,
                 application_escape_key,
+                backarrow_sends_bs,
             ) {
                 TerminalInputPayload::Single(b) => vec![b],
                 TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -870,6 +875,7 @@ fn write_input_to_terminal(
                                     snap.keypad_app_mode,
                                     snap.modify_other_keys,
                                     snap.application_escape_key,
+                                    snap.backarrow_sends_bs,
                                 );
                             }
                         }
@@ -902,6 +908,7 @@ fn write_input_to_terminal(
                 snap.keypad_app_mode,
                 snap.modify_other_keys,
                 snap.application_escape_key,
+                snap.backarrow_sends_bs,
             );
         }
     }

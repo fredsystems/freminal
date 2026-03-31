@@ -16,8 +16,8 @@
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        decarm::Decarm, decscnm::Decscnm, keypad::KeypadMode, sync_updates::SynchronizedUpdates,
-        xtmsewin::XtMseWin,
+        decarm::Decarm, decbkm::Decbkm, decscnm::Decscnm, keypad::KeypadMode,
+        sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
     },
     pty_write::PtyWrite,
 };
@@ -419,5 +419,85 @@ fn test_decnkm_decrqm_after_set_is_application() {
     assert_eq!(
         resp, "\x1b[?66;1$y",
         "DECRQM ?66 in Application state must return Ps=1 (set)"
+    );
+}
+
+// ─── DECBKM (?67) — Backarrow Key Mode ──────────────────────────────────────
+
+/// Default backarrow key mode is `BackarrowSendsBs` (set state).
+#[test]
+fn test_decbkm_default_is_bs() {
+    let (state, _rx) = make_state();
+    assert_eq!(
+        state.modes.backarrow_key_mode,
+        Decbkm::BackarrowSendsBs,
+        "Default backarrow key mode must be BackarrowSendsBs"
+    );
+}
+
+/// `CSI ? 67 h` (DECSET) sets backarrow to send BS.
+#[test]
+fn test_decbkm_set_sends_bs() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // First reset to DEL, then set back to BS
+    state.handle_incoming_data(b"\x1b[?67l");
+    assert_eq!(state.modes.backarrow_key_mode, Decbkm::BackarrowSendsDel);
+
+    state.handle_incoming_data(b"\x1b[?67h");
+    assert_eq!(
+        state.modes.backarrow_key_mode,
+        Decbkm::BackarrowSendsBs,
+        "DECSET ?67 must switch backarrow to send BS"
+    );
+}
+
+/// `CSI ? 67 l` (DECRST) sets backarrow to send DEL.
+#[test]
+fn test_decbkm_reset_sends_del() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67l");
+    assert_eq!(
+        state.modes.backarrow_key_mode,
+        Decbkm::BackarrowSendsDel,
+        "DECRST ?67 must switch backarrow to send DEL"
+    );
+}
+
+/// DECRQM query for ?67 returns Ps=1 in default (set/BS) state.
+#[test]
+fn test_decbkm_decrqm_default_is_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?67;1$y",
+        "DECRQM ?67 in default (BS) state must return Ps=1 (set)"
+    );
+}
+
+/// DECRQM query for ?67 after DECRST returns Ps=2 (reset/DEL).
+#[test]
+fn test_decbkm_decrqm_after_reset_is_del() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67l");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?67$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?67;2$y",
+        "DECRQM ?67 in DEL state must return Ps=2 (reset)"
     );
 }

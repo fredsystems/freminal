@@ -10,6 +10,7 @@ use freminal_common::buffer_states::modes::{
     allow_column_mode_switch::AllowColumnModeSwitch,
     decarm::Decarm,
     decawm::Decawm,
+    decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
     decnkm::Decnkm,
@@ -167,6 +168,30 @@ fn decquery_q66_returns_decnkm_query() {
     assert_eq!(
         dispatch(b"?66", SetMode::DecQuery),
         Mode::Decnkm(Decnkm::Query)
+    );
+}
+
+#[test]
+fn decset_q67_returns_decbkm_backarrow_sends_bs() {
+    assert_eq!(
+        dispatch(b"?67", SetMode::DecSet),
+        Mode::Decbkm(Decbkm::BackarrowSendsBs)
+    );
+}
+
+#[test]
+fn decrst_q67_returns_decbkm_backarrow_sends_del() {
+    assert_eq!(
+        dispatch(b"?67", SetMode::DecRst),
+        Mode::Decbkm(Decbkm::BackarrowSendsDel)
+    );
+}
+
+#[test]
+fn decquery_q67_returns_decbkm_query() {
+    assert_eq!(
+        dispatch(b"?67", SetMode::DecQuery),
+        Mode::Decbkm(Decbkm::Query)
     );
 }
 

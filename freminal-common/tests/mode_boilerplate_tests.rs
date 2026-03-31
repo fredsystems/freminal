@@ -11,6 +11,7 @@ use freminal_common::buffer_states::modes::{
     allow_column_mode_switch::AllowColumnModeSwitch,
     decarm::Decarm,
     decawm::Decawm,
+    decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
     decnkm::Decnkm,
@@ -367,6 +368,20 @@ test_mode_type!(
     "Keypad Application Mode (DECNKM)",
     "Keypad Numeric Mode (DECNKM)",
     "Query Keypad Mode (DECNKM)"
+);
+
+// Decbkm (?67): default=BackarrowSendsBs, Set=BackarrowSendsBs, Reset=BackarrowSendsDel
+test_mode_type!(
+    decbkm_tests,
+    Decbkm,
+    67,
+    Decbkm::BackarrowSendsBs,
+    Decbkm::BackarrowSendsBs,
+    Decbkm::BackarrowSendsDel,
+    Decbkm::Query,
+    "Backarrow sends BS (DECBKM set)",
+    "Backarrow sends DEL (DECBKM reset)",
+    "Query Backarrow Key Mode (DECBKM)"
 );
 
 // ===========================================================================

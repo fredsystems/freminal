@@ -14,6 +14,7 @@ use freminal_common::{
         modes::{
             MouseModeNumber, ReportMode,
             decarm::Decarm,
+            decbkm::Decbkm,
             decckm::Decckm,
             decnkm::Decnkm,
             keypad::KeypadMode,
@@ -261,6 +262,65 @@ impl TerminalState {
     fn sync_mode(&mut self, mode: &Mode) {
         match mode {
             // ── Query variants — respond with DECRPM ──────────
+            Mode::Decckm(Decckm::Query)
+            | Mode::BracketedPaste(
+                freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
+            )
+            | Mode::MouseMode(MouseTrack::Query(_))
+            | Mode::XtMseWin(XtMseWin::Query)
+            | Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query)
+            | Mode::Decarm(Decarm::Query)
+            | Mode::ReverseWrapAround(ReverseWrapAround::Query)
+            | Mode::SynchronizedUpdates(SynchronizedUpdates::Query)
+            | Mode::Decnkm(Decnkm::Query)
+            | Mode::Decbkm(Decbkm::Query) => {
+                self.handle_mode_query(mode);
+            }
+            // ── Set/Reset variants — sync into self.modes ─────
+            Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
+            Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
+            Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
+            Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
+            Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
+            Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
+            Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
+            Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
+            Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
+            Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
+            Mode::Decnkm(Decnkm::Application) => {
+                self.modes.keypad_mode = KeypadMode::Application;
+            }
+            Mode::Decnkm(Decnkm::Numeric) => {
+                self.modes.keypad_mode = KeypadMode::Numeric;
+            }
+            Mode::Decbkm(v) => self.modes.backarrow_key_mode = v.clone(),
+            // ── Modes handled entirely by TerminalHandler ──────
+            Mode::XtExtscrn(_)
+            | Mode::AltScreen47(_)
+            | Mode::SaveCursor1048(_)
+            | Mode::Decawm(_)
+            | Mode::Dectem(_)
+            | Mode::XtCBlink(_)
+            | Mode::Decom(_)
+            | Mode::Deccolm(_)
+            | Mode::AllowColumnModeSwitch(_)
+            | Mode::UnknownQuery(_)
+            | Mode::ApplicationEscapeKey(_)
+            | Mode::ModifyOtherKeysMode(_) => {}
+            // ── Modes parsed but not yet acted on ─────────────
+            Mode::NoOp
+            | Mode::Decsclm(_)
+            | Mode::GraphemeClustering(_)
+            | Mode::Theming(_)
+            | Mode::Unknown(_) => {
+                debug!("Mode not acted on by either layer: {mode}");
+            }
+        }
+    }
+
+    /// Handle DECRQM query variants — respond with the appropriate DECRPM.
+    fn handle_mode_query(&self, mode: &Mode) {
+        match mode {
             Mode::Decckm(Decckm::Query) => {
                 let resp = self.modes.cursor_key.report(None);
                 self.send_decrpm(&resp);
@@ -324,44 +384,11 @@ impl TerminalState {
                 };
                 self.send_decrpm(&Decnkm::Application.report(Some(override_mode)));
             }
-            // ── Set/Reset variants — sync into self.modes ─────
-            Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
-            Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
-            Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
-            Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
-            Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
-            Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
-            Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
-            Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
-            Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-            Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
-            Mode::Decnkm(Decnkm::Application) => {
-                self.modes.keypad_mode = KeypadMode::Application;
+            Mode::Decbkm(Decbkm::Query) => {
+                let resp = self.modes.backarrow_key_mode.report(None);
+                self.send_decrpm(&resp);
             }
-            Mode::Decnkm(Decnkm::Numeric) => {
-                self.modes.keypad_mode = KeypadMode::Numeric;
-            }
-            // ── Modes handled entirely by TerminalHandler ──────
-            Mode::XtExtscrn(_)
-            | Mode::AltScreen47(_)
-            | Mode::SaveCursor1048(_)
-            | Mode::Decawm(_)
-            | Mode::Dectem(_)
-            | Mode::XtCBlink(_)
-            | Mode::Decom(_)
-            | Mode::Deccolm(_)
-            | Mode::AllowColumnModeSwitch(_)
-            | Mode::UnknownQuery(_)
-            | Mode::ApplicationEscapeKey(_)
-            | Mode::ModifyOtherKeysMode(_) => {}
-            // ── Modes parsed but not yet acted on ─────────────
-            Mode::NoOp
-            | Mode::Decsclm(_)
-            | Mode::GraphemeClustering(_)
-            | Mode::Theming(_)
-            | Mode::Unknown(_) => {
-                debug!("Mode not acted on by either layer: {mode}");
-            }
+            _ => {}
         }
     }
 
@@ -532,11 +559,16 @@ impl TerminalState {
         let keypad_app = self.modes.keypad_mode == KeypadMode::Application;
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
+        let backarrow_sends_bs = {
+            use freminal_common::buffer_states::modes::decbkm::Decbkm;
+            self.modes.backarrow_key_mode == Decbkm::BackarrowSendsBs
+        };
         match to_write.to_payload(
             decckm,
             keypad_app,
             modify_other_keys,
             application_escape_key,
+            backarrow_sends_bs,
         ) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;

@@ -195,6 +195,12 @@ pub struct TerminalSnapshot {
     /// escape sequence.
     pub application_escape_key: bool,
 
+    /// Whether the Backspace key sends BS (0x08) or DEL (0x7F).
+    ///
+    /// Controlled by DECBKM (`?67`): `true` when set (BS), `false` when
+    /// reset (DEL).  Default is `true` (BS).
+    pub backarrow_sends_bs: bool,
+
     /// Current working directory reported by the shell via OSC 7, if any.
     ///
     /// The GUI can use this for tab titles, file-open dialogs, or spawning
@@ -281,6 +287,7 @@ impl TerminalSnapshot {
             skip_draw: false,
             modify_other_keys: 0,
             application_escape_key: false,
+            backarrow_sends_bs: true,
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,

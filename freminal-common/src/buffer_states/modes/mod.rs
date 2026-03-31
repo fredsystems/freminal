@@ -9,6 +9,7 @@ pub mod allow_column_mode_switch;
 pub mod application_escape_key;
 pub mod decarm;
 pub mod decawm;
+pub mod decbkm;
 pub mod decckm;
 pub mod deccolm;
 pub mod decnkm;
