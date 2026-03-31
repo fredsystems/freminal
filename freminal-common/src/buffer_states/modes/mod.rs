@@ -32,6 +32,7 @@ pub mod rl_bracket;
 pub mod sync_updates;
 pub mod theme;
 pub mod unknown;
+pub mod xt_rev_wrap2;
 pub mod xtcblink;
 pub mod xtextscrn;
 pub mod xtmsewin;

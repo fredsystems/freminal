@@ -932,13 +932,17 @@ impl Buffer {
     /// - Move cursor left by one cell.
     /// - If the cell to the left is a continuation cell of a wide glyph,
     ///   skip left until the glyph head.
-    /// - If cursor is at column 0, do nothing.
-    /// - Never moves vertically and never deletes characters.
-    pub fn handle_backspace(&mut self) {
-        // Backspace is a purely local operation. Do NOT perform scrollback
-        // enforcement or invariants after this function.
-
+    /// - If cursor is at column 0 and `reverse_wrap` is false, do nothing.
+    /// - If cursor is at column 0 and `reverse_wrap` is true, wrap to the
+    ///   last column of the previous line (within the visible screen, or
+    ///   into scrollback if `xt_rev_wrap2` is also true).
+    /// - Never deletes characters.
+    pub fn handle_backspace(&mut self, reverse_wrap: bool, xt_rev_wrap2: bool) {
         if self.cursor.pos.x == 0 {
+            if !reverse_wrap {
+                return;
+            }
+            self.reverse_wrap_up(xt_rev_wrap2);
             return;
         }
 
@@ -969,6 +973,27 @@ impl Buffer {
         // This MUST be the only post-condition for backspace.
         debug_assert!(self.cursor.pos.y < self.rows.len());
         debug_assert!(self.cursor.pos.x < self.width);
+    }
+
+    /// Move the cursor up one row and to the last column (reverse wrap).
+    ///
+    /// If the cursor is already at the top of the visible screen and
+    /// `into_scrollback` is true, the cursor enters the scrollback region.
+    /// If at the top and `into_scrollback` is false, the cursor stays put.
+    fn reverse_wrap_up(&mut self, into_scrollback: bool) {
+        let visible_start = self.visible_window_start(0);
+
+        if self.cursor.pos.y > visible_start {
+            // Not at the top of the visible screen — wrap to previous row.
+            self.cursor.pos.y -= 1;
+            self.cursor.pos.x = self.width.saturating_sub(1);
+        } else if into_scrollback && self.cursor.pos.y > 0 {
+            // At top of visible screen, but scrollback exists and
+            // extended reverse-wrap is enabled.
+            self.cursor.pos.y -= 1;
+            self.cursor.pos.x = self.width.saturating_sub(1);
+        }
+        // Otherwise: at absolute top or scrollback not allowed — no-op.
     }
 
     /// Advance the cursor to the next tab stop (HT / 0x09).
@@ -3810,17 +3835,17 @@ mod backspace_tests {
         buf.insert_text(&"abc".chars().map(TChar::from).collect::<Vec<_>>());
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 2);
 
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 1);
 
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // stays at 0
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
@@ -3837,16 +3862,16 @@ mod backspace_tests {
         // "b" (col 3)
         assert_eq!(buf.cursor.pos.x, 4);
 
-        buf.handle_backspace(); // over b → x=3
+        buf.handle_backspace(false, false); // over b → x=3
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace(); // over wide glyph (continuation cell)
+        buf.handle_backspace(false, false); // over wide glyph (continuation cell)
         assert_eq!(buf.cursor.pos.x, 1);
 
-        buf.handle_backspace(); // over 'a'
+        buf.handle_backspace(false, false); // over 'a'
         assert_eq!(buf.cursor.pos.x, 0);
 
-        buf.handle_backspace(); // can't go lower
+        buf.handle_backspace(false, false); // can't go lower
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
@@ -3861,13 +3886,120 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 1);
 
-        // backspace never moves Y
-        buf.handle_backspace();
+        // backspace never moves Y (without reverse wrap)
+        buf.handle_backspace(false, false);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // at col 0 → stays there
-        buf.handle_backspace();
+        buf.handle_backspace(false, false);
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    // ── Reverse-wrap tests (?45 and ?1045) ────────────────────────────
+
+    #[test]
+    fn reverse_wrap_at_col0_wraps_to_previous_row() {
+        let mut buf = Buffer::new(10, 5);
+
+        // Write two rows of content
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        buf.insert_text(&"K".chars().map(TChar::from).collect::<Vec<_>>());
+
+        // cursor is at row 1, col 1
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 1);
+
+        // Move to col 0
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 0);
+
+        // With reverse_wrap=true, at col 0 → wraps to last col of row 0
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, 0);
+        assert_eq!(buf.cursor.pos.x, 9); // last column (width - 1)
+    }
+
+    #[test]
+    fn reverse_wrap_at_top_of_visible_no_scrollback_stays_put() {
+        let mut buf = Buffer::new(10, 5);
+
+        // Only one row — cursor at (0, 0)
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 0;
+
+        // reverse_wrap is on but no row above → stays put
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, 0);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    #[test]
+    fn reverse_wrap_disabled_never_wraps() {
+        let mut buf = Buffer::new(10, 5);
+
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        buf.insert_text(&"K".chars().map(TChar::from).collect::<Vec<_>>());
+
+        // Move to col 0 of row 1
+        buf.cursor.pos.x = 0;
+        assert_eq!(buf.cursor.pos.y, 1);
+
+        // reverse_wrap=false → stays at col 0
+        buf.handle_backspace(false, false);
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    #[test]
+    fn reverse_wrap_into_scrollback_with_xt_rev_wrap2() {
+        // Create a buffer with scrollback: fill enough rows to push some
+        // above the visible window.
+        let mut buf = Buffer::new(10, 3);
+
+        // Fill 5 rows of data; height is 3, so 2 rows are in scrollback.
+        for line in &[
+            "aaaaaaaaaa",
+            "bbbbbbbbbb",
+            "cccccccccc",
+            "dddddddddd",
+            "eeeeeeeeee",
+        ] {
+            buf.insert_text(&line.chars().map(TChar::from).collect::<Vec<_>>());
+            buf.handle_lf();
+        }
+
+        // Cursor is now at the bottom of visible window.
+        // Move cursor to col 0 at the top of the visible window.
+        let vis_start = buf.visible_window_start(0);
+        buf.cursor.pos.y = vis_start;
+        buf.cursor.pos.x = 0;
+
+        // Without xt_rev_wrap2: stays put at top of visible screen
+        buf.handle_backspace(true, false);
+        assert_eq!(buf.cursor.pos.y, vis_start);
+        assert_eq!(buf.cursor.pos.x, 0);
+
+        // With xt_rev_wrap2=true: wraps into scrollback
+        buf.handle_backspace(true, true);
+        assert_eq!(buf.cursor.pos.y, vis_start - 1);
+        assert_eq!(buf.cursor.pos.x, 9); // last column
+    }
+
+    #[test]
+    fn xt_rev_wrap2_without_reverse_wrap_does_nothing() {
+        let mut buf = Buffer::new(10, 5);
+
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        buf.insert_text(&"K".chars().map(TChar::from).collect::<Vec<_>>());
+
+        buf.cursor.pos.x = 0;
+        assert_eq!(buf.cursor.pos.y, 1);
+
+        // reverse_wrap=false, xt_rev_wrap2=true → no wrap (reverse_wrap gate is checked first)
+        buf.handle_backspace(false, true);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
     }

@@ -34,6 +34,7 @@ use crate::buffer_states::modes::{
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::UnknownMode,
+    xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
@@ -112,6 +113,7 @@ pub enum Mode {
     /// Mouse encoding format (?1005/?1006/?1016) — orthogonal to `MouseMode`.
     MouseEncodingMode(MouseEncoding),
     ReverseWrapAround(ReverseWrapAround),
+    XtRevWrap2(XtRevWrap2),
     SynchronizedUpdates(SynchronizedUpdates),
     GraphemeClustering(GraphemeClustering),
     Theming(Theming),
@@ -174,6 +176,7 @@ impl Mode {
             // recommended; ?1006 (SGR) is the preferred replacement.
             b"?1007" => Self::AlternateScroll(AlternateScroll::new(&mode)),
             b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
+            b"?1045" => Self::XtRevWrap2(XtRevWrap2::new(&mode)),
             b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
             b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
@@ -236,6 +239,7 @@ impl ReportMode for Mode {
             Self::ReverseWrapAround(reverse_wrap_around) => {
                 reverse_wrap_around.report(override_mode)
             }
+            Self::XtRevWrap2(xt_rev_wrap2) => xt_rev_wrap2.report(override_mode),
             Self::SynchronizedUpdates(sync_updates) => sync_updates.report(override_mode),
             Self::GraphemeClustering(grapheme_clustering) => {
                 grapheme_clustering.report(override_mode)
@@ -287,6 +291,7 @@ impl fmt::Display for Mode {
             Self::SaveCursor1048(sc1048) => write!(f, "{sc1048}"),
             Self::BracketedPaste(bracketed_paste) => write!(f, "{bracketed_paste}"),
             Self::ReverseWrapAround(reverse_wrap_around) => write!(f, "{reverse_wrap_around}"),
+            Self::XtRevWrap2(xt_rev_wrap2) => write!(f, "{xt_rev_wrap2}"),
             Self::SynchronizedUpdates(sync_updates) => write!(f, "{sync_updates}"),
             Self::GraphemeClustering(grapheme_clustering) => write!(f, "{grapheme_clustering}"),
             Self::Theming(theming) => write!(f, "{theming}"),

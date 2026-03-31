@@ -29,6 +29,7 @@ use freminal_common::buffer_states::modes::{
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
+    xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
@@ -427,6 +428,20 @@ test_mode_type!(
     "Sixel Display Mode (DECSDM)",
     "Sixel Scrolling Mode (DECSDM)",
     "Query Sixel Display Mode (DECSDM)"
+);
+
+// XtRevWrap2 (?1045): default=Disabled, Set=Enabled, Reset=Disabled
+test_mode_type!(
+    xt_rev_wrap2_tests,
+    XtRevWrap2,
+    1045,
+    XtRevWrap2::Disabled,
+    XtRevWrap2::Enabled,
+    XtRevWrap2::Disabled,
+    XtRevWrap2::Query,
+    "Extended Reverse Wrap Enabled",
+    "Extended Reverse Wrap Disabled",
+    "Query Extended Reverse Wrap"
 );
 
 // ===========================================================================

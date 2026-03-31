@@ -5037,3 +5037,113 @@ fn decrpm_decnrcm_after_set_then_reset() {
         "DECNRCM after DECRST (NrcDisabled) → Ps=2"
     );
 }
+
+// ── XTREVWRAP2 (?1045) — Extended Reverse Wraparound Mode ────────────
+
+#[test]
+fn decrpm_xt_rev_wrap2_default_is_disabled() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xt_rev_wrap2::XtRevWrap2,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1045;2$y",
+        "XTREVWRAP2 default (Disabled) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_xt_rev_wrap2_after_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xt_rev_wrap2::XtRevWrap2,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1045;1$y",
+        "XTREVWRAP2 after DECSET (Enabled) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_xt_rev_wrap2_after_set_then_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xt_rev_wrap2::XtRevWrap2,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1045;2$y",
+        "XTREVWRAP2 after DECRST (Disabled) → Ps=2"
+    );
+}
+
+// ── Reverse Wrap (?45) — DECRPM via handler ───────────────────────────
+
+#[test]
+fn decrpm_reverse_wrap_default_is_enabled() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::reverse_wrap_around::ReverseWrapAround,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::ReverseWrapAround(ReverseWrapAround::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?45;1$y",
+        "Reverse wrap default (WrapAround/enabled) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_reverse_wrap_after_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::reverse_wrap_around::ReverseWrapAround,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::ReverseWrapAround(
+        ReverseWrapAround::new(&SetMode::DecRst),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::ReverseWrapAround(ReverseWrapAround::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?45;2$y",
+        "Reverse wrap after DECRST (DontWrap/disabled) → Ps=2"
+    );
+}

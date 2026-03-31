@@ -30,6 +30,8 @@ use freminal_common::{
         modes::lnm::Lnm,
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::private_color_registers::PrivateColorRegisters,
+        modes::reverse_wrap_around::ReverseWrapAround,
+        modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::{
@@ -244,6 +246,18 @@ pub struct TerminalHandler {
     /// active. When `true`, character set designations map specific ASCII
     /// positions to national characters. Default is `false` (disabled).
     nrc_mode: bool,
+    /// Whether reverse-wraparound (`?45`) is active.
+    ///
+    /// When set, the cursor can wrap backwards from column 0 to the end
+    /// of the previous line within the visible screen.
+    /// Default is `true` (enabled) — matches xterm's default.
+    reverse_wrap: bool,
+    /// Whether extended reverse-wraparound (`?1045`) is active.
+    ///
+    /// When set (and `?45` is also set), the cursor can wrap backwards
+    /// past row 0 of the visible screen into the scrollback buffer.
+    /// Default is `false` (disabled).
+    xt_rev_wrap2: bool,
     /// The persistent Sixel palette used when `private_color_registers` is
     /// `false` (shared mode, `?1070 l`).  Palette changes in one image carry
     /// over to the next.  `None` when private mode is active; populated the
@@ -289,6 +303,8 @@ impl TerminalHandler {
             sixel_display_mode: false,
             private_color_registers: true,
             nrc_mode: false,
+            reverse_wrap: true,
+            xt_rev_wrap2: false,
             sixel_shared_palette: None,
         }
     }
@@ -616,7 +632,8 @@ impl TerminalHandler {
 
     /// Handle backspace
     pub fn handle_backspace(&mut self) {
-        self.buffer.handle_backspace();
+        self.buffer
+            .handle_backspace(self.reverse_wrap, self.xt_rev_wrap2);
     }
 
     /// Handle horizontal tab (HT / 0x09)
@@ -3532,6 +3549,36 @@ impl TerminalHandler {
                     };
                     self.write_to_pty(&Decnrcm::NrcEnabled.report(Some(mode)));
                 }
+                // ── Reverse Wrap Around (?45) ─────────────────────
+                Mode::ReverseWrapAround(ReverseWrapAround::WrapAround) => {
+                    self.reverse_wrap = true;
+                }
+                Mode::ReverseWrapAround(ReverseWrapAround::DontWrap) => {
+                    self.reverse_wrap = false;
+                }
+                Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
+                    let mode = if self.reverse_wrap {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&ReverseWrapAround::WrapAround.report(Some(mode)));
+                }
+                // ── Extended Reverse Wrap (?1045) ─────────────────
+                Mode::XtRevWrap2(XtRevWrap2::Enabled) => {
+                    self.xt_rev_wrap2 = true;
+                }
+                Mode::XtRevWrap2(XtRevWrap2::Disabled) => {
+                    self.xt_rev_wrap2 = false;
+                }
+                Mode::XtRevWrap2(XtRevWrap2::Query) => {
+                    let mode = if self.xt_rev_wrap2 {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&XtRevWrap2::Enabled.report(Some(mode)));
+                }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in
                 // TerminalState::modes.  TerminalHandler does not act on
@@ -3546,7 +3593,6 @@ impl TerminalHandler {
                 | Mode::XtMseWin(_)
                 | Mode::Decscnm(_)
                 | Mode::Decarm(_)
-                | Mode::ReverseWrapAround(_)
                 | Mode::SynchronizedUpdates(_)
                 | Mode::Decnkm(_)
                 | Mode::Decbkm(_)

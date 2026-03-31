@@ -31,6 +31,7 @@ use freminal_common::buffer_states::modes::{
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::UnknownMode,
+    xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
@@ -710,5 +711,31 @@ fn decquery_q42_returns_decnrcm_query() {
     assert_eq!(
         dispatch(b"?42", SetMode::DecQuery),
         Mode::Decnrcm(Decnrcm::Query)
+    );
+}
+
+// ── ?1045 (XTREVWRAP2 — Extended Reverse Wraparound Mode) ─────────────
+
+#[test]
+fn decset_q1045_returns_xt_rev_wrap2_enabled() {
+    assert_eq!(
+        dispatch(b"?1045", SetMode::DecSet),
+        Mode::XtRevWrap2(XtRevWrap2::Enabled)
+    );
+}
+
+#[test]
+fn decrst_q1045_returns_xt_rev_wrap2_disabled() {
+    assert_eq!(
+        dispatch(b"?1045", SetMode::DecRst),
+        Mode::XtRevWrap2(XtRevWrap2::Disabled)
+    );
+}
+
+#[test]
+fn decquery_q1045_returns_xt_rev_wrap2_query() {
+    assert_eq!(
+        dispatch(b"?1045", SetMode::DecQuery),
+        Mode::XtRevWrap2(XtRevWrap2::Query)
     );
 }

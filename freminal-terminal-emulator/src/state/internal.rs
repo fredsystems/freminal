@@ -271,7 +271,6 @@ impl TerminalState {
             | Mode::XtMseWin(XtMseWin::Query)
             | Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query)
             | Mode::Decarm(Decarm::Query)
-            | Mode::ReverseWrapAround(ReverseWrapAround::Query)
             | Mode::SynchronizedUpdates(SynchronizedUpdates::Query)
             | Mode::Decnkm(Decnkm::Query)
             | Mode::Decbkm(Decbkm::Query)
@@ -286,7 +285,11 @@ impl TerminalState {
             Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
             Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
             Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
-            Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
+            // ?45 set/reset: sync into TerminalModes for backwards compat.
+            // Query is answered by the handler; ignore it here.
+            Mode::ReverseWrapAround(
+                v @ (ReverseWrapAround::WrapAround | ReverseWrapAround::DontWrap),
+            ) => self.modes.reverse_wrap_around = v.clone(),
             Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
             Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
             Mode::Decnkm(Decnkm::Application) => {
@@ -314,7 +317,9 @@ impl TerminalState {
             | Mode::GraphemeClustering(_)
             | Mode::Decsdm(_)
             | Mode::Decnrcm(_)
-            | Mode::PrivateColorRegisters(_) => {}
+            | Mode::PrivateColorRegisters(_)
+            | Mode::ReverseWrapAround(_)
+            | Mode::XtRevWrap2(_) => {}
             // ── Modes parsed but not yet acted on ─────────────
             Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
                 debug!("Mode not acted on by either layer: {mode}");
@@ -371,10 +376,6 @@ impl TerminalState {
             }
             Mode::Decarm(Decarm::Query) => {
                 let resp = self.modes.repeat_keys.report(None);
-                self.send_decrpm(&resp);
-            }
-            Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
-                let resp = self.modes.reverse_wrap_around.report(None);
                 self.send_decrpm(&resp);
             }
             Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
