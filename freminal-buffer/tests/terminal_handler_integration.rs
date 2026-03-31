@@ -2884,6 +2884,258 @@ fn test_new_columns_get_default_stops_after_resize() {
     assert_eq!(handler.buffer().get_cursor().pos.x, 112);
 }
 
+// ── 7.21b — Comprehensive Tab Stop Test Suite (Subtask 21.6) ─────────
+
+#[test]
+fn test_tab_at_last_column_does_not_advance_past_width() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Move cursor to last column (79 in 0-indexed)
+    handler.handle_cursor_pos(Some(80), Some(1)); // 1-based → col 79
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    handler.handle_tab();
+    // Should not advance past width
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+}
+
+#[test]
+fn test_tab_with_no_stops_set_goes_to_last_column() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Clear all tab stops
+    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    // Tab from col 0 should go to last column (no stops to land on)
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+}
+
+#[test]
+fn test_cht_with_count_skips_stops() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Default stops at 8, 16, 24, 32, ...
+    // Set custom stops at 10, 20, 30
+    handler.handle_cursor_pos(Some(11), Some(1)); // col 10
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(21), Some(1)); // col 20
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(31), Some(1)); // col 30
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // From col 0, CHT with Ps=2 skips first stop (col 8) and lands on second (col 10)
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.process_outputs(&[TerminalOutput::CursorForwardTab(2)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+}
+
+#[test]
+fn test_cbt_at_column_0_stays() {
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+}
+
+#[test]
+fn test_cbt_past_all_stops_goes_to_zero() {
+    let mut handler = TerminalHandler::new(80, 24);
+    // Default stops are at 8, 16, 24, ... Cursor at col 5 with CBT → col 0
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+}
+
+#[test]
+fn test_hts_then_tbc_round_trip() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set a custom stop at col 5
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Verify it works: tab from col 0 → 5
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+
+    // Clear the stop at col 5 (TBC Ps=0 with cursor at col 5)
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+
+    // Verify it's gone: tab from col 0 → 8 (next default stop)
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+}
+
+#[test]
+fn test_default_stops_after_full_reset() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Clear all tab stops
+    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    // Verify they're gone
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+
+    // Full reset
+    handler.full_reset();
+
+    // Default 8-column stops should be restored
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+}
+
+#[test]
+fn test_hts_at_column_0() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Clear all stops first
+    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+
+    // Set a stop at col 0
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Set a stop at col 10
+    handler.handle_cursor_pos(Some(11), Some(1)); // col 10
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Tab from col 0 should find the next stop at col 10 (col 0 is current, not "next")
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+}
+
+#[test]
+fn test_default_stops_in_wide_terminal() {
+    let mut handler = TerminalHandler::new(200, 24);
+
+    // Tab through all default stops
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+
+    // Jump near end: tab from col 184 → 192
+    handler.handle_cursor_pos(Some(185), Some(1)); // col 184
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 192);
+
+    // Tab from 192 → 199 (last column, no more stops)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 199);
+}
+
+#[test]
+fn test_tbc_ps1_does_not_affect_character_stops() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set a custom stop at col 5
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // TBC Ps=1 (line tab stop at cursor) — should be no-op for character stops
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::TabClear(1)]);
+
+    // Verify custom stop at col 5 is still present
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+}
+
+#[test]
+fn test_tbc_ps2_clears_at_cursor() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set custom stop at col 5
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // TBC Ps=2 — should clear the stop at the cursor column (equiv to Ps=0)
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::TabClear(2)]);
+
+    // Tab from col 0 should skip col 5 and hit col 8
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+}
+
+#[test]
+fn test_tbc_ps4_does_not_affect_character_stops() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Default stops present. TBC Ps=4 (clear all line stops) should be no-op
+    handler.process_outputs(&[TerminalOutput::TabClear(4)]);
+
+    // Verify default stops are still intact
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+}
+
+#[test]
+fn test_tbc_ps5_clears_all_stops() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set an extra custom stop
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // TBC Ps=5 — clears all tab stops (equiv to Ps=3)
+    handler.process_outputs(&[TerminalOutput::TabClear(5)]);
+
+    // Tab from col 0 should go to last column (all stops cleared)
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+}
+
+#[test]
+fn test_tab_stops_shared_across_alternate_screen() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set a custom stop at col 5 in primary screen
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Enter alternate screen
+    handler.handle_enter_alternate();
+
+    // Verify the custom stop is visible in alternate screen
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+}
+
+#[test]
+fn test_tab_stop_changes_in_alternate_persist_to_primary() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Enter alternate screen
+    handler.handle_enter_alternate();
+
+    // Clear all tab stops while in alternate
+    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+
+    // Leave alternate — return to primary
+    handler.handle_leave_alternate();
+
+    // Tab stops should be cleared in primary too (shared, not per-buffer)
+    handler.handle_cursor_pos(Some(1), Some(1));
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+}
+
 // ── 7.24 — CSI s / CSI u (Save / Restore Cursor) ────────────────────
 
 #[test]
