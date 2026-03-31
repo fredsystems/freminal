@@ -3334,7 +3334,7 @@ impl TerminalHandler {
                 self.handle_set_left_right_margins(*left_margin, *right_margin);
             }
 
-            // === Unimplemented Operations - TODO ===
+            // === Bell, Tab Stops, and Miscellaneous ===
             TerminalOutput::Bell => {
                 tracing::debug!("Bell (ignored)");
             }
@@ -3345,8 +3345,12 @@ impl TerminalHandler {
                 self.buffer.set_tab_stop();
             }
             TerminalOutput::TabClear(ps) => match ps {
-                0 => self.buffer.clear_tab_stop_at_cursor(),
-                3 => self.buffer.clear_all_tab_stops(),
+                0 | 2 => self.buffer.clear_tab_stop_at_cursor(),
+                3 | 5 => self.buffer.clear_all_tab_stops(),
+                1 | 4 => {
+                    // Line tab stops (Ps=1: at cursor line, Ps=4: all).
+                    // No modern terminal implements line tabulation — silently accept.
+                }
                 _ => {
                     tracing::warn!("TBC with unsupported Ps={ps} (ignored)");
                 }

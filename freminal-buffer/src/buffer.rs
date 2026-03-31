@@ -113,6 +113,12 @@ pub struct Buffer {
 
 /// Everything we need to restore when leaving alternate buffer.
 #[derive(Debug, Clone)]
+/// State saved when entering the alternate screen buffer, restored on exit.
+///
+/// Note: `tab_stops` is intentionally NOT saved here. Tab stops are shared
+/// between primary and alternate screens — changes made while in alternate
+/// mode persist when returning to the primary screen. This matches xterm
+/// behavior. The `tab_stops` field lives on `Buffer` and is never swapped.
 pub struct SavedPrimaryState {
     pub rows: Vec<Row>,
     /// Per-row flat-representation cache saved alongside `rows`.
@@ -2687,6 +2693,12 @@ impl Buffer {
 
     /// Switch to the alternate screen buffer.
     ///
+    /// Enter the alternate screen buffer.
+    ///
+    /// Saves the primary buffer state (rows, cursor, scroll region, image store)
+    /// so it can be restored by [`leave_alternate`]. Tab stops are NOT saved —
+    /// they are shared between primary and alternate screens (matching xterm).
+    ///
     /// The caller must pass the current `scroll_offset` from `ViewState` so it can
     /// be saved and restored later.  The alternate screen always starts at offset 0;
     /// the caller should set `ViewState::scroll_offset = 0` after this call.
@@ -2730,8 +2742,12 @@ impl Buffer {
         self.debug_assert_invariants();
     }
 
-    /// Leave the alternate screen and restore the primary buffer, if any was saved.
     /// Leave the alternate screen and restore the primary buffer.
+    ///
+    /// Restores rows, cursor, scroll region, and image store from the saved
+    /// primary state. Tab stops are NOT restored — they are shared between
+    /// primary and alternate screens, so any changes made in the alternate
+    /// screen persist (matching xterm behavior).
     ///
     /// Returns the `scroll_offset` that was saved when `enter_alternate` was
     /// called.  The caller should store this back into `ViewState::scroll_offset`.
