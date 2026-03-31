@@ -17,6 +17,7 @@ pub mod decnkm;
 pub mod decom;
 pub mod decsclm;
 pub mod decscnm;
+pub mod decsdm;
 pub mod dectcem;
 pub mod grapheme;
 pub mod keypad;

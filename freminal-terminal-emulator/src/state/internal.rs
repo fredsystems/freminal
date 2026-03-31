@@ -310,7 +310,8 @@ impl TerminalState {
             | Mode::UnknownQuery(_)
             | Mode::ApplicationEscapeKey(_)
             | Mode::ModifyOtherKeysMode(_)
-            | Mode::GraphemeClustering(_) => {}
+            | Mode::GraphemeClustering(_)
+            | Mode::Decsdm(_) => {}
             // ── Modes parsed but not yet acted on ─────────────
             Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
                 debug!("Mode not acted on by either layer: {mode}");

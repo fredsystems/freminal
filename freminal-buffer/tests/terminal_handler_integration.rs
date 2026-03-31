@@ -4627,3 +4627,70 @@ fn decrpm_grapheme_clustering_after_reset_still_permanently_set() {
         "Grapheme clustering remains permanently set even after DECRST"
     );
 }
+
+// ── DECSDM (?80) — Sixel Display Mode ──────────────────────────────────
+
+#[test]
+fn decrpm_decsdm_default_is_scrolling() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decsdm::Decsdm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?80;2$y",
+        "DECSDM default (ScrollingMode) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_decsdm_after_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decsdm::Decsdm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set DECSDM (Display Mode)
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?80;1$y",
+        "DECSDM after DECSET (DisplayMode) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_decsdm_after_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decsdm::Decsdm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Set then reset
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?80;2$y",
+        "DECSDM after DECRST (ScrollingMode) → Ps=2"
+    );
+}

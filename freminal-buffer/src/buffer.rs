@@ -313,6 +313,20 @@ impl Buffer {
         &self.cursor
     }
 
+    /// Set the cursor to an absolute buffer position without any DECOM or
+    /// screen-relative translation.
+    ///
+    /// The position is clamped to the current buffer dimensions.  Used by
+    /// DECSDM to restore the cursor after `place_image` moves it.
+    pub fn set_cursor_pos_raw(&mut self, pos: CursorPos) {
+        self.cursor.pos.x = if self.width > 0 {
+            pos.x.min(self.width - 1)
+        } else {
+            0
+        };
+        self.cursor.pos.y = pos.y.min(self.rows.len().saturating_sub(1));
+    }
+
     /// Advance the cursor by one column, wrapping to the next line if needed.
     ///
     /// Used after inserting a placeholder image cell that occupies one column.

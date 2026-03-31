@@ -18,6 +18,7 @@ use freminal_common::buffer_states::modes::{
     decom::Decom,
     decsclm::Decsclm,
     decscnm::Decscnm,
+    decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
     lnm::Lnm,
@@ -580,5 +581,29 @@ fn decquery_q1007_returns_alternate_scroll_query() {
     assert_eq!(
         dispatch(b"?1007", SetMode::DecQuery),
         Mode::AlternateScroll(AlternateScroll::Query)
+    );
+}
+
+#[test]
+fn decset_q80_returns_decsdm_display_mode() {
+    assert_eq!(
+        dispatch(b"?80", SetMode::DecSet),
+        Mode::Decsdm(Decsdm::DisplayMode)
+    );
+}
+
+#[test]
+fn decrst_q80_returns_decsdm_scrolling_mode() {
+    assert_eq!(
+        dispatch(b"?80", SetMode::DecRst),
+        Mode::Decsdm(Decsdm::ScrollingMode)
+    );
+}
+
+#[test]
+fn decquery_q80_returns_decsdm_query() {
+    assert_eq!(
+        dispatch(b"?80", SetMode::DecQuery),
+        Mode::Decsdm(Decsdm::Query)
     );
 }

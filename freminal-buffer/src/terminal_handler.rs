@@ -22,6 +22,7 @@ use freminal_common::{
         modes::decawm::Decawm,
         modes::deccolm::Deccolm,
         modes::decom::Decom,
+        modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
         modes::lnm::Lnm,
@@ -106,6 +107,7 @@ struct PrevPlaceholder {
 /// It receives parsed terminal sequences (via a TerminalOutput-like enum) and updates
 /// the buffer state accordingly.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalHandler {
     buffer: Buffer,
     current_format: FormatTag,
@@ -219,6 +221,13 @@ pub struct TerminalHandler {
     /// `ESC` (`0x1b`), allowing tmux to instantly distinguish the Escape key
     /// from the start of an escape sequence.
     application_escape_key: bool,
+    /// Whether Sixel Display Mode (DECSDM `?80`) is active.
+    ///
+    /// When set (`CSI ? 80 h`), Sixel images are placed at the cursor position
+    /// but the cursor does NOT advance past the image.
+    /// When reset (`CSI ? 80 l`, the default), the cursor advances below the
+    /// image after placement (scrolling mode).
+    sixel_display_mode: bool,
 }
 
 impl TerminalHandler {
@@ -254,6 +263,7 @@ impl TerminalHandler {
             in_tmux_passthrough: false,
             modify_other_keys_level: 0,
             application_escape_key: false,
+            sixel_display_mode: false,
         }
     }
 
@@ -1481,9 +1491,23 @@ impl TerminalHandler {
             display_rows,
         };
 
+        // In DECSDM display mode (?80 h), the cursor does not advance past
+        // the image.  Save the cursor position so we can restore it after
+        // place_image (which always moves the cursor below the image).
+        let saved_cursor = if self.sixel_display_mode {
+            Some(self.buffer.get_cursor().pos)
+        } else {
+            None
+        };
+
         let _new_offset =
             self.buffer
                 .place_image(inline_image, 0, ImageProtocol::Sixel, None, None, 0);
+
+        // Restore cursor position for DECSDM display mode.
+        if let Some(pos) = saved_cursor {
+            self.buffer.set_cursor_pos_raw(pos);
+        }
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -3393,6 +3417,21 @@ impl TerminalHandler {
                     self.write_to_pty(
                         &AllowColumnModeSwitch::AllowColumnModeSwitch.report(Some(mode)),
                     );
+                }
+                // ── Sixel Display Mode (?80) ──────────────────────────
+                Mode::Decsdm(Decsdm::DisplayMode) => {
+                    self.sixel_display_mode = true;
+                }
+                Mode::Decsdm(Decsdm::ScrollingMode) => {
+                    self.sixel_display_mode = false;
+                }
+                Mode::Decsdm(Decsdm::Query) => {
+                    let mode = if self.sixel_display_mode {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Decsdm::DisplayMode.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in
@@ -8679,5 +8718,87 @@ mod tests {
         assert_eq!(cursor.y, 0, "row should be 1 - 1 = 0 (0-based)");
 
         // Now the APC Kitty Put would execute, reading cursor.pos correctly.
+    }
+
+    // -----------------------------------------------------------------------
+    // DECSDM (?80) — Sixel Display Mode behavior tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sixel_scrolling_mode_cursor_advances() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Move cursor to a non-zero column so we can detect the x→0 reset.
+        handler.handle_data(b"Hello");
+        let cursor_before = handler.buffer.get_cursor().pos;
+        assert_eq!(
+            cursor_before.x, 5,
+            "cursor should be at col 5 after 'Hello'"
+        );
+
+        // Build a multi-band sixel (3 bands = 18px > 16px cell height = 2 cell rows).
+        // Each `-` advances to the next sixel band (6 pixels down).
+        // Default cell_pixel_height=16, so 18px → display_rows=2.
+        let sixel_body = b"#1;2;100;0;0#1~-#1~-#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let cursor_after = handler.buffer.get_cursor().pos;
+        // In scrolling mode, cursor moves below the image and x resets to 0.
+        assert!(
+            cursor_after.y > cursor_before.y,
+            "Scrolling mode: cursor row should advance past sixel image, \
+             before=({},{}) after=({},{})",
+            cursor_before.x,
+            cursor_before.y,
+            cursor_after.x,
+            cursor_after.y
+        );
+        assert_eq!(
+            cursor_after.x, 0,
+            "Scrolling mode: cursor column should reset to 0 after sixel"
+        );
+    }
+
+    #[test]
+    fn sixel_display_mode_cursor_does_not_advance() {
+        use freminal_common::buffer_states::{
+            mode::{Mode, SetMode},
+            modes::decsdm::Decsdm,
+            terminal_output::TerminalOutput,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Enable DECSDM display mode.
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+            &SetMode::DecSet,
+        )))]);
+
+        // Move cursor to a non-zero position.
+        handler.handle_data(b"Hello");
+        let cursor_before = handler.buffer.get_cursor().pos;
+        assert_eq!(
+            cursor_before.x, 5,
+            "cursor should be at col 5 after 'Hello'"
+        );
+
+        // Build a multi-band sixel (3 bands = 18px > 16px cell height = 2 cell rows).
+        let sixel_body = b"#1;2;100;0;0#1~-#1~-#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let cursor_after = handler.buffer.get_cursor().pos;
+        // In display mode, cursor should be restored to its pre-image position.
+        assert_eq!(
+            cursor_before, cursor_after,
+            "Display mode: cursor should NOT advance past sixel image, \
+             before=({},{}) after=({},{})",
+            cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y
+        );
     }
 }
