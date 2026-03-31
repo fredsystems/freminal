@@ -16,8 +16,8 @@
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        decarm::Decarm, decbkm::Decbkm, decscnm::Decscnm, keypad::KeypadMode,
-        sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decscnm::Decscnm,
+        keypad::KeypadMode, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
     },
     pty_write::PtyWrite,
 };
@@ -552,5 +552,85 @@ fn test_grapheme_clustering_set_silently_accepted() {
     assert!(
         rx.try_recv().is_err(),
         "DECSET ?2027 must not produce a PTY response"
+    );
+}
+
+// ─── Alternate Scroll Mode (?1007) ──────────────────────────────────────────
+
+/// Default alternate scroll mode is `Disabled` (reset state).
+#[test]
+fn test_alternate_scroll_default_is_disabled() {
+    let (state, _rx) = make_state();
+    assert_eq!(
+        state.modes.alternate_scroll,
+        AlternateScroll::Disabled,
+        "Default alternate scroll mode must be Disabled"
+    );
+}
+
+/// `CSI ? 1007 h` (DECSET) enables alternate scroll mode.
+#[test]
+fn test_alternate_scroll_set_enables() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007h");
+    assert_eq!(
+        state.modes.alternate_scroll,
+        AlternateScroll::Enabled,
+        "DECSET ?1007 must enable alternate scroll mode"
+    );
+}
+
+/// `CSI ? 1007 l` (DECRST) disables alternate scroll mode.
+#[test]
+fn test_alternate_scroll_reset_disables() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // First enable, then reset
+    state.handle_incoming_data(b"\x1b[?1007h");
+    assert_eq!(state.modes.alternate_scroll, AlternateScroll::Enabled);
+
+    state.handle_incoming_data(b"\x1b[?1007l");
+    assert_eq!(
+        state.modes.alternate_scroll,
+        AlternateScroll::Disabled,
+        "DECRST ?1007 must disable alternate scroll mode"
+    );
+}
+
+/// DECRQM query for ?1007 returns Ps=2 in default (reset/disabled) state.
+#[test]
+fn test_alternate_scroll_decrqm_default_is_reset() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1007;2$y",
+        "DECRQM ?1007 in default (disabled) state must return Ps=2 (reset)"
+    );
+}
+
+/// DECRQM query for ?1007 after DECSET returns Ps=1 (set/enabled).
+#[test]
+fn test_alternate_scroll_decrqm_after_set_is_enabled() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007h");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1007$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1007;1$y",
+        "DECRQM ?1007 after DECSET must return Ps=1 (set)"
     );
 }

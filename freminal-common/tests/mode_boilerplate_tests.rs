@@ -9,6 +9,7 @@ use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::modes::{
     ReportMode,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alternate_scroll::AlternateScroll,
     decarm::Decarm,
     decawm::Decawm,
     decbkm::Decbkm,
@@ -382,6 +383,20 @@ test_mode_type!(
     "Backarrow sends BS (DECBKM set)",
     "Backarrow sends DEL (DECBKM reset)",
     "Query Backarrow Key Mode (DECBKM)"
+);
+
+// AlternateScroll (?1007): default=Disabled, Set=Enabled, Reset=Disabled
+test_mode_type!(
+    alternate_scroll_tests,
+    AlternateScroll,
+    1007,
+    AlternateScroll::Disabled,
+    AlternateScroll::Enabled,
+    AlternateScroll::Disabled,
+    AlternateScroll::Query,
+    "Alternate Scroll Enabled (?1007)",
+    "Alternate Scroll Disabled (?1007)",
+    "Query Alternate Scroll Mode (?1007)"
 );
 
 // ===========================================================================

@@ -201,6 +201,14 @@ pub struct TerminalSnapshot {
     /// reset (DEL).  Default is `true` (BS).
     pub backarrow_sends_bs: bool,
 
+    /// Whether alternate scroll mode (`?1007`) is enabled.
+    ///
+    /// When `true` and the alternate screen is active, mouse scroll-wheel
+    /// events are translated into arrow-key sequences sent to the PTY.
+    /// When `false`, scroll events on the alternate screen are ignored
+    /// (unless mouse tracking is active).
+    pub alternate_scroll: bool,
+
     /// Current working directory reported by the shell via OSC 7, if any.
     ///
     /// The GUI can use this for tab titles, file-open dialogs, or spawning
@@ -288,6 +296,7 @@ impl TerminalSnapshot {
             modify_other_keys: 0,
             application_escape_key: false,
             backarrow_sends_bs: true,
+            alternate_scroll: false,
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,

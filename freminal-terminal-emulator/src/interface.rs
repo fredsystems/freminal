@@ -57,6 +57,7 @@ struct SnapshotModeFields {
     modify_other_keys: u8,
     application_escape_key: bool,
     backarrow_sends_bs: bool,
+    alternate_scroll: bool,
 }
 
 const fn char_to_ctrl_code(c: u8) -> u8 {
@@ -881,6 +882,7 @@ impl TerminalEmulator {
             modify_other_keys: mode_fields.modify_other_keys,
             application_escape_key: mode_fields.application_escape_key,
             backarrow_sends_bs: mode_fields.backarrow_sends_bs,
+            alternate_scroll: mode_fields.alternate_scroll,
             cwd,
             ftcs_state,
             last_exit_code,
@@ -895,7 +897,7 @@ impl TerminalEmulator {
     /// Collect all mode flags needed by the snapshot in a single pass.
     fn collect_mode_fields(&self) -> SnapshotModeFields {
         use freminal_common::buffer_states::modes::{
-            decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode,
+            alternate_scroll::AlternateScroll, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode,
         };
 
         SnapshotModeFields {
@@ -909,6 +911,7 @@ impl TerminalEmulator {
             modify_other_keys: self.internal.handler.modify_other_keys_level(),
             application_escape_key: self.internal.handler.application_escape_key(),
             backarrow_sends_bs: self.internal.modes.backarrow_key_mode == Decbkm::BackarrowSendsBs,
+            alternate_scroll: self.internal.modes.alternate_scroll == AlternateScroll::Enabled,
         }
     }
 

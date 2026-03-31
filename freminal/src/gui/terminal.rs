@@ -191,7 +191,7 @@ fn handle_scroll_fallback(
     let lines = (scroll_amount_to_do / character_size_y).round();
     let abs_lines = lines.abs();
 
-    if snap.is_alternate_screen {
+    if snap.is_alternate_screen && snap.alternate_scroll {
         // Convert scroll delta to arrow key presses.
         // Safety: abs_lines >= 0, and we clamp to 1 below.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

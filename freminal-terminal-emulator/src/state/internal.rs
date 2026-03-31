@@ -13,6 +13,7 @@ use freminal_common::{
         mode::{Mode, TerminalModes},
         modes::{
             MouseModeNumber, ReportMode,
+            alternate_scroll::AlternateScroll,
             decarm::Decarm,
             decbkm::Decbkm,
             decckm::Decckm,
@@ -273,7 +274,8 @@ impl TerminalState {
             | Mode::ReverseWrapAround(ReverseWrapAround::Query)
             | Mode::SynchronizedUpdates(SynchronizedUpdates::Query)
             | Mode::Decnkm(Decnkm::Query)
-            | Mode::Decbkm(Decbkm::Query) => {
+            | Mode::Decbkm(Decbkm::Query)
+            | Mode::AlternateScroll(AlternateScroll::Query) => {
                 self.handle_mode_query(mode);
             }
             // ── Set/Reset variants — sync into self.modes ─────
@@ -294,6 +296,7 @@ impl TerminalState {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
             Mode::Decbkm(v) => self.modes.backarrow_key_mode = v.clone(),
+            Mode::AlternateScroll(v) => self.modes.alternate_scroll = v.clone(),
             // ── Modes handled entirely by TerminalHandler ──────
             Mode::XtExtscrn(_)
             | Mode::AltScreen47(_)
@@ -383,6 +386,10 @@ impl TerminalState {
             }
             Mode::Decbkm(Decbkm::Query) => {
                 let resp = self.modes.backarrow_key_mode.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::AlternateScroll(AlternateScroll::Query) => {
+                let resp = self.modes.alternate_scroll.report(None);
                 self.send_decrpm(&resp);
             }
             _ => {}

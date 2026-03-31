@@ -8,6 +8,7 @@ use std::fmt;
 use crate::buffer_states::modes::{
     ReportMode,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alternate_scroll::AlternateScroll,
     application_escape_key::ApplicationEscapeKey,
     decarm::Decarm,
     decawm::Decawm,
@@ -72,6 +73,7 @@ pub struct TerminalModes {
     pub line_feed_mode: Lnm,
     pub keypad_mode: KeypadMode,
     pub backarrow_key_mode: Decbkm,
+    pub alternate_scroll: AlternateScroll,
 }
 
 #[derive(Eq, PartialEq, Debug, Default, Clone)]
@@ -81,6 +83,7 @@ pub enum Mode {
     // Cursor keys mode
     // https://vt100.net/docs/vt100-ug/chapter3.html
     AllowColumnModeSwitch(AllowColumnModeSwitch),
+    AlternateScroll(AlternateScroll),
     Decckm(Decckm),
     Decawm(Decawm),
     Dectem(Dectcem),
@@ -158,6 +161,7 @@ impl Mode {
             // ?1015 (urxvt mouse) intentionally omitted — the format clashes
             // with DL / SD / window manipulation sequences and is not
             // recommended; ?1006 (SGR) is the preferred replacement.
+            b"?1007" => Self::AlternateScroll(AlternateScroll::new(&mode)),
             b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
             b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
@@ -193,6 +197,7 @@ impl ReportMode for Mode {
             Self::AllowColumnModeSwitch(allow_column_mode_switch) => {
                 allow_column_mode_switch.report(override_mode)
             }
+            Self::AlternateScroll(alternate_scroll) => alternate_scroll.report(override_mode),
             Self::Decarm(decarm) => decarm.report(override_mode),
             Self::Decckm(decckm) => decckm.report(override_mode),
             Self::Decom(decom) => decom.report(override_mode),
@@ -239,6 +244,7 @@ impl fmt::Display for Mode {
             Self::AllowColumnModeSwitch(allow_column_mode_switch) => {
                 write!(f, "{allow_column_mode_switch}")
             }
+            Self::AlternateScroll(alternate_scroll) => write!(f, "{alternate_scroll}"),
             Self::Decarm(decarm) => write!(f, "{decarm}"),
             Self::Decckm(decckm) => write!(f, "{decckm}"),
             Self::Decawm(decawm) => write!(f, "{decawm}"),

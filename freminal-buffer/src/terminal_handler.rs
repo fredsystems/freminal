@@ -3412,6 +3412,7 @@ impl TerminalHandler {
                 | Mode::SynchronizedUpdates(_)
                 | Mode::Decnkm(_)
                 | Mode::Decbkm(_)
+                | Mode::AlternateScroll(_)
                 | Mode::GraphemeClustering(
                     GraphemeClustering::Unicode | GraphemeClustering::Legacy,
                 ) => {}

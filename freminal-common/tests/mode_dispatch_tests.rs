@@ -8,6 +8,7 @@
 use freminal_common::buffer_states::mode::{Mode, SetMode};
 use freminal_common::buffer_states::modes::{
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alternate_scroll::AlternateScroll,
     decarm::Decarm,
     decawm::Decawm,
     decbkm::Decbkm,
@@ -556,4 +557,28 @@ fn both_q47_and_q1047_map_to_altscreen47_decquery() {
     assert_eq!(via_47, Mode::AltScreen47(AltScreen47::Query));
     assert_eq!(via_1047, Mode::AltScreen47(AltScreen47::Query));
     assert_eq!(via_47, via_1047);
+}
+
+#[test]
+fn decset_q1007_returns_alternate_scroll_enabled() {
+    assert_eq!(
+        dispatch(b"?1007", SetMode::DecSet),
+        Mode::AlternateScroll(AlternateScroll::Enabled)
+    );
+}
+
+#[test]
+fn decrst_q1007_returns_alternate_scroll_disabled() {
+    assert_eq!(
+        dispatch(b"?1007", SetMode::DecRst),
+        Mode::AlternateScroll(AlternateScroll::Disabled)
+    );
+}
+
+#[test]
+fn decquery_q1007_returns_alternate_scroll_query() {
+    assert_eq!(
+        dispatch(b"?1007", SetMode::DecQuery),
+        Mode::AlternateScroll(AlternateScroll::Query)
+    );
 }
