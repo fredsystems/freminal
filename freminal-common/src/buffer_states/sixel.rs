@@ -15,7 +15,7 @@
 //! Reference: <https://vt100.net/docs/vt3xx-gp/chapter14.html>
 
 /// Maximum number of palette entries supported.
-const MAX_PALETTE: usize = 256;
+pub const MAX_PALETTE: usize = 256;
 
 /// Default palette (VT340-compatible 16 colors).
 ///
@@ -212,6 +212,28 @@ impl SixelDecoder {
 
         Self {
             palette,
+            current_color: 0,
+            x: 0,
+            band: 0,
+            width: 0,
+            height: 0,
+            declared_width: 0,
+            declared_height: 0,
+            background,
+            pixels: Vec::new(),
+        }
+    }
+
+    /// Create a decoder that starts with the given persistent palette.
+    ///
+    /// Used when `?1070` is reset (shared color registers): the caller provides
+    /// the palette left over from the previous Sixel image.
+    const fn with_palette(
+        background: SixelBackground,
+        palette: &[(u8, u8, u8); MAX_PALETTE],
+    ) -> Self {
+        Self {
+            palette: *palette,
             current_color: 0,
             x: 0,
             band: 0,
@@ -509,6 +531,76 @@ impl SixelDecoder {
             height: self.height as u32,
         })
     }
+
+    /// Finalise and return the decoded image together with the final palette.
+    ///
+    /// Used when `?1070` is reset (shared color registers): the caller can
+    /// persist the returned palette and pass it to the next image via
+    /// `parse_sixel_with_shared_palette`.
+    fn finish_into_parts(mut self) -> (Option<SixelImage>, [(u8, u8, u8); MAX_PALETTE]) {
+        let palette = self.palette;
+
+        if self.width == 0 || self.height == 0 {
+            return (None, palette);
+        }
+
+        if self.declared_height > 0 && self.declared_height < self.height {
+            let trimmed_size = self.declared_width.max(self.width) * self.declared_height * 4;
+            self.pixels.truncate(trimmed_size);
+            self.height = self.declared_height;
+        }
+
+        if self.declared_width > 0 && self.declared_width < self.width {
+            let new_width = self.declared_width;
+            let mut trimmed = vec![0u8; new_width * self.height * 4];
+            for y in 0..self.height {
+                let src_start = y * self.width * 4;
+                let dst_start = y * new_width * 4;
+                let copy_bytes = new_width * 4;
+                trimmed[dst_start..dst_start + copy_bytes]
+                    .copy_from_slice(&self.pixels[src_start..src_start + copy_bytes]);
+            }
+            self.pixels = trimmed;
+            self.width = new_width;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let image = SixelImage {
+            pixels: self.pixels,
+            width: self.width as u32,
+            height: self.height as u32,
+        };
+        (Some(image), palette)
+    }
+}
+
+/// Parse Sixel data using a shared (persistent) palette.
+///
+/// Used when `?1070` is reset (shared color registers).  The `palette` argument
+/// is the palette left over from the previous Sixel image; it will be updated
+/// with any colour-definition commands in `inner` and returned to the caller
+/// so it can be persisted for the next image.
+///
+/// Returns the decoded image (or `None` for empty/invalid data) together with
+/// the updated palette.
+#[must_use]
+pub fn parse_sixel_with_shared_palette(
+    inner: &[u8],
+    palette: [(u8, u8, u8); MAX_PALETTE],
+) -> (Option<SixelImage>, [(u8, u8, u8); MAX_PALETTE]) {
+    let Some(q_pos) = inner.iter().position(|&b| b == b'q') else {
+        return (None, palette);
+    };
+
+    let params_bytes = &inner[..q_pos];
+    let sixel_data = &inner[q_pos + 1..];
+
+    let params = parse_dcs_params(params_bytes);
+    let background = SixelBackground::from_param(params.p2);
+
+    let mut decoder = SixelDecoder::with_palette(background, &palette);
+    decoder.decode(sixel_data);
+    decoder.finish_into_parts()
 }
 
 /// Parse Sixel data from the inner content of a DCS sequence.

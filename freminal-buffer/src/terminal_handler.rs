@@ -28,6 +28,7 @@ use freminal_common::{
         modes::grapheme::GraphemeClustering,
         modes::lnm::Lnm,
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
+        modes::private_color_registers::PrivateColorRegisters,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::{
@@ -234,6 +235,16 @@ pub struct TerminalHandler {
     /// When reset (`CSI ? 80 l`, the default), the cursor advances below the
     /// image after placement (scrolling mode).
     sixel_display_mode: bool,
+    /// Whether each Sixel image uses a private (independent) color register
+    /// set (`?1070 h`, default) or all images share a single persistent
+    /// palette (`?1070 l`).
+    private_color_registers: bool,
+    /// The persistent Sixel palette used when `private_color_registers` is
+    /// `false` (shared mode, `?1070 l`).  Palette changes in one image carry
+    /// over to the next.  `None` when private mode is active; populated the
+    /// first time shared mode is used.
+    sixel_shared_palette:
+        Option<Box<[(u8, u8, u8); freminal_common::buffer_states::sixel::MAX_PALETTE]>>,
 }
 
 impl TerminalHandler {
@@ -271,6 +282,8 @@ impl TerminalHandler {
             modify_other_keys_level: 0,
             application_escape_key: false,
             sixel_display_mode: false,
+            private_color_registers: true,
+            sixel_shared_palette: None,
         }
     }
 
@@ -1461,11 +1474,31 @@ impl TerminalHandler {
     ///
     /// `inner` is the stripped DCS payload: `<P1;P2;P3>q<sixel-data>`.
     fn handle_sixel(&mut self, inner: &[u8]) {
-        use freminal_common::buffer_states::sixel::parse_sixel;
+        use freminal_common::buffer_states::sixel::{
+            MAX_PALETTE, parse_sixel, parse_sixel_with_shared_palette,
+        };
 
-        let Some(sixel_image) = parse_sixel(inner) else {
-            tracing::warn!("Sixel: failed to decode image from DCS payload");
-            return;
+        let sixel_image = if self.private_color_registers {
+            // Private mode (default): each image gets the default palette.
+            let Some(img) = parse_sixel(inner) else {
+                tracing::warn!("Sixel: failed to decode image from DCS payload");
+                return;
+            };
+            img
+        } else {
+            // Shared mode: use and update the persistent palette.
+            let palette = self
+                .sixel_shared_palette
+                .as_deref()
+                .copied()
+                .unwrap_or([(0, 0, 0); MAX_PALETTE]);
+            let (maybe_img, updated_palette) = parse_sixel_with_shared_palette(inner, palette);
+            self.sixel_shared_palette = Some(Box::new(updated_palette));
+            let Some(img) = maybe_img else {
+                tracing::warn!("Sixel (shared palette): failed to decode image from DCS payload");
+                return;
+            };
+            img
         };
 
         if sixel_image.width == 0 || sixel_image.height == 0 {
@@ -3460,6 +3493,23 @@ impl TerminalHandler {
                         SetMode::DecRst
                     };
                     self.write_to_pty(&AllowAltScreen::Allow.report(Some(mode)));
+                }
+                // ── Private Color Registers for Sixel (?1070) ────────
+                Mode::PrivateColorRegisters(PrivateColorRegisters::Private) => {
+                    self.private_color_registers = true;
+                    // Switching back to private mode discards the shared palette.
+                    self.sixel_shared_palette = None;
+                }
+                Mode::PrivateColorRegisters(PrivateColorRegisters::Shared) => {
+                    self.private_color_registers = false;
+                }
+                Mode::PrivateColorRegisters(PrivateColorRegisters::Query) => {
+                    let mode = if self.private_color_registers {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&PrivateColorRegisters::Private.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in

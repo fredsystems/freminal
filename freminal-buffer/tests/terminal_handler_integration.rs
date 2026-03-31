@@ -4806,3 +4806,172 @@ fn allow_alt_screen_permits_enter_alternate_when_allowed() {
         "Alternate screen should be entered when AllowAltScreen is Allow (default)"
     );
 }
+
+// ── PrivateColorRegisters (?1070) — Private Color Registers for Sixel ─────
+
+#[test]
+fn decrpm_private_color_registers_default_is_private() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::PrivateColorRegisters(PrivateColorRegisters::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1070;1$y",
+        "PrivateColorRegisters default (Private) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_private_color_registers_after_reset_to_shared() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecRst),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::PrivateColorRegisters(PrivateColorRegisters::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1070;2$y",
+        "PrivateColorRegisters after DECRST (Shared) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_private_color_registers_after_reset_then_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecRst),
+    ))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecSet),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::PrivateColorRegisters(PrivateColorRegisters::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1070;1$y",
+        "PrivateColorRegisters after re-enable (Private) → Ps=1"
+    );
+}
+
+/// Build a raw DCS sixel sequence: `P<params>q<sixel_body>ESC\`
+///
+/// Mirrors the private `build_sixel_dcs` helper in the unit tests of
+/// `terminal_handler.rs`; duplicated here so integration tests can call
+/// `handler.handle_device_control_string()` directly.
+fn build_sixel_dcs_bytes(params: &[u8], sixel_body: &[u8]) -> Vec<u8> {
+    let mut v = vec![b'P'];
+    v.extend_from_slice(params);
+    v.push(b'q');
+    v.extend_from_slice(sixel_body);
+    v.extend_from_slice(b"\x1b\\");
+    v
+}
+
+#[test]
+fn sixel_shared_palette_persists_color_definition_across_images() {
+    // In shared-register mode (?1070 l), a colour defined in one Sixel image
+    // should be available under the same index in the next image.
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::private_color_registers::PrivateColorRegisters,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.handle_resize(80, 24, 8, 16);
+    let (tx, _rx) = crossbeam_channel::unbounded::<freminal_common::pty_write::PtyWrite>();
+    handler.set_write_tx(tx);
+
+    // Switch to shared palette mode.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+        PrivateColorRegisters::new(&SetMode::DecRst),
+    ))]);
+
+    // Image 1: define colour index 10 as pure red (RGB 100,0,0) and paint one pixel.
+    let body1 = b"#10;2;100;0;0#10~";
+    let dcs1 = build_sixel_dcs_bytes(b"0;0;0", body1);
+    handler.handle_device_control_string(&dcs1);
+
+    // Image 2: select colour index 10 without redefining it, paint one pixel.
+    let body2 = b"#10~";
+    let dcs2 = build_sixel_dcs_bytes(b"0;0;0", body2);
+    handler.handle_device_control_string(&dcs2);
+
+    // Two images should now be in the image store.
+    let mut images: Vec<_> = handler.buffer().image_store().iter().collect();
+    assert_eq!(images.len(), 2, "expected two images in the store");
+    // Sort by image id (monotonically increasing) so images[0] is image 1 and
+    // images[1] is image 2, regardless of HashMap iteration order.
+    images.sort_by_key(|(id, _)| *id);
+
+    // The second image's top-left pixel should be red because colour 10 was
+    // inherited from the first image's palette definition.
+    let (_, img2) = images[1];
+    assert_eq!(
+        img2.pixels[0], 255,
+        "R of pixel (0,0) in image 2 should be 255 (red)"
+    );
+    assert_eq!(img2.pixels[1], 0, "G of pixel (0,0) in image 2 should be 0");
+    assert_eq!(img2.pixels[2], 0, "B of pixel (0,0) in image 2 should be 0");
+}
+
+#[test]
+fn sixel_private_palette_does_not_persist_color_definition() {
+    // In private-register mode (?1070 h, default), each image gets a fresh
+    // palette.  A colour defined in image 1 must NOT appear in image 2.
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.handle_resize(80, 24, 8, 16);
+    let (tx, _rx) = crossbeam_channel::unbounded::<freminal_common::pty_write::PtyWrite>();
+    handler.set_write_tx(tx);
+
+    // Private mode is the default — no need to set it explicitly.
+
+    // Image 1: define colour index 10 as pure red and paint.
+    let body1 = b"#10;2;100;0;0#10~";
+    let dcs1 = build_sixel_dcs_bytes(b"0;0;0", body1);
+    handler.handle_device_control_string(&dcs1);
+
+    // Image 2: select colour index 10 without redefining; should use the
+    // default VT340 palette entry for index 10 (light red ≈ (255,85,85)).
+    let body2 = b"#10~";
+    let dcs2 = build_sixel_dcs_bytes(b"0;0;0", body2);
+    handler.handle_device_control_string(&dcs2);
+
+    let mut images: Vec<_> = handler.buffer().image_store().iter().collect();
+    assert_eq!(images.len(), 2, "expected two images in the store");
+    // Sort by image id (monotonically increasing) so images[0]/[1] are stable.
+    images.sort_by_key(|(id, _)| *id);
+
+    // The second image should NOT be pure red — it should be the default
+    // VT340 palette index 10 (≈ light red, R=255 G=85 B=85).
+    let (_, img2) = images[1];
+    // The green channel distinguishes pure red (G=0) from VT340 index 10 (G=85).
+    assert_ne!(
+        img2.pixels[1], 0,
+        "G channel should not be 0 in private mode (pure red should not persist)"
+    );
+}

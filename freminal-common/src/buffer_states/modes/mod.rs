@@ -25,6 +25,7 @@ pub mod keypad;
 pub mod lnm;
 pub mod modify_other_keys_mode;
 pub mod mouse;
+pub mod private_color_registers;
 pub mod reverse_wrap_around;
 pub mod rl_bracket;
 pub mod sync_updates;

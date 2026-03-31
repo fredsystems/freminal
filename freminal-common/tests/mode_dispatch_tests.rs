@@ -24,6 +24,7 @@ use freminal_common::buffer_states::modes::{
     grapheme::GraphemeClustering,
     lnm::Lnm,
     mouse::{MouseEncoding, MouseTrack},
+    private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
@@ -656,5 +657,31 @@ fn decquery_q1001_returns_mouse_mode_query_1001() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecQuery),
         Mode::MouseMode(MouseTrack::Query(1001))
+    );
+}
+
+// ── ?1070 (Private Color Registers for Sixel) ─────────────────────────────
+
+#[test]
+fn decset_q1070_returns_private_color_registers_private() {
+    assert_eq!(
+        dispatch(b"?1070", SetMode::DecSet),
+        Mode::PrivateColorRegisters(PrivateColorRegisters::Private)
+    );
+}
+
+#[test]
+fn decrst_q1070_returns_private_color_registers_shared() {
+    assert_eq!(
+        dispatch(b"?1070", SetMode::DecRst),
+        Mode::PrivateColorRegisters(PrivateColorRegisters::Shared)
+    );
+}
+
+#[test]
+fn decquery_q1070_returns_private_color_registers_query() {
+    assert_eq!(
+        dispatch(b"?1070", SetMode::DecQuery),
+        Mode::PrivateColorRegisters(PrivateColorRegisters::Query)
     );
 }

@@ -27,6 +27,7 @@ use crate::buffer_states::modes::{
     lnm::Lnm,
     modify_other_keys_mode::ModifyOtherKeysMode,
     mouse::{MouseEncoding, MouseTrack},
+    private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
@@ -114,6 +115,7 @@ pub enum Mode {
     Theming(Theming),
     ApplicationEscapeKey(ApplicationEscapeKey),
     ModifyOtherKeysMode(ModifyOtherKeysMode),
+    PrivateColorRegisters(PrivateColorRegisters),
     UnknownQuery(Vec<u8>),
     Unknown(UnknownMode),
 }
@@ -173,6 +175,7 @@ impl Mode {
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
             b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
             b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(&mode)),
+            b"?1070" => Self::PrivateColorRegisters(PrivateColorRegisters::new(&mode)),
             b"?2004" => Self::BracketedPaste(RlBracket::new(&mode)),
             b"?2026" => Self::SynchronizedUpdates(SynchronizedUpdates::new(&mode)),
             b"?2027" => Self::GraphemeClustering(GraphemeClustering::new(&mode)),
@@ -236,6 +239,7 @@ impl ReportMode for Mode {
             Self::Theming(theming) => theming.report(override_mode),
             Self::ApplicationEscapeKey(aek) => aek.report(override_mode),
             Self::ModifyOtherKeysMode(mok) => mok.report(override_mode),
+            Self::PrivateColorRegisters(pcr) => pcr.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
             Self::UnknownQuery(v) => {
                 // convert each digit to a char
@@ -283,6 +287,7 @@ impl fmt::Display for Mode {
             Self::Theming(theming) => write!(f, "{theming}"),
             Self::ApplicationEscapeKey(aek) => write!(f, "{aek}"),
             Self::ModifyOtherKeysMode(mok) => write!(f, "{mok}"),
+            Self::PrivateColorRegisters(pcr) => write!(f, "{pcr}"),
             Self::Unknown(params) => write!(f, "{params}"),
             Self::UnknownQuery(v) => write!(f, "Unknown Query({v:?})"),
         }
