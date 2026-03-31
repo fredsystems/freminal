@@ -39,13 +39,13 @@ pub fn ansi_parser_inner_csi_set_left_and_right_margins(
     let params = split_params_into_semicolon_delimited_usize(params);
 
     let Ok(params) = params else {
-        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECSTBMCommand(
+        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECSLRMCommand(
             format!("DECSLRM: failed to parse params: {params:?}"),
         ));
     };
 
     if params.is_empty() || params.len() > 2 {
-        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECSTBMCommand(
+        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECSLRMCommand(
             format!("DECSLRM: unexpected param count: {params:?}"),
         ));
     }

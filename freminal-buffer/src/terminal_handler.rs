@@ -1516,7 +1516,7 @@ impl TerminalHandler {
     /// `inner` is the stripped DCS payload: `<P1;P2;P3>q<sixel-data>`.
     fn handle_sixel(&mut self, inner: &[u8]) {
         use freminal_common::buffer_states::sixel::{
-            MAX_PALETTE, parse_sixel, parse_sixel_with_shared_palette,
+            default_sixel_palette, parse_sixel, parse_sixel_with_shared_palette,
         };
 
         let sixel_image = if self.private_color_registers {
@@ -1532,7 +1532,7 @@ impl TerminalHandler {
                 .sixel_shared_palette
                 .as_deref()
                 .copied()
-                .unwrap_or([(0, 0, 0); MAX_PALETTE]);
+                .unwrap_or(default_sixel_palette());
             let (maybe_img, updated_palette) = parse_sixel_with_shared_palette(inner, palette);
             self.sixel_shared_palette = Some(Box::new(updated_palette));
             let Some(img) = maybe_img else {

@@ -17,6 +17,22 @@
 /// Maximum number of palette entries supported.
 pub const MAX_PALETTE: usize = 256;
 
+/// Return a freshly initialised VT340-compatible default palette.
+///
+/// Indices 0–15 are set to the standard VT340 default colours; higher indices
+/// default to black.  This is the same palette that `SixelDecoder::new()`
+/// starts with.
+#[must_use]
+pub const fn default_sixel_palette() -> [(u8, u8, u8); MAX_PALETTE] {
+    let mut palette = [(0u8, 0u8, 0u8); MAX_PALETTE];
+    let mut i = 0;
+    while i < DEFAULT_PALETTE_16.len() {
+        palette[i] = DEFAULT_PALETTE_16[i];
+        i += 1;
+    }
+    palette
+}
+
 /// Default palette (VT340-compatible 16 colors).
 ///
 /// These are the standard VT340 default palette entries.  Indices 0-15 are

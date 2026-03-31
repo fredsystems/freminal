@@ -1876,17 +1876,14 @@ impl Buffer {
         let tag = self.current_tag.clone();
         for row_idx in first..last {
             // Copy cells [left_col, right_col] from row_idx+1 into row_idx.
-            let src_cells: Vec<_> = self.rows[row_idx + 1]
-                .cells()
-                .iter()
-                .skip(left_col)
-                .take(right_col - left_col + 1)
-                .cloned()
+            // Use resolve_cell to handle sparse rows correctly — columns
+            // beyond the stored cell count are treated as implicit blanks.
+            let src_cells: Vec<_> = (left_col..=right_col)
+                .map(|col| self.rows[row_idx + 1].resolve_cell(col))
                 .collect();
             let row = &mut self.rows[row_idx];
             // Ensure storage.
             if row.cells_mut().len() < right_col + 1 {
-                // Extend with blanks up to right_col+1 — we'll overwrite anyway.
                 let width = row.width();
                 while row.cells_mut().len() < (right_col + 1).min(width) {
                     row.cells_mut_push(Cell::blank_with_tag(FormatTag::default()));
@@ -1924,12 +1921,10 @@ impl Buffer {
         let tag = self.current_tag.clone();
         for row_idx in (first + 1..=last).rev() {
             // Copy cells [left_col, right_col] from row_idx-1 into row_idx.
-            let src_cells: Vec<_> = self.rows[row_idx - 1]
-                .cells()
-                .iter()
-                .skip(left_col)
-                .take(right_col - left_col + 1)
-                .cloned()
+            // Use resolve_cell to handle sparse rows correctly — columns
+            // beyond the stored cell count are treated as implicit blanks.
+            let src_cells: Vec<_> = (left_col..=right_col)
+                .map(|col| self.rows[row_idx - 1].resolve_cell(col))
                 .collect();
             let row = &mut self.rows[row_idx];
             if row.cells_mut().len() < right_col + 1 {
