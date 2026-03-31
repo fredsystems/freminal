@@ -126,16 +126,20 @@ pub fn handle_pointer_button(
             }
             None
         }
-        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
-            Some(encode_x11_mouse_button(
-                button,
-                current_state.button_pressed,
-                current_state.modifiers,
-                &current_state.mouse_position,
-                false,
-                encoding,
-            ))
-        }
+        // XtMseHilite (?1001) is an X11-era protocol that highlights the region
+        // between press and release at the X11 window level.  Freminal does not
+        // implement X11 highlighting, so we report events the same as XtMseX11.
+        MouseTrack::XtMseX11
+        | MouseTrack::XtMseHilite
+        | MouseTrack::XtMseBtn
+        | MouseTrack::XtMseAny => Some(encode_x11_mouse_button(
+            button,
+            current_state.button_pressed,
+            current_state.modifiers,
+            &current_state.mouse_position,
+            false,
+            encoding,
+        )),
         MouseTrack::NoTracking | MouseTrack::Query(_) => None,
     }
 }
@@ -183,6 +187,7 @@ pub fn handle_pointer_moved(
         MouseTrack::NoTracking
         | MouseTrack::XtMsex10
         | MouseTrack::XtMseX11
+        | MouseTrack::XtMseHilite
         | MouseTrack::Query(_) => None,
     }
 }
@@ -199,14 +204,15 @@ pub fn handle_pointer_scroll(
     encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
     match mouse_track {
-        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
-            encode_x11_mouse_wheel(
-                delta,
-                current_state.modifiers,
-                &current_state.mouse_position,
-                encoding,
-            )
-        }
+        MouseTrack::XtMseX11
+        | MouseTrack::XtMseHilite
+        | MouseTrack::XtMseBtn
+        | MouseTrack::XtMseAny => encode_x11_mouse_wheel(
+            delta,
+            current_state.modifiers,
+            &current_state.mouse_position,
+            encoding,
+        ),
         MouseTrack::NoTracking | MouseTrack::XtMsex10 | MouseTrack::Query(_) => None,
     }
 }

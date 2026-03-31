@@ -334,15 +334,15 @@ impl TerminalState {
                 self.send_decrpm(&resp);
             }
             Mode::MouseMode(MouseTrack::Query(report_mode)) => {
-                let override_mode = match *report_mode {
+                let ps = match *report_mode {
                     1005 | 1006 | 1016 => {
                         let active_enc_num = self.modes.mouse_encoding.mouse_mode_number();
                         if active_enc_num == *report_mode
                             && self.modes.mouse_encoding != MouseEncoding::X11
                         {
-                            SetMode::DecSet
+                            1 // set
                         } else {
-                            SetMode::DecRst
+                            2 // reset
                         }
                     }
                     _ => {
@@ -350,13 +350,13 @@ impl TerminalState {
                         if active_num == *report_mode
                             && self.modes.mouse_tracking != MouseTrack::NoTracking
                         {
-                            SetMode::DecSet
+                            1 // set
                         } else {
-                            SetMode::DecRst
+                            2 // reset
                         }
                     }
                 };
-                let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
+                let resp = format!("\x1b[?{report_mode};{ps}$y");
                 self.send_decrpm(&resp);
             }
             Mode::XtMseWin(XtMseWin::Query) => {

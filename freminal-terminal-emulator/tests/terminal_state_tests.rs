@@ -634,3 +634,71 @@ fn test_alternate_scroll_decrqm_after_set_is_enabled() {
         "DECRQM ?1007 after DECSET must return Ps=1 (set)"
     );
 }
+
+// ─── Hilite Mouse Tracking (?1001) ──────────────────────────────────────────
+
+/// `CSI ? 1001 h` (DECSET) sets mouse tracking to `XtMseHilite`.
+#[test]
+fn test_hilite_mouse_tracking_set() {
+    use freminal_common::buffer_states::modes::mouse::MouseTrack;
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001h");
+    assert_eq!(
+        state.modes.mouse_tracking,
+        MouseTrack::XtMseHilite,
+        "DECSET ?1001 must set mouse tracking to XtMseHilite"
+    );
+}
+
+/// `CSI ? 1001 l` (DECRST) resets mouse tracking to `NoTracking`.
+#[test]
+fn test_hilite_mouse_tracking_reset() {
+    use freminal_common::buffer_states::modes::mouse::MouseTrack;
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001h");
+    state.handle_incoming_data(b"\x1b[?1001l");
+    assert_eq!(
+        state.modes.mouse_tracking,
+        MouseTrack::NoTracking,
+        "DECRST ?1001 must reset mouse tracking to NoTracking"
+    );
+}
+
+/// DECRQM `?1001` returns Ps=2 in default (no-tracking) state.
+#[test]
+fn test_hilite_mouse_tracking_decrqm_default_is_reset() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1001;2$y",
+        "DECRQM ?1001 in default (no-tracking) state must return Ps=2 (reset)"
+    );
+}
+
+/// DECRQM `?1001` returns Ps=1 after DECSET.
+#[test]
+fn test_hilite_mouse_tracking_decrqm_after_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001h");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1001$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?1001;1$y",
+        "DECRQM ?1001 after DECSET must return Ps=1 (set)"
+    );
+}

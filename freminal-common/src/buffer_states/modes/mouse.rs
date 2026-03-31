@@ -93,8 +93,8 @@ impl fmt::Display for MouseEncoding {
 /// PTY.
 ///
 /// This is orthogonal to `MouseEncoding`.  The tracking level is set by modes
-/// `?9`, `?1000`, `?1002`, `?1003`; the encoding format is set by `?1005`,
-/// `?1006`, `?1016`.
+/// `?9`, `?1000`, `?1001`, `?1002`, `?1003`; the encoding format is set by
+/// `?1005`, `?1006`, `?1016`.
 ///
 /// Reference: <https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Mouse-Tracking>
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
@@ -105,6 +105,10 @@ pub enum MouseTrack {
     XtMsex10,
     /// X11 / normal tracking (?1000) — report button press and release.
     XtMseX11,
+    /// Hilite mouse tracking (?1001) — X11-era protocol where the terminal
+    /// highlights the region between press and release.  Rarely used in
+    /// practice; accepted for compatibility.
+    XtMseHilite,
     /// Button-event tracking (?1002) — like X11 plus motion while button held.
     XtMseBtn,
     /// Any-event tracking (?1003) — report all motion, whether or not a button
@@ -120,6 +124,7 @@ impl MouseModeNumber for MouseTrack {
             Self::NoTracking => 0,
             Self::XtMsex10 => 9,
             Self::XtMseX11 => 1000,
+            Self::XtMseHilite => 1001,
             Self::XtMseBtn => 1002,
             Self::XtMseAny => 1003,
             Self::Query(v) => *v,
@@ -134,6 +139,7 @@ impl ReportMode for MouseTrack {
             Self::Query(a) => *a,
             Self::XtMsex10 => 9,
             Self::XtMseX11 => 1000,
+            Self::XtMseHilite => 1001,
             Self::XtMseBtn => 1002,
             Self::XtMseAny => 1003,
         };
@@ -164,6 +170,7 @@ impl fmt::Display for MouseTrack {
             Self::XtMseX11 => write!(f, "XtMseX11"),
             Self::NoTracking => write!(f, "NoTracking"),
             Self::XtMsex10 => write!(f, "XtMsex10"),
+            Self::XtMseHilite => write!(f, "XtMseHilite"),
             Self::XtMseBtn => write!(f, "XtMseBtn"),
             Self::XtMseAny => write!(f, "XtMseAny"),
             Self::Query(v) => write!(f, "Query Mouse Tracking({v})"),

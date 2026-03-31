@@ -632,3 +632,29 @@ fn decquery_q1046_returns_allow_alt_screen_query() {
         Mode::AllowAltScreen(AllowAltScreen::Query)
     );
 }
+
+// ── ?1001 (Hilite Mouse Tracking) ─────────────────────────────────────────
+
+#[test]
+fn decset_q1001_returns_mouse_mode_xtmsehilite() {
+    assert_eq!(
+        dispatch(b"?1001", SetMode::DecSet),
+        Mode::MouseMode(MouseTrack::XtMseHilite)
+    );
+}
+
+#[test]
+fn decrst_q1001_returns_mouse_mode_no_tracking() {
+    assert_eq!(
+        dispatch(b"?1001", SetMode::DecRst),
+        Mode::MouseMode(MouseTrack::NoTracking)
+    );
+}
+
+#[test]
+fn decquery_q1001_returns_mouse_mode_query_1001() {
+    assert_eq!(
+        dispatch(b"?1001", SetMode::DecQuery),
+        Mode::MouseMode(MouseTrack::Query(1001))
+    );
+}

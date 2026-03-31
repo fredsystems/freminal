@@ -158,6 +158,7 @@ impl Mode {
             b"?67" => Self::Decbkm(Decbkm::new(&mode)),
             b"?80" => Self::Decsdm(Decsdm::new(&mode)),
             b"?1000" => Self::mouse_mode(mode, MouseTrack::XtMseX11, 1000),
+            b"?1001" => Self::mouse_mode(mode, MouseTrack::XtMseHilite, 1001),
             b"?1002" => Self::mouse_mode(mode, MouseTrack::XtMseBtn, 1002),
             b"?1003" => Self::mouse_mode(mode, MouseTrack::XtMseAny, 1003),
             b"?1004" => Self::XtMseWin(XtMseWin::new(&mode)),
