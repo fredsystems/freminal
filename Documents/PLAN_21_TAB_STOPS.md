@@ -69,7 +69,7 @@ comprehensive test coverage.
 
 ### 21.1 — Preserve Tab Stops Across Resize
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -95,6 +95,9 @@ comprehensive test coverage.
   - Set custom stops at columns 5, 15, 25 → resize wider → verify stops preserved
   - Set custom stops → resize narrower → resize back wider → verify preserved stops in range
   - Verify new columns after resize have default 8-column stops
+- **Completed:** 2026-03-31. Replaced unconditional `default_tab_stops()` reset in
+  `Buffer::set_size()` with extend/truncate logic. 4 integration tests added to
+  `terminal_handler_integration.rs`. All verification checks pass.
 
 ---
 
