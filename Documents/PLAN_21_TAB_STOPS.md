@@ -231,8 +231,8 @@ comprehensive test coverage.
   - All 10 test cases pass.
   - Tests are in `terminal_handler_integration.rs` for consistency with existing tab tests.
 - **Tests required:** This subtask IS the tests.
-- **Completed:** 2026-03-31. Added 16 new tests to `terminal_handler_integration.rs`:
-  4 resize preservation tests (from 21.1), 10 edge case tests covering all scenarios
+- **Completed:** 2026-03-31. Added 19 new tests to `terminal_handler_integration.rs`:
+  4 resize preservation tests (from 21.1), 9 edge case tests covering scenarios
   listed above, 4 TBC Ps=1/2/4/5 tests, and 2 alternate screen sharing tests. All pass.
 
 ---
