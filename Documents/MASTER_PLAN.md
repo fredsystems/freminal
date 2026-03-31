@@ -45,7 +45,7 @@ and plan document maintenance rules.
 | 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`               | Pending  | Tasks 2, 3, 16       |
 | 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`     | Pending  | None (separate repo) |
 | 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`              | Complete | None                 |
-| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                      | Pending  | None                 |
+| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                      | Complete | None                 |
 | 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Pending  | None                 |
 | 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Pending  | None                 |
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
@@ -225,7 +225,7 @@ Independent of each other and of Phases 3-7. Can run at any time in parallel wit
 - **Task 25** — Code Quality Refactoring (independent)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
@@ -319,7 +319,7 @@ Update this section as tasks complete:
 | 18   |            |            |                                                |
 | 19   |            |            |                                                |
 | 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage   |
-| 21   |            |            |                                                |
+| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops            |
 | 22   |            |            |                                                |
 | 23   |            |            |                                                |
 | 24   |            |            |                                                |
