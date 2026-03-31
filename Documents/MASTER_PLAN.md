@@ -44,6 +44,7 @@ and plan document maintenance rules.
 | 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                  | Complete | None                 |
 | 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`               | Pending  | Tasks 2, 3, 16       |
 | 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`     | Pending  | None (separate repo) |
+| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`              | Pending  | None                 |
 
 ---
 
