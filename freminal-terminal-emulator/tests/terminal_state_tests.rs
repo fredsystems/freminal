@@ -16,7 +16,8 @@
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        decarm::Decarm, decscnm::Decscnm, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+        decarm::Decarm, decscnm::Decscnm, keypad::KeypadMode, sync_updates::SynchronizedUpdates,
+        xtmsewin::XtMseWin,
     },
     pty_write::PtyWrite,
 };
@@ -308,5 +309,115 @@ fn test_key_modifiers_none_is_empty() {
     assert!(
         KeyModifiers::NONE.is_empty(),
         "KeyModifiers::NONE must report is_empty() == true"
+    );
+}
+
+// ─── DECNKM (?66) — Numeric Keypad Mode ─────────────────────────────────────
+
+/// Default keypad mode is Numeric.
+#[test]
+fn test_decnkm_default_is_numeric() {
+    let (state, _rx) = make_state();
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Numeric,
+        "Default keypad mode must be Numeric"
+    );
+}
+
+/// `CSI ? 66 h` (DECSET) sets keypad to Application mode.
+#[test]
+fn test_decnkm_set_switches_to_application() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Send DECSET ?66
+    state.handle_incoming_data(b"\x1b[?66h");
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Application,
+        "DECSET ?66 must switch keypad to Application"
+    );
+}
+
+/// `CSI ? 66 l` (DECRST) sets keypad back to Numeric mode.
+#[test]
+fn test_decnkm_reset_switches_to_numeric() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // First set to Application
+    state.handle_incoming_data(b"\x1b[?66h");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    // Then reset to Numeric
+    state.handle_incoming_data(b"\x1b[?66l");
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Numeric,
+        "DECRST ?66 must switch keypad to Numeric"
+    );
+}
+
+/// `CSI ? 66 h` (DECSET ?66) produces the same effect as `ESC =` (DECKPAM).
+#[test]
+fn test_decnkm_set_matches_deckpam() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Use ESC = (DECKPAM) first
+    state.handle_incoming_data(b"\x1b=");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+
+    // Reset via ESC > (DECKPNM)
+    state.handle_incoming_data(b"\x1b>");
+    assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+
+    // Now use DECSET ?66 — same effect
+    state.handle_incoming_data(b"\x1b[?66h");
+    assert_eq!(
+        state.modes.keypad_mode,
+        KeypadMode::Application,
+        "DECSET ?66 must produce the same effect as ESC ="
+    );
+}
+
+/// DECRQM query for ?66 returns the correct DECRPM response.
+#[test]
+fn test_decnkm_decrqm_default_is_numeric() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Query in default (Numeric) state
+    state.handle_incoming_data(b"\x1b[?66$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?66;2$y",
+        "DECRQM ?66 in Numeric state must return Ps=2 (reset)"
+    );
+}
+
+/// DECRQM query for ?66 after DECSET returns Ps=1 (set).
+#[test]
+fn test_decnkm_decrqm_after_set_is_application() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Set to Application
+    state.handle_incoming_data(b"\x1b[?66h");
+
+    // Drain any writes from the set operation
+    drain(&rx);
+
+    // Query
+    state.handle_incoming_data(b"\x1b[?66$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?66;1$y",
+        "DECRQM ?66 in Application state must return Ps=1 (set)"
     );
 }

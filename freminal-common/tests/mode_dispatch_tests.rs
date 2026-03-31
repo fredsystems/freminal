@@ -12,6 +12,7 @@ use freminal_common::buffer_states::modes::{
     decawm::Decawm,
     decckm::Decckm,
     deccolm::Deccolm,
+    decnkm::Decnkm,
     decom::Decom,
     decsclm::Decsclm,
     decscnm::Decscnm,
@@ -142,6 +143,30 @@ fn decset_q45_returns_reverse_wrap_around_wrap_around() {
     assert_eq!(
         dispatch(b"?45", SetMode::DecSet),
         Mode::ReverseWrapAround(ReverseWrapAround::WrapAround)
+    );
+}
+
+#[test]
+fn decset_q66_returns_decnkm_application() {
+    assert_eq!(
+        dispatch(b"?66", SetMode::DecSet),
+        Mode::Decnkm(Decnkm::Application)
+    );
+}
+
+#[test]
+fn decrst_q66_returns_decnkm_numeric() {
+    assert_eq!(
+        dispatch(b"?66", SetMode::DecRst),
+        Mode::Decnkm(Decnkm::Numeric)
+    );
+}
+
+#[test]
+fn decquery_q66_returns_decnkm_query() {
+    assert_eq!(
+        dispatch(b"?66", SetMode::DecQuery),
+        Mode::Decnkm(Decnkm::Query)
     );
 }
 

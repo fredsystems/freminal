@@ -15,6 +15,7 @@ use freminal_common::{
             MouseModeNumber, ReportMode,
             decarm::Decarm,
             decckm::Decckm,
+            decnkm::Decnkm,
             keypad::KeypadMode,
             mouse::{MouseEncoding, MouseTrack},
             reverse_wrap_around::ReverseWrapAround,
@@ -245,97 +246,7 @@ impl TerminalState {
     /// and a DECRPM response is sent.
     fn sync_mode_flags(&mut self, output: &TerminalOutput) {
         match output {
-            TerminalOutput::Mode(mode) => match mode {
-                // ── Query variants — respond with DECRPM ──────────
-                Mode::Decckm(Decckm::Query) => {
-                    let resp = self.modes.cursor_key.report(None);
-                    self.send_decrpm(&resp);
-                }
-                Mode::BracketedPaste(
-                    freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
-                ) => {
-                    let resp = self.modes.bracketed_paste.report(None);
-                    self.send_decrpm(&resp);
-                }
-                Mode::MouseMode(MouseTrack::Query(report_mode)) => {
-                    let override_mode = match *report_mode {
-                        1005 | 1006 | 1016 => {
-                            let active_enc_num = self.modes.mouse_encoding.mouse_mode_number();
-                            if active_enc_num == *report_mode
-                                && self.modes.mouse_encoding != MouseEncoding::X11
-                            {
-                                SetMode::DecSet
-                            } else {
-                                SetMode::DecRst
-                            }
-                        }
-                        _ => {
-                            let active_num = self.modes.mouse_tracking.mouse_mode_number();
-                            if active_num == *report_mode
-                                && self.modes.mouse_tracking != MouseTrack::NoTracking
-                            {
-                                SetMode::DecSet
-                            } else {
-                                SetMode::DecRst
-                            }
-                        }
-                    };
-                    let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
-                    self.send_decrpm(&resp);
-                }
-                Mode::XtMseWin(XtMseWin::Query) => {
-                    let resp = self.modes.focus_reporting.report(None);
-                    self.send_decrpm(&resp);
-                }
-                Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query) => {
-                    let resp = self.modes.invert_screen.report(None);
-                    self.send_decrpm(&resp);
-                }
-                Mode::Decarm(Decarm::Query) => {
-                    let resp = self.modes.repeat_keys.report(None);
-                    self.send_decrpm(&resp);
-                }
-                Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
-                    let resp = self.modes.reverse_wrap_around.report(None);
-                    self.send_decrpm(&resp);
-                }
-                Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
-                    let resp = self.modes.synchronized_updates.report(None);
-                    self.send_decrpm(&resp);
-                }
-                // ── Set/Reset variants — sync into self.modes ─────
-                Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
-                Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
-                Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
-                Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
-                Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
-                Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
-                Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
-                Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
-                Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-                Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
-                // ── Modes handled entirely by TerminalHandler ──────
-                Mode::XtExtscrn(_)
-                | Mode::AltScreen47(_)
-                | Mode::SaveCursor1048(_)
-                | Mode::Decawm(_)
-                | Mode::Dectem(_)
-                | Mode::XtCBlink(_)
-                | Mode::Decom(_)
-                | Mode::Deccolm(_)
-                | Mode::AllowColumnModeSwitch(_)
-                | Mode::UnknownQuery(_)
-                | Mode::ApplicationEscapeKey(_)
-                | Mode::ModifyOtherKeysMode(_) => {}
-                // ── Modes parsed but not yet acted on ─────────────
-                Mode::NoOp
-                | Mode::Decsclm(_)
-                | Mode::GraphemeClustering(_)
-                | Mode::Theming(_)
-                | Mode::Unknown(_) => {
-                    debug!("Mode not acted on by either layer: {mode}");
-                }
-            },
+            TerminalOutput::Mode(mode) => self.sync_mode(mode),
             // DECPAM (ESC =) / DECPNM (ESC >)
             TerminalOutput::ApplicationKeypadMode => {
                 self.modes.keypad_mode = KeypadMode::Application;
@@ -344,6 +255,113 @@ impl TerminalState {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
             _ => {}
+        }
+    }
+
+    fn sync_mode(&mut self, mode: &Mode) {
+        match mode {
+            // ── Query variants — respond with DECRPM ──────────
+            Mode::Decckm(Decckm::Query) => {
+                let resp = self.modes.cursor_key.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::BracketedPaste(
+                freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
+            ) => {
+                let resp = self.modes.bracketed_paste.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::MouseMode(MouseTrack::Query(report_mode)) => {
+                let override_mode = match *report_mode {
+                    1005 | 1006 | 1016 => {
+                        let active_enc_num = self.modes.mouse_encoding.mouse_mode_number();
+                        if active_enc_num == *report_mode
+                            && self.modes.mouse_encoding != MouseEncoding::X11
+                        {
+                            SetMode::DecSet
+                        } else {
+                            SetMode::DecRst
+                        }
+                    }
+                    _ => {
+                        let active_num = self.modes.mouse_tracking.mouse_mode_number();
+                        if active_num == *report_mode
+                            && self.modes.mouse_tracking != MouseTrack::NoTracking
+                        {
+                            SetMode::DecSet
+                        } else {
+                            SetMode::DecRst
+                        }
+                    }
+                };
+                let resp = MouseTrack::Query(*report_mode).report(Some(override_mode));
+                self.send_decrpm(&resp);
+            }
+            Mode::XtMseWin(XtMseWin::Query) => {
+                let resp = self.modes.focus_reporting.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query) => {
+                let resp = self.modes.invert_screen.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::Decarm(Decarm::Query) => {
+                let resp = self.modes.repeat_keys.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
+                let resp = self.modes.reverse_wrap_around.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
+                let resp = self.modes.synchronized_updates.report(None);
+                self.send_decrpm(&resp);
+            }
+            Mode::Decnkm(Decnkm::Query) => {
+                let override_mode = match self.modes.keypad_mode {
+                    KeypadMode::Application => SetMode::DecSet,
+                    KeypadMode::Numeric => SetMode::DecRst,
+                };
+                self.send_decrpm(&Decnkm::Application.report(Some(override_mode)));
+            }
+            // ── Set/Reset variants — sync into self.modes ─────
+            Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
+            Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
+            Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
+            Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
+            Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
+            Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
+            Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
+            Mode::ReverseWrapAround(v) => self.modes.reverse_wrap_around = v.clone(),
+            Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
+            Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
+            Mode::Decnkm(Decnkm::Application) => {
+                self.modes.keypad_mode = KeypadMode::Application;
+            }
+            Mode::Decnkm(Decnkm::Numeric) => {
+                self.modes.keypad_mode = KeypadMode::Numeric;
+            }
+            // ── Modes handled entirely by TerminalHandler ──────
+            Mode::XtExtscrn(_)
+            | Mode::AltScreen47(_)
+            | Mode::SaveCursor1048(_)
+            | Mode::Decawm(_)
+            | Mode::Dectem(_)
+            | Mode::XtCBlink(_)
+            | Mode::Decom(_)
+            | Mode::Deccolm(_)
+            | Mode::AllowColumnModeSwitch(_)
+            | Mode::UnknownQuery(_)
+            | Mode::ApplicationEscapeKey(_)
+            | Mode::ModifyOtherKeysMode(_) => {}
+            // ── Modes parsed but not yet acted on ─────────────
+            Mode::NoOp
+            | Mode::Decsclm(_)
+            | Mode::GraphemeClustering(_)
+            | Mode::Theming(_)
+            | Mode::Unknown(_) => {
+                debug!("Mode not acted on by either layer: {mode}");
+            }
         }
     }
 

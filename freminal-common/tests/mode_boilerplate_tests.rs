@@ -13,6 +13,7 @@ use freminal_common::buffer_states::modes::{
     decawm::Decawm,
     decckm::Decckm,
     deccolm::Deccolm,
+    decnkm::Decnkm,
     decom::Decom,
     decsclm::Decsclm,
     decscnm::Decscnm,
@@ -352,6 +353,20 @@ test_mode_type!(
     "Bracketed Paste Mode (DEC 2004) Enabled",
     "Bracketed Paste Mode (DEC 2004) Disabled",
     "Bracketed Paste Mode (DEC 2004) Query"
+);
+
+// Decnkm (?66): default=Numeric, Set=Application, Reset=Numeric
+test_mode_type!(
+    decnkm_tests,
+    Decnkm,
+    66,
+    Decnkm::Numeric,
+    Decnkm::Application,
+    Decnkm::Numeric,
+    Decnkm::Query,
+    "Keypad Application Mode (DECNKM)",
+    "Keypad Numeric Mode (DECNKM)",
+    "Query Keypad Mode (DECNKM)"
 );
 
 // ===========================================================================

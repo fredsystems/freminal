@@ -11,6 +11,7 @@ pub mod decarm;
 pub mod decawm;
 pub mod decckm;
 pub mod deccolm;
+pub mod decnkm;
 pub mod decom;
 pub mod decsclm;
 pub mod decscnm;
