@@ -16,6 +16,7 @@ use freminal_common::buffer_states::modes::{
     decckm::Decckm,
     deccolm::Deccolm,
     decnkm::Decnkm,
+    decnrcm::Decnrcm,
     decom::Decom,
     decsclm::Decsclm,
     decscnm::Decscnm,
@@ -683,5 +684,31 @@ fn decquery_q1070_returns_private_color_registers_query() {
     assert_eq!(
         dispatch(b"?1070", SetMode::DecQuery),
         Mode::PrivateColorRegisters(PrivateColorRegisters::Query)
+    );
+}
+
+// ── ?42 (DECNRCM — National Replacement Character Set Mode) ───────────────
+
+#[test]
+fn decset_q42_returns_decnrcm_enabled() {
+    assert_eq!(
+        dispatch(b"?42", SetMode::DecSet),
+        Mode::Decnrcm(Decnrcm::NrcEnabled)
+    );
+}
+
+#[test]
+fn decrst_q42_returns_decnrcm_disabled() {
+    assert_eq!(
+        dispatch(b"?42", SetMode::DecRst),
+        Mode::Decnrcm(Decnrcm::NrcDisabled)
+    );
+}
+
+#[test]
+fn decquery_q42_returns_decnrcm_query() {
+    assert_eq!(
+        dispatch(b"?42", SetMode::DecQuery),
+        Mode::Decnrcm(Decnrcm::Query)
     );
 }

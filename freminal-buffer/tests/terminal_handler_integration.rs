@@ -4975,3 +4975,65 @@ fn sixel_private_palette_does_not_persist_color_definition() {
         "G channel should not be 0 in private mode (pure red should not persist)"
     );
 }
+
+// ── DECNRCM (?42) — National Replacement Character Set Mode ───────────
+
+#[test]
+fn decrpm_decnrcm_default_is_disabled() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decnrcm::Decnrcm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(resp, "\x1b[?42;2$y", "DECNRCM default (NrcDisabled) → Ps=2");
+}
+
+#[test]
+fn decrpm_decnrcm_after_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decnrcm::Decnrcm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(
+        &SetMode::DecSet,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?42;1$y",
+        "DECNRCM after DECSET (NrcEnabled) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_decnrcm_after_set_then_reset() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::decnrcm::Decnrcm,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(
+        &SetMode::DecSet,
+    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(
+        &SetMode::DecRst,
+    )))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::new(&SetMode::DecQuery))),
+    );
+    assert_eq!(
+        resp, "\x1b[?42;2$y",
+        "DECNRCM after DECRST (NrcDisabled) → Ps=2"
+    );
+}

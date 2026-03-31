@@ -313,6 +313,7 @@ impl TerminalState {
             | Mode::ModifyOtherKeysMode(_)
             | Mode::GraphemeClustering(_)
             | Mode::Decsdm(_)
+            | Mode::Decnrcm(_)
             | Mode::PrivateColorRegisters(_) => {}
             // ── Modes parsed but not yet acted on ─────────────
             Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {

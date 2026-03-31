@@ -22,6 +22,7 @@ use freminal_common::{
         modes::application_escape_key::ApplicationEscapeKey,
         modes::decawm::Decawm,
         modes::deccolm::Deccolm,
+        modes::decnrcm::Decnrcm,
         modes::decom::Decom,
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
@@ -239,6 +240,10 @@ pub struct TerminalHandler {
     /// set (`?1070 h`, default) or all images share a single persistent
     /// palette (`?1070 l`).
     private_color_registers: bool,
+    /// Whether DECNRCM (National Replacement Character Set Mode, `?42`) is
+    /// active. When `true`, character set designations map specific ASCII
+    /// positions to national characters. Default is `false` (disabled).
+    nrc_mode: bool,
     /// The persistent Sixel palette used when `private_color_registers` is
     /// `false` (shared mode, `?1070 l`).  Palette changes in one image carry
     /// over to the next.  `None` when private mode is active; populated the
@@ -283,6 +288,7 @@ impl TerminalHandler {
             application_escape_key: false,
             sixel_display_mode: false,
             private_color_registers: true,
+            nrc_mode: false,
             sixel_shared_palette: None,
         }
     }
@@ -3510,6 +3516,21 @@ impl TerminalHandler {
                         SetMode::DecRst
                     };
                     self.write_to_pty(&PrivateColorRegisters::Private.report(Some(mode)));
+                }
+                // ── DECNRCM — National Replacement Character Set (?42) ─
+                Mode::Decnrcm(Decnrcm::NrcEnabled) => {
+                    self.nrc_mode = true;
+                }
+                Mode::Decnrcm(Decnrcm::NrcDisabled) => {
+                    self.nrc_mode = false;
+                }
+                Mode::Decnrcm(Decnrcm::Query) => {
+                    let mode = if self.nrc_mode {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Decnrcm::NrcEnabled.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in
