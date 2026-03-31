@@ -210,6 +210,11 @@ fn dispatch_osc_target(
                 AnsiOscType::RequestColorQueryForeground(osc_internal_type),
             ));
         }
+        OscTarget::CursorColor => {
+            output.push(TerminalOutput::OscResponse(
+                AnsiOscType::RequestColorQueryCursor(osc_internal_type),
+            ));
+        }
         OscTarget::TitleBar | OscTarget::IconName => {
             output.push(TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(
                 osc_internal_type.to_string(),

@@ -439,6 +439,7 @@ impl TerminalRenderer {
             cursor_visual_style,
             None,
             &freminal_common::themes::CATPPUCCIN_MOCHA,
+            None,
         );
         let fg_verts = build_foreground_verts(
             shaped_lines,
@@ -1220,6 +1221,7 @@ pub fn build_background_verts(
     cursor_visual_style: &CursorVisualStyle,
     selection: Option<(usize, usize, usize, usize)>,
     theme: &ThemePalette,
+    cursor_color_override: Option<(u8, u8, u8)>,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
 
@@ -1403,7 +1405,7 @@ pub fn build_background_verts(
         #[allow(clippy::cast_precision_loss)]
         let ch = cell_height as f32;
 
-        let color = cursor_f(theme);
+        let color = cursor_f(theme, cursor_color_override);
 
         match cursor_visual_style {
             CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
@@ -1447,6 +1449,7 @@ const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> b
 /// rebuilding the entire background VBO, the caller patches only the cursor
 /// quad region in-place via [`upload_verts_sub`].
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn build_cursor_verts_only(
     cell_width: u32,
     cell_height: u32,
@@ -1455,6 +1458,7 @@ pub fn build_cursor_verts_only(
     cursor_pos: CursorPos,
     cursor_visual_style: &CursorVisualStyle,
     theme: &ThemePalette,
+    cursor_color_override: Option<(u8, u8, u8)>,
 ) -> Vec<f32> {
     let mut verts = Vec::new();
 
@@ -1468,7 +1472,7 @@ pub fn build_cursor_verts_only(
         #[allow(clippy::cast_precision_loss)]
         let ch = cell_height as f32;
 
-        let color = cursor_f(theme);
+        let color = cursor_f(theme, cursor_color_override);
 
         match cursor_visual_style {
             CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
@@ -2000,6 +2004,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert_eq!(verts.len(), 0, "default background should produce no quads");
     }
@@ -2023,6 +2028,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         // One quad = VERTS_PER_QUAD * BG_VERTEX_FLOATS floats.
         assert_eq!(
@@ -2089,6 +2095,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         // Two adjacent same-color runs → one merged quad.
         assert_eq!(
@@ -2157,6 +2164,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -2183,6 +2191,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -2207,6 +2216,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorBlink,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -2231,6 +2241,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -2255,6 +2266,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         // One underline quad.
         assert_eq!(
@@ -2285,6 +2297,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert_eq!(
             verts.len(),
@@ -2314,6 +2327,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         // The cursor quad is the last 36 floats (6 verts × 6 floats).
         assert!(verts.len() >= VERTS_PER_QUAD * BG_VERTEX_FLOATS);
@@ -2500,6 +2514,7 @@ mod tests {
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert!(verts.is_empty(), "hidden cursor should produce no verts");
     }
@@ -2517,6 +2532,7 @@ mod tests {
                 CursorPos { x: 1, y: 2 },
                 &CursorVisualStyle::BlockCursorSteady,
                 &themes::CATPPUCCIN_MOCHA,
+                None,
             );
             assert_eq!(
                 verts.len(),
@@ -2537,6 +2553,7 @@ mod tests {
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
         assert!(verts.is_empty(), "blink-off cursor should produce no verts");
     }
@@ -2567,6 +2584,7 @@ mod tests {
             &CursorVisualStyle::BlockCursorSteady,
             None,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
 
         // Record where the cursor quad starts (it is appended at the end).
@@ -2587,6 +2605,7 @@ mod tests {
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
             &themes::CATPPUCCIN_MOCHA,
+            None,
         );
 
         // Simulate the partial-update patch: mutate full_verts in-place to

@@ -151,6 +151,11 @@ pub struct TerminalHandler {
     /// When `Some`, responses to OSC 11 queries use this value instead of the
     /// theme's `background` field.
     bg_color_override: Option<(u8, u8, u8)>,
+    /// Dynamic cursor color override (set via OSC 12; reset via OSC 112).
+    ///
+    /// When `Some`, the cursor is rendered in this color instead of the
+    /// theme's `cursor` field.
+    cursor_color_override: Option<(u8, u8, u8)>,
     /// In-progress iTerm2 multipart file transfer, if any.
     ///
     /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
@@ -237,6 +242,7 @@ impl TerminalHandler {
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             fg_color_override: None,
             bg_color_override: None,
+            cursor_color_override: None,
             multipart_state: None,
             kitty_state: None,
             virtual_placements: HashMap::new(),
@@ -269,6 +275,14 @@ impl TerminalHandler {
         self.theme = theme;
     }
 
+    /// Get the dynamic cursor color override (set via OSC 12).
+    ///
+    /// Returns `None` when the theme default should be used.
+    #[must_use]
+    pub const fn cursor_color_override(&self) -> Option<(u8, u8, u8)> {
+        self.cursor_color_override
+    }
+
     /// Full terminal reset (RIS — Reset to Initial State).
     ///
     /// Restores the handler and buffer to initial startup state.
@@ -298,6 +312,7 @@ impl TerminalHandler {
         self.palette.reset_all();
         self.fg_color_override = None;
         self.bg_color_override = None;
+        self.cursor_color_override = None;
         self.allow_column_mode_switch = true;
         self.virtual_placements.clear();
         self.prev_placeholder = None;
@@ -2553,11 +2568,13 @@ impl TerminalHandler {
                     .push(WindowManipulation::SetTitleBarText(title.clone()));
             }
 
-            // OSC 10/11 foreground/background color query, set, and reset.
+            // OSC 10/11/12 foreground/background/cursor color query, set, and reset.
             AnsiOscType::RequestColorQueryBackground(_)
             | AnsiOscType::RequestColorQueryForeground(_)
+            | AnsiOscType::RequestColorQueryCursor(_)
             | AnsiOscType::ResetForegroundColor
-            | AnsiOscType::ResetBackgroundColor => {
+            | AnsiOscType::ResetBackgroundColor
+            | AnsiOscType::ResetCursorColor => {
                 self.handle_osc_fg_bg_color(osc);
             }
 
@@ -2642,20 +2659,22 @@ impl TerminalHandler {
                 self.palette.reset_all();
             }
 
-            AnsiOscType::NoOp | AnsiOscType::ResetCursorColor => {}
+            AnsiOscType::NoOp => {}
         }
     }
 
-    /// Handle OSC 10/11 foreground/background color query, set, and reset.
+    /// Handle OSC 10/11/12 foreground/background/cursor color query, set,
+    /// and reset (OSC 110/111/112).
     ///
     /// Extracted from `handle_osc` to keep that function within the 100-line clippy limit.
     ///
-    /// - `RequestColorQueryBackground(Query)` / `RequestColorQueryForeground(Query)`:
-    ///   respond with the effective color (override or theme default).
-    /// - `RequestColorQueryBackground(String(spec))` / `RequestColorQueryForeground(String(spec))`:
-    ///   parse the X11 color spec and store as an override.
-    /// - `ResetForegroundColor` / `ResetBackgroundColor`:
-    ///   clear the corresponding override so subsequent queries return the theme color.
+    /// - `RequestColorQuery*(Query)`: respond with the effective color
+    ///   (override or theme default).
+    /// - `RequestColorQuery*(String(spec))`: parse the X11 color spec and
+    ///   store as an override.
+    /// - `ResetForegroundColor` / `ResetBackgroundColor` / `ResetCursorColor`:
+    ///   clear the corresponding override so subsequent queries return the
+    ///   theme color.
     fn handle_osc_fg_bg_color(&mut self, osc: &AnsiOscType) {
         match osc {
             // OSC 11 query: respond with the effective background color.
@@ -2667,6 +2686,11 @@ impl TerminalHandler {
             AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
                 let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
                 self.write_to_pty(&format!("\x1b]10;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+            }
+            // OSC 12 query: respond with the effective cursor color.
+            AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query) => {
+                let (r, g, b) = self.cursor_color_override.unwrap_or(self.theme.cursor);
+                self.write_to_pty(&format!("\x1b]12;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
             }
             // OSC 11 set: store a dynamic background color override.
             AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
@@ -2684,6 +2708,14 @@ impl TerminalHandler {
                     tracing::warn!("OSC 10: unrecognised color spec: {spec:?}");
                 }
             }
+            // OSC 12 set: store a dynamic cursor color override.
+            AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::String(spec)) => {
+                if let Some(rgb) = parse_color_spec(spec) {
+                    self.cursor_color_override = Some(rgb);
+                } else {
+                    tracing::warn!("OSC 12: unrecognised color spec: {spec:?}");
+                }
+            }
             // OSC 110: reset dynamic foreground color override.
             AnsiOscType::ResetForegroundColor => {
                 self.fg_color_override = None;
@@ -2691,6 +2723,10 @@ impl TerminalHandler {
             // OSC 111: reset dynamic background color override.
             AnsiOscType::ResetBackgroundColor => {
                 self.bg_color_override = None;
+            }
+            // OSC 112: reset dynamic cursor color override.
+            AnsiOscType::ResetCursorColor => {
+                self.cursor_color_override = None;
             }
             // Unknown internal-type variants and unreachable arms — silently ignore.
             _ => {}
@@ -5910,6 +5946,110 @@ mod tests {
             panic!("bg OSC response should be valid UTF-8");
         };
         assert_eq!(bg_response, "\x1b]11;rgb:1e/1e/2e\x1b\\");
+    }
+
+    #[test]
+    fn osc12_query_returns_theme_cursor_by_default() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // OSC 12 query — no override set, should return CATPPUCCIN_MOCHA cursor.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response for OSC 12 query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA cursor = (0xf5, 0xe0, 0xdc) — Rosewater
+        assert_eq!(response, "\x1b]12;rgb:f5/e0/dc\x1b\\");
+    }
+
+    #[test]
+    fn osc12_set_stores_override_and_query_returns_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set cursor color override to #ff8000.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::String("#ff8000".to_string()),
+        ));
+
+        // Query — should return the override, not the theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 12 set + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        assert_eq!(response, "\x1b]12;rgb:ff/80/00\x1b\\");
+    }
+
+    #[test]
+    fn osc112_resets_cursor_override_and_query_returns_theme() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set override first.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::String("rgb:aa/bb/cc".to_string()),
+        ));
+
+        // Reset via OSC 112.
+        handler.handle_osc(&AnsiOscType::ResetCursorColor);
+
+        // Query — should return theme cursor again.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::Query,
+        ));
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response after OSC 112 reset + query");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("OSC response should be valid UTF-8");
+        };
+        // CATPPUCCIN_MOCHA cursor = (0xf5, 0xe0, 0xdc)
+        assert_eq!(response, "\x1b]12;rgb:f5/e0/dc\x1b\\");
+    }
+
+    #[test]
+    fn full_reset_clears_cursor_color_override() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Set cursor color override.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::String("#112233".to_string()),
+        ));
+        assert!(handler.cursor_color_override().is_some());
+
+        // full_reset should clear the override.
+        handler.full_reset();
+        assert!(handler.cursor_color_override().is_none());
+
+        // Query should return theme default.
+        handler.handle_osc(&AnsiOscType::RequestColorQueryCursor(
+            AnsiOscInternalType::Query,
+        ));
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write for cursor query after full_reset");
+        };
+        let Ok(response) = String::from_utf8(bytes) else {
+            panic!("cursor OSC response should be valid UTF-8");
+        };
+        assert_eq!(response, "\x1b]12;rgb:f5/e0/dc\x1b\\");
     }
 
     #[test]

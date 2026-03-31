@@ -1057,6 +1057,8 @@ pub struct FreminalTerminalWidget {
     previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
     /// Whether the cursor was shown in the most recently rendered frame.
     previous_show_cursor: bool,
+    /// Cursor color override from the most recently rendered frame.
+    previous_cursor_color_override: Option<(u8, u8, u8)>,
     /// The `visible_chars` arc from the last full vertex rebuild.
     ///
     /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
@@ -1113,6 +1115,7 @@ impl FreminalTerminalWidget {
             previous_cursor_blink_on: true,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_show_cursor: false,
+            previous_cursor_color_override: None,
             last_rendered_visible: None,
             previous_theme: None,
             previous_selection: None,
@@ -1405,7 +1408,8 @@ impl FreminalTerminalWidget {
             // rebuild required.
             let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
                 || snap.cursor_pos != self.previous_cursor_pos
-                || snap.show_cursor != self.previous_show_cursor;
+                || snap.show_cursor != self.previous_show_cursor
+                || snap.cursor_color_override != self.previous_cursor_color_override;
 
             let cursor_only = !content_changed
                 && !selection_changed
@@ -1427,6 +1431,7 @@ impl FreminalTerminalWidget {
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
                     snap.theme,
+                    snap.cursor_color_override,
                 );
                 let mut rs = self
                     .render_state
@@ -1480,6 +1485,7 @@ impl FreminalTerminalWidget {
                     &snap.cursor_visual_style,
                     screen_selection,
                     snap.theme,
+                    snap.cursor_color_override,
                 );
 
                 // Record where the cursor quad starts in the background VBO.
@@ -1537,6 +1543,7 @@ impl FreminalTerminalWidget {
         self.previous_cursor_blink_on = cursor_blink_on;
         self.previous_cursor_pos = snap.cursor_pos;
         self.previous_show_cursor = snap.show_cursor;
+        self.previous_cursor_color_override = snap.cursor_color_override;
 
         // Allocate the exact terminal rect (in logical points for egui).
         #[allow(clippy::cast_precision_loss)]
