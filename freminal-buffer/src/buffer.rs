@@ -644,9 +644,22 @@ impl Buffer {
         self.width = new_width;
         self.height = new_height;
 
-        // Regenerate tab stops when width changes
+        // Preserve existing tab stops across width changes:
+        // - Wider: extend with defaults (every 8th column) for new columns only.
+        // - Narrower: truncate to the new width.
         if width_changed {
-            self.tab_stops = Self::default_tab_stops(new_width);
+            let old_width = self.tab_stops.len();
+            if new_width > old_width {
+                // Extend the vector with `false` for the new columns
+                self.tab_stops.resize(new_width, false);
+                // Set default 8-column stops only in the newly added range.
+                // Default stops are at 8, 16, 24, … (matching `default_tab_stops`).
+                for col in (8..new_width).step_by(8).filter(|&c| c >= old_width) {
+                    self.tab_stops[col] = true;
+                }
+            } else if new_width < old_width {
+                self.tab_stops.truncate(new_width);
+            }
         }
 
         // Ensure every row's max_width matches the new buffer width

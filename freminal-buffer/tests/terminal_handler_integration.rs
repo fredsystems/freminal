@@ -2727,6 +2727,163 @@ fn test_cbt_at_start_stays_at_zero() {
     assert_eq!(handler.buffer().get_cursor().pos.x, 0);
 }
 
+// ── 7.21a — Tab Stop Preservation Across Resize ─────────────────────
+
+#[test]
+fn test_tab_stops_preserved_on_width_increase() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set custom tab stops at columns 5, 15, 25
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(16), Some(1)); // col 15
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(26), Some(1)); // col 25
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Resize wider (80 → 120)
+    let _ = handler.buffer_mut().set_size(120, 24, 0);
+
+    // Verify custom stops are preserved: tab from col 0 should hit col 5
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+
+    // Tab again should hit col 8 (default stop, not removed)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+
+    // Tab again should hit col 15 (custom stop preserved)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+
+    // Tab again should hit col 16 (default stop)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+
+    // Tab again should hit col 24 (default stop)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+
+    // Tab again should hit col 25 (custom stop preserved)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 25);
+}
+
+#[test]
+fn test_tab_stops_preserved_on_width_decrease() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set custom tab stops at columns 5, 15, 25
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(16), Some(1)); // col 15
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(26), Some(1)); // col 25
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Resize narrower (80 → 40). Stops at 5 and 15 and 25 should survive.
+    let _ = handler.buffer_mut().set_size(40, 24, 0);
+
+    // Tab from col 0 should hit col 5 (custom stop within range)
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+
+    // Tab again should hit col 8 (default stop)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+
+    // Tab again should hit col 15 (custom stop)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+
+    // Tab again should hit col 16 (default stop)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+
+    // Tab again should hit col 24 (default stop)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+
+    // Tab again should hit col 25 (custom stop preserved)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 25);
+}
+
+#[test]
+fn test_tab_stops_narrow_then_widen_preserves_in_range() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Set custom tab stops at columns 5, 15, 50
+    handler.handle_cursor_pos(Some(6), Some(1)); // col 5
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(16), Some(1)); // col 15
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+    handler.handle_cursor_pos(Some(51), Some(1)); // col 50
+    handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+
+    // Shrink to 30 columns — stop at col 50 is lost
+    let _ = handler.buffer_mut().set_size(30, 24, 0);
+
+    // Widen back to 80 — stops at 5 and 15 should survive, 50 is gone
+    let _ = handler.buffer_mut().set_size(80, 24, 0);
+
+    // Tab from col 0 → 5 (custom, preserved)
+    handler.handle_cursor_pos(Some(1), Some(1)); // col 0
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+
+    // Tab → 8 (default)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+
+    // Tab → 15 (custom, preserved)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+
+    // Tab → 16 (default)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+
+    // Tab → 24 (default)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+
+    // Tab → 32 (default — in newly added range from resize back to 80)
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 32);
+
+    // Col 50 should NOT be a stop anymore — tab from 48 should skip past 50 to 56
+    handler.handle_cursor_pos(Some(49), Some(1)); // col 48
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 56);
+}
+
+#[test]
+fn test_new_columns_get_default_stops_after_resize() {
+    let mut handler = TerminalHandler::new(80, 24);
+
+    // Resize wider (80 → 120)
+    let _ = handler.buffer_mut().set_size(120, 24, 0);
+
+    // Tab from col 72 (last default stop in original 80-col) should hit 80
+    // Column 80 is a default stop (8 * 10) in the newly extended range
+    handler.handle_cursor_pos(Some(73), Some(1)); // col 72
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 80);
+
+    // Continue: 80 → 88 → 96 → 104 → 112
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 88);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 96);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 104);
+    handler.handle_tab();
+    assert_eq!(handler.buffer().get_cursor().pos.x, 112);
+}
+
 // ── 7.24 — CSI s / CSI u (Save / Restore Cursor) ────────────────────
 
 #[test]
