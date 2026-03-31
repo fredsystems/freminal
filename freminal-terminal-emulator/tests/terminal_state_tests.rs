@@ -501,3 +501,56 @@ fn test_decbkm_decrqm_after_reset_is_del() {
         "DECRQM ?67 in DEL state must return Ps=2 (reset)"
     );
 }
+
+// ─── Grapheme Clustering (?2027) — permanently set ───────────────────────────
+
+/// DECRQM query for ?2027 always returns Ps=3 (permanently set).
+#[test]
+fn test_grapheme_clustering_decrqm_permanently_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?2027$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "DECRQM ?2027 must return Ps=3 (permanently set)"
+    );
+}
+
+/// DECRQM query for ?2027 still returns Ps=3 after DECRST.
+#[test]
+fn test_grapheme_clustering_decrqm_after_reset_still_permanently_set() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // Send DECRST for ?2027 — silently accepted
+    state.handle_incoming_data(b"\x1b[?2027l");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?2027$p");
+    let msg = rx.try_recv().unwrap();
+    let bytes = unwrap_write(msg);
+    let resp = String::from_utf8(bytes).unwrap();
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "DECRQM ?2027 must return Ps=3 even after DECRST"
+    );
+}
+
+/// DECSET ?2027 is silently accepted (no error, no state change).
+#[test]
+fn test_grapheme_clustering_set_silently_accepted() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    // DECSET ?2027 — should not produce any PTY output
+    state.handle_incoming_data(b"\x1b[?2027h");
+    // No DECRPM response expected for DECSET
+    assert!(
+        rx.try_recv().is_err(),
+        "DECSET ?2027 must not produce a PTY response"
+    );
+}

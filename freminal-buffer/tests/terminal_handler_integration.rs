@@ -4580,3 +4580,50 @@ fn handler_query_without_write_tx_does_not_panic() {
     ))]);
     // If we get here without panicking, the test passes
 }
+
+// ── Grapheme Clustering (?2027) — permanently set ───────────────────────
+
+#[test]
+fn decrpm_grapheme_clustering_always_permanently_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::grapheme::GraphemeClustering,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::GraphemeClustering(GraphemeClustering::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "Grapheme clustering is permanently set → Ps=3"
+    );
+}
+
+#[test]
+fn decrpm_grapheme_clustering_after_reset_still_permanently_set() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::grapheme::GraphemeClustering,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Send DECRST — should be silently accepted
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::GraphemeClustering(
+        GraphemeClustering::new(&SetMode::DecRst),
+    ))]);
+    // Query should still report permanently set
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::GraphemeClustering(GraphemeClustering::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?2027;3$y",
+        "Grapheme clustering remains permanently set even after DECRST"
+    );
+}

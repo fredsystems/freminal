@@ -23,6 +23,7 @@ use freminal_common::{
         modes::deccolm::Deccolm,
         modes::decom::Decom,
         modes::dectcem::Dectcem,
+        modes::grapheme::GraphemeClustering,
         modes::lnm::Lnm,
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::xtcblink::XtCBlink,
@@ -3398,6 +3399,8 @@ impl TerminalHandler {
                 // TerminalState::modes.  TerminalHandler does not act on
                 // them; listing them explicitly silences spurious debug
                 // noise from the catch-all.
+                // GraphemeClustering Set/Reset are also silently accepted
+                // here — Freminal does grapheme clustering unconditionally.
                 Mode::Decckm(_)
                 | Mode::BracketedPaste(_)
                 | Mode::MouseMode(_)
@@ -3408,7 +3411,10 @@ impl TerminalHandler {
                 | Mode::ReverseWrapAround(_)
                 | Mode::SynchronizedUpdates(_)
                 | Mode::Decnkm(_)
-                | Mode::Decbkm(_) => {}
+                | Mode::Decbkm(_)
+                | Mode::GraphemeClustering(
+                    GraphemeClustering::Unicode | GraphemeClustering::Legacy,
+                ) => {}
 
                 // ── Application Escape Key (?7727) ────────────────────
                 Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set) => {
@@ -3444,12 +3450,16 @@ impl TerminalHandler {
                     self.write_to_pty(&ModifyOtherKeysMode::Set.report(Some(mode)));
                 }
 
+                // ── Grapheme Clustering (?2027) — permanently on ────
+                // Freminal unconditionally uses unicode-segmentation's
+                // graphemes(true), so Query always reports ";3$y"
+                // (permanently set). Set/Reset are in the catch-all above.
+                Mode::GraphemeClustering(GraphemeClustering::Query) => {
+                    self.write_to_pty(&GraphemeClustering::Unicode.report(None));
+                }
+
                 // ── Modes parsed but not yet acted on ─────────────────
-                Mode::NoOp
-                | Mode::Decsclm(_)
-                | Mode::GraphemeClustering(_)
-                | Mode::Theming(_)
-                | Mode::Unknown(_) => {
+                Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
                     tracing::warn!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },

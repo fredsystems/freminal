@@ -365,6 +365,14 @@ fn decrst_q1000_returns_mouse_mode_no_tracking() {
     );
 }
 
+#[test]
+fn decrst_q2027_returns_grapheme_clustering_unicode() {
+    assert_eq!(
+        dispatch(b"?2027", SetMode::DecRst),
+        Mode::GraphemeClustering(GraphemeClustering::Unicode)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Group 3: Known params with DecQuery
 // ---------------------------------------------------------------------------
@@ -451,6 +459,14 @@ fn decquery_q2004_returns_bracketed_paste_query() {
     assert_eq!(
         dispatch(b"?2004", SetMode::DecQuery),
         Mode::BracketedPaste(RlBracket::Query)
+    );
+}
+
+#[test]
+fn decquery_q2027_returns_grapheme_clustering_query() {
+    assert_eq!(
+        dispatch(b"?2027", SetMode::DecQuery),
+        Mode::GraphemeClustering(GraphemeClustering::Query)
     );
 }
 

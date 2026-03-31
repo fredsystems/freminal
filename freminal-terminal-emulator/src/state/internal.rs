@@ -306,13 +306,10 @@ impl TerminalState {
             | Mode::AllowColumnModeSwitch(_)
             | Mode::UnknownQuery(_)
             | Mode::ApplicationEscapeKey(_)
-            | Mode::ModifyOtherKeysMode(_) => {}
+            | Mode::ModifyOtherKeysMode(_)
+            | Mode::GraphemeClustering(_) => {}
             // ── Modes parsed but not yet acted on ─────────────
-            Mode::NoOp
-            | Mode::Decsclm(_)
-            | Mode::GraphemeClustering(_)
-            | Mode::Theming(_)
-            | Mode::Unknown(_) => {
+            Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
                 debug!("Mode not acted on by either layer: {mode}");
             }
         }
