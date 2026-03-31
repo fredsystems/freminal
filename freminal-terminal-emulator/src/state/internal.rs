@@ -307,6 +307,7 @@ impl TerminalState {
             | Mode::Decom(_)
             | Mode::Deccolm(_)
             | Mode::AllowColumnModeSwitch(_)
+            | Mode::AllowAltScreen(_)
             | Mode::UnknownQuery(_)
             | Mode::ApplicationEscapeKey(_)
             | Mode::ModifyOtherKeysMode(_)

@@ -7,6 +7,7 @@ use std::fmt;
 
 use crate::buffer_states::modes::{
     ReportMode,
+    allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
     alternate_scroll::AlternateScroll,
     application_escape_key::ApplicationEscapeKey,
@@ -83,6 +84,7 @@ pub enum Mode {
     NoOp,
     // Cursor keys mode
     // https://vt100.net/docs/vt100-ug/chapter3.html
+    AllowAltScreen(AllowAltScreen),
     AllowColumnModeSwitch(AllowColumnModeSwitch),
     AlternateScroll(AlternateScroll),
     Decckm(Decckm),
@@ -166,6 +168,7 @@ impl Mode {
             // recommended; ?1006 (SGR) is the preferred replacement.
             b"?1007" => Self::AlternateScroll(AlternateScroll::new(&mode)),
             b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
+            b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
             b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
             b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(&mode)),
@@ -197,6 +200,7 @@ impl ReportMode for Mode {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         match self {
             Self::NoOp => "NoOp".into(),
+            Self::AllowAltScreen(allow_alt_screen) => allow_alt_screen.report(override_mode),
             Self::AllowColumnModeSwitch(allow_column_mode_switch) => {
                 allow_column_mode_switch.report(override_mode)
             }
@@ -245,6 +249,7 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoOp => write!(f, "NoOp"),
+            Self::AllowAltScreen(allow_alt_screen) => write!(f, "{allow_alt_screen}"),
             Self::AllowColumnModeSwitch(allow_column_mode_switch) => {
                 write!(f, "{allow_column_mode_switch}")
             }

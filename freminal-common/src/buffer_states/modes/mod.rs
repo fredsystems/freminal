@@ -5,6 +5,7 @@
 
 use super::mode::SetMode;
 
+pub mod allow_alt_screen;
 pub mod allow_column_mode_switch;
 pub mod alternate_scroll;
 pub mod application_escape_key;

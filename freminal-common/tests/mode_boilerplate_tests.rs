@@ -8,6 +8,7 @@
 use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::modes::{
     ReportMode,
+    allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
     alternate_scroll::AlternateScroll,
     decarm::Decarm,
@@ -229,6 +230,20 @@ test_mode_type!(
     "Focus Reporting Mode (XT_MSE_WIN) Enabled",
     "Focus Reporting Mode (XT_MSE_WIN) Disabled",
     "Focus Reporting Mode (XT_MSE_WIN) Query"
+);
+
+// AllowAltScreen (?1046): default=Allow, Set=Allow, Reset=Disallow
+test_mode_type!(
+    allow_alt_screen_tests,
+    AllowAltScreen,
+    1046,
+    AllowAltScreen::Allow,
+    AllowAltScreen::Allow,
+    AllowAltScreen::Disallow,
+    AllowAltScreen::Query,
+    "Allow Alternate Screen Switching (?1046)",
+    "Disallow Alternate Screen Switching (?1046)",
+    "Query Allow Alternate Screen Switching (?1046)"
 );
 
 // AllowColumnModeSwitch (?40): default=AllowColumnModeSwitch, Set=AllowColumnModeSwitch,

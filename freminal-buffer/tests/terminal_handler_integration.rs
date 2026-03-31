@@ -4694,3 +4694,115 @@ fn decrpm_decsdm_after_reset() {
         "DECSDM after DECRST (ScrollingMode) → Ps=2"
     );
 }
+
+// ── AllowAltScreen (?1046) — Allow Alternate Screen Switching ──────────
+
+#[test]
+fn decrpm_allow_alt_screen_default_is_allow() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_alt_screen::AllowAltScreen,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::AllowAltScreen(AllowAltScreen::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1046;1$y",
+        "AllowAltScreen default (Allow) → Ps=1"
+    );
+}
+
+#[test]
+fn decrpm_allow_alt_screen_after_disallow() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_alt_screen::AllowAltScreen,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecRst),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::AllowAltScreen(AllowAltScreen::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1046;2$y",
+        "AllowAltScreen after DECRST (Disallow) → Ps=2"
+    );
+}
+
+#[test]
+fn decrpm_allow_alt_screen_after_re_enable() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::allow_alt_screen::AllowAltScreen,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Disallow then re-allow
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecRst),
+    ))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecSet),
+    ))]);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::AllowAltScreen(AllowAltScreen::new(
+            &SetMode::DecQuery,
+        ))),
+    );
+    assert_eq!(
+        resp, "\x1b[?1046;1$y",
+        "AllowAltScreen after re-enable → Ps=1"
+    );
+}
+
+#[test]
+fn allow_alt_screen_blocks_enter_alternate_when_disallowed() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::{allow_alt_screen::AllowAltScreen, xtextscrn::XtExtscrn},
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Disallow alternate screen
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+        AllowAltScreen::new(&SetMode::DecRst),
+    ))]);
+    // Try to enter alternate screen — should be a no-op
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        !handler.is_alternate_screen(),
+        "Alternate screen should not be entered when AllowAltScreen is Disallow"
+    );
+}
+
+#[test]
+fn allow_alt_screen_permits_enter_alternate_when_allowed() {
+    use freminal_common::buffer_states::{
+        mode::{Mode, SetMode},
+        modes::xtextscrn::XtExtscrn,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    // Default is Allow — entering alternate screen should succeed
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::new(
+        &SetMode::DecSet,
+    )))]);
+    assert!(
+        handler.is_alternate_screen(),
+        "Alternate screen should be entered when AllowAltScreen is Allow (default)"
+    );
+}

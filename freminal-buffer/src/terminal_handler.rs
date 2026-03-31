@@ -17,6 +17,7 @@ use freminal_common::{
         line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode},
         modes::ReportMode,
+        modes::allow_alt_screen::AllowAltScreen,
         modes::allow_column_mode_switch::AllowColumnModeSwitch,
         modes::application_escape_key::ApplicationEscapeKey,
         modes::decawm::Decawm,
@@ -136,6 +137,11 @@ pub struct TerminalHandler {
     /// Whether DECCOLM (132-column mode switching) is allowed.
     /// Controlled by `CSI?40h` / `CSI?40l` (`AllowColumnModeSwitch`).
     allow_column_mode_switch: bool,
+    /// Whether alternate screen switching is allowed (`?1046`).
+    ///
+    /// When `false`, `?47`/`?1047`/`?1049` Set/Reset are silently ignored.
+    /// Default is `true` (allowed).
+    allow_alt_screen: bool,
     /// The terminal width before DECCOLM was activated.
     ///
     /// Saved when `CSI?3h` (132-column mode) is received so that `CSI?3l`
@@ -248,6 +254,7 @@ impl TerminalHandler {
             last_exit_code: None,
             palette: ColorPalette::default(),
             allow_column_mode_switch: true,
+            allow_alt_screen: true,
             pre_deccolm_width: None,
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             fg_color_override: None,
@@ -3282,9 +3289,15 @@ impl TerminalHandler {
             }
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate)
-                | Mode::AltScreen47(AltScreen47::Alternate) => self.handle_enter_alternate(),
+                | Mode::AltScreen47(AltScreen47::Alternate) => {
+                    if self.allow_alt_screen {
+                        self.handle_enter_alternate();
+                    }
+                }
                 Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary) => {
-                    self.handle_leave_alternate();
+                    if self.allow_alt_screen {
+                        self.handle_leave_alternate();
+                    }
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
                 Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
@@ -3432,6 +3445,21 @@ impl TerminalHandler {
                         SetMode::DecRst
                     };
                     self.write_to_pty(&Decsdm::DisplayMode.report(Some(mode)));
+                }
+                // ── Allow Alternate Screen Switching (?1046) ──────────
+                Mode::AllowAltScreen(AllowAltScreen::Allow) => {
+                    self.allow_alt_screen = true;
+                }
+                Mode::AllowAltScreen(AllowAltScreen::Disallow) => {
+                    self.allow_alt_screen = false;
+                }
+                Mode::AllowAltScreen(AllowAltScreen::Query) => {
+                    let mode = if self.allow_alt_screen {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&AllowAltScreen::Allow.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in
