@@ -10,6 +10,7 @@ use freminal_common::buffer_states::modes::{
     allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
     alternate_scroll::AlternateScroll,
+    decanm::Decanm,
     decarm::Decarm,
     decawm::Decawm,
     decbkm::Decbkm,
@@ -737,5 +738,25 @@ fn decquery_q1045_returns_xt_rev_wrap2_query() {
     assert_eq!(
         dispatch(b"?1045", SetMode::DecQuery),
         Mode::XtRevWrap2(XtRevWrap2::Query)
+    );
+}
+
+// ── ?2 (DECANM — ANSI/VT52 Mode) ─────────────────────────────────────────
+
+#[test]
+fn decset_q2_returns_decanm_ansi() {
+    assert_eq!(dispatch(b"?2", SetMode::DecSet), Mode::Decanm(Decanm::Ansi));
+}
+
+#[test]
+fn decrst_q2_returns_decanm_vt52() {
+    assert_eq!(dispatch(b"?2", SetMode::DecRst), Mode::Decanm(Decanm::Vt52));
+}
+
+#[test]
+fn decquery_q2_returns_decanm_query() {
+    assert_eq!(
+        dispatch(b"?2", SetMode::DecQuery),
+        Mode::Decanm(Decanm::Query)
     );
 }

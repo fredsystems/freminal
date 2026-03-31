@@ -20,6 +20,7 @@ use freminal_common::{
         modes::allow_alt_screen::AllowAltScreen,
         modes::allow_column_mode_switch::AllowColumnModeSwitch,
         modes::application_escape_key::ApplicationEscapeKey,
+        modes::decanm::Decanm,
         modes::decawm::Decawm,
         modes::deccolm::Deccolm,
         modes::decnrcm::Decnrcm,
@@ -258,6 +259,11 @@ pub struct TerminalHandler {
     /// past row 0 of the visible screen into the scrollback buffer.
     /// Default is `false` (disabled).
     xt_rev_wrap2: bool,
+    /// Whether the terminal is in VT52 compatibility mode (`?2 reset`).
+    ///
+    /// When `true`, the parser uses the reduced VT52 escape set.
+    /// Default is `false` (ANSI mode).
+    vt52_mode: bool,
     /// The persistent Sixel palette used when `private_color_registers` is
     /// `false` (shared mode, `?1070 l`).  Palette changes in one image carry
     /// over to the next.  `None` when private mode is active; populated the
@@ -305,6 +311,7 @@ impl TerminalHandler {
             nrc_mode: false,
             reverse_wrap: true,
             xt_rev_wrap2: false,
+            vt52_mode: false,
             sixel_shared_palette: None,
         }
     }
@@ -2597,7 +2604,12 @@ impl TerminalHandler {
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
-        self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
+        if self.vt52_mode {
+            // VT52 identify response: ESC / Z
+            self.write_to_pty("\x1b/Z");
+        } else {
+            self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
+        }
     }
 
     /// Handle a `WindowManipulation` command.
@@ -3578,6 +3590,21 @@ impl TerminalHandler {
                         SetMode::DecRst
                     };
                     self.write_to_pty(&XtRevWrap2::Enabled.report(Some(mode)));
+                }
+                // ── DECANM — ANSI/VT52 Mode (?2) ─────────────────
+                Mode::Decanm(Decanm::Vt52) => {
+                    self.vt52_mode = true;
+                }
+                Mode::Decanm(Decanm::Ansi) => {
+                    self.vt52_mode = false;
+                }
+                Mode::Decanm(Decanm::Query) => {
+                    let mode = if self.vt52_mode {
+                        SetMode::DecRst
+                    } else {
+                        SetMode::DecSet
+                    };
+                    self.write_to_pty(&Decanm::Ansi.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in

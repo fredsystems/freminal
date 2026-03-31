@@ -14,6 +14,7 @@ use freminal_common::{
         modes::{
             MouseModeNumber, ReportMode,
             alternate_scroll::AlternateScroll,
+            decanm::Decanm,
             decarm::Decarm,
             decbkm::Decbkm,
             decckm::Decckm,
@@ -319,7 +320,18 @@ impl TerminalState {
             | Mode::Decnrcm(_)
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
-            | Mode::XtRevWrap2(_) => {}
+            | Mode::XtRevWrap2(_)
+            | Mode::Decanm(Decanm::Query) => {}
+            // DECANM — toggle the parser between VT52 and ANSI modes.
+            // The handler owns the authoritative `vt52_mode` flag, but
+            // the parser also needs to know so it routes ESC bytes to
+            // the correct state machine.
+            Mode::Decanm(Decanm::Vt52) => {
+                self.parser.vt52_mode = true;
+            }
+            Mode::Decanm(Decanm::Ansi) => {
+                self.parser.vt52_mode = false;
+            }
             // ── Modes parsed but not yet acted on ─────────────
             Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
                 debug!("Mode not acted on by either layer: {mode}");

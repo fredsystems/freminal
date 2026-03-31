@@ -11,6 +11,7 @@ use freminal_common::buffer_states::modes::{
     allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
     alternate_scroll::AlternateScroll,
+    decanm::Decanm,
     decarm::Decarm,
     decawm::Decawm,
     decbkm::Decbkm,
@@ -442,6 +443,20 @@ test_mode_type!(
     "Extended Reverse Wrap Enabled",
     "Extended Reverse Wrap Disabled",
     "Query Extended Reverse Wrap"
+);
+
+// Decanm (?2): default=Ansi, Set=Ansi, Reset=Vt52
+test_mode_type!(
+    decanm_tests,
+    Decanm,
+    2,
+    Decanm::Ansi,
+    Decanm::Ansi,
+    Decanm::Vt52,
+    Decanm::Query,
+    "ANSI Mode (DECANM)",
+    "VT52 Mode (DECANM)",
+    "Query ANSI/VT52 Mode (DECANM)"
 );
 
 // ===========================================================================
