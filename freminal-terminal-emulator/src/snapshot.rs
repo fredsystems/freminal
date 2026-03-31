@@ -218,6 +218,12 @@ pub struct TerminalSnapshot {
     /// theme without holding any lock.
     pub theme: &'static ThemePalette,
 
+    /// Dynamic cursor color override (set via OSC 12; reset via OSC 112).
+    ///
+    /// When `Some`, the cursor should be rendered in this color instead of
+    /// the theme's `cursor` field.
+    pub cursor_color_override: Option<(u8, u8, u8)>,
+
     /// All inline images referenced by the visible window.
     ///
     /// The map contains only the images that appear in `visible_image_placements`
@@ -282,6 +288,7 @@ impl TerminalSnapshot {
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
             playback_info: None,
+            cursor_color_override: None,
         }
     }
 }
@@ -298,5 +305,10 @@ mod tests {
     #[test]
     fn empty_application_escape_key_is_false() {
         assert!(!TerminalSnapshot::empty().application_escape_key);
+    }
+
+    #[test]
+    fn empty_cursor_color_override_is_none() {
+        assert!(TerminalSnapshot::empty().cursor_color_override.is_none());
     }
 }

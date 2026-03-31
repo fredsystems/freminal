@@ -874,6 +874,7 @@ impl TerminalEmulator {
             images,
             visible_image_placements,
             playback_info: None,
+            cursor_color_override: self.internal.handler.cursor_color_override(),
         }
     }
 

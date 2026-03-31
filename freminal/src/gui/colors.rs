@@ -56,10 +56,16 @@ pub const fn selection_fg_f(theme: &ThemePalette) -> [f32; 4] {
     rgb_to_f32(theme.selection_fg)
 }
 
-/// Cursor color as `[f32; 4]` from the active theme.
+/// Cursor color as `[f32; 4]` from the active theme, with optional override.
 #[must_use]
-pub const fn cursor_f(theme: &ThemePalette) -> [f32; 4] {
-    rgb_to_f32(theme.cursor)
+pub const fn cursor_f(
+    theme: &ThemePalette,
+    cursor_color_override: Option<(u8, u8, u8)>,
+) -> [f32; 4] {
+    match cursor_color_override {
+        Some(rgb) => rgb_to_f32(rgb),
+        None => rgb_to_f32(theme.cursor),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +364,7 @@ mod tests {
             "selection_fg_f mismatch"
         );
 
-        let cur = cursor_f(THEME);
+        let cur = cursor_f(THEME, None);
         let expected = f4(THEME.cursor);
         assert!(
             cur.iter()

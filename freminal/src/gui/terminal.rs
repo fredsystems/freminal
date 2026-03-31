@@ -1427,6 +1427,7 @@ impl FreminalTerminalWidget {
                     snap.cursor_pos,
                     &snap.cursor_visual_style,
                     snap.theme,
+                    snap.cursor_color_override,
                 );
                 let mut rs = self
                     .render_state
@@ -1480,6 +1481,7 @@ impl FreminalTerminalWidget {
                     &snap.cursor_visual_style,
                     screen_selection,
                     snap.theme,
+                    snap.cursor_color_override,
                 );
 
                 // Record where the cursor quad starts in the background VBO.

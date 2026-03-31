@@ -135,6 +135,8 @@ pub enum OscTarget {
     ResetPaletteColor,
     RemoteHost,
     Url,
+    /// OSC 12 — set or query the cursor color.
+    CursorColor,
     ResetCursorColor,
     /// OSC 110 — reset text foreground color to the theme default.
     ResetForeground,
@@ -183,6 +185,7 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(8) => Self::Url,
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
+            AnsiOscToken::OscValue(12) => Self::CursorColor,
             AnsiOscToken::OscValue(52) => Self::Clipboard,
             AnsiOscToken::OscValue(104) => Self::ResetPaletteColor,
             AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
@@ -250,6 +253,8 @@ pub enum AnsiOscType {
     SetTitleBar(String),
     Url(UrlResponse),
     RemoteHost(String),
+    /// OSC 12 — query or set the cursor color.
+    RequestColorQueryCursor(AnsiOscInternalType),
     ResetCursorColor,
     /// OSC 1337 File= inline image (iTerm2 protocol).
     ITerm2FileInline(ITerm2InlineImageData),
@@ -294,6 +299,9 @@ impl std::fmt::Display for AnsiOscType {
             Self::SetTitleBar(value) => write!(f, "SetTitleBar({value:?})"),
             Self::Ftcs(marker) => write!(f, "Ftcs ({marker})"),
             Self::RemoteHost(value) => write!(f, "RemoteHost ({value:?})"),
+            Self::RequestColorQueryCursor(value) => {
+                write!(f, "RequestColorQueryCursor({value:?})")
+            }
             Self::ResetCursorColor => write!(f, "ResetCursorColor"),
             Self::ITerm2FileInline(data) => {
                 write!(
