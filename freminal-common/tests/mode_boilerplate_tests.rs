@@ -17,6 +17,7 @@ use freminal_common::buffer_states::modes::{
     decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
+    declrmm::Declrmm,
     decnkm::Decnkm,
     decom::Decom,
     decsclm::Decsclm,
@@ -457,6 +458,20 @@ test_mode_type!(
     "ANSI Mode (DECANM)",
     "VT52 Mode (DECANM)",
     "Query ANSI/VT52 Mode (DECANM)"
+);
+
+// Declrmm (?69): default=Disabled, Set=Enabled, Reset=Disabled
+test_mode_type!(
+    declrmm_tests,
+    Declrmm,
+    69,
+    Declrmm::Disabled,
+    Declrmm::Enabled,
+    Declrmm::Disabled,
+    Declrmm::Query,
+    "Left/Right Margin Mode (DECLRMM) Enabled",
+    "Left/Right Margin Mode (DECLRMM) Disabled",
+    "Left/Right Margin Mode (DECLRMM) Query"
 );
 
 // ===========================================================================

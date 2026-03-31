@@ -310,6 +310,7 @@ impl TerminalState {
             | Mode::XtCBlink(_)
             | Mode::Decom(_)
             | Mode::Deccolm(_)
+            | Mode::Declrmm(_)
             | Mode::AllowColumnModeSwitch(_)
             | Mode::AllowAltScreen(_)
             | Mode::UnknownQuery(_)

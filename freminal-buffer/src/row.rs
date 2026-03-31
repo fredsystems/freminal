@@ -143,6 +143,23 @@ impl Row {
         &mut self.cells
     }
 
+    /// Returns the logical width of this row.
+    #[must_use]
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Push a single cell onto the backing store (used internally by column-
+    /// selective scroll helpers which need to extend a row without a full clear).
+    pub fn cells_mut_push(&mut self, cell: Cell) {
+        self.cells.push(cell);
+    }
+
+    /// Mark this row as dirty (its cached flat representation is stale).
+    pub const fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// Clean up when overwriting wide cells:
     /// - If overwriting a continuation, clear the head + all its continuations.
     /// - If overwriting a head, clear its continuations.
@@ -195,16 +212,30 @@ impl Row {
         text: &[TChar],
         tag: &FormatTag,
     ) -> InsertResponse {
+        self.insert_text_with_limit(start_col, text, tag, self.width)
+    }
+
+    /// Like `insert_text`, but stops at `right_limit` columns instead of
+    /// `self.width`.  Used by `Buffer::insert_text` when DECLRMM is active
+    /// to enforce the right margin.  `right_limit` must be ≤ `self.width`.
+    pub fn insert_text_with_limit(
+        &mut self,
+        start_col: usize,
+        text: &[TChar],
+        tag: &FormatTag,
+        right_limit: usize,
+    ) -> InsertResponse {
+        let limit = right_limit.min(self.width);
         let mut col = start_col;
 
         // ---------------------------------------------------------------
-        // If we start at or beyond the logical width, this row is full.
+        // If we start at or beyond the limit, this row is full.
         // Caller must wrap the entire input to the next row.
         // ---------------------------------------------------------------
-        if col >= self.width {
+        if col >= limit {
             return InsertResponse::Leftover {
                 leftover_start: 0,
-                final_col: col, // typically == self.width
+                final_col: col, // typically == limit
             };
         }
 
@@ -217,16 +248,16 @@ impl Row {
         for (i, tchar) in text.iter().enumerate() {
             let w = tchar.display_width().max(1);
 
-            // If we've reached the row's width, nothing else fits here.
-            if col >= self.width {
+            // If we've reached the limit, nothing else fits here.
+            if col >= limit {
                 return InsertResponse::Leftover {
                     leftover_start: i,
                     final_col: col,
                 };
             }
 
-            // If this glyph would overflow, stop here and wrap remaining text.
-            if col + w > self.width {
+            // If this glyph would overflow the limit, stop here.
+            if col + w > limit {
                 return InsertResponse::Leftover {
                     leftover_start: i,
                     final_col: col,
@@ -452,6 +483,121 @@ impl Row {
         }
 
         // Trim trailing default blanks to maintain the sparse-row invariant.
+        while let Some(last) = self.cells.last() {
+            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
+                self.cells.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Like `insert_spaces_at`, but shifts only within `[col, right_limit)`.
+    /// Cells at or beyond `right_limit` are not affected; cells shifted beyond
+    /// the limit are discarded.  `right_limit` must be ≤ `self.width`.
+    pub fn insert_spaces_at_with_right_limit(
+        &mut self,
+        col: usize,
+        n: usize,
+        tag: &FormatTag,
+        right_limit: usize,
+    ) {
+        let limit = right_limit.min(self.width);
+
+        if n == 0 || col >= limit {
+            return;
+        }
+
+        self.dirty = true;
+
+        let insert_len = n.min(limit.saturating_sub(col));
+        let old_len = self.cells.len().min(limit); // only cells inside the margin matter
+
+        let needed_len = (old_len + insert_len).max(col + insert_len).min(limit);
+        if needed_len == 0 {
+            return;
+        }
+
+        // Ensure storage up to `limit` (fill with default blanks).
+        if self.cells.len() < limit {
+            self.cells
+                .resize(limit, Cell::blank_with_tag(FormatTag::default()));
+        }
+
+        // Shift cells [col..limit-insert_len) right by insert_len within [col, limit).
+        let shift_end = limit.saturating_sub(insert_len);
+        for i in (col..shift_end).rev() {
+            let dest = i + insert_len;
+            if dest < limit {
+                self.cells[dest] = self.cells[i].clone();
+            }
+        }
+
+        // Fill [col..col+insert_len) with blanks.
+        for i in col..(col + insert_len).min(limit) {
+            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        }
+
+        // Clamp storage to logical width.
+        if self.cells.len() > self.width {
+            self.cells.truncate(self.width);
+        }
+
+        // Maintain sparse-row invariant.
+        while let Some(last) = self.cells.last() {
+            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
+                self.cells.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Like `delete_cells_at`, but the right boundary of the operation is
+    /// `right_limit`.  Cells at `[col, col+n)` are removed; cells in
+    /// `[col+n, right_limit)` shift left to fill the gap; blanks (tagged with
+    /// `tag`) are inserted at the end of `[right_limit-n, right_limit)`.
+    /// Cells outside `[col, right_limit)` are not affected.
+    pub fn delete_cells_at_with_right_limit(
+        &mut self,
+        col: usize,
+        n: usize,
+        right_limit: usize,
+        tag: &FormatTag,
+    ) {
+        let limit = right_limit.min(self.width);
+
+        if n == 0 || col >= limit || col >= self.cells.len() {
+            return;
+        }
+
+        self.dirty = true;
+
+        let delete_n = n.min(limit.saturating_sub(col));
+
+        // Ensure storage up to `limit`.
+        if self.cells.len() < limit {
+            self.cells
+                .resize(limit, Cell::blank_with_tag(FormatTag::default()));
+        }
+
+        // Shift cells [col+delete_n, limit) left by delete_n.
+        for i in col..limit.saturating_sub(delete_n) {
+            self.cells[i] = self.cells[i + delete_n].clone();
+        }
+
+        // Fill [limit-delete_n, limit) with blanks.
+        let fill_start = limit.saturating_sub(delete_n);
+        for i in fill_start..limit {
+            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        }
+
+        // Clamp storage.
+        if self.cells.len() > self.width {
+            self.cells.truncate(self.width);
+        }
+
+        // Maintain sparse-row invariant.
         while let Some(last) = self.cells.last() {
             if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
                 self.cells.pop();

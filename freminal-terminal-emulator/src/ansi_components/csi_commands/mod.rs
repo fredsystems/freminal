@@ -17,6 +17,7 @@ pub mod dch;
 pub mod decrqm;
 pub mod decscusr;
 pub mod decslpp;
+pub mod decslrm;
 pub mod decstbm;
 pub mod dl;
 pub mod dsr;

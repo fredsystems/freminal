@@ -63,6 +63,7 @@ use super::csi_commands::{
     decrqm::ansi_parser_inner_csi_finished_decrqm,
     decscusr::ansi_parser_inner_csi_finished_set_position_q,
     decslpp::ansi_parser_inner_csi_finished_set_position_t,
+    decslrm::ansi_parser_inner_csi_set_left_and_right_margins,
     decstbm::ansi_parser_inner_csi_set_top_and_bottom_margins,
     dl::ansi_parser_inner_csi_finished_dl, dsr::ansi_parser_inner_csi_finished_dsr,
     ech::ansi_parser_inner_csi_finished_set_position_x,
@@ -308,9 +309,16 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_send_da(&self.params, &self.intermediates, output)
             }
             AnsiCsiParserState::Finished(b's') => {
-                // SCOSC — Save Cursor Position
-                output.push(TerminalOutput::SaveCursor);
-                push_result
+                // When params are present this is DECSLRM (set left/right margins);
+                // when empty it is SCOSC (save cursor).  The handler
+                // (`process_outputs`) ignores SetLeftAndRightMargins when
+                // DECLRMM is not active, so the parse is always safe.
+                if self.params.is_empty() {
+                    output.push(TerminalOutput::SaveCursor);
+                    push_result
+                } else {
+                    ansi_parser_inner_csi_set_left_and_right_margins(&self.params, output)
+                }
             }
             AnsiCsiParserState::Finished(b'u') => {
                 ansi_parser_inner_csi_finished_u(&self.params, output);
@@ -458,6 +466,41 @@ mod tests {
         assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Alternate));
         assert_eq!(*modes[1], Mode::Decckm(Decckm::Application));
         assert_eq!(*modes[2], Mode::BracketedPaste(RlBracket::Enabled));
+    }
+
+    // ── CSI s routing: SCOSC vs DECSLRM ────────────────────────────────
+
+    #[test]
+    fn csi_s_no_params_is_save_cursor() {
+        // CSI s with no params → SCOSC (save cursor)
+        let out = parse_csi_sequence(b"s");
+        assert_eq!(out, vec![TerminalOutput::SaveCursor]);
+    }
+
+    #[test]
+    fn csi_s_with_params_is_decslrm() {
+        // CSI 5;10 s → DECSLRM
+        let out = parse_csi_sequence(b"5;10s");
+        assert_eq!(
+            out,
+            vec![TerminalOutput::SetLeftAndRightMargins {
+                left_margin: 5,
+                right_margin: 10,
+            }]
+        );
+    }
+
+    #[test]
+    fn csi_s_with_single_param_is_decslrm() {
+        // CSI 3 s → DECSLRM with right=MAX
+        let out = parse_csi_sequence(b"3s");
+        assert_eq!(
+            out,
+            vec![TerminalOutput::SetLeftAndRightMargins {
+                left_margin: 3,
+                right_margin: usize::MAX,
+            }]
+        );
     }
 
     #[test]

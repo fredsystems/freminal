@@ -17,6 +17,7 @@ use crate::buffer_states::modes::{
     decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
+    declrmm::Declrmm,
     decnkm::Decnkm,
     decnrcm::Decnrcm,
     decom::Decom,
@@ -96,6 +97,7 @@ pub enum Mode {
     Decanm(Decanm),
     Dectem(Dectcem),
     Deccolm(Deccolm),
+    Declrmm(Declrmm),
     Decsclm(Decsclm),
     Decnkm(Decnkm),
     Decbkm(Decbkm),
@@ -166,6 +168,7 @@ impl Mode {
             b"?42" => Self::Decnrcm(Decnrcm::new(&mode)),
             b"?66" => Self::Decnkm(Decnkm::new(&mode)),
             b"?67" => Self::Decbkm(Decbkm::new(&mode)),
+            b"?69" => Self::Declrmm(Declrmm::new(&mode)),
             b"?80" => Self::Decsdm(Decsdm::new(&mode)),
             b"?1000" => Self::mouse_mode(mode, MouseTrack::XtMseX11, 1000),
             b"?1001" => Self::mouse_mode(mode, MouseTrack::XtMseHilite, 1001),
@@ -223,6 +226,7 @@ impl ReportMode for Mode {
             Self::Decom(decom) => decom.report(override_mode),
             Self::Decsdm(decsdm) => decsdm.report(override_mode),
             Self::Deccolm(deccolm) => deccolm.report(override_mode),
+            Self::Declrmm(declrmm) => declrmm.report(override_mode),
             Self::Decnkm(decnkm) => decnkm.report(override_mode),
             Self::Decbkm(decbkm) => decbkm.report(override_mode),
             Self::Decnrcm(decnrcm) => decnrcm.report(override_mode),
@@ -281,6 +285,7 @@ impl fmt::Display for Mode {
             Self::Decscnm(decscnm) => write!(f, "{decscnm}"),
             Self::Decsclm(decsclm) => write!(f, "{decsclm}"),
             Self::Deccolm(deccolm) => write!(f, "{deccolm}"),
+            Self::Declrmm(declrmm) => write!(f, "{declrmm}"),
             Self::Decnkm(decnkm) => write!(f, "{decnkm}"),
             Self::Decbkm(decbkm) => write!(f, "{decbkm}"),
             Self::Decnrcm(decnrcm) => write!(f, "{decnrcm}"),
@@ -384,6 +389,53 @@ mod tests {
     #[test]
     fn display_modify_other_keys_mode() {
         let s = format!("{}", Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset));
+        assert!(!s.is_empty());
+    }
+    // ── ?69 (DECLRMM) ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_69_dec_set() {
+        let mode = Mode::terminal_mode_from_params(b"?69", SetMode::DecSet);
+        assert_eq!(
+            mode,
+            Mode::Declrmm(super::super::modes::declrmm::Declrmm::Enabled)
+        );
+    }
+
+    #[test]
+    fn parse_69_dec_rst() {
+        let mode = Mode::terminal_mode_from_params(b"?69", SetMode::DecRst);
+        assert_eq!(
+            mode,
+            Mode::Declrmm(super::super::modes::declrmm::Declrmm::Disabled)
+        );
+    }
+
+    #[test]
+    fn parse_69_dec_query() {
+        let mode = Mode::terminal_mode_from_params(b"?69", SetMode::DecQuery);
+        assert_eq!(
+            mode,
+            Mode::Declrmm(super::super::modes::declrmm::Declrmm::Query)
+        );
+    }
+
+    #[test]
+    fn report_declrmm_enabled() {
+        let mode = Mode::Declrmm(super::super::modes::declrmm::Declrmm::Enabled);
+        assert_eq!(mode.report(None), "\x1b[?69;1$y");
+    }
+
+    #[test]
+    fn report_declrmm_disabled() {
+        let mode = Mode::Declrmm(super::super::modes::declrmm::Declrmm::Disabled);
+        assert_eq!(mode.report(None), "\x1b[?69;2$y");
+    }
+
+    #[test]
+    fn display_declrmm() {
+        use super::super::modes::declrmm::Declrmm;
+        let s = format!("{}", Mode::Declrmm(Declrmm::Enabled));
         assert!(!s.is_empty());
     }
 }

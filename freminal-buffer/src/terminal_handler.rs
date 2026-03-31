@@ -23,6 +23,7 @@ use freminal_common::{
         modes::decanm::Decanm,
         modes::decawm::Decawm,
         modes::deccolm::Deccolm,
+        modes::declrmm::Declrmm,
         modes::decnrcm::Decnrcm,
         modes::decom::Decom,
         modes::decsdm::Decsdm,
@@ -748,6 +749,16 @@ impl TerminalHandler {
     /// 1-based → 0-based internally, so we must NOT subtract here.
     pub fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
         self.buffer.set_scroll_region(top, bottom);
+    }
+
+    /// Set DECSLRM left/right margins.
+    ///
+    /// `left` and `right` are **1-based inclusive** column numbers as delivered
+    /// by the parser.  Only effective when DECLRMM (`?69`) is active.
+    pub fn handle_set_left_right_margins(&mut self, left: usize, right: usize) {
+        if self.buffer.is_declrmm_enabled() {
+            self.buffer.set_left_right_margins(left, right);
+        }
     }
 
     /// Handle index (IND)
@@ -3316,6 +3327,12 @@ impl TerminalHandler {
             } => {
                 self.handle_set_scroll_region(*top_margin, *bottom_margin);
             }
+            TerminalOutput::SetLeftAndRightMargins {
+                left_margin,
+                right_margin,
+            } => {
+                self.handle_set_left_right_margins(*left_margin, *right_margin);
+            }
 
             // === Unimplemented Operations - TODO ===
             TerminalOutput::Bell => {
@@ -3482,6 +3499,22 @@ impl TerminalHandler {
                         SetMode::DecRst
                     };
                     self.write_to_pty(&Deccolm::Column132.report(Some(mode)));
+                }
+                // ── DECLRMM — Left/Right Margin Mode (?69) ───────
+                Mode::Declrmm(Declrmm::Enabled) => {
+                    self.buffer.set_declrmm(true);
+                }
+                Mode::Declrmm(Declrmm::Disabled) => {
+                    // set_declrmm(false) resets margins as a side effect.
+                    self.buffer.set_declrmm(false);
+                }
+                Mode::Declrmm(Declrmm::Query) => {
+                    let mode = if self.buffer.is_declrmm_enabled() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_to_pty(&Declrmm::Enabled.report(Some(mode)));
                 }
                 Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch) => {
                     self.allow_column_mode_switch = true;

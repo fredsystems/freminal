@@ -16,6 +16,7 @@ use freminal_common::buffer_states::modes::{
     decbkm::Decbkm,
     decckm::Decckm,
     deccolm::Deccolm,
+    declrmm::Declrmm,
     decnkm::Decnkm,
     decnrcm::Decnrcm,
     decom::Decom,
@@ -758,5 +759,31 @@ fn decquery_q2_returns_decanm_query() {
     assert_eq!(
         dispatch(b"?2", SetMode::DecQuery),
         Mode::Decanm(Decanm::Query)
+    );
+}
+
+// ── ?69 (DECLRMM — Left/Right Margin Mode) ───────────────────────────────
+
+#[test]
+fn decset_q69_returns_declrmm_enabled() {
+    assert_eq!(
+        dispatch(b"?69", SetMode::DecSet),
+        Mode::Declrmm(Declrmm::Enabled)
+    );
+}
+
+#[test]
+fn decrst_q69_returns_declrmm_disabled() {
+    assert_eq!(
+        dispatch(b"?69", SetMode::DecRst),
+        Mode::Declrmm(Declrmm::Disabled)
+    );
+}
+
+#[test]
+fn decquery_q69_returns_declrmm_query() {
+    assert_eq!(
+        dispatch(b"?69", SetMode::DecQuery),
+        Mode::Declrmm(Declrmm::Query)
     );
 }
