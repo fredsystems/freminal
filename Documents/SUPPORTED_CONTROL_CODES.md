@@ -1,6 +1,6 @@
 # Supported Control Codes
 
-Last updated: 2026-03-12 — Rewritten post-Task 7 completion (all 30 subtasks done)
+Last updated: 2026-03-31 — Updated post-Task 20 completion (DEC Private Mode Coverage)
 
 ## Key
 
@@ -129,40 +129,49 @@ Last updated: 2026-03-12 — Rewritten post-Task 7 completion (all 30 subtasks d
 
 ## DEC Private Modes (CSI ? Pm h / l)
 
-| Mode  | Name                             | Implemented | Notes                                                                               |
-| ----- | -------------------------------- | ----------- | ----------------------------------------------------------------------------------- |
-| ?1    | DECCKM — Cursor Keys Mode        | ✅          | `TerminalModes.cursor_key`; GUI translates arrow keys when set                      |
-| ?3    | DECCOLM — 80/132 Column Mode     | ✅          | Column switching active when AllowColumnModeSwitch (?40) is enabled                 |
-| ?5    | DECSCNM — Reverse Video          | 🚧          | `TerminalModes.invert_screen` set correctly; renderer screen-inversion not yet done |
-| ?6    | DECOM — Origin Mode              | ✅          | CUP row 1 → top of scroll region when set                                           |
-| ?7    | DECAWM — Auto Wrap Mode          | ✅          | Implemented (`Decawm` enum)                                                         |
-| ?8    | DECARM — Auto Repeat Keys        | ✅          | `TerminalModes.repeat_keys`; GUI reads                                              |
-| ?12   | XtCBlink — Cursor Blink          | ✅          | Implemented                                                                         |
-| ?25   | DECTCEM — Show/Hide Cursor       | ✅          | Implemented                                                                         |
-| ?40   | AllowColumnModeSwitch            | ✅          | Gates DECCOLM behavior                                                              |
-| ?45   | ReverseWrapAround                | ✅          | `TerminalModes.reverse_wrap_around`                                                 |
-| ?47   | Alt Screen Buffer (legacy)       | ✅          | Wired to same alt-screen machinery as ?1049                                         |
-| ?1000 | X11 Mouse — Normal Tracking      | ✅          | `TerminalModes.mouse_tracking`; GUI reads and forwards mouse events                 |
-| ?1002 | X11 Mouse — Button Event         | ✅          | `TerminalModes.mouse_tracking`                                                      |
-| ?1003 | X11 Mouse — Any Event            | ✅          | `TerminalModes.mouse_tracking`                                                      |
-| ?1004 | Focus Reporting                  | ✅          | `TerminalModes.focus_reporting`; GUI sends `InputEvent::FocusChange`                |
-| ?1006 | SGR Mouse — Extended Coordinates | ✅          | `TerminalModes.mouse_tracking`                                                      |
-| ?1047 | Alt Screen Buffer (legacy)       | ✅          | Wired to same alt-screen machinery as ?1049                                         |
-| ?1048 | Save/Restore Cursor (legacy)     | ✅          | Wired to existing save/restore cursor machinery                                     |
-| ?1049 | Alt Screen Buffer + Save Cursor  | ✅          | Implemented — swaps screen buffers, saves/restores cursor                           |
-| ?2004 | Bracketed Paste                  | ✅          | `TerminalModes.bracketed_paste`; GUI wraps paste with `\e[200~` / `\e[201~`         |
-| ?2026 | Synchronized Output              | ✅          | `TerminalModes.synchronized_updates`                                                |
+| Mode  | Name                             | Implemented | Notes                                                                                |
+| ----- | -------------------------------- | ----------- | ------------------------------------------------------------------------------------ |
+| ?1    | DECCKM — Cursor Keys Mode        | ✅          | `TerminalModes.cursor_key`; GUI translates arrow keys when set                       |
+| ?2    | DECANM — VT52 Mode               | ✅          | Full VT52 parser with 15 commands; `ESC <` returns to ANSI mode (Task 20.8)          |
+| ?3    | DECCOLM — 80/132 Column Mode     | ✅          | Column switching active when AllowColumnModeSwitch (?40) is enabled                  |
+| ?5    | DECSCNM — Reverse Video          | 🚧          | `TerminalModes.invert_screen` set correctly; renderer screen-inversion not yet done  |
+| ?6    | DECOM — Origin Mode              | ✅          | CUP row 1 → top of scroll region when set                                            |
+| ?7    | DECAWM — Auto Wrap Mode          | ✅          | Implemented (`Decawm` enum)                                                          |
+| ?8    | DECARM — Auto Repeat Keys        | ✅          | `TerminalModes.repeat_keys`; GUI reads                                               |
+| ?12   | XtCBlink — Cursor Blink          | ✅          | Implemented                                                                          |
+| ?25   | DECTCEM — Show/Hide Cursor       | ✅          | Implemented                                                                          |
+| ?40   | AllowColumnModeSwitch            | ✅          | Gates DECCOLM behavior                                                               |
+| ?42   | DECNRCM — National Replacement   | ✅          | Character set substitution; UK charset maps `#` → `£` (Task 20.12)                   |
+| ?45   | ReverseWrapAround                | ✅          | `TerminalModes.reverse_wrap_around`                                                  |
+| ?47   | Alt Screen Buffer (legacy)       | ✅          | Wired to same alt-screen machinery as ?1049                                          |
+| ?66   | DECNKM — Numeric Keypad Mode     | ✅          | DECSET alias for DECKPAM/DECKPNM; maps to `modes.keypad_mode` (Task 20.2)            |
+| ?67   | DECBKM — Backarrow Key Mode      | ✅          | Set: BS sends 0x08; Reset: BS sends 0x7F (Task 20.3)                                 |
+| ?69   | DECLRMM — Left/Right Margin Mode | ✅          | Horizontal scroll regions via DECSLRM; full margin-aware cursor/edit ops (Task 20.1) |
+| ?80   | DECSDM — Sixel Display Mode      | ✅          | Set: Sixel no-scroll (display mode); Reset: cursor advances past image (Task 20.5)   |
+| ?1000 | X11 Mouse — Normal Tracking      | ✅          | `TerminalModes.mouse_tracking`; GUI reads and forwards mouse events                  |
+| ?1001 | X11 Mouse — Hilite Tracking      | ✅          | `MouseTrack::XtMseHilite`; highlight protocol on press/release (Task 20.10)          |
+| ?1002 | X11 Mouse — Button Event         | ✅          | `TerminalModes.mouse_tracking`                                                       |
+| ?1003 | X11 Mouse — Any Event            | ✅          | `TerminalModes.mouse_tracking`                                                       |
+| ?1004 | Focus Reporting                  | ✅          | `TerminalModes.focus_reporting`; GUI sends `InputEvent::FocusChange`                 |
+| ?1006 | SGR Mouse — Extended Coordinates | ✅          | `TerminalModes.mouse_tracking`                                                       |
+| ?1007 | Alternate Scroll Mode            | ✅          | Scroll → arrow keys on alt screen when set (Task 20.4)                               |
+| ?1045 | XTREVWRAP2 — Extended Rev-Wrap   | ✅          | Extends ?45 reverse-wrap into scrollback region (Task 20.9)                          |
+| ?1046 | AllowAltScreen                   | ✅          | Gates ?47/?1047/?1049 alternate screen switching (Task 20.6)                         |
+| ?1047 | Alt Screen Buffer (legacy)       | ✅          | Wired to same alt-screen machinery as ?1049                                          |
+| ?1048 | Save/Restore Cursor (legacy)     | ✅          | Wired to existing save/restore cursor machinery                                      |
+| ?1049 | Alt Screen Buffer + Save Cursor  | ✅          | Implemented — swaps screen buffers, saves/restores cursor                            |
+| ?1070 | Private Color Registers          | ✅          | Per-graphic Sixel palette; default on (Task 20.11)                                   |
+| ?2004 | Bracketed Paste                  | ✅          | `TerminalModes.bracketed_paste`; GUI wraps paste with `\e[200~` / `\e[201~`          |
+| ?2026 | Synchronized Output              | ✅          | `TerminalModes.synchronized_updates`                                                 |
+| ?2027 | Grapheme Clustering              | ✅          | Always-on via `unicode-segmentation`; DECRQM reports permanently set (Task 20.7)     |
+| ?2048 | modifyOtherKeys (DEC alias)      | ✅          | DEC private mode alias for modifyOtherKeys                                           |
+| ?7727 | Application Escape Key           | ✅          | Unambiguous Escape encoding for tmux                                                 |
 
 ### Not Parsed
 
-| Mode          | Description                    |
-| ------------- | ------------------------------ |
-| ?2 (DECANM)   | VT52 mode                      |
-| ?66 (DECNKM)  | Numeric keypad mode (DEC)      |
-| ?67 (DECBKM)  | Backarrow key mode             |
-| ?69 (DECLRMM) | Left/right margin mode         |
-| ?1001, ?1007  | Hilite mouse, alternate scroll |
-| ?1034         | Interpret meta key             |
+| Mode  | Description        |
+| ----- | ------------------ |
+| ?1034 | Interpret meta key |
 
 ## Standard Modes (CSI Pm h / l)
 
@@ -201,7 +210,7 @@ Last updated: 2026-03-12 — Rewritten post-Task 7 completion (all 30 subtasks d
 | DCS (all)    | General   | ✅          | Sub-command dispatch via `handle_device_control_string()`                   |
 | DCS $ q … ST | DECRQSS   | ✅          | Supports `m` (SGR), `r` (DECSTBM), `q` (DECSCUSR); unknown → error response |
 | DCS + q … ST | XTGETTCAP | ✅          | Responds to common capability queries; unknown → error response             |
-| DCS Sixel    | Sixel     | ⬜          | Not implemented                                                             |
+| DCS Sixel    | Sixel     | ✅          | Fully implemented — parser, DCS dispatch, buffer placement, GPU rendering   |
 
 ## FTCS — FinalTerm Control Sequences (OSC 133)
 

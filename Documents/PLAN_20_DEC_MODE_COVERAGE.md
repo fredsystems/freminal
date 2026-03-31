@@ -1,6 +1,6 @@
 # PLAN_20 — DEC Private Mode Coverage
 
-## Status: Pending
+## Status: Complete — All 12 subtasks merged (2026-03-17)
 
 ---
 
@@ -86,7 +86,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.1 — Implement `?69` DECLRMM (Left/Right Margin Mode)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/src/buffer.rs`, `freminal-buffer/src/terminal_handler.rs`,
   `freminal-common/src/buffer_states/mode.rs`, `freminal-common/src/buffer_states/modes/`
@@ -135,7 +135,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.2 — Implement `?66` DECNKM (Numeric Keypad Mode)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -167,7 +167,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.3 — Implement `?67` DECBKM (Backarrow Key Mode)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -208,7 +208,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.4 — Implement `?1007` Alternate Scroll Mode
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -250,7 +250,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.5 — Implement `?80` DECSDM (Sixel Display Mode)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -298,7 +298,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.6 — Implement `?1046` Enable/Disable Alternate Screen Switching
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -328,7 +328,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.7 — Promote `?2027` Grapheme Clustering to Properly Routed Mode
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-buffer/src/terminal_handler.rs`,
   `freminal-terminal-emulator/src/state/internal.rs`
@@ -368,7 +368,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.8 — Implement `?2` DECANM (VT52 Mode)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -416,7 +416,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.9 — Implement `?1045` XTREVWRAP2 (Extended Reverse-Wraparound)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -452,7 +452,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.10 — Implement `?1001` Hilite Mouse Tracking
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/mouse.rs`,
@@ -486,7 +486,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.11 — Implement `?1070` Private Color Registers for Sixel
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -524,7 +524,7 @@ These are modes that real, widely-used programs send and expect to work.
 
 ### 20.12 — Implement `?42` DECNRCM (National Replacement Character Set Mode)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-common/src/buffer_states/mode.rs`,
   `freminal-common/src/buffer_states/modes/`,
@@ -624,7 +624,7 @@ should be implemented.
 | Mode            | Origin         | Name                                  | Classification | Notes                                                |
 | --------------- | -------------- | ------------------------------------- | -------------- | ---------------------------------------------------- |
 | `?1`            | DEC            | DECCKM — Cursor Keys                  | **IMPL**       | `modes.cursor_key`                                   |
-| `?2`            | DEC            | DECANM — VT52 Mode                    | **PLAN 20.8**  | Requires second parser path                          |
+| `?2`            | DEC            | DECANM — VT52 Mode                    | **IMPL**       | Full VT52 parser (20.8)                              |
 | `?3`            | DEC            | DECCOLM — Column                      | **IMPL**       | Buffer resize + PTY resize                           |
 | `?4`            | DEC            | DECSCLM — Scrolling                   | **STUB**       | Smooth vs jump scroll; irrelevant at 60+ fps         |
 | `?5`            | DEC            | DECSCNM — Screen Invert               | **IMPL**       | `modes.invert_screen`                                |
@@ -664,7 +664,7 @@ should be implemented.
 | `?40`           | xterm          | Allow 80⇒132                          | **IMPL**       | `allow_column_mode_switch`                           |
 | `?41`           | DEC            | DECUPM — Unidirectional Print         | **SKIP**       | DEC hardware printer mode                            |
 | `?41`           | xterm          | `more(1)` fix                         | **SKIP**       | Obscure xterm workaround                             |
-| `?42`           | DEC            | DECNRCM — National Replacement        | **PLAN 20.12** | Character set substitution                           |
+| `?42`           | DEC            | DECNRCM — National Replacement        | **IMPL**       | Character set substitution (20.12)                   |
 | `?43`           | DEC            | DECGEPM — Graphics Expanded Print     | **SKIP**       | DEC hardware graphics print                          |
 | `?44`           | DEC            | DECGPCM — Graphics Print Color        | **SKIP**       | DEC hardware graphics color print                    |
 | `?44`           | xterm          | Margin bell                           | **SKIP**       | xterm-specific audio bell                            |
@@ -687,13 +687,13 @@ should be implemented.
 | `?61`           | DEC            | DECVCCM — Vertical Cursor Coupling    | **SKIP**       | DEC hardware cursor coupling                         |
 | `?64`           | DEC            | DECPCCM — Page Cursor Coupling        | **SKIP**       | DEC hardware page coupling                           |
 | `?65`           | DEC            | DECBCMM — Business Color Matching     | **SKIP**       | DEC hardware color matching                          |
-| `?66`           | DEC            | DECNKM — Numeric Keypad               | **PLAN 20.2**  | DECSET alias for DECKPAM/DECKPNM                     |
-| `?67`           | DEC            | DECBKM — Backarrow Key                | **PLAN 20.3**  | Toggles BS (0x08) vs DEL (0x7F)                      |
+| `?66`           | DEC            | DECNKM — Numeric Keypad               | **IMPL**       | DECSET alias for DECKPAM/DECKPNM (20.2)              |
+| `?67`           | DEC            | DECBKM — Backarrow Key                | **IMPL**       | Toggles BS (0x08) vs DEL (0x7F) (20.3)               |
 | `?68`           | DEC            | DECKBUM — Keyboard Usage              | **SKIP**       | DEC hardware keyboard usage mode                     |
-| `?69`           | DEC            | DECLRMM — Left/Right Margins          | **PLAN 20.1**  | Horizontal scroll regions                            |
+| `?69`           | DEC            | DECLRMM — Left/Right Margins          | **IMPL**       | Horizontal scroll regions (20.1)                     |
 | `?70`           | DEC            | DECFPM — Force Plot                   | **SKIP**       | DEC hardware force plot                              |
 | `?73`           | DEC            | DECXRLM — Transmission Rate           | **SKIP**       | DEC hardware rate limiting                           |
-| `?80`           | DEC            | DECSDM — Sixel Display Mode           | **PLAN 20.5**  | Controls Sixel scroll vs display                     |
+| `?80`           | DEC            | DECSDM — Sixel Display Mode           | **IMPL**       | Controls Sixel scroll vs display (20.5)              |
 | `?81`           | DEC            | DECKPM — Key Position Mode            | **SKIP**       | DEC hardware key position                            |
 | `?83`           | WY-370         | 52 line                               | **SKIP**       | Wyse hardware 52-line mode                           |
 | `?84`           | WY-370         | Erasable attribute select             | **SKIP**       | Wyse hardware attribute                              |
@@ -721,13 +721,13 @@ should be implemented.
 | `?116`          | DEC            | DECBBSM — Bold and Blink Style        | **SKIP**       | DEC hardware bold/blink                              |
 | `?117`          | DEC            | DECECM — Erase Color                  | **SKIP**       | DEC hardware erase color                             |
 | `?1000`         | xterm          | X11 Mouse Press                       | **IMPL**       | `MouseTrack::XtMseX11`                               |
-| `?1001`         | xterm          | Hilite Mouse Tracking                 | **PLAN 20.10** | X11 highlight protocol                               |
+| `?1001`         | xterm          | Hilite Mouse Tracking                 | **IMPL**       | X11 highlight protocol (20.10)                       |
 | `?1002`         | xterm          | Cell Motion Mouse                     | **IMPL**       | `MouseTrack::XtMseBtn`                               |
 | `?1003`         | xterm          | All Motion Mouse                      | **IMPL**       | `MouseTrack::XtMseAny`                               |
 | `?1004`         | xterm          | Focus In/Out Events                   | **IMPL**       | `modes.focus_reporting`                              |
 | `?1005`         | xterm          | UTF-8 Mouse Encoding                  | **IMPL**       | `MouseEncoding::Utf8`                                |
 | `?1006`         | xterm          | SGR Mouse Encoding                    | **IMPL**       | `MouseEncoding::Sgr`                                 |
-| `?1007`         | xterm          | Alternate Scroll Mode                 | **PLAN 20.4**  | Scroll → arrow keys on alt screen                    |
+| `?1007`         | xterm          | Alternate Scroll Mode                 | **IMPL**       | Scroll → arrow keys on alt screen (20.4)             |
 | `?1010`         | rxvt           | Scroll to bottom on output            | **SKIP**       | rxvt-specific behavior                               |
 | `?1011`         | rxvt           | Scroll to bottom on keypress          | **SKIP**       | rxvt-specific behavior                               |
 | `?1014`         | xterm          | fastScroll resource                   | **SKIP**       | xterm-specific performance hint                      |
@@ -744,8 +744,8 @@ should be implemented.
 | `?1042`         | xterm          | Urgency on Ctrl-G                     | **SKIP**       | xterm-specific window manager hint                   |
 | `?1043`         | xterm          | Raise window on Ctrl-G                | **SKIP**       | xterm-specific window manager                        |
 | `?1044`         | xterm          | Reuse CLIPBOARD data                  | **SKIP**       | xterm-specific X11 clipboard                         |
-| `?1045`         | xterm          | XTREVWRAP2 — Extended Reverse-Wrap    | **PLAN 20.9**  | Wrap into scrollback                                 |
-| `?1046`         | xterm          | Enable/Disable Alt Screen             | **PLAN 20.6**  | Gates `?47`/`?1047`/`?1049`                          |
+| `?1045`         | xterm          | XTREVWRAP2 — Extended Reverse-Wrap    | **IMPL**       | Wrap into scrollback (20.9)                          |
+| `?1046`         | xterm          | Enable/Disable Alt Screen             | **IMPL**       | Gates `?47`/`?1047`/`?1049` (20.6)                   |
 | `?1047`         | xterm          | Alternate Screen Buffer               | **IMPL**       | Same handler as `?47`                                |
 | `?1048`         | xterm          | Save/Restore Cursor                   | **IMPL**       | DECSC/DECRC via DECSET                               |
 | `?1049`         | xterm          | Save Cursor + Alt Screen              | **IMPL**       | Combined `?1048` + `?1047`                           |
@@ -755,7 +755,7 @@ should be implemented.
 | `?1053`         | xterm          | SCO function-key mode                 | **SKIP**       | xterm-specific function key encoding                 |
 | `?1060`         | xterm          | Legacy keyboard emulation             | **SKIP**       | xterm-specific X11R6 keyboard                        |
 | `?1061`         | xterm          | VT220 keyboard emulation              | **SKIP**       | xterm-specific keyboard                              |
-| `?1070`         | xterm          | Private color registers               | **PLAN 20.11** | Per-graphic Sixel palette                            |
+| `?1070`         | xterm          | Private color registers               | **IMPL**       | Per-graphic Sixel palette (20.11)                    |
 | `?1243`         | VTE            | Arrow keys BiDi                       | **SKIP**       | VTE-specific BiDi extension                          |
 | `?1337`         | iTerm2         | Report Key Up                         | **SKIP**       | iTerm2-specific key reporting                        |
 | `?2001`         | xterm          | Readline mouse button-1               | **SKIP**       | xterm-specific readline integration                  |
@@ -765,7 +765,7 @@ should be implemented.
 | `?2005`         | xterm          | Readline character-quoting            | **SKIP**       | xterm-specific readline integration                  |
 | `?2006`         | xterm          | Readline newline pasting              | **SKIP**       | xterm-specific readline integration                  |
 | `?2026`         | Contour        | Synchronized Output                   | **IMPL**       | `modes.synchronized_updates`                         |
-| `?2027`         | mintty/Contour | Grapheme Clustering                   | **PLAN 20.7**  | Always-on; promote from stub to proper route         |
+| `?2027`         | mintty/Contour | Grapheme Clustering                   | **IMPL**       | Always-on; properly routed (20.7)                    |
 | `?2028`         | Contour        | Text reflow                           | **SKIP**       | Contour-specific extension                           |
 | `?2029`         | Contour        | Passive Mouse Tracking                | **SKIP**       | Contour-specific extension                           |
 | `?2030`         | Contour        | Grid cell selection                   | **SKIP**       | Contour-specific extension                           |

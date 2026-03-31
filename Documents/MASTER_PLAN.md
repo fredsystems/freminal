@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates nineteen major development tasks for Freminal. Each task has a dedicated
+This document orchestrates twenty-five major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -44,7 +44,12 @@ and plan document maintenance rules.
 | 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                  | Complete | None                 |
 | 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`               | Pending  | Tasks 2, 3, 16       |
 | 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`     | Pending  | None (separate repo) |
-| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`              | Pending  | None                 |
+| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`              | Complete | None                 |
+| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                      | Pending  | None                 |
+| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Pending  | None                 |
+| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Pending  | None                 |
+| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
+| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Pending  | None                 |
 
 ---
 
@@ -74,6 +79,18 @@ Task 1 (Custom Terminal Renderer) ──► Task 13 (Image Protocol Support)
 Tasks 2, 3, 16 ──► Task 18 (Client-Side Update Mechanism)
 
 Task 19 (Update Service & Website) ── independent (separate repo, shares API contract with Task 18)
+
+Task 20 (DEC Private Mode Coverage) ── independent, complete
+
+Task 21 (Tab Stop Correctness) ── independent, can run any time
+
+Task 22 (vttest Integration Test Suite) ── independent, can run any time
+
+Task 23 (Blinking Text) ── independent, can run any time
+
+Task 24 (Benchmark Improvements) ── independent, can run any time
+
+Task 25 (Code Quality Refactoring) ── independent, can run any time
 ```
 
 ### Dependency Details
@@ -137,11 +154,36 @@ Implements a Cloudflare Worker at `updates.freminal.dev` that proxies the GitHub
 (the client-side consumer). Can be developed in parallel with Task 18 as long as the API contract
 (defined in both plan documents) is respected. Medium scope (10 subtasks).
 
+**Task 20:** Independent. Completed. Comprehensive DEC private mode audit — implemented 12 modes
+(`?2`, `?42`, `?66`, `?67`, `?69`, `?80`, `?1001`, `?1007`, `?1045`, `?1046`, `?1070`, `?2027`)
+and promoted `?2048` and `?7727`. Includes full VT52 parser and DECLRMM left/right margins.
+
+**Task 21:** Independent. Fixes tab stop correctness issues: tab stops lost on resize, TBC Ps=1/2/4/5
+not implemented, tab stops shared (not saved) across alternate screen transitions. Low scope
+(6 subtasks).
+
+**Task 22:** Independent. Builds a golden-file integration test suite driven by vttest. Captures
+terminal buffer state after feeding vttest escape sequences and compares against known-good
+snapshots. Covers menus 1, 2, 6, 8, 9 and xterm extensions. Medium-high scope (8 subtasks).
+
+**Task 23:** Independent. Implements SGR 5/6 blinking text rendering. Currently parsed but silently
+discarded in `apply_sgr()`. Requires adding `BlinkState` to `FormatTag`, transporting through
+snapshots, and driving a GPU-side blink timer. Medium scope (7 subtasks).
+
+**Task 24:** Independent. Fills benchmark gaps (scrollback rendering, shaping cache-miss, alt screen
+switch), fixes fragile benchmarks, adds CI compilation checks and optional weekly regression runs.
+Medium scope (6 subtasks).
+
+**Task 25:** Independent. Code quality refactoring: split `standard.rs` parser into `dcs.rs`/`apc.rs`,
+standardize CSI command naming to ECMA-48 mnemonics (17 renames), split `interface.rs`, inline
+`data.rs`, remove dead `scroll()` and `StandardOutput` enum, move `Theme` to `freminal-common`.
+Medium scope (8 subtasks).
+
 ---
 
 ## Recommended Execution Order
 
-The following reflects the actual execution state: Tasks 1, 2, 3, 7, 8, 9, and 10 are complete.
+The following reflects the actual execution state: Tasks 1-17 and 20 are complete.
 The remaining tasks are ordered as follows.
 
 ### Phase 3 — Next Up
@@ -172,21 +214,27 @@ and can be developed in a separate repo in parallel with Task 18.
 - **Task 18** — Client-Side Update Mechanism (unblocked by Tasks 2 + 3 + 16)
 - **Task 19** — Update Service & Website (independent, separate repo; shares API contract with 18)
 
+### Phase 8 — Correctness, Quality & Testing
+
+Independent of each other and of Phases 3-7. Can run at any time in parallel with other work.
+
+- **Task 21** — Tab Stop Correctness (independent)
+- **Task 22** — vttest Integration Test Suite (independent)
+- **Task 23** — Blinking Text (independent)
+- **Task 24** — Benchmark Improvements (independent)
+- **Task 25** — Code Quality Refactoring (independent)
+
 ```text
-Complete:     Tasks 1, 2, 3, 7, 8, 9, 10
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20
               │
-Phase 3:      ├── Task 5  (Font Ligatures) ────────────────────┤
-              │                                                 │
-Phase 4:      │                        ├── Task 11 (Theming)    ┤
-              │                        ├── Task 12 (Terminfo)   ┤
-              │                        ├── Task 13 (Images)     ┤
-              │                                                 │
-Phase 5:      │                        ├── Task 6  (Test Gaps) ──┤
-              │                                                   │
-Phase 6:      │                        ├── Task 4  (Deployment) ──┤
-              │                                                    │
-Phase 7:      │                        ├── Task 18 (Update Client) ┤
-              │                        ├── Task 19 (Update Service) ┤ (parallel, separate repo)
+Phase 7:      ├── Task 18 (Update Client) ──┤
+              ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
+              │                              │
+Phase 8:      ├── Task 21 (Tab Stops)        ┤ (any time)
+              ├── Task 22 (vttest Suite)     ┤ (any time)
+              ├── Task 23 (Blinking Text)    ┤ (any time)
+              ├── Task 24 (Benchmarks)       ┤ (any time)
+              ├── Task 25 (Code Quality)     ┤ (any time)
 ```
 
 ---
@@ -270,6 +318,12 @@ Update this section as tasks complete:
 | 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17      |
 | 18   |            |            |                                                |
 | 19   |            |            |                                                |
+| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage   |
+| 21   |            |            |                                                |
+| 22   |            |            |                                                |
+| 23   |            |            |                                                |
+| 24   |            |            |                                                |
+| 25   |            |            |                                                |
 
 ---
 
@@ -288,4 +342,10 @@ Update this section as tasks complete:
 - `Documents/PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` — Mode noise, URL hover, scrollback selection
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (separate repo)
+- `Documents/PLAN_20_DEC_MODE_COVERAGE.md` — DEC private mode audit and implementation
+- `Documents/PLAN_21_TAB_STOPS.md` — Tab stop correctness (resize, TBC variants, alt screen)
+- `Documents/PLAN_22_VTTEST_INTEGRATION.md` — vttest golden-file integration test suite
+- `Documents/PLAN_23_BLINKING_TEXT.md` — SGR 5/6 blinking text rendering
+- `Documents/PLAN_24_BENCHMARK_IMPROVEMENTS.md` — Benchmark gaps, CI integration, fragile fixes
+- `Documents/PLAN_25_CODE_QUALITY.md` — Parser split, CSI renames, dead code, doc comments
 - `config_example.toml` — Current config format
