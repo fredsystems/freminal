@@ -23,6 +23,7 @@ use super::atlas::{GlyphAtlas, GlyphKey};
 use super::colors::{cursor_f, internal_color_to_gl, selection_bg_f, selection_fg_f};
 use super::font_manager::FontManager;
 use super::shaping::{ShapedGlyph, ShapedLine};
+use freminal_common::buffer_states::fonts::BlinkState;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::{ImagePlacement, InlineImage};
 
@@ -447,7 +448,7 @@ impl TerminalRenderer {
             font_manager,
             cell_height,
             ascent,
-            None,
+            &FgRenderOptions::all_visible(None),
             &freminal_common::themes::CATPPUCCIN_MOCHA,
         );
 
@@ -1493,12 +1494,38 @@ pub fn build_cursor_verts_only(
     verts
 }
 
+/// Options controlling per-glyph foreground rendering.
+///
+/// Bundled to keep `build_foreground_verts` within the 7-argument lint limit.
+pub struct FgRenderOptions {
+    /// Normalised selection region `(start_col, start_row, end_col, end_row)`,
+    /// or `None` when no selection is active.
+    pub selection: Option<(usize, usize, usize, usize)>,
+    /// Whether slow-blink (SGR 5) text is currently in its visible phase.
+    pub text_blink_slow_visible: bool,
+    /// Whether fast-blink (SGR 6) text is currently in its visible phase.
+    pub text_blink_fast_visible: bool,
+}
+
+impl FgRenderOptions {
+    /// Convenience constructor for the common case where all text is fully visible
+    /// (e.g. internal helper calls and tests that do not exercise blink).
+    #[must_use]
+    pub const fn all_visible(selection: Option<(usize, usize, usize, usize)>) -> Self {
+        Self {
+            selection,
+            text_blink_slow_visible: true,
+            text_blink_fast_visible: true,
+        }
+    }
+}
+
 /// Build the foreground vertex buffer from shaped lines.
 ///
 /// For each shaped glyph: looks up the atlas entry (rasterising on miss) and
 /// emits a textured quad at the cell-grid position adjusted by the bearing offsets.
 ///
-/// `selection` is `Some((start_col, start_row, end_col, end_row))` in normalised
+/// `opts.selection` is `Some((start_col, start_row, end_col, end_row))` in normalised
 /// reading order.  Glyphs that fall within the selection use `SELECTION_FG_F`
 /// instead of their normal foreground color.
 ///
@@ -1510,7 +1537,7 @@ pub fn build_foreground_verts(
     font_manager: &FontManager,
     cell_height: u32,
     ascent: f32,
-    selection: Option<(usize, usize, usize, usize)>,
+    opts: &FgRenderOptions,
     theme: &ThemePalette,
 ) -> Vec<f32> {
     let mut verts: Vec<f32> = Vec::new();
@@ -1533,22 +1560,32 @@ pub fn build_foreground_verts(
             // Track the current column as we iterate glyphs within the run.
             let mut col = run.col_start;
 
+            // Determine whether this run's glyphs should be visible based on
+            // the blink state.  `BlinkState::None` is always visible.
+            let run_visible = match run.blink {
+                BlinkState::None => true,
+                BlinkState::Slow => opts.text_blink_slow_visible,
+                BlinkState::Fast => opts.text_blink_fast_visible,
+            };
+
             for glyph in &run.glyphs {
-                let fg_color = if is_cell_selected(row_idx, col, selection) {
+                let fg_color = if is_cell_selected(row_idx, col, opts.selection) {
                     selection_fg_f(theme)
                 } else {
                     normal_fg
                 };
 
-                emit_glyph_quad(
-                    &mut verts,
-                    glyph,
-                    atlas,
-                    font_manager,
-                    baseline_y,
-                    fg_color,
-                    [cell_top, cell_bottom],
-                );
+                if run_visible {
+                    emit_glyph_quad(
+                        &mut verts,
+                        glyph,
+                        atlas,
+                        font_manager,
+                        baseline_y,
+                        fg_color,
+                        [cell_top, cell_bottom],
+                    );
+                }
 
                 col += glyph.cell_width;
             }
@@ -1963,6 +2000,7 @@ mod tests {
                 font_decorations: decorations,
                 colors,
                 url: None,
+                blink: BlinkState::None,
             }],
         }
     }
@@ -2062,6 +2100,7 @@ mod tests {
                     font_decorations: vec![],
                     colors: colors.clone(),
                     url: None,
+                    blink: BlinkState::None,
                 },
                 ShapedRun {
                     glyphs: vec![ShapedGlyph {
@@ -2078,6 +2117,7 @@ mod tests {
                     font_decorations: vec![],
                     colors,
                     url: None,
+                    blink: BlinkState::None,
                 },
             ],
         };
@@ -2131,6 +2171,7 @@ mod tests {
                     font_decorations: vec![],
                     colors: colors_red,
                     url: None,
+                    blink: BlinkState::None,
                 },
                 ShapedRun {
                     glyphs: vec![ShapedGlyph {
@@ -2147,6 +2188,7 @@ mod tests {
                     font_decorations: vec![],
                     colors: colors_blue,
                     url: None,
+                    blink: BlinkState::None,
                 },
             ],
         };
@@ -2356,7 +2398,7 @@ mod tests {
             &FontManager::new(&Config::default(), 1.0),
             16,
             13.0,
-            None,
+            &FgRenderOptions::all_visible(None),
             &themes::CATPPUCCIN_MOCHA,
         );
         assert_eq!(verts.len(), 0);
@@ -2386,7 +2428,7 @@ mod tests {
             &fm,
             cell_h,
             ascent,
-            None,
+            &FgRenderOptions::all_visible(None),
             &themes::CATPPUCCIN_MOCHA,
         );
 
