@@ -15,7 +15,7 @@
 //!  4. `FunctionKey(n)` for F1–F12 produces the xterm/VT escape sequences that
 //!     most terminal applications (including nano) expect.
 
-use freminal_terminal_emulator::interface::{KeyModifiers, TerminalInput, TerminalInputPayload};
+use freminal_terminal_emulator::input::{KeyModifiers, TerminalInput, TerminalInputPayload};
 
 /// Convenience: call `to_payload` with both mode flags `false` (normal cursor mode,
 /// normal keypad mode) and unwrap the result as a `Vec<u8>`.

@@ -20,7 +20,7 @@ use freminal_common::{
 };
 use freminal_terminal_emulator::{
     InlineImage,
-    interface::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
+    input::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
     io::InputEvent,
     snapshot::TerminalSnapshot,
 };

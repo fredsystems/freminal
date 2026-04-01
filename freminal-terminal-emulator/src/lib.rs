@@ -25,6 +25,7 @@ pub mod ansi;
 pub mod ansi_components;
 pub mod error;
 
+pub mod input;
 pub mod interface;
 pub mod io;
 pub mod recording;

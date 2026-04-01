@@ -37,13 +37,13 @@ use std::{fmt::Write as _, time::Instant};
 
 use crate::{
     ansi::FreminalAnsiParser,
-    interface::{TerminalInput, TerminalInputPayload},
+    input::{TerminalInput, TerminalInputPayload},
     io::PtyWrite,
 };
 
 use freminal_buffer::terminal_handler::TerminalHandler as NewHandler;
 
-use super::data::TerminalSections;
+use super::TerminalSections;
 
 /// Format the first `max_bytes` of `data` as a hex string for trace logging.
 ///
@@ -68,19 +68,6 @@ fn hex_preview(data: &[u8], max_bytes: usize) -> String {
     out
 }
 
-#[derive(Debug, Default)]
-pub enum Theme {
-    Light,
-    #[default]
-    Dark,
-}
-
-impl From<bool> for Theme {
-    fn from(dark_mode: bool) -> Self {
-        if dark_mode { Self::Dark } else { Self::Light }
-    }
-}
-
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TerminalState {
@@ -89,7 +76,6 @@ pub struct TerminalState {
     pub write_tx: crossbeam_channel::Sender<PtyWrite>,
     pub leftover_data: Option<Vec<u8>>,
     pub window_commands: Vec<WindowManipulation>,
-    pub theme: Theme,
     pub cursor_visual_style: CursorVisualStyle,
 
     /// The `freminal-buffer` implementation — the sole source of truth for
@@ -141,7 +127,6 @@ impl TerminalState {
             write_tx,
             leftover_data: None,
             window_commands: Vec::new(),
-            theme: Theme::default(),
             cursor_visual_style: CursorVisualStyle::default(),
             handler,
         }
@@ -157,10 +142,6 @@ impl TerminalState {
     #[must_use]
     pub const fn cursor_color(&self) -> freminal_common::colors::TerminalColor {
         freminal_common::colors::TerminalColor::DefaultCursorColor
-    }
-
-    pub const fn set_theme(&mut self, theme: Theme) {
-        self.theme = theme;
     }
 
     #[must_use]
@@ -533,7 +514,7 @@ impl TerminalState {
         // If the parsed output contains a ResetDevice, the handler has already
         // reset all buffer-level state.  We also need to reset the state that
         // lives in TerminalState: modes, parser, leftover data, and cursor
-        // visual style.  Theme and write_tx are preserved (user configuration).
+        // visual style.  `write_tx` is preserved (user configuration).
         if parsed
             .iter()
             .any(|o| matches!(o, TerminalOutput::ResetDevice))
@@ -613,9 +594,9 @@ impl TerminalState {
 
         if in_alternate {
             let key = if scroll < 0.0 {
-                TerminalInput::ArrowDown(crate::interface::KeyModifiers::NONE)
+                TerminalInput::ArrowDown(crate::input::KeyModifiers::NONE)
             } else {
-                TerminalInput::ArrowUp(crate::interface::KeyModifiers::NONE)
+                TerminalInput::ArrowUp(crate::input::KeyModifiers::NONE)
             };
             match self.write(&key) {
                 Ok(()) => (),
