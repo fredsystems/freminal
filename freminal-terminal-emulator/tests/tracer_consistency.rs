@@ -4,7 +4,8 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_terminal_emulator::ansi_components::{
-    csi::AnsiCsiParser, osc::AnsiOscParser, standard::StandardParser,
+    apc::ApcParser, csi::AnsiCsiParser, dcs::DcsParser, osc::AnsiOscParser,
+    standard::StandardParser,
 };
 use proptest::{prelude::any, prop_assert_eq, proptest};
 
@@ -33,6 +34,24 @@ fn seq_trace_updates_on_push() {
     assert!(
         std.trace_str().contains('C'),
         "Standard parser did not record byte in trace"
+    );
+
+    // DCS
+    let mut dcs = DcsParser::new();
+    let mut dcs_output = Vec::new();
+    dcs.dcs_parser_inner(b'D', &mut dcs_output);
+    assert!(
+        dcs.trace_str().contains('D'),
+        "DCS parser did not record byte in trace"
+    );
+
+    // APC
+    let mut apc = ApcParser::new();
+    let mut apc_output = Vec::new();
+    apc.apc_parser_inner(b'E', &mut apc_output);
+    assert!(
+        apc.trace_str().contains('E'),
+        "APC parser did not record byte in trace"
     );
 }
 
@@ -65,6 +84,28 @@ proptest! {
             let mut chunked = StandardParser::new();
             for &b in &input { full.push(b); }
             for chunk in input.chunks(3) { for &b in chunk { chunked.push(b); } }
+            prop_assert_eq!(full.trace_str(), chunked.trace_str());
+        }
+
+        // DCS
+        {
+            let mut full = DcsParser::new();
+            let mut chunked = DcsParser::new();
+            let mut out1 = Vec::new();
+            let mut out2 = Vec::new();
+            for &b in &input { full.dcs_parser_inner(b, &mut out1); }
+            for chunk in input.chunks(3) { for &b in chunk { chunked.dcs_parser_inner(b, &mut out2); } }
+            prop_assert_eq!(full.trace_str(), chunked.trace_str());
+        }
+
+        // APC
+        {
+            let mut full = ApcParser::new();
+            let mut chunked = ApcParser::new();
+            let mut out1 = Vec::new();
+            let mut out2 = Vec::new();
+            for &b in &input { full.apc_parser_inner(b, &mut out1); }
+            for chunk in input.chunks(3) { for &b in chunk { chunked.apc_parser_inner(b, &mut out2); } }
             prop_assert_eq!(full.trace_str(), chunked.trace_str());
         }
     }

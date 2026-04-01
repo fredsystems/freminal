@@ -23,9 +23,6 @@ pub struct StandardParser {
     pub state: StandardParserState,
     pub params: Vec<u8>,
     pub intermediates: Vec<u8>,
-    pub sequence: Vec<u8>,
-    pub dcs: bool,
-    pub apc: bool,
 
     // Internal trace of recent bytes for diagnostics.
     seq_trace: SequenceTracer,
@@ -55,63 +52,8 @@ impl StandardParser {
             state: StandardParserState::Intermediates,
             params: Vec::with_capacity(8),
             intermediates: Vec::with_capacity(8),
-            sequence: Vec::with_capacity(8),
-            dcs: false,
-            apc: false,
             seq_trace: SequenceTracer::new(),
         }
-    }
-
-    /// Returns `true` when the accumulated sequence ends with a real
-    /// String Terminator (`ESC \`).
-    ///
-    /// For **tmux DCS passthrough** (`\x1bPtmux;…\x1b\\`), every ESC in
-    /// the inner payload is doubled.  A naïve `ends_with(b"\x1b\\")` would
-    /// falsely detect `ESC ESC \` (a doubled-ESC followed by a literal
-    /// backslash) as the real ST.
-    ///
-    /// The algorithm counts consecutive ESC bytes immediately before the
-    /// trailing `\`:
-    ///
-    /// - **Odd count** (1, 3, …) → the final ESC is unpaired → real ST.
-    /// - **Even count** (2, 4, …) → all ESCs are doubled pairs, the `\` is
-    ///   inner content → **not** an ST.
-    ///
-    /// For non-tmux DCS and APC sequences the simple suffix check is used
-    /// (no doubling is expected there).
-    #[must_use]
-    pub fn contains_string_terminator(&self) -> bool {
-        if !self.sequence.ends_with(b"\x1b\\") {
-            return false;
-        }
-
-        // Non-tmux sequences: the simple suffix check is sufficient.
-        if !self.is_tmux_passthrough() {
-            return true;
-        }
-
-        // Tmux passthrough: count consecutive ESC bytes before the final `\`.
-        // The `\` is at sequence[len - 1], so we walk backwards from
-        // sequence[len - 2].
-        let len = self.sequence.len();
-        let mut esc_count: usize = 0;
-        for &b in self.sequence[..len - 1].iter().rev() {
-            if b == 0x1b {
-                esc_count += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Odd count → real ST; even count → doubled inner content.
-        esc_count % 2 == 1
-    }
-
-    /// Returns `true` when this parser is accumulating a tmux DCS
-    /// passthrough sequence (the sequence buffer starts with `Ptmux;`).
-    #[must_use]
-    fn is_tmux_passthrough(&self) -> bool {
-        self.dcs && self.sequence.starts_with(b"Ptmux;")
     }
 
     /// Expose current sequence trace for testing and diagnostics.
@@ -132,8 +74,6 @@ impl StandardParser {
             return ParserOutcome::Invalid("Parser pushed to after finish".to_string());
         }
 
-        self.sequence.push(b);
-
         match self.state {
             StandardParserState::Intermediates => {
                 if is_standard_intermediate_final(b) {
@@ -147,12 +87,6 @@ impl StandardParser {
                     self.state = StandardParserState::Params;
                     self.intermediates.push(b);
 
-                    if b == b'P' {
-                        self.dcs = true;
-                    } else if b == b'_' {
-                        self.apc = true;
-                    }
-
                     return ParserOutcome::Continue;
                 }
 
@@ -161,18 +95,7 @@ impl StandardParser {
                 ParserOutcome::Invalid("Invalid intermediate byte".to_string())
             }
             StandardParserState::Params => {
-                if self.dcs || self.apc {
-                    self.params.push(b);
-
-                    if self.contains_string_terminator() {
-                        self.state = StandardParserState::Finished;
-
-                        self.seq_trace.trim_control_tail();
-                        return ParserOutcome::Finished;
-                    }
-
-                    return ParserOutcome::Continue;
-                } else if is_standard_param(b) {
+                if is_standard_param(b) {
                     self.params.push(b);
                     self.state = StandardParserState::Finished;
 
@@ -204,20 +127,6 @@ impl StandardParser {
 
         if let ParserOutcome::Invalid(_) = return_state {
             return return_state;
-        }
-
-        if self.state == StandardParserState::Finished {
-            if self.dcs {
-                output.push(TerminalOutput::DeviceControlString(std::mem::take(
-                    &mut self.sequence,
-                )));
-                return ParserOutcome::Finished;
-            } else if self.apc {
-                output.push(TerminalOutput::ApplicationProgramCommand(std::mem::take(
-                    &mut self.sequence,
-                )));
-                return ParserOutcome::Finished;
-            }
         }
 
         match self.state {
@@ -457,12 +366,9 @@ pub const fn is_standard_intermediate_final(b: u8) -> bool {
 
 #[must_use]
 pub const fn is_standard_intermediate_continue(b: u8) -> bool {
-    // space # % ( ) * + is a state where we want to continue and get a Params
+    // space # % ( ) * + are states where we want to continue and get a Params
 
-    matches!(
-        b,
-        0x20 | 0x23 | 0x25 | 0x28 | 0x29 | 0x2a | 0x2b | 0x50 | 0x5f | 0x5c
-    )
+    matches!(b, 0x20 | 0x23 | 0x25 | 0x28 | 0x29 | 0x2a | 0x2b)
 }
 
 #[must_use]

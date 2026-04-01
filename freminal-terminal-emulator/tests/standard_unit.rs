@@ -5,6 +5,7 @@
 
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;
+use freminal_terminal_emulator::ansi_components::dcs::DcsParser;
 use freminal_terminal_emulator::ansi_components::standard::StandardParser;
 use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
@@ -27,21 +28,16 @@ fn standard_esc_starts_control_sequence() {
 
 // ── tmux-aware ST detection ──────────────────────────────────────────
 
-/// Helper: build a `StandardParser` in DCS mode with the given sequence
-/// bytes already accumulated (simulating what the parser would accumulate
-/// after the main `FreminalAnsiParser` consumed the leading ESC and handed
-/// off the `P` byte).
-fn build_dcs_parser(sequence_bytes: &[u8]) -> StandardParser {
-    let mut p = StandardParser::new();
-    // Push `P` first to enter DCS mode
-    let _ = p.push(b'P');
-    assert!(p.dcs, "parser should be in DCS mode after pushing P");
-    // Push remaining bytes — but don't use push() because we want to
-    // set up state without triggering finish.  We manipulate the fields
-    // directly since they are pub.
+/// Helper: build a `DcsParser` with the given sequence bytes already
+/// accumulated (simulating what the parser would accumulate after the main
+/// `FreminalAnsiParser` consumed the leading ESC and the DcsParser was
+/// created with the `P` prefix byte).
+fn build_dcs_parser(sequence_bytes: &[u8]) -> DcsParser {
+    let mut p = DcsParser::new();
+    // DcsParser::new() already has `P` in sequence.
+    // Push the remaining bytes directly into the sequence.
     for &b in sequence_bytes {
         p.sequence.push(b);
-        p.params.push(b);
     }
     p
 }
@@ -315,5 +311,62 @@ fn full_parser_tmux_dcs_back_to_back_doubled_esc() {
         seq.windows(3).any(|w| w == b"\x1b\x1b_"),
         "Must contain inner doubled APC. Got: {:02x?}",
         seq
+    );
+}
+
+// ── APC parsing through FreminalAnsiParser ──────────────────────────
+
+#[test]
+fn full_parser_apc_basic() {
+    // ESC _ hello ESC \  →  ApplicationProgramCommand
+    let wire = b"\x1b_hello\x1b\\";
+    let mut parser = FreminalAnsiParser::new();
+    let outputs = parser.push(wire);
+
+    let apc_outputs: Vec<_> = outputs
+        .iter()
+        .filter(|o| matches!(o, TerminalOutput::ApplicationProgramCommand(_)))
+        .collect();
+
+    assert_eq!(
+        apc_outputs.len(),
+        1,
+        "Expected exactly one APC output, got {}: {apc_outputs:?}",
+        apc_outputs.len()
+    );
+
+    let TerminalOutput::ApplicationProgramCommand(seq) = &apc_outputs[0] else {
+        unreachable!();
+    };
+
+    // Sequence starts with `_` (the APC introducer byte) and includes
+    // the content plus the trailing ST.
+    assert!(
+        seq.starts_with(b"_hello"),
+        "APC sequence should start with _hello. Got: {:02x?}",
+        seq
+    );
+}
+
+#[test]
+fn full_parser_apc_split_across_chunks() {
+    // Feed the APC in two chunks to verify cross-chunk accumulation.
+    let mut parser = FreminalAnsiParser::new();
+    let result1 = parser.push(b"\x1b_hel");
+    assert!(
+        result1.is_empty(),
+        "First chunk should not produce output: {result1:?}"
+    );
+
+    let result2 = parser.push(b"lo\x1b\\");
+    let apc_outputs: Vec<_> = result2
+        .iter()
+        .filter(|o| matches!(o, TerminalOutput::ApplicationProgramCommand(_)))
+        .collect();
+
+    assert_eq!(
+        apc_outputs.len(),
+        1,
+        "Expected exactly one APC output after second chunk"
     );
 }

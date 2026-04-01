@@ -7,7 +7,8 @@ use core::fmt;
 
 use crate::{
     ansi_components::{
-        csi::AnsiCsiParser, osc::AnsiOscParser, standard::StandardParser, tracer::SequenceTraceable,
+        apc::ApcParser, csi::AnsiCsiParser, dcs::DcsParser, osc::AnsiOscParser,
+        standard::StandardParser, tracer::SequenceTraceable,
     },
     error::ParserFailures,
 };
@@ -95,6 +96,8 @@ pub enum ParserInner {
     Csi(AnsiCsiParser),
     Osc(AnsiOscParser),
     Standard(StandardParser),
+    Dcs(DcsParser),
+    Apc(ApcParser),
     /// VT52: waiting for the command byte after ESC.
     Vt52Escape,
     /// VT52: `ESC Y` cursor address — waiting for row and column bytes.
@@ -224,6 +227,12 @@ impl FreminalAnsiParser {
             b']' => {
                 self.inner = ParserInner::Osc(AnsiOscParser::new());
             }
+            b'P' => {
+                self.inner = ParserInner::Dcs(DcsParser::new());
+            }
+            b'_' => {
+                self.inner = ParserInner::Apc(ApcParser::new());
+            }
             b'\x1b' => {
                 // ESC followed by ESC is invalid; reset to Empty
                 debug!("ANSI parser: ESC followed by ESC");
@@ -311,6 +320,26 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
+                ParserInner::Dcs(parser) => match parser.dcs_parser_inner(b, &mut output) {
+                    ParserOutcome::Finished => {
+                        self.inner = ParserInner::Empty;
+                    }
+                    ParserOutcome::Continue => (),
+                    ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
+                        output.push(TerminalOutput::Invalid);
+                        self.inner = ParserInner::Empty;
+                    }
+                },
+                ParserInner::Apc(parser) => match parser.apc_parser_inner(b, &mut output) {
+                    ParserOutcome::Finished => {
+                        self.inner = ParserInner::Empty;
+                    }
+                    ParserOutcome::Continue => (),
+                    ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
+                        output.push(TerminalOutput::Invalid);
+                        self.inner = ParserInner::Empty;
+                    }
+                },
                 ParserInner::Csi(parser) => {
                     // ECMA-48 §5.5: C0 control characters received during a
                     // control sequence are executed immediately; the control
@@ -534,6 +563,8 @@ impl FreminalAnsiParser {
             ParserInner::Osc(p) => p.trace_str(),
             ParserInner::Csi(p) => p.trace_str(),
             ParserInner::Standard(p) => p.trace_str(),
+            ParserInner::Dcs(p) => p.trace_str(),
+            ParserInner::Apc(p) => p.trace_str(),
             _ => self.seq_trace.as_str(),
         }
     }
@@ -620,6 +651,16 @@ mod tests {
         p.inner = ParserInner::Escape;
         p.ansiparser_inner_escape(b']', &mut data, &mut out);
         assert!(matches!(p.inner, ParserInner::Osc(_)));
+
+        // 'P' → DCS
+        p.inner = ParserInner::Escape;
+        p.ansiparser_inner_escape(b'P', &mut data, &mut out);
+        assert!(matches!(p.inner, ParserInner::Dcs(_)));
+
+        // '_' → APC
+        p.inner = ParserInner::Escape;
+        p.ansiparser_inner_escape(b'_', &mut data, &mut out);
+        assert!(matches!(p.inner, ParserInner::Apc(_)));
 
         // other → Standard
         p.inner = ParserInner::Escape;
