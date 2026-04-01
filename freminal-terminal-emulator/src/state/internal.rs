@@ -4,7 +4,6 @@
 // https://opensource.org/licenses/MIT.
 
 use anyhow::Result;
-use conv2::ConvUtil;
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -585,38 +584,6 @@ impl TerminalState {
         }
 
         Ok(())
-    }
-
-    pub fn scroll(&mut self, scroll: f32) {
-        // In alternate screen, route scrolling as arrow-key presses.
-        // In primary screen, use the new handler's scroll helpers.
-        let in_alternate = self.handler.is_alternate_screen();
-
-        if in_alternate {
-            let key = if scroll < 0.0 {
-                TerminalInput::ArrowDown(crate::input::KeyModifiers::NONE)
-            } else {
-                TerminalInput::ArrowUp(crate::input::KeyModifiers::NONE)
-            };
-            match self.write(&key) {
-                Ok(()) => (),
-                Err(e) => error!("Failed to scroll: {e}"),
-            }
-            return;
-        }
-
-        let mut scroll = scroll.round();
-        if scroll < 0.0 {
-            scroll *= -1.0;
-            let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
-            // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
-            // The returned new offset is discarded until ViewState is wired (Task 7/8).
-            let _new_offset = self.handler.handle_scroll_back(0, n);
-        } else {
-            let n = scroll.max(1.0).approx_as::<usize>().unwrap_or(1);
-            // scroll_offset lives in ViewState (Task 4); pass 0 temporarily.
-            let _new_offset = self.handler.handle_scroll_forward(0, n);
-        }
     }
 
     /// Send a DECRPM response string directly to the PTY.
