@@ -651,6 +651,7 @@ impl eframe::App for FreminalGui {
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)
             //  - cursor is blinking (needs toggling every ~500 ms)
+            //  - text is blinking (needs toggling every ~167 ms)
             //  - first frame (buffers still empty — need at least one full draw)
             //
             // A steady cursor with no new content does not need a periodic
@@ -661,12 +662,21 @@ impl eframe::App for FreminalGui {
                     | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
                     | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
             );
-            if snap.content_changed || cursor_is_blinking {
+
+            // Advance the text blink cycle when blinking text is present.
+            if snap.has_blinking_text {
+                self.view_state.tick_text_blink();
+            }
+
+            if snap.content_changed || cursor_is_blinking || snap.has_blinking_text {
                 // Use a 16 ms deadline (~60 fps) for content changes; use the
                 // blink half-period (~500 ms) when only the cursor needs to
-                // toggle.  Pick the shorter of the two when both apply.
+                // toggle; use the fast-blink tick (~167 ms) when text is
+                // blinking.  Pick the shortest applicable interval.
                 let delay = if snap.content_changed {
                     std::time::Duration::from_millis(16)
+                } else if snap.has_blinking_text {
+                    view_state::TEXT_BLINK_TICK_DURATION
                 } else {
                     std::time::Duration::from_millis(500)
                 };

@@ -47,7 +47,7 @@ and plan document maintenance rules.
 | 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`              | Complete | None                 |
 | 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                      | Complete | None                 |
 | 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Pending  | None                 |
-| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Pending  | None                 |
+| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Complete | None                 |
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Pending  | None                 |
 
@@ -297,33 +297,33 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                                          |
-| ---- | ---------- | ---------- | ---------------------------------------------- |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas               |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal               |
-| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4           |
-| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4  |
-| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp) |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                       |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                        |
-| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging     |
-| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                          |
-| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4  |
-| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4  |
-| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4  |
-| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection    |
-| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17      |
-| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17      |
-| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17      |
-| 18   |            |            |                                                |
-| 19   |            |            |                                                |
-| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage   |
-| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops            |
-| 22   |            |            |                                                |
-| 23   |            |            |                                                |
-| 24   |            |            |                                                |
-| 25   |            |            |                                                |
+| Task | Started    | Completed  | Notes                                            |
+| ---- | ---------- | ---------- | ------------------------------------------------ |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                 |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                  |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                 |
+| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4             |
+| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4    |
+| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)   |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                         |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                          |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging       |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                            |
+| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4    |
+| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4    |
+| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4    |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection      |
+| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17        |
+| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17        |
+| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17        |
+| 18   |            |            |                                                  |
+| 19   |            |            |                                                  |
+| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage     |
+| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops              |
+| 22   |            |            |                                                  |
+| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text |
+| 24   |            |            |                                                  |
+| 25   |            |            |                                                  |
 
 ---
 

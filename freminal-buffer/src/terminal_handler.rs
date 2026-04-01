@@ -7,7 +7,7 @@ use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
         cursor::{CursorPos, ReverseVideo},
-        fonts::{FontDecorations, FontWeight},
+        fonts::{BlinkState, FontDecorations, FontWeight},
         format_tag::FormatTag,
         ftcs::{FtcsMarker, FtcsState},
         kitty_graphics::{
@@ -3986,12 +3986,20 @@ fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
             tag.colors.set_underline_color(*color);
         }
 
+        // Blink
+        SelectGraphicRendition::SlowBlink => {
+            tag.blink = BlinkState::Slow;
+        }
+        SelectGraphicRendition::FastBlink => {
+            tag.blink = BlinkState::Fast;
+        }
+        SelectGraphicRendition::NotBlinking => {
+            tag.blink = BlinkState::None;
+        }
+
         // Intentionally ignored attributes and unknown codes — these have no FormatTag
         // equivalent.  Silently ignore for forward compatibility.
         SelectGraphicRendition::NoOp
-        | SelectGraphicRendition::FastBlink
-        | SelectGraphicRendition::SlowBlink
-        | SelectGraphicRendition::NotBlinking
         | SelectGraphicRendition::Conceal
         | SelectGraphicRendition::Revealed
         | SelectGraphicRendition::PrimaryFont
@@ -4094,7 +4102,7 @@ mod tests {
     use freminal_common::{
         buffer_states::{
             cursor::ReverseVideo,
-            fonts::{FontDecorations, FontWeight},
+            fonts::{BlinkState, FontDecorations, FontWeight},
             terminal_output::TerminalOutput,
         },
         colors::TerminalColor,
@@ -4269,6 +4277,47 @@ mod tests {
         assert_eq!(tag, FormatTag::default());
     }
 
+    #[test]
+    fn sgr_slow_blink_sets_blink_state() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::SlowBlink);
+        assert_eq!(tag.blink, BlinkState::Slow);
+    }
+
+    #[test]
+    fn sgr_fast_blink_sets_blink_state() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::FastBlink);
+        assert_eq!(tag.blink, BlinkState::Fast);
+    }
+
+    #[test]
+    fn sgr_not_blinking_clears_blink_state() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::SlowBlink);
+        assert_eq!(tag.blink, BlinkState::Slow);
+        apply_sgr(&mut tag, &SelectGraphicRendition::NotBlinking);
+        assert_eq!(tag.blink, BlinkState::None);
+    }
+
+    #[test]
+    fn sgr_reset_clears_blink_state() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::FastBlink);
+        assert_eq!(tag.blink, BlinkState::Fast);
+        apply_sgr(&mut tag, &SelectGraphicRendition::Reset);
+        assert_eq!(tag.blink, BlinkState::None);
+    }
+
+    #[test]
+    fn sgr_bold_and_blink_accumulate() {
+        let mut tag = FormatTag::default();
+        apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
+        apply_sgr(&mut tag, &SelectGraphicRendition::SlowBlink);
+        assert_eq!(tag.font_weight, FontWeight::Bold);
+        assert_eq!(tag.blink, BlinkState::Slow);
+    }
+
     // ------------------------------------------------------------------
     // handle_sgr integration tests (via TerminalHandler)
     // ------------------------------------------------------------------
@@ -4286,6 +4335,42 @@ mod tests {
         handler.handle_sgr(&SelectGraphicRendition::Bold);
         handler.handle_sgr(&SelectGraphicRendition::Reset);
         assert_eq!(handler.current_format, FormatTag::default());
+    }
+
+    #[test]
+    fn handle_sgr_slow_blink_propagates_to_current_format() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::SlowBlink);
+        assert_eq!(handler.current_format.blink, BlinkState::Slow);
+    }
+
+    #[test]
+    fn handle_sgr_fast_blink_propagates_to_current_format() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::FastBlink);
+        assert_eq!(handler.current_format.blink, BlinkState::Fast);
+    }
+
+    #[test]
+    fn process_output_blink_then_data() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[
+            TerminalOutput::Sgr(SelectGraphicRendition::SlowBlink),
+            TerminalOutput::Data(b"Hello".to_vec()),
+        ]);
+        assert_eq!(handler.current_format.blink, BlinkState::Slow);
+    }
+
+    #[test]
+    fn process_output_bold_and_blink_then_data() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[
+            TerminalOutput::Sgr(SelectGraphicRendition::Bold),
+            TerminalOutput::Sgr(SelectGraphicRendition::SlowBlink),
+            TerminalOutput::Data(b"BoldBlink".to_vec()),
+        ]);
+        assert_eq!(handler.current_format.font_weight, FontWeight::Bold);
+        assert_eq!(handler.current_format.blink, BlinkState::Slow);
     }
 
     #[test]

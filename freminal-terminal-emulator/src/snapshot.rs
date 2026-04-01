@@ -127,6 +127,13 @@ pub struct TerminalSnapshot {
     /// the user is scrolled back and new output arrives.
     pub content_changed: bool,
 
+    /// `true` when at least one visible format tag has a non-`None` blink state.
+    ///
+    /// The GUI uses this to drive the blink timer — when no visible text is
+    /// blinking, the timer is not ticked and no blink repaints are scheduled,
+    /// saving power.
+    pub has_blinking_text: bool,
+
     /// Set to `true` when the scroll offset changed since the previous
     /// snapshot (the visible window moved, but the underlying text may not
     /// have changed).
@@ -285,6 +292,7 @@ impl TerminalSnapshot {
             term_height: 0,
             total_rows: 0,
             content_changed: false,
+            has_blinking_text: false,
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
@@ -326,5 +334,10 @@ mod tests {
     #[test]
     fn empty_cursor_color_override_is_none() {
         assert!(TerminalSnapshot::empty().cursor_color_override.is_none());
+    }
+
+    #[test]
+    fn empty_has_blinking_text_is_false() {
+        assert!(!TerminalSnapshot::empty().has_blinking_text);
     }
 }

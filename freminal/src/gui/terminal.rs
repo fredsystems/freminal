@@ -34,8 +34,8 @@ use super::{
     atlas::GlyphAtlas,
     font_manager::FontManager,
     renderer::{
-        CURSOR_QUAD_FLOATS, TerminalRenderer, build_background_verts, build_cursor_verts_only,
-        build_foreground_verts, build_image_verts,
+        CURSOR_QUAD_FLOATS, FgRenderOptions, TerminalRenderer, build_background_verts,
+        build_cursor_verts_only, build_foreground_verts, build_image_verts,
     },
     shaping::ShapingCache,
 };
@@ -1078,6 +1078,11 @@ pub struct FreminalTerminalWidget {
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild.
     previous_selection: Option<(CellCoord, CellCoord)>,
+    /// Text blink slow-visibility from the most recently rendered frame.
+    /// Used to detect blink-tick changes that require a foreground vertex rebuild.
+    previous_text_blink_slow_visible: bool,
+    /// Text blink fast-visibility from the most recently rendered frame.
+    previous_text_blink_fast_visible: bool,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
     /// Whether a modal dialog was open on the previous frame.
@@ -1126,6 +1131,8 @@ impl FreminalTerminalWidget {
             last_rendered_visible: None,
             previous_theme: None,
             previous_selection: None,
+            previous_text_blink_slow_visible: true,
+            previous_text_blink_fast_visible: true,
             ligatures: config.font.ligatures,
             modal_was_open_last_frame: false,
             base_font_defs,
@@ -1418,8 +1425,17 @@ impl FreminalTerminalWidget {
                 || snap.show_cursor != self.previous_show_cursor
                 || snap.cursor_color_override != self.previous_cursor_color_override;
 
+            // A text-blink visibility change requires rebuilding the foreground
+            // vertex buffer (glyphs are included or excluded per run).  This is
+            // a separate trigger from cursor-only so it always goes through the
+            // full rebuild path.
+            let text_blink_changed = snap.has_blinking_text
+                && (view_state.text_blink_slow_visible != self.previous_text_blink_slow_visible
+                    || view_state.text_blink_fast_visible != self.previous_text_blink_fast_visible);
+
             let cursor_only = !content_changed
                 && !selection_changed
+                && !text_blink_changed
                 && cursor_state_changed
                 && !self
                     .render_state
@@ -1462,6 +1478,7 @@ impl FreminalTerminalWidget {
                 }
             } else if content_changed
                 || selection_changed
+                || text_blink_changed
                 || self
                     .render_state
                     .lock()
@@ -1510,13 +1527,18 @@ impl FreminalTerminalWidget {
                     .render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let fg_opts = FgRenderOptions {
+                    selection: screen_selection,
+                    text_blink_slow_visible: view_state.text_blink_slow_visible,
+                    text_blink_fast_visible: view_state.text_blink_fast_visible,
+                };
                 let fg_verts = build_foreground_verts(
                     &shaped_lines,
                     &mut rs.atlas,
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
-                    screen_selection,
+                    &fg_opts,
                     snap.theme,
                 );
                 let image_verts = build_image_verts(
@@ -1540,6 +1562,8 @@ impl FreminalTerminalWidget {
                 self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
                 self.previous_theme = Some(snap.theme);
                 self.previous_selection = current_selection;
+                self.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
+                self.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the

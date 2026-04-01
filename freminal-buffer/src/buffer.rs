@@ -2397,6 +2397,7 @@ impl Buffer {
                         font_weight: row_tag.font_weight.clone(),
                         font_decorations: row_tag.font_decorations.clone(),
                         url: row_tag.url.clone(),
+                        blink: row_tag.blink,
                     };
 
                     // Merge with the previous tag when format is identical and
@@ -2488,6 +2489,7 @@ impl Buffer {
                         font_weight: cell_tag.font_weight.clone(),
                         font_decorations: cell_tag.font_decorations.clone(),
                         url: cell_tag.url.clone(),
+                        blink: cell_tag.blink,
                     });
                 }
             } else {
@@ -2498,6 +2500,7 @@ impl Buffer {
                     font_weight: cell_tag.font_weight.clone(),
                     font_decorations: cell_tag.font_decorations.clone(),
                     url: cell_tag.url.clone(),
+                    blink: cell_tag.blink,
                 });
             }
         }
@@ -3230,6 +3233,7 @@ fn tags_same_format(a: &FormatTag, b: &FormatTag) -> bool {
         && a.font_weight == b.font_weight
         && a.font_decorations == b.font_decorations
         && a.url == b.url
+        && a.blink == b.blink
 }
 
 // tests

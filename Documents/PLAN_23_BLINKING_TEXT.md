@@ -1,6 +1,6 @@
 # PLAN_23 — Blinking Text (SGR 5/6)
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -112,7 +112,7 @@ When `has_blinking_text` is true in the current snapshot:
 
 ### 23.1 — Add `BlinkState` to `FormatTag`
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal-common/src/buffer_states/format_tag.rs`,
   `freminal-common/src/buffer_states/fonts.rs`
@@ -130,12 +130,19 @@ When `has_blinking_text` is true in the current snapshot:
 - **Tests required:**
   - `FormatTag` with different `BlinkState` values are not equal.
   - Default `FormatTag` has `BlinkState::None`.
+- **Completion notes:**
+  - Added `BlinkState` enum with `Debug, Clone, Copy, Eq, PartialEq, Default` derives.
+  - Added `pub blink: BlinkState` to `FormatTag`, defaulting to `BlinkState::None`.
+  - Updated all explicit `FormatTag` struct literals in `buffer.rs`, `shaping.rs`,
+    `buffer_row_bench.rs` to include `blink: BlinkState::None`.
+  - Updated `tags_same_format()` in `buffer.rs` to compare `blink` field.
+  - Added 5 unit tests in `format_tag.rs`. All verification passes.
 
 ---
 
 ### 23.2 — Wire `apply_sgr()` for SGR 5/6/25
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs`
 - **Details:**
@@ -159,12 +166,19 @@ When `has_blinking_text` is true in the current snapshot:
   - Feed `ESC[25m` after blink, verify `BlinkState::None`.
   - Feed `ESC[0m`, verify blink cleared.
   - Feed `ESC[1;5mBold+Blink`, verify both bold AND blink are set.
+- **Completion notes:**
+  - Moved `SlowBlink`, `FastBlink`, `NotBlinking` out of the ignored group in `apply_sgr()`.
+  - Added 3 match arms mapping to `BlinkState::Slow`, `BlinkState::Fast`, `BlinkState::None`.
+  - SGR 0 (Reset) already clears blink via `*tag = FormatTag::default()`.
+  - Added `BlinkState` to the top-level import in `terminal_handler.rs`.
+  - Added 9 tests: 5 `apply_sgr` unit tests + 4 `handle_sgr`/`process_outputs` integration tests.
+  - All verification passes.
 
 ---
 
 ### 23.3 — Add `has_blinking_text` to `TerminalSnapshot`
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/src/snapshot.rs`,
   `freminal-terminal-emulator/src/interface.rs`
@@ -180,12 +194,19 @@ When `has_blinking_text` is true in the current snapshot:
 - **Tests required:**
   - Feed blinking text, build snapshot, verify `has_blinking_text` is true.
   - Feed non-blinking text only, verify `has_blinking_text` is false.
+- **Completion notes:**
+  - Added `pub has_blinking_text: bool` to `TerminalSnapshot`.
+  - `build_snapshot()` scans `visible_tags` for any tag with `blink != BlinkState::None`.
+  - `TerminalSnapshot::empty()` sets `has_blinking_text: false`.
+  - Added 1 unit test in `snapshot.rs` and 4 integration tests in `snapshot_build.rs`
+    (plain text = false, SGR 5 = true, SGR 6 = true, overwritten blink = false).
+  - All verification passes.
 
 ---
 
 ### 23.4 — Add Blink Timer to GUI
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal/src/gui/mod.rs`, `freminal/src/gui/view_state.rs`
 - **Details:**
@@ -211,14 +232,29 @@ When `has_blinking_text` is true in the current snapshot:
   - Unit test for cycle → visibility mapping:
     cycles 0,1,2 → slow visible; 3,4,5 → slow hidden.
     cycles 0,2,4 → fast visible; 1,3,5 → fast hidden.
+- **Completion notes:**
+  - Added `text_blink_cycle: u8`, `text_blink_last_tick: Instant`,
+    `text_blink_slow_visible: bool`, `text_blink_fast_visible: bool` to `ViewState`.
+  - Removed `#[derive(Default)]` from `ViewState` and implemented `Default` manually
+    (since `Instant` does not implement `Default`).
+  - Added `tick_text_blink(&mut self) -> bool` method that advances the cycle when
+    > =167ms has elapsed, supporting multi-tick catch-up for dropped frames.
+  - Added `reset_text_blink()` and const `blink_visibility_for_cycle(cycle) -> (bool, bool)`.
+  - In `update()`, calls `tick_text_blink()` when `snap.has_blinking_text` is true.
+  - Repaint scheduling includes `TEXT_BLINK_TICK_DURATION` (167ms) when blinking text
+    is present, choosing the shortest applicable delay (16ms content > 167ms blink > 500ms cursor).
+  - Added 7 unit tests: slow/fast/combined visibility mapping, reset, tick-no-advance,
+    tick-advance-after-elapsed, default-starts-visible.
+  - All verification passes.
 
 ---
 
 ### 23.5 — Wire Blink State Through Rendering Pipeline
 
-- **Status:** Pending
+- **Status:** Done (2026-04-01)
 - **Priority:** 1 — High
-- **Scope:** `freminal/src/gui/terminal.rs`, `freminal/src/gui/renderer.rs`
+- **Scope:** `freminal/src/gui/terminal.rs`, `freminal/src/gui/renderer.rs`,
+  `freminal/src/gui/shaping.rs`
 - **Details:**
   1. In `process_tags()` or the shaped run building step, propagate `BlinkState` from
      `FormatTag` to the rendering data.
@@ -238,12 +274,25 @@ When `has_blinking_text` is true in the current snapshot:
 - **Tests required:**
   - Visual smoke test (manual): `echo -e "\e[5mSlow Blink\e[0m \e[6mFast Blink\e[0m"`
   - Verify non-blinking text does not flicker.
+- **Completion notes:**
+  - Added `pub blink: BlinkState` to `TextRun` and `ShapedRun` in `shaping.rs`.
+  - `same_format()` compares `blink` so blink-boundary changes correctly split shaped runs.
+  - `hash_line()` hashes `tag.blink` so blink changes invalidate the shaping cache.
+  - Added `FgRenderOptions` struct to `renderer.rs` bundling `selection`,
+    `text_blink_slow_visible`, and `text_blink_fast_visible` (reduces `build_foreground_verts`
+    from 9 args to 7, satisfying the `clippy::too_many_arguments` lint).
+  - `build_foreground_verts` gates `emit_glyph_quad` per run via a `run_visible` match on
+    `run.blink` against the two visibility flags.
+  - `FreminalTerminalWidget` gained `previous_text_blink_slow_visible` and
+    `previous_text_blink_fast_visible`; a visibility change with `has_blinking_text` triggers
+    a full foreground VBO rebuild.
+  - All call sites in `terminal.rs` and `renderer.rs` updated; all tests pass; clippy clean.
 
 ---
 
 ### 23.6 — DECSCUSR Interaction with Text Blink
 
-- **Status:** Pending
+- **Status:** Done (2026-04-01)
 - **Priority:** 3 — Low
 - **Scope:** `freminal/src/gui/mod.rs`
 - **Details:**
@@ -262,12 +311,20 @@ When `has_blinking_text` is true in the current snapshot:
   - Both blink rates are correct when both are active simultaneously.
 - **Tests required:**
   - Manual verification with cursor in a blinking text region.
+- **Completion notes:**
+  - Verification pass confirmed cursor blink and text blink are fully independent. Cursor
+    blink timer state is tracked via `cursor_blink_on` (derived from `cursor_blink_start_time`
+    in `terminal.rs`). Text blink state is tracked via `ViewState::text_blink_cycle` and
+    associated visibility flags. Neither timer touches the other. Repaint scheduling in
+    `mod.rs` picks the shortest applicable deadline: 16 ms for content changes, 167 ms for
+    text blink, 500 ms for cursor-only blink. Keyboard input resets cursor blink (handled
+    in `terminal.rs` `write_input_to_terminal`) but does not touch `text_blink_cycle`.
 
 ---
 
 ### 23.7 — Update SUPPORTED_CONTROL_CODES.md
 
-- **Status:** Pending
+- **Status:** Done (2026-04-01)
 - **Priority:** 3 — Low
 - **Scope:** `Documents/SUPPORTED_CONTROL_CODES.md`, `Documents/SGR.md`
 - **Details:**
@@ -279,6 +336,9 @@ When `has_blinking_text` is true in the current snapshot:
   - SUPPORTED_CONTROL_CODES.md reflects implemented blink support.
   - SGR.md (if it exists) reflects blink support.
 - **Tests required:** None (documentation only).
+- **Completion notes:**
+  - Updated `SGR.md`: SGR 5, 6, and 25 changed from ❌ to ✅ with updated notes.
+  - `SUPPORTED_CONTROL_CODES.md` has no SGR table; no changes needed there.
 
 ---
 

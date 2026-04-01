@@ -13,7 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use freminal_common::buffer_states::{
-    fonts::{FontDecorations, FontWeight},
+    fonts::{BlinkState, FontDecorations, FontWeight},
     format_tag::FormatTag,
     tchar::TChar,
 };
@@ -50,6 +50,8 @@ pub struct TextRun {
     pub text: String,
     /// Per-character column widths (1 for normal, 2 for wide, 0 for continuation).
     pub char_widths: Vec<usize>,
+    /// Blink state for all characters in this run.
+    pub blink: BlinkState,
 }
 
 /// The output of shaping a single [`TextRun`].
@@ -89,6 +91,8 @@ pub struct ShapedRun {
     pub colors: freminal_common::buffer_states::cursor::StateColors,
     /// URL for this run.
     pub url: Option<freminal_common::buffer_states::url::Url>,
+    /// Blink state for all glyphs in this run.
+    pub blink: BlinkState,
 }
 
 /// Shaped output for a single terminal line.
@@ -269,6 +273,7 @@ fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> 
         format!("{:?}", tag.font_weight).hash(&mut hasher);
         format!("{:?}", tag.font_decorations).hash(&mut hasher);
         format!("{:?}", tag.url).hash(&mut hasher);
+        format!("{:?}", tag.blink).hash(&mut hasher);
     }
 
     hasher.finish()
@@ -306,6 +311,7 @@ fn tag_at_position(tags: &[FormatTag], global_pos: usize) -> &FormatTag {
             font_weight: FontWeight::Normal,
             font_decorations: Vec::new(),
             url: None,
+            blink: freminal_common::buffer_states::fonts::BlinkState::None,
         };
         &DEFAULT_TAG
     })
@@ -317,6 +323,7 @@ fn same_format(a: &FormatTag, b: &FormatTag) -> bool {
         && a.font_decorations == b.font_decorations
         && a.colors == b.colors
         && a.url == b.url
+        && a.blink == b.blink
 }
 
 /// Segment a single line into `TextRun`s based on format and face boundaries.
@@ -377,6 +384,7 @@ fn segment_line(
                 url: current_tag.url.clone(),
                 text: std::mem::take(&mut run_text),
                 char_widths: std::mem::take(&mut run_char_widths),
+                blink: current_tag.blink,
             });
 
             // Start new run.
@@ -405,6 +413,7 @@ fn segment_line(
             url: current_tag.url.clone(),
             text: run_text,
             char_widths: run_char_widths,
+            blink: current_tag.blink,
         });
     }
 
@@ -520,6 +529,7 @@ fn shape_single_run(
         font_decorations: run.font_decorations.clone(),
         colors: run.colors.clone(),
         url: run.url.clone(),
+        blink: run.blink,
     }
 }
 

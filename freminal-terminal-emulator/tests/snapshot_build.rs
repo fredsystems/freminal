@@ -516,3 +516,58 @@ fn erase_display_sets_content_changed_true() {
         "erase-display must mark visible rows dirty → content_changed = true"
     );
 }
+
+// ─── 15. has_blinking_text flag ──────────────────────────────────────────────
+
+#[test]
+fn has_blinking_text_false_for_plain_text() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"no blink here");
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.has_blinking_text,
+        "has_blinking_text must be false when no blink SGR was used"
+    );
+}
+
+#[test]
+fn has_blinking_text_true_after_sgr_5() {
+    let (mut emu, _rx) = make_emulator();
+    // ESC[5m → slow blink, then write text
+    emu.handle_incoming_data(b"\x1b[5mBlinky");
+    let snap = emu.build_snapshot();
+    assert!(
+        snap.has_blinking_text,
+        "has_blinking_text must be true when visible text has SGR 5 (slow blink)"
+    );
+}
+
+#[test]
+fn has_blinking_text_true_after_sgr_6() {
+    let (mut emu, _rx) = make_emulator();
+    // ESC[6m → fast blink, then write text
+    emu.handle_incoming_data(b"\x1b[6mRapidBlink");
+    let snap = emu.build_snapshot();
+    assert!(
+        snap.has_blinking_text,
+        "has_blinking_text must be true when visible text has SGR 6 (fast blink)"
+    );
+}
+
+#[test]
+fn has_blinking_text_false_after_blink_cleared() {
+    let (mut emu, _rx) = make_emulator();
+    // Write blinking text, then reset and overwrite with plain text
+    emu.handle_incoming_data(b"\x1b[5mBlink\x1b[0m");
+    // Move cursor back to start and overwrite with non-blinking text
+    emu.handle_incoming_data(b"\x1b[H\x1b[0mPlain text here!!");
+    let snap = emu.build_snapshot();
+    // The blinking text was overwritten; whether has_blinking_text is true
+    // depends on whether any visible tag still carries blink.
+    // The "Blink" text at cols 0-4 was overwritten by "Plain text here!!"
+    // (17 chars), so all original blinking cells are gone.
+    assert!(
+        !snap.has_blinking_text,
+        "has_blinking_text must be false after all blinking cells are overwritten"
+    );
+}
