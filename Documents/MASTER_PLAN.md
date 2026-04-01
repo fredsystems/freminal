@@ -49,7 +49,7 @@ and plan document maintenance rules.
 | 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Pending  | None                 |
 | 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Complete | None                 |
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
-| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Pending  | None                 |
+| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
 
 ---
 
@@ -225,16 +225,13 @@ Independent of each other and of Phases 3-7. Can run at any time in parallel wit
 - **Task 25** — Code Quality Refactoring (independent)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │                              │
-Phase 8:      ├── Task 21 (Tab Stops)        ┤ (any time)
-              ├── Task 22 (vttest Suite)     ┤ (any time)
-              ├── Task 23 (Blinking Text)    ┤ (any time)
+Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
               ├── Task 24 (Benchmarks)       ┤ (any time)
-              ├── Task 25 (Code Quality)     ┤ (any time)
 ```
 
 ---
@@ -323,7 +320,7 @@ Update this section as tasks complete:
 | 22   |            |            |                                                  |
 | 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text |
 | 24   |            |            |                                                  |
-| 25   |            |            |                                                  |
+| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality |
 
 ---
 

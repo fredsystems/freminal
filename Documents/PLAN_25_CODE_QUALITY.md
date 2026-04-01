@@ -1,6 +1,6 @@
 # PLAN_25 — Code Quality: Parser Split, CSI Naming, Crate Organization
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -250,7 +250,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.3 — Split Input Encoding Out of `interface.rs`
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/src/interface.rs` (modify),
   `freminal-terminal-emulator/src/input.rs` (new)
@@ -289,7 +289,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.4 — Inline `state/data.rs`
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 3 — Low
 - **Scope:** `freminal-terminal-emulator/src/state/data.rs` (delete),
   `freminal-terminal-emulator/src/state/mod.rs` (modify),
@@ -315,7 +315,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.5 — Remove Dead `Theme` Enum from `TerminalState`
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/src/state/internal.rs`
 - **Details:**
@@ -350,7 +350,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.6 — Remove Dead `scroll()` Method and Update Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/src/state/internal.rs`,
   `freminal-terminal-emulator/tests/terminal_state_tests.rs`,
@@ -479,7 +479,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.10 — Split `osc.rs` iTerm2 and Clipboard Handlers into Submodules
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs` (modify),
   `freminal-terminal-emulator/src/ansi_components/osc_iterm2.rs` (new),
