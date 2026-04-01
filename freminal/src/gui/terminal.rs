@@ -1435,6 +1435,7 @@ impl FreminalTerminalWidget {
 
             let cursor_only = !content_changed
                 && !selection_changed
+                && !text_blink_changed
                 && cursor_state_changed
                 && !self
                     .render_state
