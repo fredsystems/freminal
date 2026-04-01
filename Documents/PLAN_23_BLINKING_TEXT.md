@@ -112,7 +112,7 @@ When `has_blinking_text` is true in the current snapshot:
 
 ### 23.1 — Add `BlinkState` to `FormatTag`
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal-common/src/buffer_states/format_tag.rs`,
   `freminal-common/src/buffer_states/fonts.rs`
@@ -130,6 +130,13 @@ When `has_blinking_text` is true in the current snapshot:
 - **Tests required:**
   - `FormatTag` with different `BlinkState` values are not equal.
   - Default `FormatTag` has `BlinkState::None`.
+- **Completion notes:**
+  - Added `BlinkState` enum with `Debug, Clone, Copy, Eq, PartialEq, Default` derives.
+  - Added `pub blink: BlinkState` to `FormatTag`, defaulting to `BlinkState::None`.
+  - Updated all explicit `FormatTag` struct literals in `buffer.rs`, `shaping.rs`,
+    `buffer_row_bench.rs` to include `blink: BlinkState::None`.
+  - Updated `tags_same_format()` in `buffer.rs` to compare `blink` field.
+  - Added 5 unit tests in `format_tag.rs`. All verification passes.
 
 ---
 

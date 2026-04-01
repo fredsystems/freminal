@@ -306,6 +306,7 @@ fn tag_at_position(tags: &[FormatTag], global_pos: usize) -> &FormatTag {
             font_weight: FontWeight::Normal,
             font_decorations: Vec::new(),
             url: None,
+            blink: freminal_common::buffer_states::fonts::BlinkState::None,
         };
         &DEFAULT_TAG
     })

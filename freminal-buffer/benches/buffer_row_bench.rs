@@ -244,6 +244,7 @@ fn bench_insert_with_color_changes(c: &mut Criterion) {
                             font_weight: FontWeight::Normal,
                             font_decorations: Vec::new(),
                             url: None,
+                            blink: freminal_common::buffer_states::fonts::BlinkState::None,
                         };
                         let chars: Vec<TChar> =
                             (0..SEGMENT).map(|j| TChar::Ascii(b'a' + j as u8)).collect();
