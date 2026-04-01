@@ -7,13 +7,10 @@ use crate::ansi::{ParserOutcome, extract_param, split_params_into_semicolon_deli
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Cursor Position
+/// CUP — Cursor Position (`CSI Ps ; Ps H`)
 ///
-/// CUP moves the cursor to the specified position. If the cursor is already at the specified position, no action occurs.
-///
-/// ESC [ Pn ; Pn H
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Move the cursor to row Ps1, column Ps2 (both 1-based, default = 1).
+/// Also handles HVP (`CSI Ps ; Ps f`) which is functionally identical.
 pub fn ansi_parser_inner_csi_finished_cup(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

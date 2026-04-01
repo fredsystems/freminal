@@ -7,17 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Erase Character(s)
+/// ECH — Erase Character (`CSI Ps X`)
 ///
-/// ECH deletes characters from the cursor position to the right.
-///
-/// Values for param:
-/// 0 - Delete one character (default)
-/// n - Delete n characters
-///
-/// ESC [ Pn X
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Erase Ps characters starting at the cursor position by replacing them
+/// with blanks (default = 1). Does not shift remaining characters.
 pub fn ansi_parser_inner_csi_finished_ech(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

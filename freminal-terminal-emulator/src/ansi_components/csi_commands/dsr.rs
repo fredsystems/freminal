@@ -7,24 +7,17 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Device Status Report (DSR)
+/// DSR — Device Status Report (`CSI Ps n` / `CSI ? Ps n`)
 ///
-/// DSR requests status information from the terminal.
+/// Request status information from the terminal:
+/// - Ps = 5 → Device status: respond with `CSI 0 n` (OK)
+/// - Ps = 6 → Cursor position report: respond with `CSI row ; col R`
 ///
-/// Values for Ps:
-/// 5 - Device status report: respond with CSI 0 n (device OK)
-/// 6 - Cursor position report: respond with CSI row ; col R
-///
-/// DEC private variants (with `?` prefix):
-/// ?5 - DEC device status report: respond with CSI 0 n (device OK)
-/// ?6 - DEC cursor position report (DECXCPR): respond with CSI row ; col R
-/// ?996 - Color theme query: respond with CSI ? 997 ; Ps n
-///        where Ps = 1 (light) or 2 (dark)
-///
-/// ESC [ Ps n        (standard DSR)
-/// ESC [ ? Ps n      (DEC private DSR)
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// DEC private variants (`CSI ? Ps n`):
+/// - Ps = 5 → DEC device status: respond with `CSI 0 n` (OK)
+/// - Ps = 6 → DEC cursor position report (DECXCPR): respond with `CSI row ; col R`
+/// - Ps = 996 → Color theme query: respond with `CSI ? 997 ; Ps n`
+///   where Ps = 1 (light) or 2 (dark)
 pub fn ansi_parser_inner_csi_finished_dsr(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

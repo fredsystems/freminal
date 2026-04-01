@@ -7,13 +7,9 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Cursor Right
+/// CUF — Cursor Forward (`CSI Ps C`)
 ///
-/// CUF moves the cursor right by a specified number of columns without changing lines.
-///
-/// ESC [ Pn C
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Move the cursor right by Ps columns without changing the row (default = 1).
 pub fn ansi_parser_inner_csi_finished_cuf(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

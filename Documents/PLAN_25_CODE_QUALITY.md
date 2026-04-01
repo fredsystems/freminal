@@ -407,7 +407,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.8 — Add Doc Comments to CSI Command Public Functions
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 3 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi_commands/` (multiple files)
 - **Details:**

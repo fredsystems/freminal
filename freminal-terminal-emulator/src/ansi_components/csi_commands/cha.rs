@@ -8,14 +8,10 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 
-/// Move cursor to indicated column in current row
+/// CHA — Cursor Horizontal Absolute (`CSI Ps G`)
 ///
-/// CHA moves the cursor to the specified column in the current row. If the cursor is already at the specified position, no action occurs.
-///
-/// ESC [ Pn G
-///
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Move the cursor to column Ps in the current row (default = 1).
+/// Also handles HPA (`CSI Ps backtick`) which is functionally identical.
 pub fn ansi_parser_inner_csi_finished_cha(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

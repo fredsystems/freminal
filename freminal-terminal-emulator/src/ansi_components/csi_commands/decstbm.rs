@@ -7,35 +7,20 @@ use crate::ansi::{ParserOutcome, split_params_into_semicolon_delimited_usize};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Set Top and Bottom Margins
-///
-/// DECSTBM: This control function sets the top and bottom margins for the current page.
-/// You cannot perform scrolling outside the margins.
-///
-/// Values for param:
-/// Pt - Line number for top margin
-/// Pb - Line number for bottom margin
-///
-/// Notes on DECSTBM
-/// The value of the top margin (Pt) must be less than the bottom margin (Pb).
-/// The maximum size of the scrolling region is the page size.
-/// DECSTBM moves the cursor to column 1, line 1 of the page.
-///
-/// ESC [ Pt ; Pb r
-///
-/// Internally, we will use `usize::MAX` to flag that the value should be default
-/// Default for Pt is 1
-/// Default for Pb is the page size
-///
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Extract a parameter value or return a default.
 #[inline]
 fn param_or(params: &[Option<usize>], idx: usize, default: usize) -> usize {
     params.get(idx).and_then(|opt| *opt).unwrap_or(default)
 }
 
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// DECSTBM — Set Top and Bottom Margins (`CSI Ps ; Ps r`)
+///
+/// Set the scrolling region:
+/// - Ps1 = top margin row (1-based, default = 1)
+/// - Ps2 = bottom margin row (1-based, default = last row)
+///
+/// A value of 0 or omission uses the default. The parameter `usize::MAX`
+/// is used internally as a sentinel meaning "use terminal height".
 pub fn ansi_parser_inner_csi_finished_decstbm(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

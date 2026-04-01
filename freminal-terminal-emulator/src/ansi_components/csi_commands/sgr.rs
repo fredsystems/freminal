@@ -18,15 +18,13 @@ fn opt(params: &[Option<usize>], idx: usize) -> Option<usize> {
     params.get(idx).copied().flatten()
 }
 
-/// Select Graphic Rendition
+/// SGR — Select Graphic Rendition (`CSI Ps m`)
 ///
-/// SGR sets the text attributes for the following characters. Several attributes can be combined by separating them with a semicolon.
+/// Set text attributes for subsequent characters. Multiple attributes can be
+/// combined with semicolons (e.g., `CSI 1;31 m` for bold red).
 ///
-/// Values for param are defined in the `SelectGraphicRendition` enum
-///
-/// ESC [ params m
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// When `params` starts with `>`, dispatches to the xterm `modifyOtherKeys`
+/// handler instead.
 pub fn ansi_parser_inner_csi_finished_sgr(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

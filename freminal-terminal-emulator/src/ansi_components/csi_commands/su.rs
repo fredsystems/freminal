@@ -7,14 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Scroll Up (SU)
+/// SU — Scroll Up (`CSI Ps S`)
 ///
-/// SU scrolls the content within the scroll region up by Ps lines.
-/// Content moves up, blank lines appear at the bottom.
-///
-/// ESC [ Ps S
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Scroll the content within the scroll region up by Ps lines (default = 1).
+/// Content moves up; blank lines appear at the bottom.
 pub fn ansi_parser_inner_csi_finished_su(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

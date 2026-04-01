@@ -6,13 +6,10 @@
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
-/// Insert Lines
+/// IL — Insert Line (`CSI Ps L`)
 ///
-/// IL inserts a specified number of lines at the cursor position.
-///
-/// ESC [ Pn L
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Insert Ps blank lines at the cursor row, scrolling existing lines
+/// down within the scroll region (default = 1).
 pub fn ansi_parser_inner_csi_finished_il(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

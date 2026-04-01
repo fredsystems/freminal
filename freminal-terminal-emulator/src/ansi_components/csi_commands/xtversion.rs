@@ -7,12 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Request device name and version
+/// XTVERSION — Report xterm Version (`CSI > Ps q`)
 ///
-/// ESC [ > Ps q
-///
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Respond with `DCS > | version_string ST` containing the terminal name
+/// and version. The leading `>` in params distinguishes this from DECSCUSR.
 pub fn ansi_parser_inner_csi_finished_xtversion(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

@@ -8,15 +8,9 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 
-/// Vertical Position Absolute
+/// VPA — Vertical Position Absolute (`CSI Ps d`)
 ///
-/// VPA moves the cursor to the specified row in the current column. If no
-/// parameter is given the cursor moves to the first row.
-///
-/// ESC [ Pn d
-///
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Move the cursor to row Ps in the current column (default = 1).
 pub fn ansi_parser_inner_csi_finished_vpa(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

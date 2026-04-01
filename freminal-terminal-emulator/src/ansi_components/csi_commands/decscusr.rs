@@ -7,19 +7,15 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// DECSCUSR—Set Cursor Style
+/// DECSCUSR — Set Cursor Style (`CSI Ps SP q`)
 ///
-/// Select the style of the cursor on the screen.
-/// 0, 1, or none: Blink Block (default)
-/// 2: Steady Block
-/// 3: Blink Underline
-/// 4: Steady Underline
-/// 5: Vertical line cursor / Blink
-/// 6: Vertical line cursor / Steady
-///
-/// ESC [ Pn SP q
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Select the cursor style:
+/// - Ps = 0, 1 → Blinking block (default)
+/// - Ps = 2 → Steady block
+/// - Ps = 3 → Blinking underline
+/// - Ps = 4 → Steady underline
+/// - Ps = 5 → Blinking bar
+/// - Ps = 6 → Steady bar
 pub fn ansi_parser_inner_csi_finished_decscusr(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
