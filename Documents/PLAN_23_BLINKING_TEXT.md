@@ -178,7 +178,7 @@ When `has_blinking_text` is true in the current snapshot:
 
 ### 23.3 — Add `has_blinking_text` to `TerminalSnapshot`
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/src/snapshot.rs`,
   `freminal-terminal-emulator/src/interface.rs`
@@ -194,6 +194,13 @@ When `has_blinking_text` is true in the current snapshot:
 - **Tests required:**
   - Feed blinking text, build snapshot, verify `has_blinking_text` is true.
   - Feed non-blinking text only, verify `has_blinking_text` is false.
+- **Completion notes:**
+  - Added `pub has_blinking_text: bool` to `TerminalSnapshot`.
+  - `build_snapshot()` scans `visible_tags` for any tag with `blink != BlinkState::None`.
+  - `TerminalSnapshot::empty()` sets `has_blinking_text: false`.
+  - Added 1 unit test in `snapshot.rs` and 4 integration tests in `snapshot_build.rs`
+    (plain text = false, SGR 5 = true, SGR 6 = true, overwritten blink = false).
+  - All verification passes.
 
 ---
 

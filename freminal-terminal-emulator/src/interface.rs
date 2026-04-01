@@ -841,6 +841,11 @@ impl TerminalEmulator {
         let cursor_visual_style = self.internal.get_cursor_visual_style();
         let is_normal_display = self.internal.is_normal_display();
 
+        // ── Blink detection ──────────────────────────────────────────────────
+        let has_blinking_text = visible_tags
+            .iter()
+            .any(|tag| tag.blink != freminal_common::buffer_states::fonts::BlinkState::None);
+
         let cwd = self
             .internal
             .handler
@@ -871,6 +876,7 @@ impl TerminalEmulator {
             term_height,
             total_rows,
             content_changed,
+            has_blinking_text,
             scroll_changed,
             bracketed_paste: mode_fields.bracketed_paste,
             mouse_tracking: mode_fields.mouse_tracking,
