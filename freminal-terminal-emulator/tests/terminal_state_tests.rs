@@ -8,7 +8,7 @@
 //! Covers:
 //! - `send_focus_event` (enabled/disabled, focused/unfocused)
 //! - `write` (ASCII, Enter, closed channel)
-//! - `scroll` (alternate screen up/down arrow routing)
+//! - Alternate-screen scroll routing (ArrowUp/Down via `write`)
 //! - Mode accessors: `is_normal_display`, `should_repeat_keys`, `skip_draw_always`
 
 #![allow(clippy::unwrap_used)]
@@ -168,61 +168,62 @@ fn test_write_closed_channel() {
     );
 }
 
-// ─── scroll (alternate screen) ───────────────────────────────────────────────
+// ─── alternate-screen scroll routing ─────────────────────────────────────────
 
-/// In alternate-screen mode, `scroll(1.0)` (positive = scroll up) must send
-/// an ArrowUp escape sequence to the PTY.
+/// In alternate-screen mode, writing ArrowUp must send an ArrowUp escape
+/// sequence to the PTY (CSI A when DECCKM is off, the default).
 #[test]
-fn test_scroll_alternate_screen_up() {
+fn test_alternate_screen_write_arrow_up() {
     let (mut state, rx) = make_state();
 
     // Enter alternate screen via DECSET 1049.
     state.handle_incoming_data(b"\x1b[?1049h");
 
     // Drain any device-attribute responses or other write-backs produced by
-    // handle_incoming_data before we exercise scroll.
+    // handle_incoming_data before exercising write.
     drain(&rx);
 
-    // Positive scroll amount → ArrowUp in alternate screen.
-    state.scroll(1.0);
+    // ArrowUp(NONE) in alternate screen → CSI A (DECCKM off by default).
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
 
     let msg = rx.try_recv().unwrap();
     let bytes = unwrap_write(msg);
-    // ArrowUp(NONE).to_payload(false, false) → Many(b"\x1b[A")
-    // DECCKM is not active (default), so CSI form is used.
     assert_eq!(
         bytes, b"\x1b[A",
-        "scroll(1.0) in alternate screen must send ArrowUp (ESC[A); got {bytes:?}"
+        "write(ArrowUp) in alternate screen must send ESC[A; got {bytes:?}"
     );
     assert!(
         rx.try_recv().is_err(),
-        "exactly one message should be sent for scroll up"
+        "exactly one message should be sent for arrow up"
     );
 }
 
-/// In alternate-screen mode, `scroll(-1.0)` (negative = scroll down) must send
-/// an ArrowDown escape sequence to the PTY.
+/// In alternate-screen mode, writing ArrowDown must send an ArrowDown escape
+/// sequence to the PTY (CSI B when DECCKM is off, the default).
 #[test]
-fn test_scroll_alternate_screen_down() {
+fn test_alternate_screen_write_arrow_down() {
     let (mut state, rx) = make_state();
 
     // Enter alternate screen via DECSET 1049.
     state.handle_incoming_data(b"\x1b[?1049h");
     drain(&rx);
 
-    // Negative scroll amount → ArrowDown in alternate screen.
-    state.scroll(-1.0);
+    // ArrowDown(NONE) in alternate screen → CSI B (DECCKM off by default).
+    state
+        .write(&TerminalInput::ArrowDown(KeyModifiers::NONE))
+        .unwrap();
 
     let msg = rx.try_recv().unwrap();
     let bytes = unwrap_write(msg);
-    // ArrowDown(NONE).to_payload(false, false) → Many(b"\x1b[B")
     assert_eq!(
         bytes, b"\x1b[B",
-        "scroll(-1.0) in alternate screen must send ArrowDown (ESC[B); got {bytes:?}"
+        "write(ArrowDown) in alternate screen must send ESC[B; got {bytes:?}"
     );
     assert!(
         rx.try_recv().is_err(),
-        "exactly one message should be sent for scroll down"
+        "exactly one message should be sent for arrow down"
     );
 }
 

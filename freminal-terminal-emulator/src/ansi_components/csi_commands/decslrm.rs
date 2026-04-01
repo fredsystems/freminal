@@ -20,7 +20,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// # Errors
 /// Returns an error outcome if the params cannot be parsed.
-pub fn ansi_parser_inner_csi_set_left_and_right_margins(
+pub fn ansi_parser_inner_csi_finished_decslrm(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
@@ -75,7 +75,7 @@ mod tests {
 
     fn parse(params: &[u8]) -> Vec<TerminalOutput> {
         let mut out = Vec::new();
-        ansi_parser_inner_csi_set_left_and_right_margins(params, &mut out);
+        ansi_parser_inner_csi_finished_decslrm(params, &mut out);
         out
     }
 

@@ -36,7 +36,10 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// Returns [`ParserOutcome::Finished`] after pushing the appropriate
 /// [`TerminalOutput`] variant into `output`.
-pub fn parse_modify_other_keys(params: &[u8], output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+pub fn ansi_parser_inner_csi_finished_modify_other_keys(
+    params: &[u8],
+    output: &mut Vec<TerminalOutput>,
+) -> ParserOutcome {
     // Strip the leading `>`.
     let rest = params.strip_prefix(b">").unwrap_or(params);
 
@@ -81,7 +84,7 @@ mod tests {
     #[test]
     fn test_set_level_0() {
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;0", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;0", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(0));
@@ -90,7 +93,7 @@ mod tests {
     #[test]
     fn test_set_level_1() {
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;1", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;1", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(1));
@@ -99,7 +102,7 @@ mod tests {
     #[test]
     fn test_set_level_2() {
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;2", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;2", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(2));
@@ -109,7 +112,7 @@ mod tests {
     fn test_reset_no_value() {
         // CSI > 4 m — no Pv means reset to 0
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(0));
@@ -119,7 +122,7 @@ mod tests {
     fn test_clamp_out_of_range() {
         // Level 5 should clamp to 2
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;5", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;5", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(2));
@@ -129,7 +132,7 @@ mod tests {
     fn test_other_resource_skipped() {
         // Ps = 1 (modifyCursorKeys) — not supported, should skip
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">1;2", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">1;2", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::Skipped);
@@ -138,7 +141,7 @@ mod tests {
     #[test]
     fn test_empty_params_skipped() {
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         // Empty resource param → None → falls through to Skipped
@@ -150,7 +153,7 @@ mod tests {
         // No `>` at all — strip_prefix returns the input unchanged, which is
         // empty; parsed resource is None → Skipped.
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b"", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b"", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::Skipped);
@@ -160,7 +163,7 @@ mod tests {
     fn test_semicolon_empty_pv() {
         // `>4;` — semicolon present but empty Pv field → defaults to 0
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(0));
@@ -170,7 +173,7 @@ mod tests {
     fn test_non_numeric_pv() {
         // `>4;abc` — non-numeric Pv → parse fails → None → defaults to 0
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;abc", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;abc", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(0));
@@ -180,7 +183,7 @@ mod tests {
     fn test_level_3_clamps_to_2() {
         // Level 3 is out-of-range — should clamp to 2
         let mut output = Vec::new();
-        let result = parse_modify_other_keys(b">4;3", &mut output);
+        let result = ansi_parser_inner_csi_finished_modify_other_keys(b">4;3", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::ModifyOtherKeys(2));
@@ -192,7 +195,7 @@ mod tests {
         let cases: &[&[u8]] = &[b">4;0", b">4;1", b">4;2", b">4", b">1;2", b">"];
         for params in cases {
             let mut output = Vec::new();
-            let _ = parse_modify_other_keys(params, &mut output);
+            let _ = ansi_parser_inner_csi_finished_modify_other_keys(params, &mut output);
             assert_eq!(
                 output.len(),
                 1,

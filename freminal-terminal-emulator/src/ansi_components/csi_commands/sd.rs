@@ -7,14 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Scroll Down (SD)
+/// SD — Scroll Down (`CSI Ps T`)
 ///
-/// SD scrolls the content within the scroll region down by Ps lines.
-/// Content moves down, blank lines appear at the top.
-///
-/// ESC [ Ps T
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Scroll the content within the scroll region down by Ps lines (default = 1).
+/// Content moves down; blank lines appear at the top.
 pub fn ansi_parser_inner_csi_finished_sd(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

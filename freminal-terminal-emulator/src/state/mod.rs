@@ -3,5 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-pub mod data;
+pub use freminal_common::buffer_states::terminal_sections::TerminalSections;
+
 pub mod internal;

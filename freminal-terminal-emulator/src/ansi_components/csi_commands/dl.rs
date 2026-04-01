@@ -7,14 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Delete Lines (DL)
+/// DL — Delete Line (`CSI Ps M`)
 ///
-/// DL deletes a specified number of lines starting at the cursor row,
-/// scrolling lines below up within the scroll region.
-///
-/// ESC [ Pn M
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Delete Ps lines starting at the cursor row, scrolling lines below
+/// up within the scroll region (default = 1).
 pub fn ansi_parser_inner_csi_finished_dl(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

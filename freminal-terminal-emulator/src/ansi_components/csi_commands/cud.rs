@@ -7,14 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Cursor Down
+/// CUD — Cursor Down (`CSI Ps B`)
 ///
-/// CUD moves the cursor down by a specified number of lines without changing columns.
-///
-/// ESC [ Pn B
-/// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_move_down(
+/// Move the cursor down by Ps rows without changing the column (default = 1).
+pub fn ansi_parser_inner_csi_finished_cud(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {

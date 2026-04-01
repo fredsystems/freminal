@@ -74,7 +74,7 @@
         {
           freminal = pkgs.rustPlatform.buildRustPackage {
             pname = "freminal";
-            version = "0.1.0";
+            version = "0.1.4";
             src = pkgs.lib.cleanSource ./.;
 
             cargoLock.lockFile = ./Cargo.lock;

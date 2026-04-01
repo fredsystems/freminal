@@ -7,13 +7,9 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Cursor Next Line
+/// CNL — Cursor Next Line (`CSI Ps E`)
 ///
-/// CNL moves the cursor to the beginning of the line N lines down.
-///
-/// ESC [ Pn E
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Move the cursor to the first column of the Ps-th line down (default = 1).
 pub fn ansi_parser_inner_csi_finished_cnl(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

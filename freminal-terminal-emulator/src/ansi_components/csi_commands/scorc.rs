@@ -29,7 +29,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// - `<` prefix  → Kitty pop
 /// - Anything else with digits only → SCORC (numeric params are valid for
 ///   some SCORC implementations, though rarely used)
-pub fn ansi_parser_inner_csi_finished_u(params: &[u8], output: &mut Vec<TerminalOutput>) {
+pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<TerminalOutput>) {
     match params.first() {
         None => {
             // Plain CSI u — SCORC: restore cursor position.
@@ -65,35 +65,35 @@ mod tests {
     #[test]
     fn plain_csi_u_is_scorc() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_u(b"", &mut output);
+        ansi_parser_inner_csi_finished_scorc(b"", &mut output);
         assert_eq!(output, vec![TerminalOutput::RestoreCursor]);
     }
 
     #[test]
     fn csi_question_u_is_kitty_query() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_u(b"?", &mut output);
+        ansi_parser_inner_csi_finished_scorc(b"?", &mut output);
         assert_eq!(output, vec![TerminalOutput::KittyKeyboardQuery]);
     }
 
     #[test]
     fn csi_gt_u_is_kitty_push_ignored() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_u(b">1", &mut output);
+        ansi_parser_inner_csi_finished_scorc(b">1", &mut output);
         assert!(output.is_empty(), "Kitty push should be silently ignored");
     }
 
     #[test]
     fn csi_lt_u_is_kitty_pop_ignored() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_u(b"<1", &mut output);
+        ansi_parser_inner_csi_finished_scorc(b"<1", &mut output);
         assert!(output.is_empty(), "Kitty pop should be silently ignored");
     }
 
     #[test]
     fn numeric_params_are_scorc() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_u(b"1", &mut output);
+        ansi_parser_inner_csi_finished_scorc(b"1", &mut output);
         assert_eq!(output, vec![TerminalOutput::RestoreCursor]);
     }
 }

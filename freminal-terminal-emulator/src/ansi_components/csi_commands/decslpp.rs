@@ -8,7 +8,7 @@ use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 
-/// DECSLLP - Window Manipulation
+/// DECSLPP — Window Manipulation
 ///
 /// Ps1 1    De-iconify window.
 ///     2    Minimize window.
@@ -71,16 +71,16 @@ use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 ///            Ps2 0, 1, 2    Restore window title.
 ///
 /// ESC [ Ps1 ; Ps2 ; Ps3 t
-/// # Errors
-/// Will return an error if the parameter is not a valid number
 #[inline]
 fn param_or(params: &[Option<usize>], idx: usize, default: usize) -> usize {
     params.get(idx).and_then(|opt| *opt).unwrap_or(default)
 }
 
-/// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_set_position_t(
+/// DECSLPP — Window Manipulation (`CSI Ps ; Ps ; Ps t`)
+///
+/// Handles xterm window manipulation operations. See the full operation
+/// table in the source for all supported Ps values.
+pub fn ansi_parser_inner_csi_finished_decslpp(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {

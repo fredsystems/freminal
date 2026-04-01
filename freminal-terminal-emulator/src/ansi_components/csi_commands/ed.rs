@@ -7,20 +7,14 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Erase in Display
+/// ED — Erase in Display (`CSI Ps J`)
 ///
-/// ED clears part of the screen.
-///
-/// Values for param:
-/// 0 - Erase from the cursor to the end of the screen (default)
-/// 1 - Erase from the beginning of the screen to the cursor
-/// 2 - Erase the entire screen
-/// 3 - Erase the entire screen including the scrollback buffer
-///
-/// ESC [ Pn J
-/// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_set_position_j(
+/// Erase part of the display:
+/// - Ps = 0 → From cursor to end of display (default)
+/// - Ps = 1 → From start of display to cursor
+/// - Ps = 2 → Entire display
+/// - Ps = 3 → Entire display including scrollback buffer
+pub fn ansi_parser_inner_csi_finished_ed(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {

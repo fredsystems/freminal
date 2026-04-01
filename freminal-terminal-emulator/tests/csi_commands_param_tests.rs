@@ -15,8 +15,8 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_terminal_emulator::ansi::ParserOutcome;
 use freminal_terminal_emulator::ansi_components::csi_commands::cpl::ansi_parser_inner_csi_finished_cpl;
 use freminal_terminal_emulator::ansi_components::csi_commands::dl::ansi_parser_inner_csi_finished_dl;
-use freminal_terminal_emulator::ansi_components::csi_commands::ict::ansi_parser_inner_csi_finished_ich;
-use freminal_terminal_emulator::ansi_components::csi_commands::il::ansi_parser_inner_csi_finished_set_position_l;
+use freminal_terminal_emulator::ansi_components::csi_commands::ich::ansi_parser_inner_csi_finished_ich;
+use freminal_terminal_emulator::ansi_components::csi_commands::il::ansi_parser_inner_csi_finished_il;
 use freminal_terminal_emulator::ansi_components::csi_commands::sd::ansi_parser_inner_csi_finished_sd;
 use freminal_terminal_emulator::ansi_components::csi_commands::su::ansi_parser_inner_csi_finished_su;
 
@@ -309,7 +309,7 @@ fn dl_invalid_non_numeric_pushes_invalid_and_returns_failure() {
 #[test]
 fn il_empty_params_defaults_to_one() {
     let mut output = Vec::new();
-    let result = ansi_parser_inner_csi_finished_set_position_l(b"", &mut output);
+    let result = ansi_parser_inner_csi_finished_il(b"", &mut output);
     assert!(
         matches!(result, ParserOutcome::Finished),
         "expected Finished, got {result:?}"
@@ -324,7 +324,7 @@ fn il_empty_params_defaults_to_one() {
 #[test]
 fn il_explicit_zero_normalizes_to_one() {
     let mut output = Vec::new();
-    let result = ansi_parser_inner_csi_finished_set_position_l(b"0", &mut output);
+    let result = ansi_parser_inner_csi_finished_il(b"0", &mut output);
     assert!(
         matches!(result, ParserOutcome::Finished),
         "expected Finished, got {result:?}"
@@ -339,7 +339,7 @@ fn il_explicit_zero_normalizes_to_one() {
 #[test]
 fn il_explicit_value_greater_than_one() {
     let mut output = Vec::new();
-    let result = ansi_parser_inner_csi_finished_set_position_l(b"5", &mut output);
+    let result = ansi_parser_inner_csi_finished_il(b"5", &mut output);
     assert!(
         matches!(result, ParserOutcome::Finished),
         "expected Finished, got {result:?}"
@@ -354,7 +354,7 @@ fn il_explicit_value_greater_than_one() {
 #[test]
 fn il_invalid_non_numeric_pushes_invalid_and_returns_failure() {
     let mut output = Vec::new();
-    let result = ansi_parser_inner_csi_finished_set_position_l(b"abc", &mut output);
+    let result = ansi_parser_inner_csi_finished_il(b"abc", &mut output);
     assert!(
         matches!(result, ParserOutcome::InvalidParserFailure(_)),
         "expected InvalidParserFailure, got {result:?}"

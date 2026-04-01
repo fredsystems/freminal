@@ -7,14 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Cursor Up
+/// CUU — Cursor Up (`CSI Ps A`)
 ///
-/// CUU moves the cursor up by a specified number of lines without changing columns.
-///
-/// ESC [ Pn A
-/// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_move_up(
+/// Move the cursor up by Ps rows without changing the column (default = 1).
+pub fn ansi_parser_inner_csi_finished_cuu(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {

@@ -7,20 +7,13 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Erase in Line
+/// EL — Erase in Line (`CSI Ps K`)
 ///
-/// EL clears part or all of the line.
-///
-/// Values for param:
-/// 0 - Erase from the cursor to the end of the line (default)
-/// 1 - Erase from the cursor to the start of the line to cursor
-/// 2 - Erase the whole line
-///
-/// ESC [ Pn K
-///
-/// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_set_position_k(
+/// Erase part of the current line:
+/// - Ps = 0 → From cursor to end of line (default)
+/// - Ps = 1 → From start of line to cursor
+/// - Ps = 2 → Entire line
+pub fn ansi_parser_inner_csi_finished_el(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {

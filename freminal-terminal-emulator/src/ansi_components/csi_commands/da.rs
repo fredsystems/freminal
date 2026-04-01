@@ -19,7 +19,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// # Errors
 /// Returns `InvalidParserFailure` if parameters are malformed.
-pub fn ansi_parser_inner_csi_finished_send_da(
+pub fn ansi_parser_inner_csi_finished_da(
     params: &[u8],
     intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,

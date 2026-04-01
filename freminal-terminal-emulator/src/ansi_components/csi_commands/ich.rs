@@ -7,17 +7,10 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// Insert Blank Character(s)
+/// ICH — Insert Character (`CSI Ps @`)
 ///
-/// ICH inserts blank characters at the cursor position.
-///
-/// Values for param:
-/// 0 - Insert one blank character (default)
-/// n - Insert n blank characters
-///
-/// ESC [ Pn @
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Insert Ps blank characters at the cursor position, shifting existing
+/// characters to the right (default = 1).
 pub fn ansi_parser_inner_csi_finished_ich(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,

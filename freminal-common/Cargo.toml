@@ -20,7 +20,6 @@ anyhow.workspace = true
 clap.workspace = true
 conv2.workspace = true
 directories.workspace = true
-portable-pty.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

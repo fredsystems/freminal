@@ -9,14 +9,13 @@ use crate::error::ParserFailures;
 use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-/// DEC Private Mode Set
+/// DECRQM — DEC Private Mode Set / Reset / Request (`CSI ? Ps h` / `l` / `$ p`)
 ///
-/// Supported formats:
-/// - Set ESC [ ? Pn h
-/// - Reset ESC [ ? Pn l
-/// - Query ESC [ ? Pn $ h
-/// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Handles three DEC private mode operations based on the final byte and
+/// intermediate characters:
+/// - `CSI ? Ps h` → Set mode (DECSET)
+/// - `CSI ? Ps l` → Reset mode (DECRST)
+/// - `CSI ? Ps $ p` → Query mode (DECRQM): respond with mode status report
 pub fn ansi_parser_inner_csi_finished_decrqm(
     params: &[u8],
     intermediates: &[u8],

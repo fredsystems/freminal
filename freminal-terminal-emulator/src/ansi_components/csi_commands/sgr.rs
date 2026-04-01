@@ -7,7 +7,7 @@ use std::vec::IntoIter;
 
 use crate::ansi::split_params_into_semicolon_delimited_usize;
 use crate::ansi::{ParserOutcome, split_params_into_colon_delimited_usize};
-use crate::ansi_components::csi_commands::modify_other_keys::parse_modify_other_keys;
+use crate::ansi_components::csi_commands::modify_other_keys::ansi_parser_inner_csi_finished_modify_other_keys;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::colors::TerminalColor;
@@ -18,21 +18,19 @@ fn opt(params: &[Option<usize>], idx: usize) -> Option<usize> {
     params.get(idx).copied().flatten()
 }
 
-/// Select Graphic Rendition
+/// SGR — Select Graphic Rendition (`CSI Ps m`)
 ///
-/// SGR sets the text attributes for the following characters. Several attributes can be combined by separating them with a semicolon.
+/// Set text attributes for subsequent characters. Multiple attributes can be
+/// combined with semicolons (e.g., `CSI 1;31 m` for bold red).
 ///
-/// Values for param are defined in the `SelectGraphicRendition` enum
-///
-/// ESC [ params m
-/// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_sgr_ansi(
+/// When `params` starts with `>`, dispatches to the xterm `modifyOtherKeys`
+/// handler instead.
+pub fn ansi_parser_inner_csi_finished_sgr(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     if params.first() == Some(&b'>') {
-        return parse_modify_other_keys(params, output);
+        return ansi_parser_inner_csi_finished_modify_other_keys(params, output);
     }
 
     let (params, split_by_colon) = if params.contains(&b':') {
