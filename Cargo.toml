@@ -1,4 +1,5 @@
 [workspace]
+resolver = "3"
 members = [
   "freminal",
   "freminal-buffer",
@@ -12,23 +13,19 @@ default-members = [
   "freminal-common",
   "freminal-terminal-emulator"
 ]
-resolver = "3"
 
 [workspace.package]
-edition = "2024"
-license = "MIT"
-description = "A terminal emulator written in Rust"
-repository = "https://github.com/fredsystems/freminal"
-documentation = "https://github.com/fredsystems/freminal/README.md"
-homepage = "https://github.com/fredsystems/freminal"
-readme = "README.md"
-rust-version = "1.92.0"
-keywords = ["terminal", "emulator", "vt100", "tty", "terminal-emulator"]
-categories = ["command-line-utilities", "development-tools"]
 version = "0.1.4"
-
-[workspace.metadata.cargo-machete]
-ignored = ["vergen"]
+edition = "2024"
+rust-version = "1.92.0"
+description = "A terminal emulator written in Rust"
+documentation = "https://github.com/fredsystems/freminal/README.md"
+readme = "README.md"
+homepage = "https://github.com/fredsystems/freminal"
+repository = "https://github.com/fredsystems/freminal"
+license = "MIT"
+keywords = ["emulator", "terminal", "terminal-emulator", "tty", "vt100"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
@@ -85,3 +82,6 @@ tracing-subscriber = { version = "0.3.23", features = [
 unicode-segmentation = "1.13.2"
 unicode-width = "0.2.2"
 vergen = { version = "9.1.0", features = ["build", "cargo", "rustc", "si"] }
+
+[workspace.metadata.cargo-machete]
+ignored = ["vergen"]
