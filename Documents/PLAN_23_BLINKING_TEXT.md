@@ -206,7 +206,7 @@ When `has_blinking_text` is true in the current snapshot:
 
 ### 23.4 — Add Blink Timer to GUI
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal/src/gui/mod.rs`, `freminal/src/gui/view_state.rs`
 - **Details:**
@@ -232,6 +232,20 @@ When `has_blinking_text` is true in the current snapshot:
   - Unit test for cycle → visibility mapping:
     cycles 0,1,2 → slow visible; 3,4,5 → slow hidden.
     cycles 0,2,4 → fast visible; 1,3,5 → fast hidden.
+- **Completion notes:**
+  - Added `text_blink_cycle: u8`, `text_blink_last_tick: Instant`,
+    `text_blink_slow_visible: bool`, `text_blink_fast_visible: bool` to `ViewState`.
+  - Removed `#[derive(Default)]` from `ViewState` and implemented `Default` manually
+    (since `Instant` does not implement `Default`).
+  - Added `tick_text_blink(&mut self) -> bool` method that advances the cycle when
+    > =167ms has elapsed, supporting multi-tick catch-up for dropped frames.
+  - Added `reset_text_blink()` and const `blink_visibility_for_cycle(cycle) -> (bool, bool)`.
+  - In `update()`, calls `tick_text_blink()` when `snap.has_blinking_text` is true.
+  - Repaint scheduling includes `TEXT_BLINK_TICK_DURATION` (167ms) when blinking text
+    is present, choosing the shortest applicable delay (16ms content > 167ms blink > 500ms cursor).
+  - Added 7 unit tests: slow/fast/combined visibility mapping, reset, tick-no-advance,
+    tick-advance-after-elapsed, default-starts-visible.
+  - All verification passes.
 
 ---
 
