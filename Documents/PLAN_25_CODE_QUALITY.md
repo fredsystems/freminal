@@ -387,9 +387,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.7 — Delete Dead `StandardOutput` Enum
 
-- **Status:** Pending
-- **Priority:** 2 — Medium
-- **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs`
+- **Status:** Complete
 - **Details:**
   The `StandardOutput` enum (lines 22–39, 16 variants) is never constructed or pattern-matched
   anywhere in the codebase. The only match in the entire workspace is its own definition. It
@@ -445,11 +443,7 @@ separate`hvp.rs`or`hpa.rs` files are needed.
 
 ### 25.9 — Remove `portable-pty` from `freminal-common`
 
-- **Status:** Pending
-- **Priority:** 1 — High
-- **Scope:** `freminal-common/src/pty_write.rs` (modify),
-  `freminal-common/Cargo.toml` (modify),
-  `freminal-terminal-emulator/src/io/pty.rs` (modify)
+- **Status:** Complete
 - **Details:**
   `freminal-common` depends on `portable-pty` solely for a 12-line `TryFrom` impl
   (`TryFrom<FreminalTerminalSize> for portable_pty::PtySize`) in `pty_write.rs` (lines 21–32).

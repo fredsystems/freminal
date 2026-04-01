@@ -19,26 +19,6 @@ pub enum StandardParserState {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub enum StandardOutput {
-    SevenBitControl,
-    EightBitControl,
-    AnsiConformanceLevelOne,
-    AnsiConformanceLevelTwo,
-    AnsiConformanceLevelThree,
-    DoubleLineHeightTop,
-    DoubleLineHeightBottom,
-    SingleWidthLine,
-    DoubleWidthLine,
-    ScreenAlignmentTest,
-    CharsetDefault,
-    CharsetUTF8,
-    CharsetG0,
-    CharsetG1,
-    CharsetG2,
-    CharsetG3,
-}
-
-#[derive(Eq, PartialEq, Debug)]
 pub struct StandardParser {
     pub state: StandardParserState,
     pub params: Vec<u8>,
