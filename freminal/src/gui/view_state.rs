@@ -211,7 +211,7 @@ impl ViewState {
         // Advance by the number of ticks elapsed (normally 1, but could be
         // more if the frame rate dropped below the tick rate).
         #[allow(clippy::cast_possible_truncation)]
-        let ticks = (elapsed.as_millis() / TEXT_BLINK_TICK_DURATION.as_millis()).min(6) as u8;
+        let ticks = (elapsed.as_millis() / TEXT_BLINK_TICK_DURATION.as_millis() % 6) as u8;
         self.text_blink_cycle = (self.text_blink_cycle + ticks) % 6;
         self.text_blink_last_tick = now;
 
