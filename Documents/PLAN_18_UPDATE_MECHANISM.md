@@ -212,7 +212,7 @@ Modeled after `SettingsModal`. An `UpdateModal` struct with `open()/show()/is_op
     check is disabled, but defensive)
   - `MacOsApp`: "Drag the new .app to /Applications, replacing the old one"
   - `WindowsExe`: "Replace the current exe with the downloaded file"
-  - `DebPackage`: "Install with: sudo dpkg -i <filename>"
+  - `DebPackage`: "Install with: sudo dpkg -i filename"
   - `RawBinary`: "Replace the current binary with the downloaded file"
 
 ### Asset Selection

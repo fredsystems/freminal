@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates twenty-five major development tasks for Freminal. Each task has a dedicated
+This document orchestrates thirty-four major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -50,6 +50,15 @@ and plan document maintenance rules.
 | 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Complete | None                 |
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
+| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Pending  | None                 |
+| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Stub     | None                 |
+| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Stub     | None                 |
+| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
+| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Pending  | None                 |
+| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Stub     | None                 |
+| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
+| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Pending  | None                 |
+| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Pending  | None                 |
 
 ---
 
@@ -91,6 +100,24 @@ Task 23 (Blinking Text) ── independent, can run any time
 Task 24 (Benchmark Improvements) ── independent, can run any time
 
 Task 25 (Code Quality Refactoring) ── independent, can run any time
+
+Task 26 (Bool-to-Enum Mode Refactor) ── independent, can run any time
+
+Task 27 (FIXME/TODO Audit) ── independent, stub (requires audit before subtask creation)
+
+Task 28 (Code Comment Audit) ── independent, stub (requires audit before subtask creation)
+
+Task 29 (God File Refactoring) ── depends on all other tasks (should be last)
+
+Task 30 (Clippy Allow Audit) ── independent, can run any time
+
+Task 31 (Dead Code Audit) ── independent, can run any time
+
+Task 32 (Playback Feature Flag) ── independent, can run any time
+
+Task 33 (WezTerm & Ghostty Palettes) ── independent, can run any time
+
+Task 34 (Window Background Opacity) ── independent, can run any time
 ```
 
 ### Dependency Details
@@ -179,6 +206,58 @@ standardize CSI command naming to ECMA-48 mnemonics (17 renames), split `interfa
 `data.rs`, remove dead `scroll()` and `StandardOutput` enum, move `Theme` to `freminal-common`.
 Medium scope (8 subtasks).
 
+**Task 26:** Independent. Replaces raw `bool` fields representing terminal modes with the typed
+enums already defined in `freminal-common/src/buffer_states/modes/`. Affects `TerminalHandler`
+(9 fields), `Buffer` (4 fields), `FreminalAnsiParser` (1 field), `SnapshotModeFields` +
+`TerminalSnapshot` (6 fields each), and function signatures (`to_payload`, `send_terminal_inputs`).
+Removes 6 clippy bool-suppression attributes. Medium scope (6 subtasks).
+
+**Task 27:** Independent. Stub — requires a full codebase audit of all `FIXME`, `TODO`, `HACK`,
+and `XXX` comments to assess veracity, relevance, and required mitigations. Subtasks will be
+created after the audit determines scope.
+
+**Task 28:** Independent. Stub — requires a full codebase audit to verify comment accuracy,
+identify missing documentation on public APIs and complex logic, and flag stale or misleading
+comments. Subtasks will be created after the audit determines scope.
+
+**Task 29:** Depends on all other tasks. The final structural refactor: split god files
+(`terminal_handler.rs` at ~9,098 lines, `buffer.rs` at ~6,624 lines, and any other files that
+have grown too large) into focused, single-responsibility modules. Should be the last task
+executed to avoid merge conflicts with all other work.
+
+**Task 30:** Independent. Full audit of all `#[allow(clippy::...)]` attributes (231 suppressions
+across the workspace). Replaces 158 casting suppressions with `conv2` checked/approximate
+conversions, fixes 4 minor non-casting suppressions, and documents justification for all remaining
+allows. Establishes a `conv2` numeric conversion convention in `agents.md`. Interacts with Task 26
+(8 bool-related suppressions are deferred to that task) and Task 29 (some `too_many_lines` allows
+will be resolved when god files are split).
+
+**Task 31:** Independent. Stub — requires a full codebase audit of all `pub` items to identify
+orphaned APIs that are no longer called from outside their defining module. Rust's dead code lint
+only fires on private items, so `pub` functions, methods, types, and constants that lost their
+callers during 25+ tasks of refactoring remain undetected. Known likely sources: `TerminalEmulator`
+methods (FairMutex elimination), `Buffer` methods (scroll externalization), `TerminalHandler`
+methods (escape sequence rework), and `freminal-common` types from earlier designs. Subtasks will
+be created after the audit determines scope.
+
+**Task 32:** Independent. Stub — gates the existing playback/recording feature behind a Cargo
+feature flag (`playback`) not enabled by default. The feature is fully implemented today but
+compiles unconditionally. Dedicated files (`recording.rs`, `playback.rs`) and coupling points in
+6 shared files (`args.rs`, `io/mod.rs`, `snapshot.rs`, `interface.rs`, `gui/mod.rs`, `main.rs`)
+need `#[cfg(feature = "playback")]` gating. Subtasks will be created after the audit confirms the
+full coupling surface.
+
+**Task 33:** Independent. Adds WezTerm Default and Ghostty Default color palettes to the existing
+theme registry. Single-file change (`freminal-common/src/themes.rs`): define two new
+`const ThemePalette` structs with colors sourced from WezTerm's `term/src/color.rs` and Ghostty's
+`src/terminal/color.zig`, add them to `ALL_THEMES`, update the count test. Low scope (1 subtask).
+
+**Task 34:** Independent. Adds a `background_opacity` setting (`0.0`–`1.0`) to make the terminal
+background semi-transparent. Extends `UiConfig` with the new field, adds a slider to the Settings
+Modal UI tab, and wires opacity into eframe viewport transparency and egui panel fills. The
+existing custom renderer already skips `DefaultBackground` cells, so semi-transparent panel fill
+achieves the effect without shader changes. Low-medium scope (5 subtasks).
+
 ---
 
 ## Recommended Execution Order
@@ -223,6 +302,20 @@ Independent of each other and of Phases 3-7. Can run at any time in parallel wit
 - **Task 23** — Blinking Text (independent)
 - **Task 24** — Benchmark Improvements (independent)
 - **Task 25** — Code Quality Refactoring (independent)
+- **Task 26** — Bool-to-Enum Mode Refactor (independent)
+- **Task 27** — FIXME/TODO Audit (stub — requires audit first)
+- **Task 28** — Code Comment Audit (stub — requires audit first)
+- **Task 30** — Clippy Allow Audit (independent)
+- **Task 31** — Dead Code Audit (stub — requires audit first)
+- **Task 32** — Playback Feature Flag (stub — requires audit first)
+- **Task 33** — WezTerm & Ghostty Palettes (independent)
+- **Task 34** — Window Background Opacity (independent)
+
+### Phase 9 — Final Structural Cleanup
+
+Must run after all other tasks are complete to avoid merge conflicts.
+
+- **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
 Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25
@@ -232,6 +325,16 @@ Phase 7:      ├── Task 18 (Update Client) ──┤
               │                              │
 Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
               ├── Task 24 (Benchmarks)       ┤ (any time)
+              ├── Task 26 (Bool-to-Enum)     ┤ (any time)
+              ├── Task 27 (FIXME Audit)      ┤ (stub — audit first)
+              ├── Task 28 (Comment Audit)    ┤ (stub — audit first)
+              ├── Task 30 (Clippy Allows)    ┤ (any time)
+              ├── Task 31 (Dead Code Audit)  ┤ (stub — audit first)
+              ├── Task 32 (Playback Flag)    ┤ (stub — audit first)
+              ├── Task 33 (Palettes)         ┤ (any time)
+              ├── Task 34 (BG Opacity)       ┤ (any time)
+              │                              │
+Phase 9:      └── Task 29 (God File Split)   ┘ (last — after all others)
 ```
 
 ---
@@ -321,6 +424,15 @@ Update this section as tasks complete:
 | 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text |
 | 24   |            |            |                                                  |
 | 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality |
+| 26   |            |            |                                                  |
+| 27   |            |            |                                                  |
+| 28   |            |            |                                                  |
+| 29   |            |            |                                                  |
+| 30   |            |            |                                                  |
+| 31   |            |            |                                                  |
+| 32   |            |            |                                                  |
+| 33   |            |            |                                                  |
+| 34   |            |            |                                                  |
 
 ---
 
@@ -345,4 +457,13 @@ Update this section as tasks complete:
 - `Documents/PLAN_23_BLINKING_TEXT.md` — SGR 5/6 blinking text rendering
 - `Documents/PLAN_24_BENCHMARK_IMPROVEMENTS.md` — Benchmark gaps, CI integration, fragile fixes
 - `Documents/PLAN_25_CODE_QUALITY.md` — Parser split, CSI renames, dead code, doc comments
+- `Documents/PLAN_26_BOOL_TO_ENUM.md` — Bool-to-enum mode refactor
+- `Documents/PLAN_27_FIXME_AUDIT.md` — FIXME/TODO audit (stub)
+- `Documents/PLAN_28_COMMENT_AUDIT.md` — Code comment audit (stub)
+- `Documents/PLAN_29_GOD_FILE_REFACTOR.md` — God file refactoring (stub)
+- `Documents/PLAN_30_CLIPPY_ALLOW_AUDIT.md` — Clippy allow audit, conv2 migration
+- `Documents/PLAN_31_DEAD_CODE_AUDIT.md` — Dead code audit (stub)
+- `Documents/PLAN_32_PLAYBACK_FEATURE_FLAG.md` — Playback feature flag (stub)
+- `Documents/PLAN_33_WEZTERM_GHOSTTY_PALETTES.md` — WezTerm and Ghostty color palettes
+- `Documents/PLAN_34_BACKGROUND_OPACITY.md` — Window background opacity
 - `config_example.toml` — Current config format

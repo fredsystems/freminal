@@ -148,6 +148,30 @@ Provides subcommands: `ci`, `build`, `check`, `lint`, `test`, `coverage`, `deny`
 - Commit messages follow conventional commits format (e.g., `feat:`, `fix:`, `test:`, `docs:`).
 - Each commit must leave `cargo test --all` passing (no broken intermediate states).
 
+### Plan Subtask Commits
+
+When executing a plan document (`Documents/PLAN_XX_*.md`), each completed subtask must be
+committed before moving to the next. This ensures:
+
+- Clear traceability from commits to plan subtasks.
+- Safe rollback points if a later subtask introduces problems.
+- Clean `git bisect` history.
+
+**Default rule:** One commit per plan subtask. The commit message should reference the subtask
+number (e.g., `refactor: 30.3 — replace casting suppressions in freminal-common`).
+
+**Merging small or interleaved subtasks:** It is acceptable to combine multiple subtasks into a
+single commit when:
+
+- The subtasks are small enough that separating them adds noise rather than clarity.
+- Multiple sub-agents worked on separate subtasks that modify the same files, and splitting
+  the commits into fully atomic units would cause merge conflicts or broken intermediate states.
+- The subtasks are tightly intertwined (e.g., a type change in one subtask requires a signature
+  change tracked by another subtask in the same file).
+
+When merging subtasks into one commit, the commit message must list all subtask numbers covered
+(e.g., `refactor: 25.4 + 25.5 — inline data.rs and remove dead Theme enum`).
+
 ---
 
 ## Development Environment & Verification
