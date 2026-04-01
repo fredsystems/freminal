@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # write a for loop that will loop over 137 to 176 and echo the number
 
 echo -e "Displaying characters from 0x5f to 0x7e\n"
