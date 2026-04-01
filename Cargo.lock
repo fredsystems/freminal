@@ -1446,7 +1446,6 @@ dependencies = [
  "clap",
  "conv2",
  "directories",
- "portable-pty",
  "predicates",
  "proptest",
  "serde",

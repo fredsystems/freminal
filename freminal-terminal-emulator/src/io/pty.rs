@@ -8,8 +8,10 @@ use std::{io::Write, path::Path, path::PathBuf, time::Instant};
 use super::{PtyRead, PtyWrite};
 use crate::recording;
 use anyhow::Result;
+use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
+    pty_write::FreminalTerminalSize,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     terminfo::TERMINFO,
 };
@@ -17,6 +19,23 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use sys_locale::get_locale;
 use tempfile::TempDir;
 use thiserror::Error;
+
+/// Convert [`FreminalTerminalSize`] to [`PtySize`].
+///
+/// This conversion lives here (rather than as a `TryFrom` impl on
+/// `freminal-common`) so that `freminal-common` does not depend on
+/// `portable-pty` — keeping it free of platform-specific dependencies.
+///
+/// # Errors
+/// Returns an error if any dimension value exceeds `u16::MAX`.
+fn pty_size_from_terminal_size(value: &FreminalTerminalSize) -> Result<PtySize> {
+    Ok(PtySize {
+        rows: u16::value_from(value.height)?,
+        cols: u16::value_from(value.width)?,
+        pixel_width: u16::value_from(value.pixel_width)?,
+        pixel_height: u16::value_from(value.pixel_height)?,
+    })
+}
 
 pub struct FreminalPtyInputOutput {
     /// Holds the extracted terminfo directory alive for the lifetime of the PTY.
@@ -332,7 +351,7 @@ pub fn run_terminal(
                         }
                     },
                     PtyWrite::Resize(size) => {
-                        let size: PtySize = match PtySize::try_from(size) {
+                        let size: PtySize = match pty_size_from_terminal_size(&size) {
                             Ok(size) => size,
                             Err(e) => {
                                 error!("failed to convert size {e}");

@@ -3,10 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use anyhow::{Error, Result};
-use conv2::ValueFrom;
-use portable_pty::PtySize;
-
 /// The pixel/character dimensions of the terminal window.
 ///
 /// Used inside [`PtyWrite::Resize`] to inform the PTY of a window-size change.
@@ -16,19 +12,6 @@ pub struct FreminalTerminalSize {
     pub height: usize,
     pub pixel_width: usize,
     pub pixel_height: usize,
-}
-
-impl TryFrom<FreminalTerminalSize> for PtySize {
-    type Error = Error;
-
-    fn try_from(value: FreminalTerminalSize) -> Result<Self> {
-        Ok(Self {
-            rows: u16::value_from(value.height)?,
-            cols: u16::value_from(value.width)?,
-            pixel_width: u16::value_from(value.pixel_width)?,
-            pixel_height: u16::value_from(value.pixel_height)?,
-        })
-    }
 }
 
 /// Commands sent from the terminal-emulator layer to the OS PTY writer thread.
