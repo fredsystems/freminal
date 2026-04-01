@@ -52,29 +52,24 @@ pub(crate) fn push_split_mode_params(
 }
 
 use super::csi_commands::{
-    cbt::ansi_parser_inner_csi_finished_cbt,
-    cha::ansi_parser_inner_csi_finished_set_cursor_position_g,
+    cbt::ansi_parser_inner_csi_finished_cbt, cha::ansi_parser_inner_csi_finished_cha,
     cht::ansi_parser_inner_csi_finished_cht, cnl::ansi_parser_inner_csi_finished_cnl,
-    cpl::ansi_parser_inner_csi_finished_cpl, cub::ansi_parser_inner_csi_finished_move_cursor_left,
-    cud::ansi_parser_inner_csi_finished_move_down, cuf::ansi_parser_inner_csi_finished_move_right,
-    cup::ansi_parser_inner_csi_finished_set_position_h,
-    cuu::ansi_parser_inner_csi_finished_move_up,
-    dch::ansi_parser_inner_csi_finished_set_position_p,
+    cpl::ansi_parser_inner_csi_finished_cpl, cub::ansi_parser_inner_csi_finished_cub,
+    cud::ansi_parser_inner_csi_finished_cud, cuf::ansi_parser_inner_csi_finished_cuf,
+    cup::ansi_parser_inner_csi_finished_cup, cuu::ansi_parser_inner_csi_finished_cuu,
+    da::ansi_parser_inner_csi_finished_da, dch::ansi_parser_inner_csi_finished_dch,
     decrqm::ansi_parser_inner_csi_finished_decrqm,
-    decscusr::ansi_parser_inner_csi_finished_set_position_q,
-    decslpp::ansi_parser_inner_csi_finished_set_position_t,
-    decslrm::ansi_parser_inner_csi_set_left_and_right_margins,
-    decstbm::ansi_parser_inner_csi_set_top_and_bottom_margins,
-    dl::ansi_parser_inner_csi_finished_dl, dsr::ansi_parser_inner_csi_finished_dsr,
-    ech::ansi_parser_inner_csi_finished_set_position_x,
-    ed::ansi_parser_inner_csi_finished_set_position_j,
-    el::ansi_parser_inner_csi_finished_set_position_k, ict::ansi_parser_inner_csi_finished_ich,
-    il::ansi_parser_inner_csi_finished_set_position_l, rep::ansi_parser_inner_csi_finished_rep,
-    report_xt_version::ansi_parser_inner_csi_finished_report_version_q,
-    scorc::ansi_parser_inner_csi_finished_u, sd::ansi_parser_inner_csi_finished_sd,
-    send_device_attributes::ansi_parser_inner_csi_finished_send_da,
-    sgr::ansi_parser_inner_csi_finished_sgr_ansi, su::ansi_parser_inner_csi_finished_su,
-    tbc::ansi_parser_inner_csi_finished_tbc, vpa::ansi_parser_inner_csi_finished_vpa,
+    decscusr::ansi_parser_inner_csi_finished_decscusr,
+    decslpp::ansi_parser_inner_csi_finished_decslpp,
+    decslrm::ansi_parser_inner_csi_finished_decslrm,
+    decstbm::ansi_parser_inner_csi_finished_decstbm, dl::ansi_parser_inner_csi_finished_dl,
+    dsr::ansi_parser_inner_csi_finished_dsr, ech::ansi_parser_inner_csi_finished_ech,
+    ed::ansi_parser_inner_csi_finished_ed, el::ansi_parser_inner_csi_finished_el,
+    ich::ansi_parser_inner_csi_finished_ich, il::ansi_parser_inner_csi_finished_il,
+    rep::ansi_parser_inner_csi_finished_rep, scorc::ansi_parser_inner_csi_finished_scorc,
+    sd::ansi_parser_inner_csi_finished_sd, sgr::ansi_parser_inner_csi_finished_sgr,
+    su::ansi_parser_inner_csi_finished_su, tbc::ansi_parser_inner_csi_finished_tbc,
+    vpa::ansi_parser_inner_csi_finished_vpa, xtversion::ansi_parser_inner_csi_finished_xtversion,
 };
 use crate::ansi_components::tracer::SequenceTracer;
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
@@ -206,16 +201,16 @@ impl AnsiCsiParser {
 
         match self.state {
             AnsiCsiParserState::Finished(b'A') => {
-                ansi_parser_inner_csi_finished_move_up(&self.params, output)
+                ansi_parser_inner_csi_finished_cuu(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'B') => {
-                ansi_parser_inner_csi_finished_move_down(&self.params, output)
+                ansi_parser_inner_csi_finished_cud(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'C') => {
-                ansi_parser_inner_csi_finished_move_right(&self.params, output)
+                ansi_parser_inner_csi_finished_cuf(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'D') => {
-                ansi_parser_inner_csi_finished_move_cursor_left(&self.params, output)
+                ansi_parser_inner_csi_finished_cub(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'E') => {
                 ansi_parser_inner_csi_finished_cnl(&self.params, output)
@@ -224,7 +219,7 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_cpl(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'H' | b'f') => {
-                ansi_parser_inner_csi_finished_set_position_h(&self.params, output)
+                ansi_parser_inner_csi_finished_cup(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'I') => {
                 // CHT — Cursor Forward Tabulation
@@ -232,22 +227,22 @@ impl AnsiCsiParser {
             }
             AnsiCsiParserState::Finished(b'G' | b'`') => {
                 // CHA (CSI G) and HPA (CSI `) — cursor horizontal absolute
-                ansi_parser_inner_csi_finished_set_cursor_position_g(&self.params, output)
+                ansi_parser_inner_csi_finished_cha(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'J') => {
-                ansi_parser_inner_csi_finished_set_position_j(&self.params, output)
+                ansi_parser_inner_csi_finished_ed(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'K') => {
-                ansi_parser_inner_csi_finished_set_position_k(&self.params, output)
+                ansi_parser_inner_csi_finished_el(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'L') => {
-                ansi_parser_inner_csi_finished_set_position_l(&self.params, output)
+                ansi_parser_inner_csi_finished_il(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'M') => {
                 ansi_parser_inner_csi_finished_dl(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'P') => {
-                ansi_parser_inner_csi_finished_set_position_p(&self.params, output)
+                ansi_parser_inner_csi_finished_dch(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'S') => {
                 ansi_parser_inner_csi_finished_su(&self.params, output)
@@ -256,7 +251,7 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_sd(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'X') => {
-                ansi_parser_inner_csi_finished_set_position_x(&self.params, output)
+                ansi_parser_inner_csi_finished_ech(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'Z') => {
                 // CBT — Cursor Backward Tabulation
@@ -271,7 +266,7 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_tbc(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'm') => {
-                ansi_parser_inner_csi_finished_sgr_ansi(&self.params, output)
+                ansi_parser_inner_csi_finished_sgr(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'h') => {
                 push_split_mode_params(&self.params, SetMode::DecSet, output);
@@ -288,25 +283,25 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_dsr(&self.params, output)
             }
             AnsiCsiParserState::Finished(b't') => {
-                ansi_parser_inner_csi_finished_set_position_t(&self.params, output)
+                ansi_parser_inner_csi_finished_decslpp(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'p') => {
                 ansi_parser_inner_csi_finished_decrqm(&self.params, &self.intermediates, b, output)
             }
             AnsiCsiParserState::Finished(b'q') => {
                 if self.params.is_empty() || self.params.first().unwrap_or(&b'0') != &b'>' {
-                    return ansi_parser_inner_csi_finished_set_position_q(&self.params, output);
+                    return ansi_parser_inner_csi_finished_decscusr(&self.params, output);
                 }
-                ansi_parser_inner_csi_finished_report_version_q(&self.params, output)
+                ansi_parser_inner_csi_finished_xtversion(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'd') => {
                 ansi_parser_inner_csi_finished_vpa(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'r') => {
-                ansi_parser_inner_csi_set_top_and_bottom_margins(&self.params, output)
+                ansi_parser_inner_csi_finished_decstbm(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'c') => {
-                ansi_parser_inner_csi_finished_send_da(&self.params, &self.intermediates, output)
+                ansi_parser_inner_csi_finished_da(&self.params, &self.intermediates, output)
             }
             AnsiCsiParserState::Finished(b's') => {
                 // When params are present this is DECSLRM (set left/right margins);
@@ -317,11 +312,11 @@ impl AnsiCsiParser {
                     output.push(TerminalOutput::SaveCursor);
                     push_result
                 } else {
-                    ansi_parser_inner_csi_set_left_and_right_margins(&self.params, output)
+                    ansi_parser_inner_csi_finished_decslrm(&self.params, output)
                 }
             }
             AnsiCsiParserState::Finished(b'u') => {
-                ansi_parser_inner_csi_finished_u(&self.params, output);
+                ansi_parser_inner_csi_finished_scorc(&self.params, output);
                 push_result
             }
             AnsiCsiParserState::Finished(_esc) => push_result,

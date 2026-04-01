@@ -129,7 +129,7 @@ split and should be addressed there.
 
 ### 25.1 — Split `standard.rs` into ESC, DCS, and APC Parsers
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/standard.rs` (modify),
   `freminal-terminal-emulator/src/ansi_components/dcs.rs` (new),
@@ -175,7 +175,7 @@ split and should be addressed there.
 
 ### 25.2 — Standardize CSI Command File and Function Names
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi_commands/` (20 files),
   `freminal-terminal-emulator/src/ansi_components/csi.rs` (dispatch table + imports)

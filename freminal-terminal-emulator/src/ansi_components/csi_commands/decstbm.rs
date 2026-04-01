@@ -36,7 +36,7 @@ fn param_or(params: &[Option<usize>], idx: usize, default: usize) -> usize {
 
 /// # Errors
 /// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_set_top_and_bottom_margins(
+pub fn ansi_parser_inner_csi_finished_decstbm(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {

@@ -14,7 +14,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// ESC [ Pn B
 /// # Errors
 /// Will return an error if the parameter is not a valid number
-pub fn ansi_parser_inner_csi_finished_move_down(
+pub fn ansi_parser_inner_csi_finished_cud(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
