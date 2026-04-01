@@ -142,7 +142,7 @@ When `has_blinking_text` is true in the current snapshot:
 
 ### 23.2 — Wire `apply_sgr()` for SGR 5/6/25
 
-- **Status:** Pending
+- **Status:** Done (2026-03-31)
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs`
 - **Details:**
@@ -166,6 +166,13 @@ When `has_blinking_text` is true in the current snapshot:
   - Feed `ESC[25m` after blink, verify `BlinkState::None`.
   - Feed `ESC[0m`, verify blink cleared.
   - Feed `ESC[1;5mBold+Blink`, verify both bold AND blink are set.
+- **Completion notes:**
+  - Moved `SlowBlink`, `FastBlink`, `NotBlinking` out of the ignored group in `apply_sgr()`.
+  - Added 3 match arms mapping to `BlinkState::Slow`, `BlinkState::Fast`, `BlinkState::None`.
+  - SGR 0 (Reset) already clears blink via `*tag = FormatTag::default()`.
+  - Added `BlinkState` to the top-level import in `terminal_handler.rs`.
+  - Added 9 tests: 5 `apply_sgr` unit tests + 4 `handle_sgr`/`process_outputs` integration tests.
+  - All verification passes.
 
 ---
 
