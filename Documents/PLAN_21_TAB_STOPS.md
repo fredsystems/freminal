@@ -1,6 +1,6 @@
 # PLAN_21 — Tab Stop Completeness
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -69,7 +69,7 @@ comprehensive test coverage.
 
 ### 21.1 — Preserve Tab Stops Across Resize
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -95,12 +95,15 @@ comprehensive test coverage.
   - Set custom stops at columns 5, 15, 25 → resize wider → verify stops preserved
   - Set custom stops → resize narrower → resize back wider → verify preserved stops in range
   - Verify new columns after resize have default 8-column stops
+- **Completed:** 2026-03-31. Replaced unconditional `default_tab_stops()` reset in
+  `Buffer::set_size()` with extend/truncate logic. 4 integration tests added to
+  `terminal_handler_integration.rs`. All verification checks pass.
 
 ---
 
 ### 21.2 — Handle TBC Ps=1, 2, 4, 5
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-buffer/src/terminal_handler.rs`
 - **Details:**
@@ -128,12 +131,15 @@ comprehensive test coverage.
   - TBC Ps=2: set a stop at cursor, send Ps=2, verify stop cleared
   - TBC Ps=4: verify no state change
   - TBC Ps=5: set multiple stops, send Ps=5, verify all cleared
+- **Completed:** 2026-03-31. Updated TBC match arms in `terminal_handler.rs`: Ps=0|2
+  dispatch to `clear_tab_stop_at_cursor()`, Ps=3|5 dispatch to `clear_all_tab_stops()`,
+  Ps=1|4 are silent no-ops. Warning log removed for these valid ECMA-48 values.
 
 ---
 
 ### 21.3 — Update TBC Parser Documentation
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 3 — Low
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/csi_commands/tbc.rs`
 - **Details:**
@@ -145,12 +151,14 @@ comprehensive test coverage.
   - Doc comment on `finished_parsing_tbc` lists all 6 Ps values.
   - Each value notes whether it is implemented, a no-op, or equivalent to another.
 - **Tests required:** None (documentation only).
+- **Completed:** 2026-03-31. Updated doc comment on `ansi_parser_inner_csi_finished_tbc`
+  to list all 6 Ps values (0-5) with ECMA-48 definitions and Freminal handling.
 
 ---
 
 ### 21.4 — Fix Misleading "Unimplemented Operations" Comment
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 3 — Low
 - **Scope:** `freminal-buffer/src/terminal_handler.rs`
 - **Details:**
@@ -162,12 +170,14 @@ comprehensive test coverage.
 - **Acceptance criteria:**
   - The misleading comment is either removed or relocated to an accurate position.
 - **Tests required:** None (comment only).
+- **Completed:** 2026-03-31. Changed comment to
+  `// === Bell, Tab Stops, and Miscellaneous ===`.
 
 ---
 
 ### 21.5 — Document Tab Stop Sharing Across Alternate Screen
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 3 — Low
 - **Scope:** `freminal-buffer/src/buffer.rs`
 - **Details:**
@@ -191,12 +201,15 @@ comprehensive test coverage.
   - Set custom tab stops → enter alternate → verify stops present in alternate
   - In alternate screen, clear all stops → leave alternate → verify stops are cleared in primary
     (confirming shared behavior)
+- **Completed:** 2026-03-31. Added comments to `SavedPrimaryState`, `enter_alternate()`,
+  and `leave_alternate()` explaining that tab stops are intentionally shared (not saved/
+  restored), matching xterm behavior.
 
 ---
 
 ### 21.6 — Comprehensive Tab Stop Test Suite
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/tests/terminal_handler_integration.rs`
 - **Details:**
@@ -218,6 +231,9 @@ comprehensive test coverage.
   - All 10 test cases pass.
   - Tests are in `terminal_handler_integration.rs` for consistency with existing tab tests.
 - **Tests required:** This subtask IS the tests.
+- **Completed:** 2026-03-31. Added 19 new tests to `terminal_handler_integration.rs`:
+  4 resize preservation tests (from 21.1), 9 edge case tests covering scenarios
+  listed above, 4 TBC Ps=1/2/4/5 tests, and 2 alternate screen sharing tests. All pass.
 
 ---
 
