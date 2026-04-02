@@ -562,109 +562,6 @@ impl TerminalRenderer {
         Ok(())
     }
 
-    /// Render a complete terminal frame.
-    ///
-    /// Uploads any dirty atlas regions, builds vertex buffers from `shaped_lines`,
-    /// draws the background pass then the foreground pass.  Restores the egui
-    /// intermediate FBO on completion.
-    ///
-    /// # Safety
-    ///
-    /// This method calls `glow` functions which are marked `unsafe`.  The caller
-    /// is responsible for ensuring a valid GL context exists.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(
-        &mut self,
-        gl: &glow::Context,
-        atlas: &mut GlyphAtlas,
-        shaped_lines: &[ShapedLine],
-        font_manager: &FontManager,
-        cell_width: u32,
-        cell_height: u32,
-        ascent: f32,
-        underline_offset: f32,
-        strikeout_offset: f32,
-        stroke_size: f32,
-        cursor_pos: CursorPos,
-        show_cursor: bool,
-        cursor_blink_on: bool,
-        cursor_visual_style: &CursorVisualStyle,
-        viewport_width: i32,
-        viewport_height: i32,
-        intermediate_fbo: Option<glow::Framebuffer>,
-    ) {
-        if !self.initialized {
-            error!("TerminalRenderer::draw() called before init()");
-            return;
-        }
-
-        // 1. Sync atlas texture.
-        self.sync_atlas(gl, atlas);
-
-        // 2. Build CPU-side vertex buffers.
-        let (bg_instances, deco_verts) = build_background_instances(
-            shaped_lines,
-            cell_width,
-            cell_height,
-            underline_offset,
-            strikeout_offset,
-            stroke_size,
-            show_cursor,
-            cursor_blink_on,
-            cursor_pos,
-            cursor_visual_style,
-            None,
-            &freminal_common::themes::CATPPUCCIN_MOCHA,
-            None,
-        );
-        let fg_instances = build_foreground_instances(
-            shaped_lines,
-            atlas,
-            font_manager,
-            cell_height,
-            ascent,
-            &FgRenderOptions::all_visible(None),
-            &freminal_common::themes::CATPPUCCIN_MOCHA,
-        );
-
-        // 3. Upload vertex data using orphan-then-write.
-        let buf_idx = self.vbo_index;
-        self.upload_bg_instances(gl, &bg_instances, buf_idx);
-        self.upload_deco_verts(gl, &deco_verts, buf_idx);
-        self.upload_fg_instances(gl, &fg_instances, buf_idx);
-
-        // 4. Draw instanced background, decorations, then foreground.
-        #[allow(clippy::cast_precision_loss)]
-        let vp_w = viewport_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let vp_h = viewport_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cell_width_f = cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cell_height_f = cell_height as f32;
-
-        self.draw_background_instanced(
-            gl,
-            bg_instances.len(),
-            vp_w,
-            vp_h,
-            cell_width_f,
-            cell_height_f,
-            1.0,
-            buf_idx,
-        );
-        self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, buf_idx);
-        self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
-
-        // 5. Restore egui's framebuffer binding.
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, intermediate_fbo);
-        }
-
-        // Advance double-buffer index.
-        self.vbo_index = 1 - self.vbo_index;
-    }
-
     /// Render a terminal frame from pre-built vertex buffers.
     ///
     /// Used when the vertex buffers were built on the main thread (where
@@ -1574,238 +1471,6 @@ fn extract_atlas_rect(pixels: &[u8], atlas_size: u32, rect: &super::atlas::Dirty
 //  Pure CPU vertex builders  (testable without GL context)
 // ---------------------------------------------------------------------------
 
-/// Build the background vertex buffer from shaped lines.
-///
-/// Generates:
-/// - One merged quad per horizontal run of same-background cells.
-/// - Selection highlight quads for the current text selection (if any).
-/// - Cursor quad (block / underline / bar) at `cursor_pos` when visible.
-/// - Underline / strikethrough quads for runs that carry those decorations.
-///
-/// Returns a flat `Vec<f32>` with `DECO_VERTEX_FLOATS` floats per vertex,
-/// `VERTS_PER_QUAD * 6` floats per quad.
-#[must_use]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub fn build_background_verts(
-    shaped_lines: &[ShapedLine],
-    cell_width: u32,
-    cell_height: u32,
-    underline_offset: f32,
-    strikeout_offset: f32,
-    stroke_size: f32,
-    show_cursor: bool,
-    cursor_blink_on: bool,
-    cursor_pos: CursorPos,
-    cursor_visual_style: &CursorVisualStyle,
-    selection: Option<(usize, usize, usize, usize)>,
-    theme: &ThemePalette,
-    cursor_color_override: Option<(u8, u8, u8)>,
-) -> Vec<f32> {
-    let mut verts: Vec<f32> = Vec::new();
-
-    for (row_idx, line) in shaped_lines.iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let y_top = row_idx as f32 * cell_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let y_bot = y_top + cell_height as f32;
-
-        // --- Background quad merging ---
-        // Walk runs and merge adjacent cells with the same background color.
-        let mut merge_start_col: Option<usize> = None;
-        let mut merge_bg: Option<[f32; 4]> = None;
-
-        for run in &line.runs {
-            let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
-            let bg_color_raw = run.colors.get_background_color();
-
-            // Skip default backgrounds (transparent — the terminal base color is
-            // rendered as a clear color, not explicit quads).
-            if matches!(
-                bg_color_raw,
-                freminal_common::colors::TerminalColor::DefaultBackground
-            ) {
-                // Flush any open merge run.
-                if let (Some(start_col), Some(color)) = (merge_start_col.take(), merge_bg.take()) {
-                    let end_col = run.col_start;
-                    if end_col > start_col {
-                        #[allow(clippy::cast_precision_loss)]
-                        push_quad(
-                            &mut verts,
-                            start_col as f32 * cell_width as f32,
-                            y_top,
-                            end_col as f32 * cell_width as f32,
-                            y_bot,
-                            color,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            let bg_color = internal_color_to_gl(bg_color_raw, is_faint, theme);
-
-            // Extend or start a merge run.
-            if let Some(ref existing_bg) = merge_bg {
-                if colors_equal(existing_bg, &bg_color) {
-                    // Same color — extend the run.
-                } else {
-                    // Different color — flush previous and start new.
-                    if let Some(start_col) = merge_start_col.take() {
-                        #[allow(clippy::cast_precision_loss)]
-                        push_quad(
-                            &mut verts,
-                            start_col as f32 * cell_width as f32,
-                            y_top,
-                            run.col_start as f32 * cell_width as f32,
-                            y_bot,
-                            *existing_bg,
-                        );
-                    }
-                    merge_start_col = Some(run.col_start);
-                    merge_bg = Some(bg_color);
-                }
-            } else {
-                merge_start_col = Some(run.col_start);
-                merge_bg = Some(bg_color);
-            }
-        }
-
-        // Flush any remaining merge run at end of line.
-        if let (Some(start_col), Some(color)) = (merge_start_col.take(), merge_bg.take()) {
-            // Determine end column from last run.
-            let end_col = shaped_lines[row_idx]
-                .runs
-                .last()
-                .map_or(start_col, |r| r.col_start + run_col_count(r));
-            if end_col > start_col {
-                #[allow(clippy::cast_precision_loss)]
-                push_quad(
-                    &mut verts,
-                    start_col as f32 * cell_width as f32,
-                    y_top,
-                    end_col as f32 * cell_width as f32,
-                    y_bot,
-                    color,
-                );
-            }
-        }
-
-        // --- Underline and strikethrough quads ---
-        for run in &line.runs {
-            let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
-            let has_underline = run.font_decorations.contains(&FontDecorations::Underline);
-            let has_strike = run
-                .font_decorations
-                .contains(&FontDecorations::Strikethrough);
-
-            if !has_underline && !has_strike {
-                continue;
-            }
-
-            let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
-            let col_end = run.col_start + run_col_count(run);
-
-            #[allow(clippy::cast_precision_loss)]
-            let x0 = run.col_start as f32 * cell_width as f32;
-            #[allow(clippy::cast_precision_loss)]
-            let x1 = col_end as f32 * cell_width as f32;
-
-            if has_underline {
-                let ul_top = y_top + underline_offset;
-                let ul_bot = ul_top + stroke_size.max(1.0);
-                push_quad(&mut verts, x0, ul_top, x1, ul_bot, fg_color);
-            }
-
-            if has_strike {
-                let st_top = y_top + strikeout_offset;
-                let st_bot = st_top + stroke_size.max(1.0);
-                push_quad(&mut verts, x0, st_top, x1, st_bot, fg_color);
-            }
-        }
-    }
-
-    // --- Selection highlight quads ---
-    // `selection` is `Some((start_col, start_row, end_col, end_row))` with
-    // start <= end in reading order.
-    if let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection {
-        #[allow(clippy::cast_precision_loss)]
-        let cw = cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let ch = cell_height as f32;
-
-        for (row, line) in shaped_lines
-            .iter()
-            .enumerate()
-            .take(sel_end_row + 1)
-            .skip(sel_start_row)
-        {
-            // Determine the column range for this row.
-            let col_begin = if row == sel_start_row {
-                sel_start_col
-            } else {
-                0
-            };
-            let col_end = if row == sel_end_row {
-                sel_end_col
-            } else {
-                // Highlight to the end of the row.  Use the last run's end
-                // column, or fall back to the total run width.
-                line.runs
-                    .last()
-                    .map_or(0, |r| r.col_start + run_col_count(r))
-                    .saturating_sub(1)
-            };
-
-            if col_end < col_begin {
-                continue;
-            }
-
-            #[allow(clippy::cast_precision_loss)]
-            let x0 = col_begin as f32 * cw;
-            #[allow(clippy::cast_precision_loss)]
-            let x1 = (col_end + 1) as f32 * cw;
-            #[allow(clippy::cast_precision_loss)]
-            let y0 = row as f32 * ch;
-            let y1 = y0 + ch;
-
-            push_quad(&mut verts, x0, y0, x1, y1, selection_bg_f(theme));
-        }
-    }
-
-    // --- Cursor quad ---
-    if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
-        #[allow(clippy::cast_precision_loss)]
-        let cx = cursor_pos.x as f32 * cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cy = cursor_pos.y as f32 * cell_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cw = cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let ch = cell_height as f32;
-
-        let color = cursor_f(theme, cursor_color_override);
-
-        match cursor_visual_style {
-            CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
-                push_quad(&mut verts, cx, cy, cx + cw, cy + ch, color);
-            }
-            CursorVisualStyle::UnderlineCursorBlink | CursorVisualStyle::UnderlineCursorSteady => {
-                // Thin bar at the bottom of the cell.
-                let bar_h = (ch * 0.1).max(2.0);
-                push_quad(&mut verts, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
-            }
-            CursorVisualStyle::VerticalLineCursorBlink
-            | CursorVisualStyle::VerticalLineCursorSteady => {
-                // Thin vertical bar at the left edge of the cell.
-                let bar_w = (cw * 0.1).max(1.0);
-                push_quad(&mut verts, cx, cy, cx + bar_w, cy + ch, color);
-            }
-        }
-    }
-
-    verts
-}
-
 /// Returns whether the cursor should be visible given its style and blink state.
 const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> bool {
     match style {
@@ -2450,17 +2115,6 @@ const fn is_cell_selected(
     }
 }
 
-/// Compare two GL `[f32; 4]` colors for equality.
-///
-/// Uses `total_cmp` so that the comparison is bitwise-exact (no NaN issues)
-/// without triggering `clippy::float_cmp`.
-fn colors_equal(a: &[f32; 4], b: &[f32; 4]) -> bool {
-    a[0].total_cmp(&b[0]).is_eq()
-        && a[1].total_cmp(&b[1]).is_eq()
-        && a[2].total_cmp(&b[2]).is_eq()
-        && a[3].total_cmp(&b[3]).is_eq()
-}
-
 // ---------------------------------------------------------------------------
 //  Tests
 // ---------------------------------------------------------------------------
@@ -2533,64 +2187,86 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  Vertex count tests
+    //  Background instance + decoration tests
     // -----------------------------------------------------------------------
 
+    /// Shorthand for calling `build_background_instances` with typical test
+    /// defaults (no selection, `CATPPUCCIN_MOCHA`, no cursor color override).
+    fn bg_instances_test(
+        lines: &[ShapedLine],
+        cell_width: u32,
+        cell_height: u32,
+        show_cursor: bool,
+        cursor_blink_on: bool,
+        cursor_pos: CursorPos,
+        cursor_style: &CursorVisualStyle,
+    ) -> (Vec<f32>, Vec<f32>) {
+        build_background_instances(
+            lines,
+            cell_width,
+            cell_height,
+            13.0,
+            8.0,
+            1.0,
+            show_cursor,
+            cursor_blink_on,
+            cursor_pos,
+            cursor_style,
+            None,
+            &themes::CATPPUCCIN_MOCHA,
+            None,
+        )
+    }
+
     #[test]
-    fn bg_verts_empty_on_default_background() {
-        // A line whose cells all have `DefaultBackground` should produce no quads.
+    fn bg_instances_empty_on_default_background() {
+        // A line whose cells all have `DefaultBackground` should produce no
+        // instances and no decoration verts.
         let line = make_line(5, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        assert_eq!(verts.len(), 0, "default background should produce no quads");
-    }
-
-    #[test]
-    fn bg_verts_one_quad_for_colored_run() {
-        // A single run with a non-default background should produce exactly one quad.
-        let colors = StateColors::default().with_background_color(TerminalColor::Red);
-
-        let line = make_line(3, 8.0, colors, vec![]);
-        let verts = build_background_verts(
-            &[line],
-            8,
-            16,
-            13.0,
-            8.0,
-            1.0,
-            false,
-            false,
-            CursorPos::default(),
-            &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
-        );
-        // One quad = VERTS_PER_QUAD * DECO_VERTEX_FLOATS floats.
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
-            "expected exactly one background quad"
+            bg.len(),
+            0,
+            "default background should produce no instances"
         );
+        assert_eq!(deco.len(), 0, "no decorations expected");
     }
 
     #[test]
-    fn bg_verts_adjacent_same_color_merged() {
-        // Two runs that have the same background color and are adjacent should
-        // produce only one merged quad.
+    fn bg_instances_per_cell_for_colored_run() {
+        // A single run with 3 non-default-background cells should produce 3
+        // instances (one per cell).
+        let colors = StateColors::default().with_background_color(TerminalColor::Red);
+        let line = make_line(3, 8.0, colors, vec![]);
+        let (bg, deco) = bg_instances_test(
+            &[line],
+            8,
+            16,
+            false,
+            false,
+            CursorPos::default(),
+            &CursorVisualStyle::BlockCursorSteady,
+        );
+        assert_eq!(
+            bg.len(),
+            3 * BG_INSTANCE_FLOATS,
+            "expected 3 cell instances"
+        );
+        assert_eq!(deco.len(), 0, "no decorations expected");
+    }
+
+    #[test]
+    fn bg_instances_adjacent_same_color_per_cell() {
+        // Two adjacent runs with the same background color produce one instance
+        // per cell (instanced rendering does not merge — the GPU handles it).
         use crate::gui::font_manager::FaceId;
         let colors = StateColors::default().with_background_color(TerminalColor::Blue);
 
@@ -2633,33 +2309,28 @@ mod tests {
             ],
         };
 
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        // Two adjacent same-color runs → one merged quad.
+        // Two cells → two instances.
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
-            "adjacent same-color runs should be merged into one quad"
+            bg.len(),
+            2 * BG_INSTANCE_FLOATS,
+            "adjacent same-color runs should produce one instance per cell"
         );
+        assert_eq!(deco.len(), 0, "no decorations expected");
     }
 
     #[test]
-    fn bg_verts_different_colors_two_quads() {
-        // Two runs with different non-default background colors should produce two
-        // separate quads.
+    fn bg_instances_different_colors_per_cell() {
+        // Two runs with different non-default background colors produce one
+        // instance per cell.
         use crate::gui::font_manager::FaceId;
 
         let colors_red = StateColors::default().with_background_color(TerminalColor::Red);
@@ -2704,189 +2375,150 @@ mod tests {
             ],
         };
 
-        let verts = build_background_verts(
+        let (bg, _deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
         assert_eq!(
-            verts.len(),
-            2 * VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
-            "different-color runs should produce two quads"
+            bg.len(),
+            2 * BG_INSTANCE_FLOATS,
+            "different-color runs should produce one instance per cell"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_block_adds_quad() {
+    fn bg_instances_cursor_block_adds_deco_quad() {
         // With `show_cursor = true` and a steady block cursor, one cursor quad
-        // should be appended.
+        // should appear in the decoration verts.
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             true,
             CursorPos { x: 1, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
+        assert_eq!(bg.len(), 0, "default bg should produce no instances");
         assert_eq!(
-            verts.len(),
+            deco.len(),
             VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
-            "block cursor should add one quad"
+            "block cursor should add one deco quad"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_blink_off_no_quad() {
+    fn bg_instances_cursor_blink_off_no_quad() {
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             false, // blink_on = false
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
+        assert_eq!(bg.len(), 0);
         assert_eq!(
-            verts.len(),
+            deco.len(),
             0,
             "blinking cursor with blink_on=false should produce no quad"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_steady_ignores_blink_flag() {
+    fn bg_instances_cursor_steady_ignores_blink_flag() {
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (_bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             false, // blink_on = false — irrelevant for steady cursor
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
         assert_eq!(
-            verts.len(),
+            deco.len(),
             VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
             "steady cursor should render even when blink_on=false"
         );
     }
 
     #[test]
-    fn bg_verts_underline_adds_quad() {
+    fn bg_instances_underline_adds_deco_quad() {
         let line = make_line(3, 8.0, default_colors(), vec![FontDecorations::Underline]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        // One underline quad.
+        assert_eq!(bg.len(), 0, "default bg — no instances");
         assert_eq!(
-            verts.len(),
+            deco.len(),
             VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
-            "underline run should produce one underline quad"
+            "underline run should produce one decoration quad"
         );
     }
 
     #[test]
-    fn bg_verts_strikethrough_adds_quad() {
+    fn bg_instances_strikethrough_adds_deco_quad() {
         let line = make_line(
             3,
             8.0,
             default_colors(),
             vec![FontDecorations::Strikethrough],
         );
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
+        assert_eq!(bg.len(), 0, "default bg — no instances");
         assert_eq!(
-            verts.len(),
+            deco.len(),
             VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
-            "strikethrough run should produce one strikethrough quad"
+            "strikethrough run should produce one decoration quad"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_position_maps_to_pixel_coords() {
+    fn bg_instances_cursor_position_maps_to_pixel_coords() {
         // Block cursor at (col=2, row=1) with cell_width=10, cell_height=20.
         // Expected x0 = 2*10 = 20, y0 = 1*20 = 20.
         let lines = [
             make_line(5, 10.0, default_colors(), vec![]),
             make_line(5, 10.0, default_colors(), vec![]),
         ];
-        let verts = build_background_verts(
+        let (_bg, deco) = bg_instances_test(
             &lines,
             10,
             20,
-            16.0,
-            10.0,
-            1.0,
             true,
             true,
             CursorPos { x: 2, y: 1 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        // The cursor quad is the last 36 floats (6 verts × 6 floats).
-        assert!(verts.len() >= VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
-        let cursor_start = verts.len() - VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
-        let x0 = verts[cursor_start];
-        let y0 = verts[cursor_start + 1];
+        // The cursor quad is the last 36 floats (6 verts x 6 floats) in deco.
+        assert!(deco.len() >= VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
+        let cursor_start = deco.len() - VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
+        let x0 = deco[cursor_start];
+        let y0 = deco[cursor_start + 1];
         assert!(
             (x0 - 20.0).abs() < f32::EPSILON,
             "cursor x should be col*cell_w = 20, got {x0}"
@@ -3116,35 +2748,29 @@ mod tests {
     /// The test verifies that:
     ///   1. The cursor-only builder produces `CURSOR_QUAD_FLOATS` floats
     ///      (= `VERTS_PER_QUAD * DECO_VERTEX_FLOATS`).
-    ///   2. Patching those floats into a pre-built background VBO at the
+    ///   2. Patching those floats into a pre-built deco VBO at the
     ///      recorded offset produces the expected combined buffer — only the
     ///      cursor region changes, all other floats are untouched.
     #[test]
     fn partial_vbo_update_only_modifies_cursor_region() {
-        // Build a full background VBO for one line + a cursor at (col=0, row=0).
+        // Build the full deco VBO for one line + a cursor at (col=0, row=0).
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let full_verts = build_background_verts(
+        let (_bg, full_deco) = bg_instances_test(
             std::slice::from_ref(&line),
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             true, // cursor visible
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
 
         // Record where the cursor quad starts (it is appended at the end).
-        let cursor_float_offset = full_verts.len() - CURSOR_QUAD_FLOATS;
+        let cursor_float_offset = full_deco.len() - CURSOR_QUAD_FLOATS;
         let cursor_byte_offset = cursor_float_offset * std::mem::size_of::<f32>();
 
         // The pre-cursor portion must be unchanged — capture it before mutation.
-        let pre_cursor = full_verts[..cursor_float_offset].to_vec();
+        let pre_cursor = full_deco[..cursor_float_offset].to_vec();
 
         // Build cursor-only verts with blink_on=false using a *blinking* style.
         // BlockCursorSteady ignores blink_on (always visible); BlockCursorBlink
@@ -3160,9 +2786,9 @@ mod tests {
             None,
         );
 
-        // Simulate the partial-update patch: mutate full_verts in-place to
+        // Simulate the partial-update patch: mutate full_deco in-place to
         // overwrite the cursor region (matches draw_with_cursor_only_update).
-        let mut patched = full_verts;
+        let mut patched = full_deco;
         if cursor_off_verts.is_empty() {
             // Zero-fill the cursor region (matches what draw_with_cursor_only_update does).
             for f in &mut patched[cursor_float_offset..] {
