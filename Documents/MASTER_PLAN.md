@@ -57,8 +57,8 @@ and plan document maintenance rules.
 | 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Pending  | None                 |
 | 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Stub     | None                 |
 | 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
-| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Pending  | None                 |
-| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Pending  | None                 |
+| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
+| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
 
 ---
 
@@ -309,7 +309,6 @@ Independent of each other and of Phases 3-7. Can run at any time in parallel wit
 - **Task 31** — Dead Code Audit (stub — requires audit first)
 - **Task 32** — Playback Feature Flag (stub — requires audit first)
 - **Task 33** — WezTerm & Ghostty Palettes (independent)
-- **Task 34** — Window Background Opacity (independent)
 
 ### Phase 9 — Final Structural Cleanup
 
@@ -318,7 +317,7 @@ Must run after all other tasks are complete to avoid merge conflicts.
 - **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 34
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
@@ -331,7 +330,6 @@ Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
               ├── Task 31 (Dead Code Audit)  ┤ (stub — audit first)
               ├── Task 32 (Playback Flag)    ┤ (stub — audit first)
               ├── Task 33 (Palettes)         ┤ (any time)
-              ├── Task 34 (BG Opacity)       ┤ (any time)
               │                              │
 Phase 9:      └── Task 29 (God File Split)   ┘ (last — after all others)
 ```
@@ -396,42 +394,42 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                                            |
-| ---- | ---------- | ---------- | ------------------------------------------------ |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                 |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                  |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                 |
-| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4             |
-| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4    |
-| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)   |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                         |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                          |
-| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging       |
-| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                            |
-| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4    |
-| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4    |
-| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4    |
-| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection      |
-| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17        |
-| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17        |
-| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17        |
-| 18   |            |            |                                                  |
-| 19   |            |            |                                                  |
-| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage     |
-| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops              |
-| 22   |            |            |                                                  |
-| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text |
-| 24   |            |            |                                                  |
-| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality |
-| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum           |
-| 27   |            |            |                                                  |
-| 28   |            |            |                                                  |
-| 29   |            |            |                                                  |
-| 30   |            |            |                                                  |
-| 31   |            |            |                                                  |
-| 32   |            |            |                                                  |
-| 33   |            |            |                                                  |
-| 34   |            |            |                                                  |
+| Task | Started    | Completed  | Notes                                                  |
+| ---- | ---------- | ---------- | ------------------------------------------------------ |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                       |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                        |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                       |
+| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4                   |
+| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4          |
+| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)         |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                               |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                                |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging             |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                                  |
+| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4          |
+| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4          |
+| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4          |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection            |
+| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17              |
+| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17              |
+| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17              |
+| 18   |            |            |                                                        |
+| 19   |            |            |                                                        |
+| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage           |
+| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                    |
+| 22   |            |            |                                                        |
+| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text       |
+| 24   |            |            |                                                        |
+| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality       |
+| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                 |
+| 27   |            |            |                                                        |
+| 28   |            |            |                                                        |
+| 29   |            |            |                                                        |
+| 30   |            |            |                                                        |
+| 31   |            |            |                                                        |
+| 32   |            |            |                                                        |
+| 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                |
+| 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity |
 
 ---
 

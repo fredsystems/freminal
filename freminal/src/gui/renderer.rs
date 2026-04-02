@@ -10,7 +10,7 @@
 //! glyph quads from the atlas), VAOs, double-buffered VBOs, and the atlas GL texture.
 //!
 //! Rendering is triggered via egui's [`eframe::egui_glow::CallbackFn`] mechanism.
-//! The CPU-side vertex builders (`build_background_verts` / `build_foreground_verts`)
+//! The CPU-side instance/vertex builders (`build_background_instances` / `build_foreground_instances`)
 //! are pure functions and are fully testable without a GL context.
 
 use eframe::glow::{self, HasContext};
@@ -31,11 +31,14 @@ use freminal_terminal_emulator::{ImagePlacement, InlineImage};
 //  GLSL shaders  (GL 3.3 core profile)
 // ---------------------------------------------------------------------------
 
-/// Background pass: solid-color quads (background fills, cursor, underline,
-/// strikethrough).
+/// Decoration pass: solid-color quads (underlines, strikethrough, cursor, selection).
+///
+/// The original non-instanced background shader repurposed for decoration/cursor
+/// elements that have sub-cell geometry.  Cell backgrounds are now drawn by the
+/// instanced background pass below.
 ///
 /// Vertex layout: `vec2 a_pos, vec4 a_color`  (stride = 6 × f32 = 24 bytes)
-const BG_VERT_SRC: &str = r"#version 330 core
+const DECO_VERT_SRC: &str = r"#version 330 core
 layout(location = 0) in vec2 a_pos;
 layout(location = 1) in vec4 a_color;
 
@@ -51,7 +54,7 @@ void main() {
 }
 ";
 
-const BG_FRAG_SRC: &str = r"#version 330 core
+const DECO_FRAG_SRC: &str = r"#version 330 core
 in vec4 v_color;
 out vec4 frag_color;
 
@@ -61,15 +64,67 @@ void main() {
 }
 ";
 
-/// Foreground pass: textured glyph quads sampled from the atlas.
+/// Instanced background pass: one draw call for all cell background quads.
 ///
-/// Vertex layout: `vec2 a_pos, vec2 a_uv, vec4 a_color, float a_is_color`
-///   (stride = 9 × f32 = 36 bytes)
+/// A static unit quad (`UNIT_QUAD`) is scaled to cell size by the vertex shader.
+/// Per-instance attributes supply the grid position and resolved RGBA color.
+///
+/// Vertex layout (per-vertex, divisor 0): `vec2 a_pos`
+/// Instance layout (per-instance, divisor 1): `vec2 a_cell_pos, vec4 a_bg_color`
+const BG_INST_VERT_SRC: &str = r"#version 330 core
+
+// Static unit-quad vertex (one of 6 triangle vertices for a quad).
+layout(location = 0) in vec2 a_pos;
+
+// Per-instance attributes (divisor = 1):
+layout(location = 1) in vec2  a_cell_pos;    // (col, row) -- integer grid position
+layout(location = 2) in vec4  a_bg_color;    // resolved RGBA
+
+uniform vec2  u_viewport_size;
+uniform float u_cell_width;
+uniform float u_cell_height;
+
+out vec4  v_bg_color;
+
+void main() {
+    vec2 cell_origin = a_cell_pos * vec2(u_cell_width, u_cell_height);
+    vec2 pixel_pos = cell_origin + a_pos * vec2(u_cell_width, u_cell_height);
+    vec2 ndc = (pixel_pos / u_viewport_size) * 2.0 - 1.0;
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    v_bg_color = a_bg_color;
+}
+";
+
+const BG_INST_FRAG_SRC: &str = r"#version 330 core
+
+in vec4  v_bg_color;
+
+out vec4 frag_color;
+
+uniform float u_bg_opacity;
+
+void main() {
+    float alpha = v_bg_color.a * u_bg_opacity;
+    frag_color = vec4(v_bg_color.rgb * alpha, alpha);
+}
+";
+
+/// Foreground pass: instanced textured glyph quads sampled from the atlas.
+///
+/// Per-vertex: `vec2 a_pos` (unit quad in [0,1]², divisor 0).
+/// Per-instance (divisor 1):
+///   location 1: `vec2  a_glyph_origin` — pixel position of the glyph quad
+///   location 2: `vec2  a_glyph_size`   — pixel size of the glyph quad
+///   location 3: `vec4  a_uv_rect`      — (u0, v0, u1, v1) atlas UV
+///   location 4: `vec4  a_fg_color`     — RGBA foreground color
+///   location 5: `float a_is_color`     — 1.0 for color emoji, 0.0 for mono
 const FG_VERT_SRC: &str = r"#version 330 core
 layout(location = 0) in vec2  a_pos;
-layout(location = 1) in vec2  a_uv;
-layout(location = 2) in vec4  a_color;
-layout(location = 3) in float a_is_color;
+layout(location = 1) in vec2  a_glyph_origin;
+layout(location = 2) in vec2  a_glyph_size;
+layout(location = 3) in vec4  a_uv_rect;
+layout(location = 4) in vec4  a_fg_color;
+layout(location = 5) in float a_is_color;
 
 out vec2  v_uv;
 out vec4  v_color;
@@ -78,10 +133,11 @@ out float v_is_color;
 uniform vec2 u_viewport_size;
 
 void main() {
-    vec2 ndc = (a_pos / u_viewport_size) * 2.0 - 1.0;
+    vec2 pixel_pos = a_glyph_origin + a_pos * a_glyph_size;
+    vec2 ndc = (pixel_pos / u_viewport_size) * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
-    v_uv       = a_uv;
-    v_color    = a_color;
+    v_uv       = mix(a_uv_rect.xy, a_uv_rect.zw, a_pos);
+    v_color    = a_fg_color;
     v_is_color = a_is_color;
 }
 ";
@@ -143,16 +199,32 @@ void main() {
 //  Vertex strides (in f32 components)
 // ---------------------------------------------------------------------------
 
-/// Background vertex: `x, y, r, g, b, a` — 6 floats per vertex.
-const BG_VERTEX_FLOATS: usize = 6;
-/// Foreground vertex: `x, y, u, v, r, g, b, a, is_color` — 9 floats per vertex.
-const FG_VERTEX_FLOATS: usize = 9;
+/// Decoration vertex: `x, y, r, g, b, a` — 6 floats per vertex.
+///
+/// Used for underlines, strikethrough, cursor, and selection highlight quads.
+/// These are the same layout as the old background pass.
+const DECO_VERTEX_FLOATS: usize = 6;
+/// Foreground instance: `glyph_x, glyph_y, glyph_w, glyph_h, u0, v0, u1, v1,
+/// r, g, b, a, is_color` — 13 floats per glyph instance.
+pub(crate) const FG_INSTANCE_FLOATS: usize = 13;
 /// Image vertex: `x, y, u, v` — 4 floats per vertex.
 const IMG_VERTEX_FLOATS: usize = 4;
 /// Vertices per quad (2 triangles, 6 vertices).
 pub(crate) const VERTS_PER_QUAD: usize = 6;
-/// Floats for one cursor quad in the background VBO.
-pub(crate) const CURSOR_QUAD_FLOATS: usize = VERTS_PER_QUAD * BG_VERTEX_FLOATS;
+/// Floats for one cursor quad in the decoration VBO.
+pub(crate) const CURSOR_QUAD_FLOATS: usize = VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
+
+/// Per-instance data: `col, row, r, g, b, a` — 6 floats per cell instance.
+pub(crate) const BG_INSTANCE_FLOATS: usize = 6;
+
+/// Static unit quad for instanced background rendering (2 triangles = 6 vertices).
+///
+/// Each vertex is `vec2 a_pos` in [0,1]² space.  The vertex shader scales by
+/// `(u_cell_width, u_cell_height)` and offsets by the per-instance cell position.
+const UNIT_QUAD: [f32; 12] = [
+    0.0, 0.0, 1.0, 0.0, 0.0, 1.0, // triangle 1
+    1.0, 0.0, 1.0, 1.0, 0.0, 1.0, // triangle 2
+];
 
 // ---------------------------------------------------------------------------
 //  TerminalRenderer
@@ -167,10 +239,18 @@ pub struct TerminalRenderer {
     /// Whether GPU resources have been created.
     initialized: bool,
 
-    // ---- background pass ----
-    bg_program: Option<glow::Program>,
-    bg_vao: Option<glow::VertexArray>,
-    bg_vbo: [Option<glow::Buffer>; 2],
+    // ---- instanced background pass ----
+    bg_inst_program: Option<glow::Program>,
+    bg_inst_vao: Option<glow::VertexArray>,
+    /// Static unit-quad VBO (uploaded once, never changes).
+    bg_unit_quad_vbo: Option<glow::Buffer>,
+    /// Double-buffered instance VBOs for per-cell background data.
+    bg_inst_vbo: [Option<glow::Buffer>; 2],
+
+    // ---- decoration pass (underline, strikethrough, cursor, selection) ----
+    deco_program: Option<glow::Program>,
+    deco_vao: Option<glow::VertexArray>,
+    deco_vbo: [Option<glow::Buffer>; 2],
 
     // ---- foreground pass ----
     fg_program: Option<glow::Program>,
@@ -190,9 +270,17 @@ pub struct TerminalRenderer {
     image_textures: std::collections::HashMap<u64, glow::Texture>,
 
     // ---- uniform locations ----
-    bg_u_viewport: Option<glow::UniformLocation>,
+    // instanced background
+    bg_inst_u_viewport: Option<glow::UniformLocation>,
+    bg_inst_u_cell_width: Option<glow::UniformLocation>,
+    bg_inst_u_cell_height: Option<glow::UniformLocation>,
+    bg_inst_u_bg_opacity: Option<glow::UniformLocation>,
+    // decorations
+    deco_u_viewport: Option<glow::UniformLocation>,
+    // foreground
     fg_u_viewport: Option<glow::UniformLocation>,
     fg_u_atlas: Option<glow::UniformLocation>,
+    // images
     img_u_viewport: Option<glow::UniformLocation>,
     img_u_image: Option<glow::UniformLocation>,
 
@@ -214,18 +302,31 @@ impl TerminalRenderer {
     pub fn new() -> Self {
         Self {
             initialized: false,
-            bg_program: None,
-            bg_vao: None,
-            bg_vbo: [None, None],
+            // instanced background
+            bg_inst_program: None,
+            bg_inst_vao: None,
+            bg_unit_quad_vbo: None,
+            bg_inst_vbo: [None, None],
+            // decoration
+            deco_program: None,
+            deco_vao: None,
+            deco_vbo: [None, None],
+            // foreground
             fg_program: None,
             fg_vao: None,
             fg_vbo: [None, None],
             atlas_texture: None,
+            // images
             img_program: None,
             img_vao: None,
             img_vbo: [None, None],
             image_textures: std::collections::HashMap::new(),
-            bg_u_viewport: None,
+            // uniform locations
+            bg_inst_u_viewport: None,
+            bg_inst_u_cell_width: None,
+            bg_inst_u_cell_height: None,
+            bg_inst_u_bg_opacity: None,
+            deco_u_viewport: None,
             fg_u_viewport: None,
             fg_u_atlas: None,
             img_u_viewport: None,
@@ -250,65 +351,153 @@ impl TerminalRenderer {
     /// Returns a human-readable error string if shader compilation/linking fails
     /// or if any GL object creation fails.
     pub fn init(&mut self, gl: &glow::Context) -> Result<(), String> {
-        // Compile shaders.
-        let bg_program = compile_program(gl, BG_VERT_SRC, BG_FRAG_SRC, "background")?;
-        let fg_program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
+        self.init_bg_inst_pass(gl)?;
+        self.init_deco_pass(gl)?;
+        self.init_fg_pass(gl)?;
+        self.init_atlas_texture(gl)?;
+        self.init_image_pass(gl)?;
 
-        // Cache uniform locations.
-        let bg_u_viewport = unsafe { gl.get_uniform_location(bg_program, "u_viewport_size") };
-        let fg_u_viewport = unsafe { gl.get_uniform_location(fg_program, "u_viewport_size") };
-        let fg_u_atlas = unsafe { gl.get_uniform_location(fg_program, "u_atlas") };
+        self.initialized = true;
+        Ok(())
+    }
 
-        // --- background VAO + double-buffered VBOs ---
-        let bg_vao = unsafe {
+    /// Initialise the instanced background pass (shader, VAO, unit-quad VBO,
+    /// double-buffered instance VBOs).
+    fn init_bg_inst_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let program = compile_program(gl, BG_INST_VERT_SRC, BG_INST_FRAG_SRC, "bg_instanced")?;
+
+        self.bg_inst_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
+        self.bg_inst_u_cell_width = unsafe { gl.get_uniform_location(program, "u_cell_width") };
+        self.bg_inst_u_cell_height = unsafe { gl.get_uniform_location(program, "u_cell_height") };
+        self.bg_inst_u_bg_opacity = unsafe { gl.get_uniform_location(program, "u_bg_opacity") };
+
+        let vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create background VAO: {e}"))?
+                .map_err(|e| format!("create bg_inst VAO: {e}"))?
         };
-        let bg_vbo0 = unsafe {
+        let unit_quad_vbo = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create background VBO 0: {e}"))?
+                .map_err(|e| format!("create bg unit-quad VBO: {e}"))?
         };
-        let bg_vbo1 = unsafe {
+        let inst_vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create background VBO 1: {e}"))?
+                .map_err(|e| format!("create bg instance VBO 0: {e}"))?
+        };
+        let inst_vbo1 = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create bg instance VBO 1: {e}"))?
         };
 
+        // Upload the static unit quad (never changes).
+        let unit_quad_bytes = unsafe {
+            std::slice::from_raw_parts(
+                UNIT_QUAD.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(&UNIT_QUAD),
+            )
+        };
         unsafe {
-            gl.bind_vertex_array(Some(bg_vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(bg_vbo0));
-            setup_bg_attribs(gl);
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(unit_quad_vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, unit_quad_bytes, glow::STATIC_DRAW);
+        }
+
+        // Configure the instanced VAO.
+        unsafe {
+            gl.bind_vertex_array(Some(vao));
+            setup_bg_inst_attribs(gl, unit_quad_vbo, inst_vbo0);
             gl.bind_vertex_array(None);
         }
 
-        // --- foreground VAO + double-buffered VBOs ---
-        let fg_vao = unsafe {
+        self.bg_inst_program = Some(program);
+        self.bg_inst_vao = Some(vao);
+        self.bg_unit_quad_vbo = Some(unit_quad_vbo);
+        self.bg_inst_vbo = [Some(inst_vbo0), Some(inst_vbo1)];
+
+        Ok(())
+    }
+
+    /// Initialise the decoration pass (shader, VAO, double-buffered VBOs).
+    fn init_deco_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let program = compile_program(gl, DECO_VERT_SRC, DECO_FRAG_SRC, "decoration")?;
+
+        self.deco_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
+
+        let vao = unsafe {
+            gl.create_vertex_array()
+                .map_err(|e| format!("create deco VAO: {e}"))?
+        };
+        let vbo0 = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create deco VBO 0: {e}"))?
+        };
+        let vbo1 = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create deco VBO 1: {e}"))?
+        };
+
+        unsafe {
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo0));
+            setup_deco_attribs(gl);
+            gl.bind_vertex_array(None);
+        }
+
+        self.deco_program = Some(program);
+        self.deco_vao = Some(vao);
+        self.deco_vbo = [Some(vbo0), Some(vbo1)];
+
+        Ok(())
+    }
+
+    /// Initialise the foreground pass (shader, VAO, double-buffered instance VBOs).
+    ///
+    /// Reuses the shared unit-quad VBO from the instanced background pass
+    /// (must be initialised first via [`init_bg_inst_pass`]).
+    fn init_fg_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
+
+        self.fg_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
+        self.fg_u_atlas = unsafe { gl.get_uniform_location(program, "u_atlas") };
+
+        let vao = unsafe {
             gl.create_vertex_array()
                 .map_err(|e| format!("create foreground VAO: {e}"))?
         };
-        let fg_vbo0 = unsafe {
+        let vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create foreground VBO 0: {e}"))?
+                .map_err(|e| format!("create foreground instance VBO 0: {e}"))?
         };
-        let fg_vbo1 = unsafe {
+        let vbo1 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create foreground VBO 1: {e}"))?
+                .map_err(|e| format!("create foreground instance VBO 1: {e}"))?
         };
 
+        // The unit-quad VBO must already exist (created by init_bg_inst_pass).
+        let unit_quad_vbo = self.bg_unit_quad_vbo.ok_or_else(|| {
+            "FG init: unit-quad VBO not yet created (call init_bg_inst_pass first)".to_owned()
+        })?;
+
         unsafe {
-            gl.bind_vertex_array(Some(fg_vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(fg_vbo0));
-            setup_fg_attribs(gl);
+            gl.bind_vertex_array(Some(vao));
+            setup_fg_inst_attribs(gl, unit_quad_vbo, vbo0);
             gl.bind_vertex_array(None);
         }
 
-        // --- Atlas texture ---
-        let atlas_texture = unsafe {
+        self.fg_program = Some(program);
+        self.fg_vao = Some(vao);
+        self.fg_vbo = [Some(vbo0), Some(vbo1)];
+
+        Ok(())
+    }
+
+    /// Create and configure the glyph-atlas texture.
+    fn init_atlas_texture(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let texture = unsafe {
             gl.create_texture()
                 .map_err(|e| format!("create atlas texture: {e}"))?
         };
 
         unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(atlas_texture));
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
@@ -332,21 +521,7 @@ impl TerminalRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
 
-        self.bg_program = Some(bg_program);
-        self.bg_vao = Some(bg_vao);
-        self.bg_vbo = [Some(bg_vbo0), Some(bg_vbo1)];
-        self.fg_program = Some(fg_program);
-        self.fg_vao = Some(fg_vao);
-        self.fg_vbo = [Some(fg_vbo0), Some(fg_vbo1)];
-        self.atlas_texture = Some(atlas_texture);
-        self.bg_u_viewport = bg_u_viewport;
-        self.fg_u_viewport = fg_u_viewport;
-        self.fg_u_atlas = fg_u_atlas;
-
-        // --- image pass ---
-        self.init_image_pass(gl)?;
-
-        self.initialized = true;
+        self.atlas_texture = Some(texture);
 
         Ok(())
     }
@@ -387,94 +562,6 @@ impl TerminalRenderer {
         Ok(())
     }
 
-    /// Render a complete terminal frame.
-    ///
-    /// Uploads any dirty atlas regions, builds vertex buffers from `shaped_lines`,
-    /// draws the background pass then the foreground pass.  Restores the egui
-    /// intermediate FBO on completion.
-    ///
-    /// # Safety
-    ///
-    /// This method calls `glow` functions which are marked `unsafe`.  The caller
-    /// is responsible for ensuring a valid GL context exists.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(
-        &mut self,
-        gl: &glow::Context,
-        atlas: &mut GlyphAtlas,
-        shaped_lines: &[ShapedLine],
-        font_manager: &FontManager,
-        cell_width: u32,
-        cell_height: u32,
-        ascent: f32,
-        underline_offset: f32,
-        strikeout_offset: f32,
-        stroke_size: f32,
-        cursor_pos: CursorPos,
-        show_cursor: bool,
-        cursor_blink_on: bool,
-        cursor_visual_style: &CursorVisualStyle,
-        viewport_width: i32,
-        viewport_height: i32,
-        intermediate_fbo: Option<glow::Framebuffer>,
-    ) {
-        if !self.initialized {
-            error!("TerminalRenderer::draw() called before init()");
-            return;
-        }
-
-        // 1. Sync atlas texture.
-        self.sync_atlas(gl, atlas);
-
-        // 2. Build CPU-side vertex buffers.
-        let bg_verts = build_background_verts(
-            shaped_lines,
-            cell_width,
-            cell_height,
-            underline_offset,
-            strikeout_offset,
-            stroke_size,
-            show_cursor,
-            cursor_blink_on,
-            cursor_pos,
-            cursor_visual_style,
-            None,
-            &freminal_common::themes::CATPPUCCIN_MOCHA,
-            None,
-        );
-        let fg_verts = build_foreground_verts(
-            shaped_lines,
-            atlas,
-            font_manager,
-            cell_height,
-            ascent,
-            &FgRenderOptions::all_visible(None),
-            &freminal_common::themes::CATPPUCCIN_MOCHA,
-        );
-
-        // 3. Upload vertex data using orphan-then-write.
-        let buf_idx = self.vbo_index;
-        self.upload_bg_verts(gl, &bg_verts, buf_idx);
-        self.upload_fg_verts(gl, &fg_verts, buf_idx);
-
-        // 4. Draw background pass then foreground pass.
-        #[allow(clippy::cast_precision_loss)]
-        let vp_w = viewport_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let vp_h = viewport_height as f32;
-
-        self.draw_background(gl, bg_verts.len(), vp_w, vp_h, buf_idx);
-        self.draw_foreground(gl, fg_verts.len(), vp_w, vp_h, buf_idx);
-
-        // 5. Restore egui's framebuffer binding.
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, intermediate_fbo);
-        }
-
-        // Advance double-buffer index.
-        self.vbo_index = 1 - self.vbo_index;
-    }
-
     /// Render a terminal frame from pre-built vertex buffers.
     ///
     /// Used when the vertex buffers were built on the main thread (where
@@ -491,12 +578,16 @@ impl TerminalRenderer {
         &mut self,
         gl: &glow::Context,
         atlas: &mut GlyphAtlas,
-        bg_verts: &[f32],
-        fg_verts: &[f32],
+        bg_instances: &[f32],
+        deco_verts: &[f32],
+        fg_instances: &[f32],
         image_verts: &[f32],
         snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
         viewport_height: i32,
+        cell_width: f32,
+        cell_height: f32,
+        bg_opacity: f32,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
         if !self.initialized {
@@ -512,18 +603,29 @@ impl TerminalRenderer {
 
         // 2. Upload pre-built vertex data using orphan-then-write.
         let buf_idx = self.vbo_index;
-        self.upload_bg_verts(gl, bg_verts, buf_idx);
-        self.upload_fg_verts(gl, fg_verts, buf_idx);
+        self.upload_bg_instances(gl, bg_instances, buf_idx);
+        self.upload_deco_verts(gl, deco_verts, buf_idx);
+        self.upload_fg_instances(gl, fg_instances, buf_idx);
         self.upload_img_verts(gl, image_verts, buf_idx);
 
-        // 3. Draw background pass then foreground pass then image pass.
+        // 3. Draw instanced backgrounds, decorations, foreground, images.
         #[allow(clippy::cast_precision_loss)]
         let vp_w = viewport_width as f32;
         #[allow(clippy::cast_precision_loss)]
         let vp_h = viewport_height as f32;
 
-        self.draw_background(gl, bg_verts.len(), vp_w, vp_h, buf_idx);
-        self.draw_foreground(gl, fg_verts.len(), vp_w, vp_h, buf_idx);
+        self.draw_background_instanced(
+            gl,
+            bg_instances.len(),
+            vp_w,
+            vp_h,
+            cell_width,
+            cell_height,
+            bg_opacity,
+            buf_idx,
+        );
+        self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, buf_idx);
+        self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_verts.len(), snap_images, vp_w, vp_h, buf_idx);
 
         // 4. Restore egui's framebuffer binding.
@@ -539,12 +641,12 @@ impl TerminalRenderer {
     ///
     /// When the terminal content has not changed but the cursor blink state
     /// has toggled (or the cursor moved), this method patches only the cursor
-    /// quad region of the background VBO and redraws both passes.  The
-    /// foreground VBO is untouched.
+    /// quad region of the decoration VBO and redraws all passes.  The
+    /// foreground VBO and instanced background VBO are untouched.
     ///
-    /// `cursor_vert_byte_offset` is the byte offset into the background VBO
-    /// where the cursor quad data begins.  `bg_total_floats` is the total
-    /// float count of the most recently uploaded background VBO (needed to
+    /// `cursor_vert_byte_offset` is the byte offset into the decoration VBO
+    /// where the cursor quad data begins.  `deco_total_floats` is the total
+    /// float count of the most recently uploaded decoration VBO (needed to
     /// set the draw vertex count correctly).  `cursor_verts` contains exactly
     /// `CURSOR_QUAD_FLOATS` floats (or is empty when the cursor is hidden).
     ///
@@ -557,13 +659,17 @@ impl TerminalRenderer {
         gl: &glow::Context,
         atlas: &mut GlyphAtlas,
         cursor_vert_byte_offset: usize,
-        bg_total_floats: usize,
+        deco_total_floats: usize,
+        bg_inst_total_floats: usize,
         cursor_verts: &[f32],
         fg_total_floats: usize,
         image_total_floats: usize,
         snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
         viewport_height: i32,
+        cell_width: f32,
+        cell_height: f32,
+        bg_opacity: f32,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
         if !self.initialized {
@@ -574,28 +680,43 @@ impl TerminalRenderer {
         // 1. Sync atlas (may have new glyphs from a previous frame).
         self.sync_atlas(gl, atlas);
 
-        let buf_idx = self.vbo_index;
+        // Use the slot that was last fully written by `draw_with_verts`.
+        // After a full frame, `draw_with_verts` advances `vbo_index` to the
+        // *next* slot.  The cursor-only path patches and draws from the
+        // *previous* slot (the one with valid data).
+        let buf_idx = 1 - self.vbo_index;
 
-        // 2. Patch just the cursor region of the bg VBO (no orphan).
+        // 2. Patch just the cursor region of the deco VBO (no orphan).
         if cursor_verts.is_empty() {
             // Cursor is hidden: zero out the cursor quad region so no stale
             // cursor is painted.  We write CURSOR_QUAD_FLOATS zeros.
-            if let Some(vbo) = self.bg_vbo[buf_idx] {
+            if let Some(vbo) = self.deco_vbo[buf_idx] {
                 let zeros = vec![0.0f32; CURSOR_QUAD_FLOATS];
                 upload_verts_sub(gl, vbo, cursor_vert_byte_offset, &zeros);
             }
-        } else if let Some(vbo) = self.bg_vbo[buf_idx] {
+        } else if let Some(vbo) = self.deco_vbo[buf_idx] {
             upload_verts_sub(gl, vbo, cursor_vert_byte_offset, cursor_verts);
         }
 
-        // 3. Draw background + foreground with the total float counts from the
-        //    previously uploaded full frame.
+        // 3. Draw instanced backgrounds, decorations, foreground, images
+        //    with the total float counts from the previously uploaded full
+        //    frame.
         #[allow(clippy::cast_precision_loss)]
         let vp_w = viewport_width as f32;
         #[allow(clippy::cast_precision_loss)]
         let vp_h = viewport_height as f32;
 
-        self.draw_background(gl, bg_total_floats, vp_w, vp_h, buf_idx);
+        self.draw_background_instanced(
+            gl,
+            bg_inst_total_floats,
+            vp_w,
+            vp_h,
+            cell_width,
+            cell_height,
+            bg_opacity,
+            buf_idx,
+        );
+        self.draw_decorations(gl, deco_total_floats, vp_w, vp_h, buf_idx);
         self.draw_foreground(gl, fg_total_floats, vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_total_floats, snap_images, vp_w, vp_h, buf_idx);
 
@@ -674,20 +795,28 @@ impl TerminalRenderer {
         }
     }
 
-    /// Upload background vertex data via orphan-then-write.
-    fn upload_bg_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
-        let Some(vbo) = self.bg_vbo[buf_idx] else {
+    /// Upload decoration vertex data via orphan-then-write.
+    fn upload_deco_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
+        let Some(vbo) = self.deco_vbo[buf_idx] else {
             return;
         };
         upload_verts(gl, vbo, verts);
     }
 
-    /// Upload foreground vertex data via orphan-then-write.
-    fn upload_fg_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
+    /// Upload instanced background instance data via orphan-then-write.
+    fn upload_bg_instances(&self, gl: &glow::Context, instances: &[f32], buf_idx: usize) {
+        let Some(vbo) = self.bg_inst_vbo[buf_idx] else {
+            return;
+        };
+        upload_verts(gl, vbo, instances);
+    }
+
+    /// Upload foreground instance data via orphan-then-write.
+    fn upload_fg_instances(&self, gl: &glow::Context, instances: &[f32], buf_idx: usize) {
         let Some(vbo) = self.fg_vbo[buf_idx] else {
             return;
         };
-        upload_verts(gl, vbo, verts);
+        upload_verts(gl, vbo, instances);
     }
 
     /// Upload image vertex data via orphan-then-write.
@@ -859,8 +988,64 @@ impl TerminalRenderer {
         }
     }
 
-    /// Execute the background draw call.
-    fn draw_background(
+    /// Execute the instanced background draw call.
+    ///
+    /// Each instance is one cell-sized quad; the instance buffer provides the
+    /// grid position and resolved RGBA color.  `u_bg_opacity` is applied in the
+    /// fragment shader.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_background_instanced(
+        &self,
+        gl: &glow::Context,
+        instance_floats: usize,
+        vp_w: f32,
+        vp_h: f32,
+        cell_width: f32,
+        cell_height: f32,
+        bg_opacity: f32,
+        buf_idx: usize,
+    ) {
+        let (Some(prog), Some(vao), Some(unit_vbo), Some(inst_vbo)) = (
+            self.bg_inst_program,
+            self.bg_inst_vao,
+            self.bg_unit_quad_vbo,
+            self.bg_inst_vbo[buf_idx],
+        ) else {
+            return;
+        };
+
+        let instance_count = instance_floats / BG_INSTANCE_FLOATS;
+        if instance_count == 0 {
+            return;
+        }
+
+        unsafe {
+            gl.use_program(Some(prog));
+            if let Some(loc) = &self.bg_inst_u_viewport {
+                gl.uniform_2_f32(Some(loc), vp_w, vp_h);
+            }
+            if let Some(loc) = &self.bg_inst_u_cell_width {
+                gl.uniform_1_f32(Some(loc), cell_width);
+            }
+            if let Some(loc) = &self.bg_inst_u_cell_height {
+                gl.uniform_1_f32(Some(loc), cell_height);
+            }
+            if let Some(loc) = &self.bg_inst_u_bg_opacity {
+                gl.uniform_1_f32(Some(loc), bg_opacity);
+            }
+            gl.bind_vertex_array(Some(vao));
+            // Re-bind both buffers into the VAO for this draw call.
+            setup_bg_inst_attribs(gl, unit_vbo, inst_vbo);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, instance_count as i32);
+            gl.bind_vertex_array(None);
+            gl.use_program(None);
+        }
+    }
+
+    /// Execute the decoration draw call (underlines, strikethrough, cursor,
+    /// selection highlights).
+    fn draw_decorations(
         &self,
         gl: &glow::Context,
         vert_floats: usize,
@@ -869,7 +1054,7 @@ impl TerminalRenderer {
         buf_idx: usize,
     ) {
         let (Some(prog), Some(vao), Some(vbo)) =
-            (self.bg_program, self.bg_vao, self.bg_vbo[buf_idx])
+            (self.deco_program, self.deco_vao, self.deco_vbo[buf_idx])
         else {
             return;
         };
@@ -879,46 +1064,45 @@ impl TerminalRenderer {
         }
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let vertex_count = (vert_floats / BG_VERTEX_FLOATS) as i32;
+        let vertex_count = (vert_floats / DECO_VERTEX_FLOATS) as i32;
 
         unsafe {
             gl.use_program(Some(prog));
-            if let Some(loc) = &self.bg_u_viewport {
+            if let Some(loc) = &self.deco_u_viewport {
                 gl.uniform_2_f32(Some(loc), vp_w, vp_h);
             }
             gl.bind_vertex_array(Some(vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            setup_bg_attribs(gl);
+            setup_deco_attribs(gl);
             gl.draw_arrays(glow::TRIANGLES, 0, vertex_count);
             gl.bind_vertex_array(None);
             gl.use_program(None);
         }
     }
 
-    /// Execute the foreground draw call.
+    /// Execute the instanced foreground draw call.
     fn draw_foreground(
         &self,
         gl: &glow::Context,
-        vert_floats: usize,
+        instance_floats: usize,
         vp_w: f32,
         vp_h: f32,
         buf_idx: usize,
     ) {
-        let (Some(prog), Some(vao), Some(vbo), Some(tex)) = (
+        let (Some(prog), Some(vao), Some(unit_vbo), Some(inst_vbo), Some(tex)) = (
             self.fg_program,
             self.fg_vao,
+            self.bg_unit_quad_vbo,
             self.fg_vbo[buf_idx],
             self.atlas_texture,
         ) else {
             return;
         };
 
-        if vert_floats == 0 {
+        let instance_count = instance_floats / FG_INSTANCE_FLOATS;
+        if instance_count == 0 {
             return;
         }
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let vertex_count = (vert_floats / FG_VERTEX_FLOATS) as i32;
 
         unsafe {
             gl.use_program(Some(prog));
@@ -931,9 +1115,10 @@ impl TerminalRenderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            setup_fg_attribs(gl);
-            gl.draw_arrays(glow::TRIANGLES, 0, vertex_count);
+            // Re-bind both buffers into the VAO for this draw call.
+            setup_fg_inst_attribs(gl, unit_vbo, inst_vbo);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, instance_count as i32);
             gl.bind_vertex_array(None);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
@@ -949,17 +1134,34 @@ impl TerminalRenderer {
         }
 
         unsafe {
-            if let Some(p) = self.bg_program.take() {
+            // Instanced background resources.
+            if let Some(p) = self.bg_inst_program.take() {
                 gl.delete_program(p);
             }
-            if let Some(v) = self.bg_vao.take() {
+            if let Some(v) = self.bg_inst_vao.take() {
                 gl.delete_vertex_array(v);
             }
-            for slot in &mut self.bg_vbo {
+            if let Some(b) = self.bg_unit_quad_vbo.take() {
+                gl.delete_buffer(b);
+            }
+            for slot in &mut self.bg_inst_vbo {
                 if let Some(b) = slot.take() {
                     gl.delete_buffer(b);
                 }
             }
+            // Decoration resources.
+            if let Some(p) = self.deco_program.take() {
+                gl.delete_program(p);
+            }
+            if let Some(v) = self.deco_vao.take() {
+                gl.delete_vertex_array(v);
+            }
+            for slot in &mut self.deco_vbo {
+                if let Some(b) = slot.take() {
+                    gl.delete_buffer(b);
+                }
+            }
+            // Foreground resources.
             if let Some(p) = self.fg_program.take() {
                 gl.delete_program(p);
             }
@@ -974,6 +1176,7 @@ impl TerminalRenderer {
             if let Some(t) = self.atlas_texture.take() {
                 gl.delete_texture(t);
             }
+            // Image resources.
             if let Some(p) = self.img_program.take() {
                 gl.delete_program(p);
             }
@@ -998,13 +1201,53 @@ impl TerminalRenderer {
 //  Vertex attribute setup helpers
 // ---------------------------------------------------------------------------
 
-/// Configure vertex attributes for the background shader.
+/// Configure vertex attributes for the instanced background shader.
+///
+/// Binds the static unit-quad VBO to location 0 (per-vertex, divisor 0)
+/// and the instance VBO to locations 1–2 (per-instance, divisor 1).
+///
+/// - Location 0: `vec2 a_pos`       (unit quad)      — divisor 0
+/// - Location 1: `vec2 a_cell_pos`  (col, row)       — divisor 1
+/// - Location 2: `vec4 a_bg_color`  (r, g, b, a)     — divisor 1
+unsafe fn setup_bg_inst_attribs(
+    gl: &glow::Context,
+    unit_quad_vbo: glow::Buffer,
+    instance_vbo: glow::Buffer,
+) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let f = size_of::<f32>() as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let inst_stride = (BG_INSTANCE_FLOATS * size_of::<f32>()) as i32;
+
+    unsafe {
+        // Location 0: unit-quad vertex position (per-vertex).
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(unit_quad_vbo));
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 2 * f, 0);
+        gl.vertex_attrib_divisor(0, 0);
+
+        // Locations 1–2: instance data (per-instance).
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(instance_vbo));
+        // Location 1: vec2 a_cell_pos (col, row).
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, inst_stride, 0);
+        gl.vertex_attrib_divisor(1, 1);
+        // Location 2: vec4 a_bg_color (r, g, b, a).
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_f32(2, 4, glow::FLOAT, false, inst_stride, 2 * f);
+        gl.vertex_attrib_divisor(2, 1);
+    }
+}
+
+/// Configure vertex attributes for the decoration shader.
 ///
 /// Layout: `location 0 = vec2 pos, location 1 = vec4 color`.
-/// Stride = `BG_VERTEX_FLOATS * 4` bytes.
-unsafe fn setup_bg_attribs(gl: &glow::Context) {
+/// Stride = `DECO_VERTEX_FLOATS * 4` bytes.
+///
+/// Used for underlines, strikethrough, cursor, and selection highlight quads.
+unsafe fn setup_deco_attribs(gl: &glow::Context) {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let stride = (BG_VERTEX_FLOATS * size_of::<f32>()) as i32;
+    let stride = (DECO_VERTEX_FLOATS * size_of::<f32>()) as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let offset_c2 = (2 * size_of::<f32>()) as i32;
     unsafe {
@@ -1015,25 +1258,56 @@ unsafe fn setup_bg_attribs(gl: &glow::Context) {
     }
 }
 
-/// Configure vertex attributes for the foreground shader.
+/// Configure vertex attributes for the instanced foreground shader.
 ///
-/// Layout: `location 0 = vec2 pos, location 1 = vec2 uv,
-///          location 2 = vec4 color, location 3 = float is_color`.
-/// Stride = `FG_VERTEX_FLOATS * 4` bytes.
-unsafe fn setup_fg_attribs(gl: &glow::Context) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let stride = (FG_VERTEX_FLOATS * size_of::<f32>()) as i32;
+/// Binds the static unit-quad VBO to location 0 (per-vertex, divisor 0)
+/// and the instance VBO to locations 1–5 (per-instance, divisor 1).
+///
+/// - Location 0: `vec2  a_pos`          (unit quad)       — divisor 0
+/// - Location 1: `vec2  a_glyph_origin` (pixel position)  — divisor 1
+/// - Location 2: `vec2  a_glyph_size`   (pixel size)      — divisor 1
+/// - Location 3: `vec4  a_uv_rect`      (u0, v0, u1, v1)  — divisor 1
+/// - Location 4: `vec4  a_fg_color`     (r, g, b, a)      — divisor 1
+/// - Location 5: `float a_is_color`     (1.0 or 0.0)      — divisor 1
+unsafe fn setup_fg_inst_attribs(
+    gl: &glow::Context,
+    unit_quad_vbo: glow::Buffer,
+    instance_vbo: glow::Buffer,
+) {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let f = size_of::<f32>() as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let inst_stride = (FG_INSTANCE_FLOATS * size_of::<f32>()) as i32;
+
     unsafe {
+        // Location 0: unit-quad vertex position (per-vertex).
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(unit_quad_vbo));
         gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 2 * f, 0);
+        gl.vertex_attrib_divisor(0, 0);
+
+        // Locations 1–5: instance data (per-instance).
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(instance_vbo));
+        // Location 1: vec2 a_glyph_origin (glyph_x, glyph_y).
         gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 2 * f);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, inst_stride, 0);
+        gl.vertex_attrib_divisor(1, 1);
+        // Location 2: vec2 a_glyph_size (glyph_w, glyph_h).
         gl.enable_vertex_attrib_array(2);
-        gl.vertex_attrib_pointer_f32(2, 4, glow::FLOAT, false, stride, 4 * f);
+        gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, inst_stride, 2 * f);
+        gl.vertex_attrib_divisor(2, 1);
+        // Location 3: vec4 a_uv_rect (u0, v0, u1, v1).
         gl.enable_vertex_attrib_array(3);
-        gl.vertex_attrib_pointer_f32(3, 1, glow::FLOAT, false, stride, 8 * f);
+        gl.vertex_attrib_pointer_f32(3, 4, glow::FLOAT, false, inst_stride, 4 * f);
+        gl.vertex_attrib_divisor(3, 1);
+        // Location 4: vec4 a_fg_color (r, g, b, a).
+        gl.enable_vertex_attrib_array(4);
+        gl.vertex_attrib_pointer_f32(4, 4, glow::FLOAT, false, inst_stride, 8 * f);
+        gl.vertex_attrib_divisor(4, 1);
+        // Location 5: float a_is_color.
+        gl.enable_vertex_attrib_array(5);
+        gl.vertex_attrib_pointer_f32(5, 1, glow::FLOAT, false, inst_stride, 12 * f);
+        gl.vertex_attrib_divisor(5, 1);
     }
 }
 
@@ -1197,19 +1471,35 @@ fn extract_atlas_rect(pixels: &[u8], atlas_size: u32, rect: &super::atlas::Dirty
 //  Pure CPU vertex builders  (testable without GL context)
 // ---------------------------------------------------------------------------
 
-/// Build the background vertex buffer from shaped lines.
+/// Returns whether the cursor should be visible given its style and blink state.
+const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> bool {
+    match style {
+        CursorVisualStyle::BlockCursorSteady
+        | CursorVisualStyle::UnderlineCursorSteady
+        | CursorVisualStyle::VerticalLineCursorSteady => true,
+        CursorVisualStyle::BlockCursorBlink
+        | CursorVisualStyle::UnderlineCursorBlink
+        | CursorVisualStyle::VerticalLineCursorBlink => blink_on,
+    }
+}
+
+/// Build the two-pass background data: instanced cell BGs + decoration quads.
 ///
-/// Generates:
-/// - One merged quad per horizontal run of same-background cells.
-/// - Selection highlight quads for the current text selection (if any).
-/// - Cursor quad (block / underline / bar) at `cursor_pos` when visible.
-/// - Underline / strikethrough quads for runs that carry those decorations.
+/// Returns `(bg_instances, deco_verts)`:
+/// - `bg_instances`: flat `Vec<f32>` with `BG_INSTANCE_FLOATS` (6) floats per
+///   cell that has a non-default background.  Each instance is
+///   `(col, row, r, g, b, a)`.  Uploaded to the instance VBO and drawn with
+///   `draw_arrays_instanced`.
+/// - `deco_verts`: flat `Vec<f32>` with `DECO_VERTEX_FLOATS` (6) floats per
+///   vertex.  Contains underline, strikethrough, selection highlight, and
+///   cursor quads.  Uploaded to the decoration VBO and drawn with a plain
+///   `draw_arrays` call.
 ///
-/// Returns a flat `Vec<f32>` with `BG_VERTEX_FLOATS` floats per vertex,
-/// `VERTS_PER_QUAD * 6` floats per quad.
+/// The cursor quad (if visible) is always appended **last** in `deco_verts`
+/// so that cursor-only partial updates can patch just the tail.
 #[must_use]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub fn build_background_verts(
+pub fn build_background_instances(
     shaped_lines: &[ShapedLine],
     cell_width: u32,
     cell_height: u32,
@@ -1223,97 +1513,47 @@ pub fn build_background_verts(
     selection: Option<(usize, usize, usize, usize)>,
     theme: &ThemePalette,
     cursor_color_override: Option<(u8, u8, u8)>,
-) -> Vec<f32> {
-    let mut verts: Vec<f32> = Vec::new();
+) -> (Vec<f32>, Vec<f32>) {
+    let mut instances: Vec<f32> = Vec::new();
+    let mut deco: Vec<f32> = Vec::new();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let y_top = row_idx as f32 * cell_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let y_bot = y_top + cell_height as f32;
 
-        // --- Background quad merging ---
-        // Walk runs and merge adjacent cells with the same background color.
-        let mut merge_start_col: Option<usize> = None;
-        let mut merge_bg: Option<[f32; 4]> = None;
-
+        // --- Per-cell background instances ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
             let bg_color_raw = run.colors.get_background_color();
 
-            // Skip default backgrounds (transparent — the terminal base color is
-            // rendered as a clear color, not explicit quads).
+            // Skip default backgrounds (transparent — the terminal base color
+            // is rendered as a panel clear, not explicit quads).
             if matches!(
                 bg_color_raw,
                 freminal_common::colors::TerminalColor::DefaultBackground
             ) {
-                // Flush any open merge run.
-                if let (Some(start_col), Some(color)) = (merge_start_col.take(), merge_bg.take()) {
-                    let end_col = run.col_start;
-                    if end_col > start_col {
-                        #[allow(clippy::cast_precision_loss)]
-                        push_quad(
-                            &mut verts,
-                            start_col as f32 * cell_width as f32,
-                            y_top,
-                            end_col as f32 * cell_width as f32,
-                            y_bot,
-                            color,
-                        );
-                    }
-                }
                 continue;
             }
 
-            let bg_color = internal_color_to_gl(bg_color_raw, is_faint, theme);
+            let [r, g, b, a] = internal_color_to_gl(bg_color_raw, is_faint, theme);
 
-            // Extend or start a merge run.
-            if let Some(ref existing_bg) = merge_bg {
-                if colors_equal(existing_bg, &bg_color) {
-                    // Same color — extend the run.
-                } else {
-                    // Different color — flush previous and start new.
-                    if let Some(start_col) = merge_start_col.take() {
-                        #[allow(clippy::cast_precision_loss)]
-                        push_quad(
-                            &mut verts,
-                            start_col as f32 * cell_width as f32,
-                            y_top,
-                            run.col_start as f32 * cell_width as f32,
-                            y_bot,
-                            *existing_bg,
-                        );
-                    }
-                    merge_start_col = Some(run.col_start);
-                    merge_bg = Some(bg_color);
-                }
-            } else {
-                merge_start_col = Some(run.col_start);
-                merge_bg = Some(bg_color);
-            }
-        }
-
-        // Flush any remaining merge run at end of line.
-        if let (Some(start_col), Some(color)) = (merge_start_col.take(), merge_bg.take()) {
-            // Determine end column from last run.
-            let end_col = shaped_lines[row_idx]
-                .runs
-                .last()
-                .map_or(start_col, |r| r.col_start + run_col_count(r));
-            if end_col > start_col {
+            // Emit one instance per cell in this run.
+            let col_count = run_col_count(run);
+            for c in 0..col_count {
+                let col = run.col_start + c;
                 #[allow(clippy::cast_precision_loss)]
-                push_quad(
-                    &mut verts,
-                    start_col as f32 * cell_width as f32,
-                    y_top,
-                    end_col as f32 * cell_width as f32,
-                    y_bot,
-                    color,
-                );
+                {
+                    instances.push(col as f32);
+                    instances.push(row_idx as f32);
+                }
+                instances.push(r);
+                instances.push(g);
+                instances.push(b);
+                instances.push(a);
             }
         }
 
-        // --- Underline and strikethrough quads ---
+        // --- Underline and strikethrough decoration quads ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
             let has_underline = run.font_decorations.contains(&FontDecorations::Underline);
@@ -1336,20 +1576,18 @@ pub fn build_background_verts(
             if has_underline {
                 let ul_top = y_top + underline_offset;
                 let ul_bot = ul_top + stroke_size.max(1.0);
-                push_quad(&mut verts, x0, ul_top, x1, ul_bot, fg_color);
+                push_quad(&mut deco, x0, ul_top, x1, ul_bot, fg_color);
             }
 
             if has_strike {
                 let st_top = y_top + strikeout_offset;
                 let st_bot = st_top + stroke_size.max(1.0);
-                push_quad(&mut verts, x0, st_top, x1, st_bot, fg_color);
+                push_quad(&mut deco, x0, st_top, x1, st_bot, fg_color);
             }
         }
     }
 
-    // --- Selection highlight quads ---
-    // `selection` is `Some((start_col, start_row, end_col, end_row))` with
-    // start <= end in reading order.
+    // --- Selection highlight quads (decoration pass) ---
     if let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection {
         #[allow(clippy::cast_precision_loss)]
         let cw = cell_width as f32;
@@ -1362,7 +1600,6 @@ pub fn build_background_verts(
             .take(sel_end_row + 1)
             .skip(sel_start_row)
         {
-            // Determine the column range for this row.
             let col_begin = if row == sel_start_row {
                 sel_start_col
             } else {
@@ -1371,8 +1608,6 @@ pub fn build_background_verts(
             let col_end = if row == sel_end_row {
                 sel_end_col
             } else {
-                // Highlight to the end of the row.  Use the last run's end
-                // column, or fall back to the total run width.
                 line.runs
                     .last()
                     .map_or(0, |r| r.col_start + run_col_count(r))
@@ -1391,11 +1626,11 @@ pub fn build_background_verts(
             let y0 = row as f32 * ch;
             let y1 = y0 + ch;
 
-            push_quad(&mut verts, x0, y0, x1, y1, selection_bg_f(theme));
+            push_quad(&mut deco, x0, y0, x1, y1, selection_bg_f(theme));
         }
     }
 
-    // --- Cursor quad ---
+    // --- Cursor quad (always last in deco so cursor-only patches work) ---
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
         #[allow(clippy::cast_precision_loss)]
         let cx = cursor_pos.x as f32 * cell_width as f32;
@@ -1410,35 +1645,21 @@ pub fn build_background_verts(
 
         match cursor_visual_style {
             CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
-                push_quad(&mut verts, cx, cy, cx + cw, cy + ch, color);
+                push_quad(&mut deco, cx, cy, cx + cw, cy + ch, color);
             }
             CursorVisualStyle::UnderlineCursorBlink | CursorVisualStyle::UnderlineCursorSteady => {
-                // Thin bar at the bottom of the cell.
                 let bar_h = (ch * 0.1).max(2.0);
-                push_quad(&mut verts, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
+                push_quad(&mut deco, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
             }
             CursorVisualStyle::VerticalLineCursorBlink
             | CursorVisualStyle::VerticalLineCursorSteady => {
-                // Thin vertical bar at the left edge of the cell.
                 let bar_w = (cw * 0.1).max(1.0);
-                push_quad(&mut verts, cx, cy, cx + bar_w, cy + ch, color);
+                push_quad(&mut deco, cx, cy, cx + bar_w, cy + ch, color);
             }
         }
     }
 
-    verts
-}
-
-/// Returns whether the cursor should be visible given its style and blink state.
-const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> bool {
-    match style {
-        CursorVisualStyle::BlockCursorSteady
-        | CursorVisualStyle::UnderlineCursorSteady
-        | CursorVisualStyle::VerticalLineCursorSteady => true,
-        CursorVisualStyle::BlockCursorBlink
-        | CursorVisualStyle::UnderlineCursorBlink
-        | CursorVisualStyle::VerticalLineCursorBlink => blink_on,
-    }
+    (instances, deco)
 }
 
 /// Build just the cursor quad for the background VBO.
@@ -1496,7 +1717,7 @@ pub fn build_cursor_verts_only(
 
 /// Options controlling per-glyph foreground rendering.
 ///
-/// Bundled to keep `build_foreground_verts` within the 7-argument lint limit.
+/// Bundled to keep `build_foreground_instances` within the 7-argument lint limit.
 pub struct FgRenderOptions {
     /// Normalised selection region `(start_col, start_row, end_col, end_row)`,
     /// or `None` when no selection is active.
@@ -1520,18 +1741,18 @@ impl FgRenderOptions {
     }
 }
 
-/// Build the foreground vertex buffer from shaped lines.
+/// Build the foreground instance buffer from shaped lines.
 ///
 /// For each shaped glyph: looks up the atlas entry (rasterising on miss) and
-/// emits a textured quad at the cell-grid position adjusted by the bearing offsets.
+/// emits a single instance at the cell-grid position adjusted by the bearing offsets.
 ///
 /// `opts.selection` is `Some((start_col, start_row, end_col, end_row))` in normalised
 /// reading order.  Glyphs that fall within the selection use `SELECTION_FG_F`
 /// instead of their normal foreground color.
 ///
-/// Returns a flat `Vec<f32>` with `FG_VERTEX_FLOATS` floats per vertex.
+/// Returns a flat `Vec<f32>` with `FG_INSTANCE_FLOATS` floats per glyph instance.
 #[must_use]
-pub fn build_foreground_verts(
+pub fn build_foreground_instances(
     shaped_lines: &[ShapedLine],
     atlas: &mut GlyphAtlas,
     font_manager: &FontManager,
@@ -1540,7 +1761,7 @@ pub fn build_foreground_verts(
     opts: &FgRenderOptions,
     theme: &ThemePalette,
 ) -> Vec<f32> {
-    let mut verts: Vec<f32> = Vec::new();
+    let mut instances: Vec<f32> = Vec::new();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
@@ -1576,8 +1797,8 @@ pub fn build_foreground_verts(
                 };
 
                 if run_visible {
-                    emit_glyph_quad(
-                        &mut verts,
+                    emit_glyph_instance(
+                        &mut instances,
                         glyph,
                         atlas,
                         font_manager,
@@ -1592,7 +1813,7 @@ pub fn build_foreground_verts(
         }
     }
 
-    verts
+    instances
 }
 
 /// Build the image vertex buffer from the visible placements.
@@ -1744,15 +1965,15 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
     ]
 }
 
-/// Emit a textured quad for a single shaped glyph.
+/// Emit a single foreground glyph instance (13 floats).
 ///
-/// Looks up (or rasterises) the atlas entry for the glyph, then pushes 6
-/// vertices (`VERTS_PER_QUAD`) into `verts`.  Glyphs that extend beyond the
-/// cell's vertical extent (`cell_y_range[0]`..`cell_y_range[1]`) are clipped,
-/// and their UV coordinates are adjusted proportionally so the visible portion
-/// of the atlas texture is correct.
-fn emit_glyph_quad(
-    verts: &mut Vec<f32>,
+/// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
+/// instance into `instances`.  Glyphs that extend beyond the cell's vertical
+/// extent (`cell_y_range[0]`..`cell_y_range[1]`) are clipped, and their UV
+/// and position are adjusted proportionally so the visible portion of the
+/// atlas texture is correct.
+fn emit_glyph_instance(
+    instances: &mut Vec<f32>,
     glyph: &ShapedGlyph,
     atlas: &mut GlyphAtlas,
     font_manager: &FontManager,
@@ -1821,48 +2042,14 @@ fn emit_glyph_quad(
 
     let is_color_f: f32 = if glyph.is_color { 1.0 } else { 0.0 };
 
-    // Two triangles = 6 vertices.  Each vertex: x, y, u, v, r, g, b, a, is_color.
-    let quad = [
-        // Triangle 1
+    // One instance: glyph_x, glyph_y, glyph_w, glyph_h, u0, v0, u1, v1, r, g, b, a, is_color
+    instances.extend_from_slice(&[
         x0,
         y0,
+        x1 - x0,
+        y1 - y0,
         u0,
         v0_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        x1,
-        y0,
-        u1,
-        v0_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        x0,
-        y1,
-        u0,
-        v1_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        // Triangle 2
-        x1,
-        y0,
-        u1,
-        v0_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        x1,
-        y1,
         u1,
         v1_adj,
         fg_color[0],
@@ -1870,18 +2057,7 @@ fn emit_glyph_quad(
         fg_color[2],
         fg_color[3],
         is_color_f,
-        x0,
-        y1,
-        u0,
-        v1_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-    ];
-
-    verts.extend_from_slice(&quad);
+    ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1937,17 +2113,6 @@ const fn is_cell_selected(
         // Middle rows are fully selected.
         true
     }
-}
-
-/// Compare two GL `[f32; 4]` colors for equality.
-///
-/// Uses `total_cmp` so that the comparison is bitwise-exact (no NaN issues)
-/// without triggering `clippy::float_cmp`.
-fn colors_equal(a: &[f32; 4], b: &[f32; 4]) -> bool {
-    a[0].total_cmp(&b[0]).is_eq()
-        && a[1].total_cmp(&b[1]).is_eq()
-        && a[2].total_cmp(&b[2]).is_eq()
-        && a[3].total_cmp(&b[3]).is_eq()
 }
 
 // ---------------------------------------------------------------------------
@@ -2022,64 +2187,86 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  Vertex count tests
+    //  Background instance + decoration tests
     // -----------------------------------------------------------------------
 
+    /// Shorthand for calling `build_background_instances` with typical test
+    /// defaults (no selection, `CATPPUCCIN_MOCHA`, no cursor color override).
+    fn bg_instances_test(
+        lines: &[ShapedLine],
+        cell_width: u32,
+        cell_height: u32,
+        show_cursor: bool,
+        cursor_blink_on: bool,
+        cursor_pos: CursorPos,
+        cursor_style: &CursorVisualStyle,
+    ) -> (Vec<f32>, Vec<f32>) {
+        build_background_instances(
+            lines,
+            cell_width,
+            cell_height,
+            13.0,
+            8.0,
+            1.0,
+            show_cursor,
+            cursor_blink_on,
+            cursor_pos,
+            cursor_style,
+            None,
+            &themes::CATPPUCCIN_MOCHA,
+            None,
+        )
+    }
+
     #[test]
-    fn bg_verts_empty_on_default_background() {
-        // A line whose cells all have `DefaultBackground` should produce no quads.
+    fn bg_instances_empty_on_default_background() {
+        // A line whose cells all have `DefaultBackground` should produce no
+        // instances and no decoration verts.
         let line = make_line(5, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        assert_eq!(verts.len(), 0, "default background should produce no quads");
-    }
-
-    #[test]
-    fn bg_verts_one_quad_for_colored_run() {
-        // A single run with a non-default background should produce exactly one quad.
-        let colors = StateColors::default().with_background_color(TerminalColor::Red);
-
-        let line = make_line(3, 8.0, colors, vec![]);
-        let verts = build_background_verts(
-            &[line],
-            8,
-            16,
-            13.0,
-            8.0,
-            1.0,
-            false,
-            false,
-            CursorPos::default(),
-            &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
-        );
-        // One quad = VERTS_PER_QUAD * BG_VERTEX_FLOATS floats.
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * BG_VERTEX_FLOATS,
-            "expected exactly one background quad"
+            bg.len(),
+            0,
+            "default background should produce no instances"
         );
+        assert_eq!(deco.len(), 0, "no decorations expected");
     }
 
     #[test]
-    fn bg_verts_adjacent_same_color_merged() {
-        // Two runs that have the same background color and are adjacent should
-        // produce only one merged quad.
+    fn bg_instances_per_cell_for_colored_run() {
+        // A single run with 3 non-default-background cells should produce 3
+        // instances (one per cell).
+        let colors = StateColors::default().with_background_color(TerminalColor::Red);
+        let line = make_line(3, 8.0, colors, vec![]);
+        let (bg, deco) = bg_instances_test(
+            &[line],
+            8,
+            16,
+            false,
+            false,
+            CursorPos::default(),
+            &CursorVisualStyle::BlockCursorSteady,
+        );
+        assert_eq!(
+            bg.len(),
+            3 * BG_INSTANCE_FLOATS,
+            "expected 3 cell instances"
+        );
+        assert_eq!(deco.len(), 0, "no decorations expected");
+    }
+
+    #[test]
+    fn bg_instances_adjacent_same_color_per_cell() {
+        // Two adjacent runs with the same background color produce one instance
+        // per cell (instanced rendering does not merge — the GPU handles it).
         use crate::gui::font_manager::FaceId;
         let colors = StateColors::default().with_background_color(TerminalColor::Blue);
 
@@ -2122,33 +2309,28 @@ mod tests {
             ],
         };
 
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        // Two adjacent same-color runs → one merged quad.
+        // Two cells → two instances.
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * BG_VERTEX_FLOATS,
-            "adjacent same-color runs should be merged into one quad"
+            bg.len(),
+            2 * BG_INSTANCE_FLOATS,
+            "adjacent same-color runs should produce one instance per cell"
         );
+        assert_eq!(deco.len(), 0, "no decorations expected");
     }
 
     #[test]
-    fn bg_verts_different_colors_two_quads() {
-        // Two runs with different non-default background colors should produce two
-        // separate quads.
+    fn bg_instances_different_colors_per_cell() {
+        // Two runs with different non-default background colors produce one
+        // instance per cell.
         use crate::gui::font_manager::FaceId;
 
         let colors_red = StateColors::default().with_background_color(TerminalColor::Red);
@@ -2193,189 +2375,150 @@ mod tests {
             ],
         };
 
-        let verts = build_background_verts(
+        let (bg, _deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
         assert_eq!(
-            verts.len(),
-            2 * VERTS_PER_QUAD * BG_VERTEX_FLOATS,
-            "different-color runs should produce two quads"
+            bg.len(),
+            2 * BG_INSTANCE_FLOATS,
+            "different-color runs should produce one instance per cell"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_block_adds_quad() {
+    fn bg_instances_cursor_block_adds_deco_quad() {
         // With `show_cursor = true` and a steady block cursor, one cursor quad
-        // should be appended.
+        // should appear in the decoration verts.
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             true,
             CursorPos { x: 1, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
+        assert_eq!(bg.len(), 0, "default bg should produce no instances");
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * BG_VERTEX_FLOATS,
-            "block cursor should add one quad"
+            deco.len(),
+            VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
+            "block cursor should add one deco quad"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_blink_off_no_quad() {
+    fn bg_instances_cursor_blink_off_no_quad() {
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             false, // blink_on = false
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorBlink,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
+        assert_eq!(bg.len(), 0);
         assert_eq!(
-            verts.len(),
+            deco.len(),
             0,
             "blinking cursor with blink_on=false should produce no quad"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_steady_ignores_blink_flag() {
+    fn bg_instances_cursor_steady_ignores_blink_flag() {
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let verts = build_background_verts(
+        let (_bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             false, // blink_on = false — irrelevant for steady cursor
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * BG_VERTEX_FLOATS,
+            deco.len(),
+            VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
             "steady cursor should render even when blink_on=false"
         );
     }
 
     #[test]
-    fn bg_verts_underline_adds_quad() {
+    fn bg_instances_underline_adds_deco_quad() {
         let line = make_line(3, 8.0, default_colors(), vec![FontDecorations::Underline]);
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        // One underline quad.
+        assert_eq!(bg.len(), 0, "default bg — no instances");
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * BG_VERTEX_FLOATS,
-            "underline run should produce one underline quad"
+            deco.len(),
+            VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
+            "underline run should produce one decoration quad"
         );
     }
 
     #[test]
-    fn bg_verts_strikethrough_adds_quad() {
+    fn bg_instances_strikethrough_adds_deco_quad() {
         let line = make_line(
             3,
             8.0,
             default_colors(),
             vec![FontDecorations::Strikethrough],
         );
-        let verts = build_background_verts(
+        let (bg, deco) = bg_instances_test(
             &[line],
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             false,
             false,
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
+        assert_eq!(bg.len(), 0, "default bg — no instances");
         assert_eq!(
-            verts.len(),
-            VERTS_PER_QUAD * BG_VERTEX_FLOATS,
-            "strikethrough run should produce one strikethrough quad"
+            deco.len(),
+            VERTS_PER_QUAD * DECO_VERTEX_FLOATS,
+            "strikethrough run should produce one decoration quad"
         );
     }
 
     #[test]
-    fn bg_verts_cursor_position_maps_to_pixel_coords() {
+    fn bg_instances_cursor_position_maps_to_pixel_coords() {
         // Block cursor at (col=2, row=1) with cell_width=10, cell_height=20.
         // Expected x0 = 2*10 = 20, y0 = 1*20 = 20.
         let lines = [
             make_line(5, 10.0, default_colors(), vec![]),
             make_line(5, 10.0, default_colors(), vec![]),
         ];
-        let verts = build_background_verts(
+        let (_bg, deco) = bg_instances_test(
             &lines,
             10,
             20,
-            16.0,
-            10.0,
-            1.0,
             true,
             true,
             CursorPos { x: 2, y: 1 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
-        // The cursor quad is the last 36 floats (6 verts × 6 floats).
-        assert!(verts.len() >= VERTS_PER_QUAD * BG_VERTEX_FLOATS);
-        let cursor_start = verts.len() - VERTS_PER_QUAD * BG_VERTEX_FLOATS;
-        let x0 = verts[cursor_start];
-        let y0 = verts[cursor_start + 1];
+        // The cursor quad is the last 36 floats (6 verts x 6 floats) in deco.
+        assert!(deco.len() >= VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
+        let cursor_start = deco.len() - VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
+        let x0 = deco[cursor_start];
+        let y0 = deco[cursor_start + 1];
         assert!(
             (x0 - 20.0).abs() < f32::EPSILON,
             "cursor x should be col*cell_w = 20, got {x0}"
@@ -2387,12 +2530,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  Foreground vertex tests
+    //  Foreground instance tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn fg_verts_empty_on_empty_lines() {
-        let verts = build_foreground_verts(
+    fn fg_instances_empty_on_empty_lines() {
+        let instances = build_foreground_instances(
             &[],
             &mut GlyphAtlas::default(),
             &FontManager::new(&Config::default(), 1.0),
@@ -2401,11 +2544,11 @@ mod tests {
             &FgRenderOptions::all_visible(None),
             &themes::CATPPUCCIN_MOCHA,
         );
-        assert_eq!(verts.len(), 0);
+        assert_eq!(instances.len(), 0);
     }
 
     #[test]
-    fn fg_verts_produces_quads_for_ascii_glyphs() {
+    fn fg_instances_produces_data_for_ascii_glyphs() {
         let mut fm = FontManager::new(&Config::default(), 1.0);
         let mut atlas = GlyphAtlas::new(256, 1024);
         #[allow(clippy::cast_precision_loss)]
@@ -2422,7 +2565,7 @@ mod tests {
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
         let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
 
-        let verts = build_foreground_verts(
+        let instances = build_foreground_instances(
             &lines,
             &mut atlas,
             &fm,
@@ -2432,18 +2575,17 @@ mod tests {
             &themes::CATPPUCCIN_MOCHA,
         );
 
-        // Three ASCII glyphs each produce one quad = VERTS_PER_QUAD * FG_VERTEX_FLOATS.
-        // Some glyphs may be spaces (zero-size) — so at minimum some quads must exist.
+        // Three ASCII glyphs each produce one instance = FG_INSTANCE_FLOATS floats.
+        // Some glyphs may be spaces (zero-size) — so at minimum some instances must exist.
         assert!(
-            verts.len() >= FG_VERTEX_FLOATS,
-            "at least one foreground quad expected, got {} floats",
-            verts.len()
+            instances.len() >= FG_INSTANCE_FLOATS,
+            "at least one foreground instance expected, got {} floats",
+            instances.len()
         );
         assert_eq!(
-            verts.len() % (VERTS_PER_QUAD * FG_VERTEX_FLOATS),
+            instances.len() % FG_INSTANCE_FLOATS,
             0,
-            "foreground vertex count must be a multiple of one quad ({} floats)",
-            VERTS_PER_QUAD * FG_VERTEX_FLOATS
+            "foreground instance count must be a multiple of one instance ({FG_INSTANCE_FLOATS} floats)",
         );
     }
 
@@ -2455,7 +2597,7 @@ mod tests {
     fn push_quad_produces_six_vertices() {
         let mut verts = Vec::new();
         push_quad(&mut verts, 0.0, 0.0, 10.0, 10.0, [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(verts.len(), VERTS_PER_QUAD * BG_VERTEX_FLOATS);
+        assert_eq!(verts.len(), VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
     }
 
     #[test]
@@ -2468,8 +2610,8 @@ mod tests {
         assert!((verts[1] - 3.0).abs() < f32::EPSILON);
 
         // Vertex 1 (top-right): x=15, y=3
-        assert!((verts[BG_VERTEX_FLOATS] - 15.0).abs() < f32::EPSILON);
-        assert!((verts[BG_VERTEX_FLOATS + 1] - 3.0).abs() < f32::EPSILON);
+        assert!((verts[DECO_VERTEX_FLOATS] - 15.0).abs() < f32::EPSILON);
+        assert!((verts[DECO_VERTEX_FLOATS + 1] - 3.0).abs() < f32::EPSILON);
     }
 
     // -----------------------------------------------------------------------
@@ -2605,36 +2747,30 @@ mod tests {
     ///
     /// The test verifies that:
     ///   1. The cursor-only builder produces `CURSOR_QUAD_FLOATS` floats
-    ///      (= `VERTS_PER_QUAD * BG_VERTEX_FLOATS`).
-    ///   2. Patching those floats into a pre-built background VBO at the
+    ///      (= `VERTS_PER_QUAD * DECO_VERTEX_FLOATS`).
+    ///   2. Patching those floats into a pre-built deco VBO at the
     ///      recorded offset produces the expected combined buffer — only the
     ///      cursor region changes, all other floats are untouched.
     #[test]
     fn partial_vbo_update_only_modifies_cursor_region() {
-        // Build a full background VBO for one line + a cursor at (col=0, row=0).
+        // Build the full deco VBO for one line + a cursor at (col=0, row=0).
         let line = make_line(3, 8.0, default_colors(), vec![]);
-        let full_verts = build_background_verts(
+        let (_bg, full_deco) = bg_instances_test(
             std::slice::from_ref(&line),
             8,
             16,
-            13.0,
-            8.0,
-            1.0,
             true,
             true, // cursor visible
             CursorPos { x: 0, y: 0 },
             &CursorVisualStyle::BlockCursorSteady,
-            None,
-            &themes::CATPPUCCIN_MOCHA,
-            None,
         );
 
         // Record where the cursor quad starts (it is appended at the end).
-        let cursor_float_offset = full_verts.len() - CURSOR_QUAD_FLOATS;
+        let cursor_float_offset = full_deco.len() - CURSOR_QUAD_FLOATS;
         let cursor_byte_offset = cursor_float_offset * std::mem::size_of::<f32>();
 
         // The pre-cursor portion must be unchanged — capture it before mutation.
-        let pre_cursor = full_verts[..cursor_float_offset].to_vec();
+        let pre_cursor = full_deco[..cursor_float_offset].to_vec();
 
         // Build cursor-only verts with blink_on=false using a *blinking* style.
         // BlockCursorSteady ignores blink_on (always visible); BlockCursorBlink
@@ -2650,9 +2786,9 @@ mod tests {
             None,
         );
 
-        // Simulate the partial-update patch: mutate full_verts in-place to
+        // Simulate the partial-update patch: mutate full_deco in-place to
         // overwrite the cursor region (matches draw_with_cursor_only_update).
-        let mut patched = full_verts;
+        let mut patched = full_deco;
         if cursor_off_verts.is_empty() {
             // Zero-fill the cursor region (matches what draw_with_cursor_only_update does).
             for f in &mut patched[cursor_float_offset..] {

@@ -41,8 +41,8 @@ use super::{
     atlas::GlyphAtlas,
     font_manager::FontManager,
     renderer::{
-        CURSOR_QUAD_FLOATS, FgRenderOptions, TerminalRenderer, build_background_verts,
-        build_cursor_verts_only, build_foreground_verts, build_image_verts,
+        CURSOR_QUAD_FLOATS, FgRenderOptions, TerminalRenderer, build_background_instances,
+        build_cursor_verts_only, build_foreground_instances, build_image_verts,
     },
     shaping::ShapingCache,
 };
@@ -1048,17 +1048,25 @@ fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
 struct RenderState {
     renderer: TerminalRenderer,
     atlas: GlyphAtlas,
-    bg_verts: Vec<f32>,
-    fg_verts: Vec<f32>,
+    /// Per-cell instanced background data (col, row, r, g, b, a per cell).
+    bg_instances: Vec<f32>,
+    /// Decoration vertex data (underlines, strikethrough, cursor, selection).
+    deco_verts: Vec<f32>,
+    fg_instances: Vec<f32>,
     /// Pre-built image vertex data (one quad per unique inline image).
     image_verts: Vec<f32>,
     /// Snapshot image map from the last full rebuild, cloned into `RenderState`
     /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
     snap_images: std::collections::HashMap<u64, InlineImage>,
-    /// Float offset (not byte offset) into `bg_verts` where the cursor quad
+    /// Float offset (not byte offset) into `deco_verts` where the cursor quad
     /// data begins.  Set after every full vertex rebuild so cursor-only frames
     /// can patch just this region.
     cursor_vert_float_offset: usize,
+    /// Cell dimensions in physical pixels, for the instanced background shader.
+    cell_width_px: f32,
+    cell_height_px: f32,
+    /// Background opacity (0.0–1.0), for the instanced background shader.
+    bg_opacity: f32,
 }
 
 #[allow(clippy::struct_excessive_bools)] // Six GUI rendering bookkeeping bools; not terminal modes
@@ -1126,11 +1134,15 @@ impl FreminalTerminalWidget {
             render_state: Arc::new(Mutex::new(RenderState {
                 renderer: TerminalRenderer::new(),
                 atlas: GlyphAtlas::default(),
-                bg_verts: Vec::new(),
-                fg_verts: Vec::new(),
+                bg_instances: Vec::new(),
+                deco_verts: Vec::new(),
+                fg_instances: Vec::new(),
                 image_verts: Vec::new(),
                 snap_images: std::collections::HashMap::new(),
                 cursor_vert_float_offset: 0,
+                cell_width_px: 0.0,
+                cell_height_px: 0.0,
+                bg_opacity: 1.0,
             })),
             previous_mouse_state: None,
             previous_key: None,
@@ -1204,6 +1216,7 @@ impl FreminalTerminalWidget {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)] // bg_opacity must be threaded from config
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -1212,6 +1225,7 @@ impl FreminalTerminalWidget {
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
         modal_is_open: bool,
+        bg_opacity: f32,
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1347,6 +1361,12 @@ impl FreminalTerminalWidget {
             }
         };
 
+        // Cursor-only state captured before the PaintCallback closure (which
+        // requires `Send + Sync + 'static`).  `is_cursor_only` and
+        // `cursor_only_verts` are moved into the closure below.
+        let mut is_cursor_only = false;
+        let mut cursor_only_verts: Vec<f32> = Vec::new();
+
         if !snap.skip_draw {
             // Detect content changes via `Arc::ptr_eq` — this is immune to the
             // race where the PTY thread overwrites a "changed" snapshot with a
@@ -1452,7 +1472,7 @@ impl FreminalTerminalWidget {
                     .render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .bg_verts
+                    .deco_verts
                     .is_empty();
 
             if cursor_only {
@@ -1467,6 +1487,8 @@ impl FreminalTerminalWidget {
                     snap.theme,
                     snap.cursor_color_override,
                 );
+                is_cursor_only = true;
+                cursor_only_verts.clone_from(&cursor_verts);
                 let mut rs = self
                     .render_state
                     .lock()
@@ -1477,15 +1499,15 @@ impl FreminalTerminalWidget {
                 let cfo = rs.cursor_vert_float_offset;
                 if cursor_verts.is_empty() {
                     // Hide cursor: zero out the region.
-                    if cfo + CURSOR_QUAD_FLOATS <= rs.bg_verts.len() {
-                        for f in &mut rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS] {
+                    if cfo + CURSOR_QUAD_FLOATS <= rs.deco_verts.len() {
+                        for f in &mut rs.deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS] {
                             *f = 0.0;
                         }
                     }
-                } else if cfo + CURSOR_QUAD_FLOATS <= rs.bg_verts.len()
+                } else if cfo + CURSOR_QUAD_FLOATS <= rs.deco_verts.len()
                     && cursor_verts.len() == CURSOR_QUAD_FLOATS
                 {
-                    rs.bg_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
+                    rs.deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
                 }
             } else if content_changed
                 || selection_changed
@@ -1494,7 +1516,7 @@ impl FreminalTerminalWidget {
                     .render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .bg_verts
+                    .deco_verts
                     .is_empty()
             {
                 // Full rebuild path.
@@ -1507,7 +1529,7 @@ impl FreminalTerminalWidget {
                     self.ligatures,
                 );
 
-                let bg_verts = build_background_verts(
+                let (bg_instances, deco_verts) = build_background_instances(
                     &shaped_lines,
                     cell_w,
                     cell_h,
@@ -1523,16 +1545,16 @@ impl FreminalTerminalWidget {
                     snap.cursor_color_override,
                 );
 
-                // Record where the cursor quad starts in the background VBO.
-                // The cursor is always appended at the END of bg_verts, and is
+                // Record where the cursor quad starts in the decoration VBO.
+                // The cursor is always appended at the END of deco_verts, and is
                 // exactly CURSOR_QUAD_FLOATS floats (or absent when hidden).
                 let cursor_vert_float_offset = if snap.show_cursor {
-                    bg_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
+                    deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
                 } else {
-                    bg_verts.len()
+                    deco_verts.len()
                 };
 
-                // `build_foreground_verts` needs mutable access to the atlas for
+                // `build_foreground_instances` needs mutable access to the atlas for
                 // rasterisation, so acquire the lock before calling it.
                 let mut rs = self
                     .render_state
@@ -1543,7 +1565,7 @@ impl FreminalTerminalWidget {
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };
-                let fg_verts = build_foreground_verts(
+                let fg_instances = build_foreground_instances(
                     &shaped_lines,
                     &mut rs.atlas,
                     &self.font_manager,
@@ -1559,13 +1581,20 @@ impl FreminalTerminalWidget {
                     cell_w,
                     cell_h,
                 );
-                rs.bg_verts = bg_verts;
-                rs.fg_verts = fg_verts;
+                rs.bg_instances = bg_instances;
+                rs.deco_verts = deco_verts;
+                rs.fg_instances = fg_instances;
                 rs.image_verts = image_verts;
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
                 rs.snap_images.clone_from(snap.images.as_ref());
                 rs.cursor_vert_float_offset = cursor_vert_float_offset;
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    rs.cell_width_px = cell_w as f32;
+                    rs.cell_height_px = cell_h as f32;
+                }
+                rs.bg_opacity = bg_opacity;
                 drop(rs);
 
                 // Remember which `visible_chars` allocation we rendered, so
@@ -1597,7 +1626,8 @@ impl FreminalTerminalWidget {
 
         // Hand off the draw call to egui's paint phase via PaintCallback.
         // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
-        // data (not `FontManager`) may be captured here.
+        // data (not `FontManager`) may be captured here.  `is_cursor_only` and
+        // `cursor_only_verts` are captured by value (bool is Copy; Vec is moved).
         let render_state = Arc::clone(&self.render_state);
         // The MutexGuard inside the callback intentionally lives through
         // `draw_with_verts` because the renderer and atlas are refs into it.
@@ -1616,27 +1646,69 @@ impl FreminalTerminalWidget {
                     error!("GL init failed: {e}");
                     return;
                 }
-                // Clone pre-built verts to avoid conflicting borrows of `rs`.
-                let bg = rs.bg_verts.clone();
-                let fg = rs.fg_verts.clone();
-                let img = rs.image_verts.clone();
-                let images = rs.snap_images.clone();
-                // Split borrow: get &mut RenderState so the borrow checker sees
-                // renderer and atlas as disjoint fields.
-                let rs_ref: &mut RenderState = &mut rs;
-                let renderer = &mut rs_ref.renderer;
-                let atlas = &mut rs_ref.atlas;
-                renderer.draw_with_verts(
-                    gl,
-                    atlas,
-                    &bg,
-                    &fg,
-                    &img,
-                    &images,
-                    vp.width_px,
-                    vp.height_px,
-                    painter.intermediate_fbo(),
-                );
+                if is_cursor_only {
+                    // Cursor-only fast path: patch just the cursor quad on the
+                    // GPU via `glBufferSubData` (no VBO orphan, no full upload).
+                    let deco_len = rs.deco_verts.len();
+                    let bg_len = rs.bg_instances.len();
+                    let fg_len = rs.fg_instances.len();
+                    let img_len = rs.image_verts.len();
+                    let cfo_bytes = rs.cursor_vert_float_offset * std::mem::size_of::<f32>();
+                    let cw = rs.cell_width_px;
+                    let ch = rs.cell_height_px;
+                    let opacity = rs.bg_opacity;
+                    // Split borrow: renderer + atlas are disjoint from the
+                    // scalar fields and snap_images.
+                    let rs_ref: &mut RenderState = &mut rs;
+                    let renderer = &mut rs_ref.renderer;
+                    let atlas = &mut rs_ref.atlas;
+                    let images = &rs_ref.snap_images;
+                    renderer.draw_with_cursor_only_update(
+                        gl,
+                        atlas,
+                        cfo_bytes,
+                        deco_len,
+                        bg_len,
+                        &cursor_only_verts,
+                        fg_len,
+                        img_len,
+                        images,
+                        vp.width_px,
+                        vp.height_px,
+                        cw,
+                        ch,
+                        opacity,
+                        painter.intermediate_fbo(),
+                    );
+                } else {
+                    // Full draw path: clone and re-upload all VBOs.
+                    let bg_inst = rs.bg_instances.clone();
+                    let deco = rs.deco_verts.clone();
+                    let fg = rs.fg_instances.clone();
+                    let img = rs.image_verts.clone();
+                    let images = rs.snap_images.clone();
+                    let cw = rs.cell_width_px;
+                    let ch = rs.cell_height_px;
+                    let opacity = rs.bg_opacity;
+                    let rs_ref: &mut RenderState = &mut rs;
+                    let renderer = &mut rs_ref.renderer;
+                    let atlas = &mut rs_ref.atlas;
+                    renderer.draw_with_verts(
+                        gl,
+                        atlas,
+                        &bg_inst,
+                        &deco,
+                        &fg,
+                        &img,
+                        &images,
+                        vp.width_px,
+                        vp.height_px,
+                        cw,
+                        ch,
+                        opacity,
+                        painter.intermediate_fbo(),
+                    );
+                }
             })),
         });
 
@@ -1768,14 +1840,19 @@ mod subtask_1_7_tests {
         let rs = RenderState {
             renderer: TerminalRenderer::new(),
             atlas: GlyphAtlas::default(),
-            bg_verts: Vec::new(),
-            fg_verts: Vec::new(),
+            bg_instances: Vec::new(),
+            deco_verts: Vec::new(),
+            fg_instances: Vec::new(),
             cursor_vert_float_offset: 0,
             image_verts: Vec::new(),
             snap_images: std::collections::HashMap::new(),
+            cell_width_px: 0.0,
+            cell_height_px: 0.0,
+            bg_opacity: 1.0,
         };
-        assert!(rs.bg_verts.is_empty(), "bg_verts should be empty");
-        assert!(rs.fg_verts.is_empty(), "fg_verts should be empty");
+        assert!(rs.bg_instances.is_empty(), "bg_instances should be empty");
+        assert!(rs.deco_verts.is_empty(), "deco_verts should be empty");
+        assert!(rs.fg_instances.is_empty(), "fg_instances should be empty");
     }
 
     /// Verify that `FontManager::cell_size()` returns non-zero dimensions for

@@ -100,6 +100,16 @@ limit = 4000
 # Can also be set via the --hide-menu-bar CLI flag.
 # hide_menu_bar = false
 
+# Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+# Default and colored cell backgrounds are affected.
+# Text, images, cursor, selection highlights, underlines, and strikethrough
+# remain fully opaque.
+#
+# Note: On X11, transparency requires a running compositor (e.g. picom).
+# Without a compositor, transparent areas will render as black.
+#
+# background_opacity = 1.0
+
 ################################################################################
 # MANAGED-BY MARKER (do not set manually)
 ################################################################################

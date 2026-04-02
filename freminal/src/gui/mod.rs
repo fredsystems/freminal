@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::gui::colors::internal_color_to_egui;
+use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use conv2::ConvUtil;
@@ -31,17 +31,24 @@ pub mod shaping;
 pub mod terminal;
 pub mod view_state;
 
-fn set_egui_options(ctx: &egui::Context) {
+fn set_egui_options(ctx: &egui::Context, bg_opacity: f32) {
     ctx.global_style_mut(|style| {
-        style.visuals.window_fill = internal_color_to_egui(
+        // window_fill stays fully opaque so menus, settings modal, and all
+        // egui chrome are never affected by background_opacity.
+        style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             &freminal_common::themes::CATPPUCCIN_MOCHA,
+            1.0,
         );
-        style.visuals.panel_fill = internal_color_to_egui(
+        // panel_fill gets the opacity — it controls the CentralPanel
+        // (terminal area) background, which is the only surface that
+        // should be semi-transparent.
+        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             &freminal_common::themes::CATPPUCCIN_MOCHA,
+            bg_opacity,
         );
     });
     ctx.options_mut(|options| {
@@ -50,17 +57,25 @@ fn set_egui_options(ctx: &egui::Context) {
 }
 
 /// Update egui chrome colors (window/panel fill) to match a new theme.
-fn update_egui_theme(ctx: &egui::Context, theme: &freminal_common::themes::ThemePalette) {
+fn update_egui_theme(
+    ctx: &egui::Context,
+    theme: &freminal_common::themes::ThemePalette,
+    bg_opacity: f32,
+) {
     ctx.global_style_mut(|style| {
-        style.visuals.window_fill = internal_color_to_egui(
+        // window_fill: always opaque (menus, settings, chrome).
+        style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             theme,
+            1.0,
         );
-        style.visuals.panel_fill = internal_color_to_egui(
+        // panel_fill: respects background_opacity (terminal area only).
+        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             theme,
+            bg_opacity,
         );
     });
 }
@@ -112,7 +127,7 @@ impl FreminalGui {
         clipboard_rx: Receiver<String>,
         is_playback: bool,
     ) -> Self {
-        set_egui_options(&cc.egui_ctx);
+        set_egui_options(&cc.egui_ctx, config.ui.background_opacity);
 
         Self {
             arc_swap,
@@ -529,6 +544,25 @@ fn handle_window_manipulation(
 }
 
 impl eframe::App for FreminalGui {
+    /// Override the GL framebuffer clear color.
+    ///
+    /// When `background_opacity < 1.0` the viewport was created with
+    /// `transparent = true`, so the compositor can show the desktop through.
+    /// For that to work the clear color must have alpha = 0; otherwise the
+    /// opaque clear overwrites the transparent framebuffer before egui
+    /// paints anything.
+    ///
+    /// When opacity is 1.0 the clear color matches `panel_fill` (fully
+    /// opaque) — there is no visible difference from the default.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.config.ui.background_opacity < 1.0 {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            // Fully opaque: use the terminal background color.
+            visuals.panel_fill.to_normalized_gamma_f32()
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         debug!("Starting new frame");
@@ -619,23 +653,34 @@ impl eframe::App for FreminalGui {
 
             // Update background color based on whether the terminal is in
             // normal (non-inverted) display mode.
+            let bg_opacity = self.config.ui.background_opacity;
             if snap.is_normal_display {
                 ui.ctx().global_style_mut(|style| {
-                    style.visuals.window_fill = internal_color_to_egui(
+                    // window_fill: always opaque (menus, settings, chrome).
+                    style.visuals.window_fill = internal_color_to_egui_with_alpha(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
                         snap.theme,
+                        1.0,
                     );
-                    style.visuals.panel_fill = internal_color_to_egui(
+                    // panel_fill: respects background_opacity (terminal area only).
+                    style.visuals.panel_fill = internal_color_to_egui_with_alpha(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
                         snap.theme,
+                        bg_opacity,
                     );
                 });
             } else {
                 ui.ctx().global_style_mut(|style| {
-                    style.visuals.window_fill = egui::Color32::WHITE;
-                    style.visuals.panel_fill = egui::Color32::WHITE;
+                    // window_fill: always opaque (menus, settings, chrome).
+                    style.visuals.window_fill =
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
+                    // panel_fill: respects background_opacity (terminal area only).
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let alpha = (bg_opacity * 255.0).round() as u8;
+                    style.visuals.panel_fill =
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
                 });
             }
 
@@ -646,6 +691,7 @@ impl eframe::App for FreminalGui {
                 &self.input_tx,
                 &self.clipboard_rx,
                 self.settings_modal.is_open,
+                bg_opacity,
             );
 
             // Only schedule a wakeup when there is work to do:
@@ -718,7 +764,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
                         error!("Failed to send ThemeChange to PTY thread: {e}");
                     }
-                    update_egui_theme(ui.ctx(), theme);
+                    update_egui_theme(ui.ctx(), theme, new_cfg.ui.background_opacity);
                     // Force a full vertex rebuild on the next frame so
                     // foreground/background colors are re-resolved against
                     // the new palette.  Without this, the preview's rebuild
@@ -731,13 +777,27 @@ impl eframe::App for FreminalGui {
                     .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
                 self.config = new_cfg;
             }
-            SettingsAction::PreviewTheme(ref slug) | SettingsAction::RevertTheme(ref slug) => {
+            SettingsAction::PreviewTheme(ref slug) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
                     if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
-                        error!("Failed to send theme preview/revert to PTY thread: {e}");
+                        error!("Failed to send theme preview to PTY thread: {e}");
                     }
-                    update_egui_theme(ui.ctx(), theme);
+                    update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
                 }
+            }
+            SettingsAction::RevertTheme(ref slug, original_opacity) => {
+                if let Some(theme) = freminal_common::themes::by_slug(slug) {
+                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                        error!("Failed to send theme revert to PTY thread: {e}");
+                    }
+                    // Restore opacity first so update_egui_theme uses the
+                    // correct value for panel_fill.
+                    self.config.ui.background_opacity = original_opacity;
+                    update_egui_theme(ui.ctx(), theme, original_opacity);
+                }
+            }
+            SettingsAction::PreviewOpacity(opacity) | SettingsAction::RevertOpacity(opacity) => {
+                self.config.ui.background_opacity = opacity;
             }
             SettingsAction::None => {}
         }
@@ -800,6 +860,14 @@ pub fn run(
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.icon = Some(Arc::new(icon));
+
+    // Always request a framebuffer with an alpha channel so that
+    // background_opacity can be changed at runtime without a restart.
+    // When opacity is 1.0 the clear_color() override returns a fully
+    // opaque color, so there is no visual difference.  On Wayland and
+    // macOS this works out of the box; on X11 it requires a running
+    // compositor (e.g. picom).
+    native_options.viewport.transparent = Some(true);
 
     // Disable client-side vsync so that eglSwapBuffers is non-blocking.
     //

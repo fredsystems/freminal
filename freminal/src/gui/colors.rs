@@ -125,6 +125,25 @@ pub fn internal_color_to_egui(
     }
 }
 
+/// Map a `TerminalColor` to an egui `Color32` with an explicit alpha channel.
+///
+/// The base RGB values come from [`internal_color_to_egui`]; `alpha` (`0.0`–`1.0`)
+/// is applied on top of the result.  This is used to make panel/window fills
+/// semi-transparent when `background_opacity < 1.0`.
+#[must_use]
+pub fn internal_color_to_egui_with_alpha(
+    color: TerminalColor,
+    make_faint: bool,
+    theme: &ThemePalette,
+    alpha: f32,
+) -> Color32 {
+    let base = internal_color_to_egui(color, make_faint, theme);
+    let [r, g, b, _] = base.to_array();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
 /// Map a `TerminalColor` to an `[f32; 4]` RGBA value for GL vertex attributes.
 ///
 /// Faint dimming is applied by halving the alpha channel.
@@ -372,5 +391,43 @@ mod tests {
                 .all(|(a, e)| (a - e).abs() < f32::EPSILON),
             "cursor_f mismatch"
         );
+    }
+
+    /// `internal_color_to_egui_with_alpha` with `alpha = 1.0` produces the
+    /// same RGB as `internal_color_to_egui` (regression guard).
+    #[test]
+    fn with_alpha_1_matches_base() {
+        let base = internal_color_to_egui(TerminalColor::DefaultBackground, false, THEME);
+        let with_alpha =
+            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, THEME, 1.0);
+        assert_eq!(base.r(), with_alpha.r());
+        assert_eq!(base.g(), with_alpha.g());
+        assert_eq!(base.b(), with_alpha.b());
+        assert_eq!(with_alpha.a(), 255);
+    }
+
+    /// `internal_color_to_egui_with_alpha` applies the alpha channel correctly.
+    #[test]
+    fn with_alpha_half() {
+        let with_alpha =
+            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, THEME, 0.5);
+        // 0.5 * 255 = 127.5 → truncated to 127
+        assert_eq!(with_alpha.a(), 127);
+    }
+
+    /// `internal_color_to_egui_with_alpha` clamps alpha to [0.0, 1.0].
+    #[test]
+    fn with_alpha_clamps() {
+        let zero =
+            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, THEME, 0.0);
+        assert_eq!(zero.a(), 0);
+
+        let over =
+            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, THEME, 2.0);
+        assert_eq!(over.a(), 255);
+
+        let under =
+            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, THEME, -1.0);
+        assert_eq!(under.a(), 0);
     }
 }
