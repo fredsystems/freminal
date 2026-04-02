@@ -58,7 +58,7 @@ and plan document maintenance rules.
 | 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Stub     | None                 |
 | 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Pending  | None                 |
-| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Pending  | None                 |
+| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Active   | None                 |
 
 ---
 
@@ -431,7 +431,7 @@ Update this section as tasks complete:
 | 31   |            |            |                                                  |
 | 32   |            |            |                                                  |
 | 33   |            |            |                                                  |
-| 34   |            |            |                                                  |
+| 34   | 2026-04-02 |            | 34.1-34.5 complete on task-34/background-opacity |
 
 ---
 

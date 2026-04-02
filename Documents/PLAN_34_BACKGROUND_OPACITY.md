@@ -1,6 +1,6 @@
 # PLAN 34 — Instanced Renderer + Background Opacity
 
-## Status: Pending
+## Status: In Progress
 
 ---
 
@@ -431,7 +431,7 @@ Use it in `set_egui_options()` and `update_egui_theme()` to set `window_fill` an
 
 ### 34.5 — Instanced background shader and instance buffer builder
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 1 — High
 **Scope:** `freminal/src/gui/renderer.rs`
 
@@ -600,6 +600,28 @@ Keep the old BG program for decorations (renamed to `decoration_program`).
 - Verify cell background instances have `flags = 0.0`.
 - Benchmark: instance buffer construction vs old `build_background_verts` — expect significant
   reduction in float count and construction time.
+
+**Completion notes (2026-04-02):**
+
+Implemented as Option 1 from the plan: instanced background pass for cell backgrounds +
+separate non-instanced decoration pass for underlines, strikethrough, cursor, and selection.
+The instance format was simplified to 6 floats per cell `(col, row, r, g, b, a)` — no flags
+field needed since decorations use an entirely separate shader/VAO/VBO pipeline. Key changes:
+
+- `renderer.rs`: Added `BG_INST_VERT_SRC`/`BG_INST_FRAG_SRC` shaders with `u_cell_width`,
+  `u_cell_height`, `u_bg_opacity` uniforms. Renamed old BG shader to `DECO_VERT_SRC`/
+  `DECO_FRAG_SRC`. Added `UNIT_QUAD` static VBO, `BG_INSTANCE_FLOATS = 6` constant. Added
+  `bg_inst_program`, `bg_inst_vao`, `bg_unit_quad_vbo`, `bg_inst_vbo` fields. Split `init()`
+  into `init_bg_inst_pass()`, `init_deco_pass()`, `init_fg_pass()`, `init_atlas_texture()`.
+  Added `setup_bg_inst_attribs()`, `upload_bg_instances()`, `draw_background_instanced()`,
+  `draw_decorations()`. Updated `draw_with_verts()` and `draw_with_cursor_only_update()`.
+  Updated `destroy()` to clean up new GL objects.
+- `renderer.rs`: Added `build_background_instances()` function that emits per-cell instance
+  data (6 floats each). Skips `DefaultBackground` cells. Handles reverse video and selection.
+- `terminal.rs`: Updated `RenderState` with `bg_instances`, `deco_verts`, `cell_width_px`,
+  `cell_height_px`, `bg_opacity` fields. Updated `PaintCallback` closure to pass new params.
+  Updated existing test to check `deco_verts` instead of `bg_verts`.
+- All verification passes: `cargo test --all`, `cargo clippy`, `cargo-machete`.
 
 ---
 
