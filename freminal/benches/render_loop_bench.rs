@@ -28,9 +28,16 @@
 //! in Section 8.5 of the performance plan.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use freminal::gui::atlas::GlyphAtlas;
 use freminal::gui::font_manager::FontManager;
+use freminal::gui::renderer::{
+    FgRenderOptions, build_background_instances, build_foreground_instances,
+};
 use freminal::gui::shaping::ShapingCache;
+use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::config::Config;
+use freminal_common::cursor::CursorVisualStyle;
+use freminal_common::themes::CATPPUCCIN_MOCHA;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::sync::Arc;
@@ -381,6 +388,120 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Helper: build shaped lines for a given terminal size
+// ---------------------------------------------------------------
+
+/// Build shaped lines from an ANSI-heavy payload at the given terminal size.
+///
+/// Returns `(shaped_lines, font_manager)` — the `FontManager` is needed by the
+/// foreground instance builder.
+fn build_shaped_lines_for_size(
+    width: usize,
+    height: usize,
+) -> (Vec<freminal::gui::shaping::ShapedLine>, FontManager) {
+    let (chars, tags) = ligature_heavy_visible_chars(width, height);
+    let mut fm = FontManager::new(&Config::default(), 1.0);
+    let mut cache = ShapingCache::new();
+    #[allow(clippy::cast_precision_loss)]
+    let cell_w = fm.cell_width() as f32;
+    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false);
+    (lines, fm)
+}
+
+// ---------------------------------------------------------------
+// bench_bg_instances — instanced background buffer builder
+// ---------------------------------------------------------------
+fn bench_bg_instances(c: &mut Criterion) {
+    let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
+
+    let mut group = c.benchmark_group("instanced_bg");
+
+    for &(width, height) in sizes {
+        let (lines, fm) = build_shaped_lines_for_size(width, height);
+        let total_cells = (width * height) as u64;
+
+        group.throughput(Throughput::Elements(total_cells));
+
+        let cell_width = fm.cell_width();
+        let cell_height = fm.cell_height();
+        let underline_offset = fm.underline_offset();
+        let strikeout_offset = fm.strikeout_offset();
+        let stroke_size = fm.stroke_size();
+
+        let cursor_pos = CursorPos { x: 0, y: 0 };
+        let cursor_style = CursorVisualStyle::BlockCursorSteady;
+
+        group.bench_function(
+            BenchmarkId::new("build_bg_instances", format!("{width}x{height}")),
+            |b| {
+                b.iter(|| {
+                    std::hint::black_box(build_background_instances(
+                        &lines,
+                        cell_width,
+                        cell_height,
+                        underline_offset,
+                        strikeout_offset,
+                        stroke_size,
+                        true, // show_cursor
+                        true, // cursor_blink_on
+                        cursor_pos,
+                        &cursor_style,
+                        None, // selection
+                        &CATPPUCCIN_MOCHA,
+                        None, // cursor_color_override
+                    ));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_fg_instances — instanced foreground buffer builder
+// ---------------------------------------------------------------
+fn bench_fg_instances(c: &mut Criterion) {
+    let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
+
+    let mut group = c.benchmark_group("instanced_fg");
+
+    for &(width, height) in sizes {
+        let (lines, fm) = build_shaped_lines_for_size(width, height);
+        let total_cells = (width * height) as u64;
+
+        group.throughput(Throughput::Elements(total_cells));
+
+        let cell_height = fm.cell_height();
+        let ascent = fm.ascent();
+        let opts = FgRenderOptions::all_visible(None);
+
+        group.bench_function(
+            BenchmarkId::new("build_fg_instances", format!("{width}x{height}")),
+            |b| {
+                b.iter_batched(
+                    GlyphAtlas::default,
+                    |mut atlas| {
+                        std::hint::black_box(build_foreground_instances(
+                            &lines,
+                            &mut atlas,
+                            &fm,
+                            cell_height,
+                            ascent,
+                            &opts,
+                            &CATPPUCCIN_MOCHA,
+                        ));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -393,6 +514,8 @@ criterion_group!(
         bench_build_snapshot_after_feed,
         bench_arcswap_roundtrip,
         bench_shaping_ligatures,
+        bench_bg_instances,
+        bench_fg_instances,
 );
 
 criterion_main!(benches);
