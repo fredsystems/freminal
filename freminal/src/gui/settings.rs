@@ -178,10 +178,21 @@ impl SettingsModal {
         // whether the user changed the theme dropdown this frame.
         let theme_before = self.draft.theme.name.clone();
 
+        // Build an opaque window frame so the settings modal is never
+        // affected by background_opacity (which lowers window_fill alpha
+        // for compositor transparency).
+        let opaque_frame = {
+            let style = ctx.global_style();
+            let base = egui::Frame::window(&style);
+            let [r, g, b, _] = style.visuals.window_fill().to_array();
+            base.fill(egui::Color32::from_rgba_unmultiplied(r, g, b, 255))
+        };
+
         egui::Window::new("Settings")
             .collapsible(false)
             .resizable(true)
             .default_width(450.0)
+            .frame(opaque_frame)
             .open(&mut open)
             .show(ctx, |ui| {
                 // --- Read-only banner ---
