@@ -1,6 +1,6 @@
 # PLAN_26 — Replace Terminal Mode Booleans with Typed Enums
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -202,7 +202,7 @@ the dispatch system. Adding newtypes to prevent storage of `Query` is not worth 
 
 ### 26.1 — Document Bool-to-Enum Convention in `agents.md`
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 1 — High
 - **Scope:** `agents.md` (modify — add convention to `freminal-buffer` and/or cross-cutting
   section)
@@ -227,7 +227,7 @@ the dispatch system. Adding newtypes to prevent storage of `Query` is not worth 
 
 ### 26.2 — Replace 13 Bool Fields in `TerminalHandler` and `Buffer` with Enums
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 1 — High
 - **Scope:**
   - `freminal-buffer/src/terminal_handler.rs` (9 fields + all reader/writer sites)
@@ -303,7 +303,7 @@ the dispatch system. Adding newtypes to prevent storage of `Query` is not worth 
 
 ### 26.3 — Replace `FreminalAnsiParser::vt52_mode` with `Decanm`
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 2 — Medium
 - **Scope:**
   - `freminal-terminal-emulator/src/ansi.rs` (field change + all 10 usage sites)
@@ -331,7 +331,7 @@ the dispatch system. Adding newtypes to prevent storage of `Query` is not worth 
 
 ### 26.4 — Replace `SnapshotModeFields` and `TerminalSnapshot` Bool Fields with Enums
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 2 — Medium
 - **Scope:**
   - `freminal-terminal-emulator/src/interface.rs` (`SnapshotModeFields`, `build_snapshot`)
@@ -392,7 +392,7 @@ the dispatch system. Adding newtypes to prevent storage of `Query` is not worth 
 
 ### 26.5 — Replace `to_payload()` and `send_terminal_inputs()` Bool Params with Enums
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 2 — Medium
 - **Scope:**
   - `freminal-terminal-emulator/src/input.rs` (`to_payload` signature + body)
@@ -435,7 +435,7 @@ the dispatch system. Adding newtypes to prevent storage of `Query` is not worth 
 
 ### 26.6 — Remove Clippy Bool Suppression Attributes
 
-- **Status:** Pending
+- **Status:** Complete (2026-04-01)
 - **Priority:** 3 — Low
 - **Scope:**
   - `freminal-buffer/src/terminal_handler.rs` (line 117)

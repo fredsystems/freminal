@@ -50,7 +50,7 @@ and plan document maintenance rules.
 | 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Complete | None                 |
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
-| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Pending  | None                 |
+| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Complete | None                 |
 | 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Stub     | None                 |
 | 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Stub     | None                 |
 | 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
@@ -318,14 +318,13 @@ Must run after all other tasks are complete to avoid merge conflicts.
 - **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │                              │
 Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
               ├── Task 24 (Benchmarks)       ┤ (any time)
-              ├── Task 26 (Bool-to-Enum)     ┤ (any time)
               ├── Task 27 (FIXME Audit)      ┤ (stub — audit first)
               ├── Task 28 (Comment Audit)    ┤ (stub — audit first)
               ├── Task 30 (Clippy Allows)    ┤ (any time)
@@ -424,7 +423,7 @@ Update this section as tasks complete:
 | 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text |
 | 24   |            |            |                                                  |
 | 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality |
-| 26   |            |            |                                                  |
+| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum           |
 | 27   |            |            |                                                  |
 | 28   |            |            |                                                  |
 | 29   |            |            |                                                  |
