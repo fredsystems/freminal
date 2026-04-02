@@ -49,7 +49,7 @@ impl SettingsTab {
 ///
 /// The caller uses this to decide whether to apply config changes, re-register
 /// fonts, etc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SettingsAction {
     /// No action this frame (modal still open or closed without applying).
     None,
@@ -62,6 +62,12 @@ pub enum SettingsAction {
     /// The modal was closed without Apply while a preview was active —
     /// revert to the original theme.  Carries the original theme slug.
     RevertTheme(String),
+    /// The user changed the opacity slider — apply it temporarily so they
+    /// can preview the effect in real time.
+    PreviewOpacity(f32),
+    /// The modal was closed without Apply while opacity was being previewed —
+    /// revert to the original value.
+    RevertOpacity(f32),
 }
 
 /// Persistent state for the settings modal.
@@ -96,6 +102,10 @@ pub struct SettingsModal {
     /// preview is active and to revert on Cancel.
     original_theme_slug: String,
 
+    /// Background opacity when the modal was opened.  Used to detect
+    /// whether opacity preview is active and to revert on Cancel.
+    original_opacity: f32,
+
     /// Sorted list of monospaced font family names available on the system.
     /// Populated once when the modal is opened via [`Self::open()`].
     monospace_families: Vec<String>,
@@ -123,6 +133,7 @@ impl SettingsModal {
             log_dir_display: String::new(),
             read_only_reason: None,
             original_theme_slug: String::new(),
+            original_opacity: 1.0,
             monospace_families: Vec::new(),
             base_font_defs: None,
             preview_registered: None,
@@ -139,6 +150,7 @@ impl SettingsModal {
         self.status_message = None;
         self.monospace_families = monospace_families;
         self.original_theme_slug.clone_from(&live_config.theme.name);
+        self.original_opacity = live_config.ui.background_opacity;
         self.log_dir_display = config::log_dir().map_or_else(
             || "(unable to determine log directory)".to_string(),
             |p| p.display().to_string(),
@@ -174,9 +186,10 @@ impl SettingsModal {
         let mut action = SettingsAction::None;
         let mut open = self.is_open;
 
-        // Snapshot the draft theme slug before rendering so we can detect
-        // whether the user changed the theme dropdown this frame.
+        // Snapshot the draft theme slug and opacity before rendering so we
+        // can detect whether the user changed either this frame.
         let theme_before = self.draft.theme.name.clone();
+        let opacity_before = self.draft.ui.background_opacity;
 
         // Build an opaque window frame so the settings modal is never
         // affected by background_opacity (which lowers window_fill alpha
@@ -270,13 +283,28 @@ impl SettingsModal {
             self.is_open = false;
         }
 
-        // If the modal just closed (Cancel or X) without Apply, and the
-        // theme was being previewed, revert to the original.
+        // If the modal just closed (Cancel or X) without Apply, revert any
+        // previewed settings to their originals.
         if !self.is_open && action != SettingsAction::Applied {
+            // Opacity revert takes priority over theme revert because the
+            // caller will process both on the next frame (theme revert also
+            // triggers a full style update which picks up the reverted
+            // opacity).  In practice they are mutually exclusive since they
+            // live on different tabs.
+            if (self.original_opacity - opacity_before).abs() > f32::EPSILON {
+                return SettingsAction::RevertOpacity(self.original_opacity);
+            }
             if self.original_theme_slug != theme_before {
                 return SettingsAction::RevertTheme(self.original_theme_slug.clone());
             }
             return action;
+        }
+
+        // If the opacity slider changed this frame, signal a live preview.
+        if (self.draft.ui.background_opacity - opacity_before).abs() > f32::EPSILON
+            && action != SettingsAction::Applied
+        {
+            return SettingsAction::PreviewOpacity(self.draft.ui.background_opacity);
         }
 
         // If the theme dropdown changed this frame, signal a live preview.

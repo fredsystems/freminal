@@ -780,6 +780,9 @@ impl eframe::App for FreminalGui {
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
                 }
             }
+            SettingsAction::PreviewOpacity(opacity) | SettingsAction::RevertOpacity(opacity) => {
+                self.config.ui.background_opacity = opacity;
+            }
             SettingsAction::None => {}
         }
 
