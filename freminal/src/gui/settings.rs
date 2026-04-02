@@ -488,6 +488,22 @@ impl SettingsModal {
             egui::Color32::GRAY,
             "Can also be set via the --hide-menu-bar CLI flag.",
         );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Background Opacity:");
+        ui.add(Slider::new(&mut self.draft.ui.background_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Only affects backgrounds. Text and content remain fully opaque.",
+        );
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "On X11, requires a running compositor (e.g. picom).",
+        );
     }
 
     // -------------------------------------------------------------------------

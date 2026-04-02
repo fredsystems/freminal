@@ -233,7 +233,7 @@ The vertex shader maps the unit quad to the glyph rect and computes UVs.
 
 ### 34.1 — Add `background_opacity` to `UiConfig` and validation
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 1 — High
 **Scope:** `freminal-common/src/config.rs`
 
@@ -290,7 +290,7 @@ The vertex shader maps the unit quad to the glyph rect and computes UVs.
 
 ### 34.2 — Update `config_example.toml`
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 2 — Medium
 **Scope:** `config_example.toml`
 
@@ -322,7 +322,7 @@ Place it after the `hide_menu_bar` entry.
 
 ### 34.3 — Add opacity slider to the Settings Modal UI tab
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 2 — Medium
 **Scope:** `freminal/src/gui/settings.rs`
 
