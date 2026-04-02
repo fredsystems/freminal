@@ -842,12 +842,13 @@ pub fn run(
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.icon = Some(Arc::new(icon));
 
-    // Enable viewport transparency when background opacity is < 1.0.
-    // On Wayland and macOS this works out of the box; on X11 it requires
-    // a running compositor (e.g. picom).
-    if config.ui.background_opacity < 1.0 {
-        native_options.viewport.transparent = Some(true);
-    }
+    // Always request a framebuffer with an alpha channel so that
+    // background_opacity can be changed at runtime without a restart.
+    // When opacity is 1.0 the clear_color() override returns a fully
+    // opaque color, so there is no visual difference.  On Wayland and
+    // macOS this works out of the box; on X11 it requires a running
+    // compositor (e.g. picom).
+    native_options.viewport.transparent = Some(true);
 
     // Disable client-side vsync so that eglSwapBuffers is non-blocking.
     //
