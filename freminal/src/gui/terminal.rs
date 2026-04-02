@@ -1359,6 +1359,12 @@ impl FreminalTerminalWidget {
             }
         };
 
+        // Cursor-only state captured before the PaintCallback closure (which
+        // requires `Send + Sync + 'static`).  `is_cursor_only` and
+        // `cursor_only_verts` are moved into the closure below.
+        let mut is_cursor_only = false;
+        let mut cursor_only_verts: Vec<f32> = Vec::new();
+
         if !snap.skip_draw {
             // Detect content changes via `Arc::ptr_eq` — this is immune to the
             // race where the PTY thread overwrites a "changed" snapshot with a
@@ -1479,6 +1485,8 @@ impl FreminalTerminalWidget {
                     snap.theme,
                     snap.cursor_color_override,
                 );
+                is_cursor_only = true;
+                cursor_only_verts.clone_from(&cursor_verts);
                 let mut rs = self
                     .render_state
                     .lock()
@@ -1616,7 +1624,8 @@ impl FreminalTerminalWidget {
 
         // Hand off the draw call to egui's paint phase via PaintCallback.
         // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
-        // data (not `FontManager`) may be captured here.
+        // data (not `FontManager`) may be captured here.  `is_cursor_only` and
+        // `cursor_only_verts` are captured by value (bool is Copy; Vec is moved).
         let render_state = Arc::clone(&self.render_state);
         // The MutexGuard inside the callback intentionally lives through
         // `draw_with_verts` because the renderer and atlas are refs into it.
@@ -1635,35 +1644,69 @@ impl FreminalTerminalWidget {
                     error!("GL init failed: {e}");
                     return;
                 }
-                // Clone pre-built verts to avoid conflicting borrows of `rs`.
-                let bg_inst = rs.bg_instances.clone();
-                let deco = rs.deco_verts.clone();
-                let fg = rs.fg_instances.clone();
-                let img = rs.image_verts.clone();
-                let images = rs.snap_images.clone();
-                let cw = rs.cell_width_px;
-                let ch = rs.cell_height_px;
-                let opacity = rs.bg_opacity;
-                // Split borrow: get &mut RenderState so the borrow checker sees
-                // renderer and atlas as disjoint fields.
-                let rs_ref: &mut RenderState = &mut rs;
-                let renderer = &mut rs_ref.renderer;
-                let atlas = &mut rs_ref.atlas;
-                renderer.draw_with_verts(
-                    gl,
-                    atlas,
-                    &bg_inst,
-                    &deco,
-                    &fg,
-                    &img,
-                    &images,
-                    vp.width_px,
-                    vp.height_px,
-                    cw,
-                    ch,
-                    opacity,
-                    painter.intermediate_fbo(),
-                );
+                if is_cursor_only {
+                    // Cursor-only fast path: patch just the cursor quad on the
+                    // GPU via `glBufferSubData` (no VBO orphan, no full upload).
+                    let deco_len = rs.deco_verts.len();
+                    let bg_len = rs.bg_instances.len();
+                    let fg_len = rs.fg_instances.len();
+                    let img_len = rs.image_verts.len();
+                    let cfo_bytes = rs.cursor_vert_float_offset * std::mem::size_of::<f32>();
+                    let cw = rs.cell_width_px;
+                    let ch = rs.cell_height_px;
+                    let opacity = rs.bg_opacity;
+                    // Split borrow: renderer + atlas are disjoint from the
+                    // scalar fields and snap_images.
+                    let rs_ref: &mut RenderState = &mut rs;
+                    let renderer = &mut rs_ref.renderer;
+                    let atlas = &mut rs_ref.atlas;
+                    let images = &rs_ref.snap_images;
+                    renderer.draw_with_cursor_only_update(
+                        gl,
+                        atlas,
+                        cfo_bytes,
+                        deco_len,
+                        bg_len,
+                        &cursor_only_verts,
+                        fg_len,
+                        img_len,
+                        images,
+                        vp.width_px,
+                        vp.height_px,
+                        cw,
+                        ch,
+                        opacity,
+                        painter.intermediate_fbo(),
+                    );
+                } else {
+                    // Full draw path: clone and re-upload all VBOs.
+                    let bg_inst = rs.bg_instances.clone();
+                    let deco = rs.deco_verts.clone();
+                    let fg = rs.fg_instances.clone();
+                    let img = rs.image_verts.clone();
+                    let images = rs.snap_images.clone();
+                    let cw = rs.cell_width_px;
+                    let ch = rs.cell_height_px;
+                    let opacity = rs.bg_opacity;
+                    let rs_ref: &mut RenderState = &mut rs;
+                    let renderer = &mut rs_ref.renderer;
+                    let atlas = &mut rs_ref.atlas;
+                    renderer.draw_with_verts(
+                        gl,
+                        atlas,
+                        &bg_inst,
+                        &deco,
+                        &fg,
+                        &img,
+                        &images,
+                        vp.width_px,
+                        vp.height_px,
+                        cw,
+                        ch,
+                        opacity,
+                        painter.intermediate_fbo(),
+                    );
+                }
             })),
         });
 

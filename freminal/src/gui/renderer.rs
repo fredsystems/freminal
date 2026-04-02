@@ -783,7 +783,11 @@ impl TerminalRenderer {
         // 1. Sync atlas (may have new glyphs from a previous frame).
         self.sync_atlas(gl, atlas);
 
-        let buf_idx = self.vbo_index;
+        // Use the slot that was last fully written by `draw_with_verts`.
+        // After a full frame, `draw_with_verts` advances `vbo_index` to the
+        // *next* slot.  The cursor-only path patches and draws from the
+        // *previous* slot (the one with valid data).
+        let buf_idx = 1 - self.vbo_index;
 
         // 2. Patch just the cursor region of the deco VBO (no orphan).
         if cursor_verts.is_empty() {
