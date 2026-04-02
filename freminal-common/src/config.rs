@@ -172,11 +172,24 @@ impl Default for ScrollbackConfig {
 /// ---------------------------------------------------------------------------------------------
 ///  UI
 /// ---------------------------------------------------------------------------------------------
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     /// Hide the menu bar at the top of the window. Default: `false`.
     pub hide_menu_bar: bool,
+    /// Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+    /// Only affects the terminal and menu bar backgrounds; text and content
+    /// remain fully opaque.
+    pub background_opacity: f32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            hide_menu_bar: false,
+            background_opacity: 1.0,
+        }
+    }
 }
 
 /// ---------------------------------------------------------------------------------------------
@@ -292,6 +305,13 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "scrollback.limit={} out of allowed range (1–100000)",
                 self.scrollback.limit
+            )));
+        }
+
+        if !(0.0..=1.0).contains(&self.ui.background_opacity) {
+            return Err(ConfigError::Validation(format!(
+                "ui.background_opacity={} out of allowed range (0.0–1.0)",
+                self.ui.background_opacity
             )));
         }
 
@@ -789,5 +809,106 @@ managed_by = "home-manager"
         std::fs::set_permissions(&path, perms).expect("set permissions");
 
         assert!(!config_is_writable(Some(&path)));
+    }
+
+    // -----------------------------------------------------------------
+    //  background_opacity
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_config_has_opacity_one() {
+        let cfg = Config::default();
+        assert!(
+            (cfg.ui.background_opacity - 1.0).abs() < f32::EPSILON,
+            "default background_opacity should be 1.0"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_opacity_zero() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = 0.0;
+        cfg.validate().expect("opacity 0.0 should be valid");
+    }
+
+    #[test]
+    fn validate_accepts_opacity_half() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = 0.5;
+        cfg.validate().expect("opacity 0.5 should be valid");
+    }
+
+    #[test]
+    fn validate_accepts_opacity_one() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = 1.0;
+        cfg.validate().expect("opacity 1.0 should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_opacity_negative() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = -0.1;
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("background_opacity"),
+            "error should mention background_opacity: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_opacity_above_one() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = 1.1;
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("background_opacity"),
+            "error should mention background_opacity: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_opacity_two() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = 2.0;
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("background_opacity"),
+            "error should mention background_opacity: {msg}"
+        );
+    }
+
+    #[test]
+    fn opacity_roundtrip_preserves_value() {
+        let mut cfg = Config::default();
+        cfg.ui.background_opacity = 0.7;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(
+            (deserialized.ui.background_opacity - 0.7).abs() < f32::EPSILON,
+            "background_opacity should round-trip: got {}",
+            deserialized.ui.background_opacity
+        );
+    }
+
+    #[test]
+    fn missing_opacity_in_toml_defaults_to_one() {
+        // Backward compatibility: old config files without background_opacity
+        // should default to 1.0 (fully opaque).
+        let toml_str = r"
+[ui]
+hide_menu_bar = false
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let ui = partial.ui.expect("ui section should be present");
+        assert!(
+            (ui.background_opacity - 1.0).abs() < f32::EPSILON,
+            "missing background_opacity should default to 1.0"
+        );
     }
 }
