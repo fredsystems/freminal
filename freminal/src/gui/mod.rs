@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::gui::colors::internal_color_to_egui;
+use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use conv2::ConvUtil;
@@ -31,17 +31,19 @@ pub mod shaping;
 pub mod terminal;
 pub mod view_state;
 
-fn set_egui_options(ctx: &egui::Context) {
+fn set_egui_options(ctx: &egui::Context, bg_opacity: f32) {
     ctx.global_style_mut(|style| {
-        style.visuals.window_fill = internal_color_to_egui(
+        style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             &freminal_common::themes::CATPPUCCIN_MOCHA,
+            bg_opacity,
         );
-        style.visuals.panel_fill = internal_color_to_egui(
+        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             &freminal_common::themes::CATPPUCCIN_MOCHA,
+            bg_opacity,
         );
     });
     ctx.options_mut(|options| {
@@ -50,17 +52,23 @@ fn set_egui_options(ctx: &egui::Context) {
 }
 
 /// Update egui chrome colors (window/panel fill) to match a new theme.
-fn update_egui_theme(ctx: &egui::Context, theme: &freminal_common::themes::ThemePalette) {
+fn update_egui_theme(
+    ctx: &egui::Context,
+    theme: &freminal_common::themes::ThemePalette,
+    bg_opacity: f32,
+) {
     ctx.global_style_mut(|style| {
-        style.visuals.window_fill = internal_color_to_egui(
+        style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             theme,
+            bg_opacity,
         );
-        style.visuals.panel_fill = internal_color_to_egui(
+        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             theme,
+            bg_opacity,
         );
     });
 }
@@ -112,7 +120,7 @@ impl FreminalGui {
         clipboard_rx: Receiver<String>,
         is_playback: bool,
     ) -> Self {
-        set_egui_options(&cc.egui_ctx);
+        set_egui_options(&cc.egui_ctx, config.ui.background_opacity);
 
         Self {
             arc_swap,
@@ -619,23 +627,28 @@ impl eframe::App for FreminalGui {
 
             // Update background color based on whether the terminal is in
             // normal (non-inverted) display mode.
+            let bg_opacity = self.config.ui.background_opacity;
             if snap.is_normal_display {
                 ui.ctx().global_style_mut(|style| {
-                    style.visuals.window_fill = internal_color_to_egui(
+                    style.visuals.window_fill = internal_color_to_egui_with_alpha(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
                         snap.theme,
+                        bg_opacity,
                     );
-                    style.visuals.panel_fill = internal_color_to_egui(
+                    style.visuals.panel_fill = internal_color_to_egui_with_alpha(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
                         snap.theme,
+                        bg_opacity,
                     );
                 });
             } else {
                 ui.ctx().global_style_mut(|style| {
-                    style.visuals.window_fill = egui::Color32::WHITE;
-                    style.visuals.panel_fill = egui::Color32::WHITE;
+                    style.visuals.window_fill =
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
+                    style.visuals.panel_fill =
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
                 });
             }
 
@@ -718,7 +731,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
                         error!("Failed to send ThemeChange to PTY thread: {e}");
                     }
-                    update_egui_theme(ui.ctx(), theme);
+                    update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
                     // Force a full vertex rebuild on the next frame so
                     // foreground/background colors are re-resolved against
                     // the new palette.  Without this, the preview's rebuild
@@ -736,7 +749,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
                         error!("Failed to send theme preview/revert to PTY thread: {e}");
                     }
-                    update_egui_theme(ui.ctx(), theme);
+                    update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
                 }
             }
             SettingsAction::None => {}
@@ -800,6 +813,13 @@ pub fn run(
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.icon = Some(Arc::new(icon));
+
+    // Enable viewport transparency when background opacity is < 1.0.
+    // On Wayland and macOS this works out of the box; on X11 it requires
+    // a running compositor (e.g. picom).
+    if config.ui.background_opacity < 1.0 {
+        native_options.viewport.transparent = Some(true);
+    }
 
     // Disable client-side vsync so that eglSwapBuffers is non-blocking.
     //

@@ -372,7 +372,7 @@ The `Slider` import already exists in `settings.rs` (line 6).
 
 ### 34.4 — Wire opacity into eframe viewport and egui panel fills
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 1 — High
 **Scope:** `freminal/src/gui/mod.rs`, `freminal/src/gui/colors.rs`
 
