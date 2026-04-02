@@ -256,12 +256,17 @@ fn handle_scroll_fallback(
 /// as individual characters rather than as one escape sequence, causing
 /// them to be interpreted as literal typed text.
 ///
-/// The `cursor_key_app_mode` flag from the snapshot drives `DECCKM`-sensitive
-/// key encoding (arrow keys, home, end).  `keypad_app_mode` drives `DECPAM` /
-/// `DECPNM` encoding for keypad keys.  `modify_other_keys` carries the
-/// xterm `modifyOtherKeys` level (0/1/2) for extended Ctrl+letter encoding.
-/// `application_escape_key` drives the `?7727` escape key encoding.
-/// `backarrow_sends_bs` drives the DECBKM (`?67`) backspace key encoding.
+/// The mode states from the snapshot control key encoding:
+/// - `cursor_key_app_mode` (`Decckm`) — `DECCKM`-sensitive encoding for
+///   arrow keys, home, end.
+/// - `keypad_app_mode` (`KeypadMode`) — `DECPAM` / `DECPNM` encoding for
+///   keypad keys.
+/// - `modify_other_keys` — xterm `modifyOtherKeys` level (0/1/2) for
+///   extended Ctrl+letter encoding.
+/// - `application_escape_key` (`ApplicationEscapeKey`) — `?7727` escape key
+///   encoding.
+/// - `backarrow_sends_bs` (`Decbkm`) — DECBKM (`?67`) backspace key
+///   encoding.
 fn send_terminal_inputs(
     inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
