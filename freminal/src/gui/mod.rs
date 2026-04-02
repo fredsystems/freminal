@@ -33,12 +33,17 @@ pub mod view_state;
 
 fn set_egui_options(ctx: &egui::Context, bg_opacity: f32) {
     ctx.global_style_mut(|style| {
+        // window_fill stays fully opaque so menus, settings modal, and all
+        // egui chrome are never affected by background_opacity.
         style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             &freminal_common::themes::CATPPUCCIN_MOCHA,
-            bg_opacity,
+            1.0,
         );
+        // panel_fill gets the opacity — it controls the CentralPanel
+        // (terminal area) background, which is the only surface that
+        // should be semi-transparent.
         style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
@@ -58,12 +63,14 @@ fn update_egui_theme(
     bg_opacity: f32,
 ) {
     ctx.global_style_mut(|style| {
+        // window_fill: always opaque (menus, settings, chrome).
         style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
             theme,
-            bg_opacity,
+            1.0,
         );
+        // panel_fill: respects background_opacity (terminal area only).
         style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
@@ -537,6 +544,25 @@ fn handle_window_manipulation(
 }
 
 impl eframe::App for FreminalGui {
+    /// Override the GL framebuffer clear color.
+    ///
+    /// When `background_opacity < 1.0` the viewport was created with
+    /// `transparent = true`, so the compositor can show the desktop through.
+    /// For that to work the clear color must have alpha = 0; otherwise the
+    /// opaque clear overwrites the transparent framebuffer before egui
+    /// paints anything.
+    ///
+    /// When opacity is 1.0 the clear color matches `panel_fill` (fully
+    /// opaque) — there is no visible difference from the default.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.config.ui.background_opacity < 1.0 {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            // Fully opaque: use the terminal background color.
+            visuals.panel_fill.to_normalized_gamma_f32()
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         debug!("Starting new frame");
@@ -630,12 +656,14 @@ impl eframe::App for FreminalGui {
             let bg_opacity = self.config.ui.background_opacity;
             if snap.is_normal_display {
                 ui.ctx().global_style_mut(|style| {
+                    // window_fill: always opaque (menus, settings, chrome).
                     style.visuals.window_fill = internal_color_to_egui_with_alpha(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
                         snap.theme,
-                        bg_opacity,
+                        1.0,
                     );
+                    // panel_fill: respects background_opacity (terminal area only).
                     style.visuals.panel_fill = internal_color_to_egui_with_alpha(
                         freminal_common::colors::TerminalColor::DefaultBackground,
                         false,
