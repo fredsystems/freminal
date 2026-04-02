@@ -1,6 +1,6 @@
 # PLAN 33 — WezTerm & Ghostty Default Color Palettes
 
-## Status: Pending
+## Status: Complete
 
 ## Overview
 
@@ -114,7 +114,7 @@ Dark's `#282c3e`, so we use similar selection values that complement the Tomorro
 
 ### 33.1 — Add WezTerm Default and Ghostty Default theme consts
 
-**Status:** Pending
+**Status:** Complete (2026-04-01)
 **Priority:** Medium
 **Scope:** `freminal-common/src/themes.rs` only
 

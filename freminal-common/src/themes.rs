@@ -968,6 +968,78 @@ pub const XTERM_DEFAULT: ThemePalette = ThemePalette {
     ],
 };
 
+// ---------------------------------------------------------------------------
+//  WezTerm Default
+// ---------------------------------------------------------------------------
+
+/// `WezTerm` Default palette.
+///
+/// Source: <https://github.com/wez/wezterm> (term/src/color.rs)
+pub const WEZTERM_DEFAULT: ThemePalette = ThemePalette {
+    name: "WezTerm Default",
+    slug: "wezterm-default",
+    foreground: (0xb2, 0xb2, 0xb2),
+    background: (0x00, 0x00, 0x00),
+    cursor: (0x52, 0xad, 0x70),
+    cursor_text: (0x00, 0x00, 0x00),
+    selection_bg: (0x4d, 0x40, 0x60),
+    selection_fg: (0xd0, 0xd0, 0xd0),
+    ansi: [
+        (0x00, 0x00, 0x00), // 0  Black
+        (0xcc, 0x55, 0x55), // 1  Red
+        (0x55, 0xcc, 0x55), // 2  Green
+        (0xcd, 0xcd, 0x55), // 3  Yellow
+        (0x54, 0x55, 0xcb), // 4  Blue
+        (0xcc, 0x55, 0xcc), // 5  Magenta
+        (0x7a, 0xca, 0xca), // 6  Cyan
+        (0xcc, 0xcc, 0xcc), // 7  White
+        (0x55, 0x55, 0x55), // 8  BrightBlack
+        (0xff, 0x55, 0x55), // 9  BrightRed
+        (0x55, 0xff, 0x55), // 10 BrightGreen
+        (0xff, 0xff, 0x55), // 11 BrightYellow
+        (0x55, 0x55, 0xff), // 12 BrightBlue
+        (0xff, 0x55, 0xff), // 13 BrightMagenta
+        (0x55, 0xff, 0xff), // 14 BrightCyan
+        (0xff, 0xff, 0xff), // 15 BrightWhite
+    ],
+};
+
+// ---------------------------------------------------------------------------
+//  Ghostty Default (Tomorrow Night)
+// ---------------------------------------------------------------------------
+
+/// Ghostty Default palette (Tomorrow Night).
+///
+/// Source: <https://github.com/ghostty-org/ghostty> (src/terminal/color.zig)
+pub const GHOSTTY_DEFAULT: ThemePalette = ThemePalette {
+    name: "Ghostty Default",
+    slug: "ghostty-default",
+    foreground: (0xff, 0xff, 0xff),
+    background: (0x28, 0x2c, 0x34),
+    cursor: (0xff, 0xff, 0xff),
+    cursor_text: (0x28, 0x2c, 0x34),
+    selection_bg: (0x3e, 0x44, 0x52),
+    selection_fg: (0xc5, 0xc8, 0xc6),
+    ansi: [
+        (0x1d, 0x1f, 0x21), // 0  Black
+        (0xcc, 0x66, 0x66), // 1  Red
+        (0xb5, 0xbd, 0x68), // 2  Green
+        (0xf0, 0xc6, 0x74), // 3  Yellow
+        (0x81, 0xa2, 0xbe), // 4  Blue
+        (0xb2, 0x94, 0xbb), // 5  Magenta
+        (0x8a, 0xbe, 0xb7), // 6  Cyan
+        (0xc5, 0xc8, 0xc6), // 7  White
+        (0x66, 0x66, 0x66), // 8  BrightBlack
+        (0xd5, 0x4e, 0x53), // 9  BrightRed
+        (0xb9, 0xca, 0x4a), // 10 BrightGreen
+        (0xe7, 0xc5, 0x47), // 11 BrightYellow
+        (0x7a, 0xa6, 0xda), // 12 BrightBlue
+        (0xc3, 0x97, 0xd8), // 13 BrightMagenta
+        (0x70, 0xc0, 0xb1), // 14 BrightCyan
+        (0xea, 0xea, 0xea), // 15 BrightWhite
+    ],
+};
+
 /// The default theme used when no theme is configured or the configured slug
 /// is not recognized.
 pub const DEFAULT_THEME: &ThemePalette = &CATPPUCCIN_MOCHA;
@@ -1003,6 +1075,8 @@ static ALL_THEMES: &[&ThemePalette] = &[
     &EVERFOREST_LIGHT,
     &MATERIAL_DARK,
     &XTERM_DEFAULT,
+    &WEZTERM_DEFAULT,
+    &GHOSTTY_DEFAULT,
 ];
 
 /// Return all embedded themes in display order.
@@ -1102,11 +1176,11 @@ mod tests {
     }
 
     #[test]
-    fn all_themes_contains_25_themes() {
+    fn all_themes_contains_27_themes() {
         assert_eq!(
             all_themes().len(),
-            25,
-            "expected 25 themes, got {}",
+            27,
+            "expected 27 themes, got {}",
             all_themes().len()
         );
     }
