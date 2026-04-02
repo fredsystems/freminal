@@ -16,7 +16,7 @@ use super::ReportMode;
 ///   is permitted (default).
 /// - **Reset** (`CSI ? 1046 l`): Disallow — `?47`, `?1047`, and `?1049`
 ///   Set/Reset are silently ignored while this mode is reset.
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum AllowAltScreen {
     /// Set: Allow alternate screen switching (default).
     #[default]

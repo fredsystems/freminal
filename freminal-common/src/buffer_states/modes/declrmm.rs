@@ -11,7 +11,7 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 ///
 /// When set, DECSLRM (`CSI Pl ; Pr s`) can be used to set left and right
 /// margins.  When reset, `CSI s` reverts to SCOSC (save cursor).
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Declrmm {
     #[default]
     Disabled,

@@ -112,9 +112,9 @@ pub struct FreminalAnsiParser {
     // reducing per-call allocations and enabling coalesced Data emissions.
     pending_data: Vec<u8>,
     seq_trace: SequenceTracer,
-    /// When `true`, the parser uses the reduced VT52 escape set instead of
-    /// standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
-    pub vt52_mode: bool,
+    /// When set to `Decanm::Vt52`, the parser uses the reduced VT52 escape set
+    /// instead of standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
+    pub vt52_mode: Decanm,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -141,7 +141,7 @@ impl FreminalAnsiParser {
             inner: ParserInner::Empty,
             pending_data: Vec::new(),
             seq_trace: SequenceTracer::new(),
-            vt52_mode: false,
+            vt52_mode: Decanm::Ansi,
         }
     }
 
@@ -152,7 +152,7 @@ impl FreminalAnsiParser {
         output: &mut Vec<TerminalOutput>,
     ) -> Result<(), ()> {
         if b == b'\x1b' {
-            if self.vt52_mode {
+            if self.vt52_mode == Decanm::Vt52 {
                 self.inner = ParserInner::Vt52Escape;
             } else {
                 self.inner = ParserInner::Escape;
@@ -1023,7 +1023,7 @@ mod tests {
     /// Helper: create a parser already in VT52 mode.
     fn vt52_parser() -> FreminalAnsiParser {
         let mut p = FreminalAnsiParser::new();
-        p.vt52_mode = true;
+        p.vt52_mode = Decanm::Vt52;
         p
     }
 
@@ -1259,13 +1259,11 @@ mod tests {
     fn vt52_ansi_roundtrip() {
         // Start in ANSI mode, switch to VT52 via CSI, then back via ESC <
         let mut p = FreminalAnsiParser::new();
-        assert!(!p.vt52_mode);
+        assert!(p.vt52_mode == Decanm::Ansi);
 
         // Enter VT52 mode via the mode change (parser flag set externally,
         // as sync_mode would do after processing Mode::Decanm(Decanm::Vt52))
-        p.vt52_mode = true;
-
-        // VT52 cursor up should work
+        p.vt52_mode = Decanm::Vt52;
         let result = p.push(b"\x1bA");
         assert_eq!(
             result,
@@ -1284,7 +1282,7 @@ mod tests {
 
         // After sync_mode processes it, parser.vt52_mode would be set to false.
         // Simulate that:
-        p.vt52_mode = false;
+        p.vt52_mode = Decanm::Ansi;
 
         // Now ANSI escape sequences should work again
         let result = p.push(b"\x1b[1A"); // CSI 1A = cursor up 1

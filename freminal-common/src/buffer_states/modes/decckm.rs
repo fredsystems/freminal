@@ -7,7 +7,7 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 use core::fmt;
 
 /// Cursor Key Mode (DECCKM) ?1
-#[derive(Eq, PartialEq, Debug, Default, Clone)]
+#[derive(Eq, PartialEq, Debug, Default, Clone, Copy)]
 pub enum Decckm {
     #[default]
     /// Normal (Reset) Mode

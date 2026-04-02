@@ -8,7 +8,7 @@ use core::fmt;
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
 /// Show cursor Reverse Wrap Around ?45
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum ReverseWrapAround {
     #[default]
     /// Normal (Set) Mode

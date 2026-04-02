@@ -16,7 +16,7 @@ use super::ReportMode;
 /// - Reset (`CSI ? 67 l`): Backspace sends `DEL` (0x7F).
 ///
 /// Default is `BackarrowSendsBs` (set), matching Freminal's historical behavior.
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decbkm {
     #[default]
     /// Backarrow sends BS (0x08) — DECSET ?67 (default)

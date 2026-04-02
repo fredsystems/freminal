@@ -88,6 +88,14 @@ full implementation history.
 Shared types and utilities only. No business logic. No platform-specific dependencies beyond what
 is needed for type definitions. No terminal semantics. Changes here affect all downstream crates.
 
+### Terminal Mode Representation
+
+If a terminal mode has a corresponding enum in `freminal-common/src/buffer_states/modes/`, that
+enum must be used for storage, transport, and function parameters — never a raw `bool`. This
+applies to struct fields on `TerminalHandler`, `Buffer`, `FreminalAnsiParser`,
+`SnapshotModeFields`, `TerminalSnapshot`, and function signatures like `to_payload()` and
+`send_terminal_inputs()`. If no enum exists for a flag, `bool` is fine.
+
 ### freminal-buffer
 
 Pure data model for terminal content. Responsible for cells, rows, cursor tracking, wrapping, and

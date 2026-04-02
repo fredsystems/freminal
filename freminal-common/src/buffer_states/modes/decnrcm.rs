@@ -17,7 +17,7 @@ use super::ReportMode;
 ///   (`ESC ( A`, etc.) map specific ASCII positions to national characters.
 /// - **Reset** (`CSI ? 42 l`): NRC mode disabled — standard character sets
 ///   used (default).
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decnrcm {
     /// Reset: NRC mode disabled, standard character sets used (default).
     #[default]
