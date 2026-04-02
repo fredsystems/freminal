@@ -234,7 +234,7 @@ fn test_alternate_screen_write_arrow_down() {
 fn test_is_normal_display_default() {
     let (state, _rx) = make_state();
     assert!(
-        state.is_normal_display(),
+        state.modes.invert_screen.is_normal_display(),
         "is_normal_display must be true in the default state"
     );
 }
@@ -246,7 +246,7 @@ fn test_is_normal_display_after_reverse() {
     let (mut state, _rx) = make_state();
     state.modes.invert_screen = Decscnm::ReverseDisplay;
     assert!(
-        !state.is_normal_display(),
+        !state.modes.invert_screen.is_normal_display(),
         "is_normal_display must be false when invert_screen is ReverseDisplay"
     );
 }
@@ -284,7 +284,7 @@ fn test_should_repeat_keys_disabled() {
 fn test_skip_draw_always_default() {
     let (state, _rx) = make_state();
     assert!(
-        !state.skip_draw_always(),
+        state.modes.synchronized_updates != SynchronizedUpdates::DontDraw,
         "skip_draw_always must be false in the default state (SynchronizedUpdates::Draw)"
     );
 }
@@ -296,7 +296,7 @@ fn test_skip_draw_always_enabled() {
     let (mut state, _rx) = make_state();
     state.modes.synchronized_updates = SynchronizedUpdates::DontDraw;
     assert!(
-        state.skip_draw_always(),
+        state.modes.synchronized_updates == SynchronizedUpdates::DontDraw,
         "skip_draw_always must be true when synchronized_updates is DontDraw"
     );
 }

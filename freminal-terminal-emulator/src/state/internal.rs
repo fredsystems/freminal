@@ -131,19 +131,12 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub fn get_cursor_visual_style(&self) -> CursorVisualStyle {
+    pub(crate) fn get_cursor_visual_style(&self) -> CursorVisualStyle {
         self.handler.cursor_visual_style()
     }
 
-    /// Return the cursor color.
-    /// The cursor color is not yet tracked by the new handler, so we return the terminal default.
     #[must_use]
-    pub const fn cursor_color(&self) -> freminal_common::colors::TerminalColor {
-        freminal_common::colors::TerminalColor::DefaultCursorColor
-    }
-
-    #[must_use]
-    pub const fn is_normal_display(&self) -> bool {
+    pub(crate) const fn is_normal_display(&self) -> bool {
         self.modes.invert_screen.is_normal_display()
     }
 
@@ -153,12 +146,12 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn show_cursor(&mut self) -> bool {
+    pub(crate) const fn show_cursor(&self) -> bool {
         self.handler.show_cursor()
     }
 
     #[must_use]
-    pub fn skip_draw_always(&self) -> bool {
+    pub(crate) fn skip_draw_always(&self) -> bool {
         self.modes.synchronized_updates == SynchronizedUpdates::DontDraw
     }
 
@@ -180,7 +173,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub fn cursor_pos(&mut self) -> CursorPos {
+    pub(crate) fn cursor_pos(&self) -> CursorPos {
         self.handler.cursor_pos()
     }
 
@@ -196,7 +189,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn get_cursor_key_mode(&self) -> Decckm {
+    pub(crate) const fn get_cursor_key_mode(&self) -> Decckm {
         self.modes.cursor_key
     }
 

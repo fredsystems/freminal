@@ -12,43 +12,6 @@ use crate::{
     sgr::SelectGraphicRendition,
 };
 
-/// Erase mode for ED (Erase in Display) and EL (Erase in Line) operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EraseMode {
-    /// Erase from cursor to end (ED 0, EL 0)
-    ToEnd,
-    /// Erase from beginning to cursor (ED 1, EL 1)
-    ToBeginning,
-    /// Erase entire display/line (ED 2, EL 2)
-    All,
-    /// Erase scrollback (ED 3)
-    Scrollback,
-}
-
-/// Cursor movement direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CursorDirection {
-    Up,
-    Down,
-    Forward,
-    Backward,
-}
-
-/// Line insertion/deletion operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineOperation {
-    Insert(usize),
-    Delete(usize),
-}
-
-/// Character insertion/deletion operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CharOperation {
-    Insert(usize),
-    Delete(usize),
-    Erase(usize),
-}
-
 /// High-level actions produced by the ANSI/OSC parser.
 ///
 /// This enum represents normalized terminal effects (cursor movement,

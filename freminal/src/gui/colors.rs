@@ -7,22 +7,6 @@ use eframe::egui::Color32;
 use freminal_common::colors::TerminalColor;
 use freminal_common::themes::ThemePalette;
 
-// ---------------------------------------------------------------------------
-//  Utility
-// ---------------------------------------------------------------------------
-
-/// Convert a [`Color32`] to `[f32; 4]` RGBA in `[0.0, 1.0]` range.
-#[must_use]
-pub const fn color32_to_f32(color: Color32) -> [f32; 4] {
-    let rgba = color.to_array();
-    [
-        rgba[0] as f32 / 255.0,
-        rgba[1] as f32 / 255.0,
-        rgba[2] as f32 / 255.0,
-        rgba[3] as f32 / 255.0,
-    ]
-}
-
 /// Convert an `(r, g, b)` tuple to a `Color32`.
 #[must_use]
 const fn rgb_to_color32(rgb: (u8, u8, u8)) -> Color32 {

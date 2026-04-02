@@ -58,7 +58,7 @@ const DEFAULT_PALETTE_16: [(u8, u8, u8); 16] = [
 
 /// Background handling mode from P2 parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SixelBackground {
+pub(crate) enum SixelBackground {
     /// P2=0 or P2=2: the background of the image is painted with palette
     /// colour 0 before any sixel data is applied.
     Paint,

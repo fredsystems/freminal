@@ -531,7 +531,7 @@ fn system_config_path() -> Option<PathBuf> {
 /// Windows: %APPDATA%\Freminal\config.toml
 #[allow(unreachable_code)]
 #[must_use]
-pub fn user_config_path() -> Option<PathBuf> {
+pub(crate) fn user_config_path() -> Option<PathBuf> {
     let base = BaseDirs::new()?;
 
     #[cfg(target_os = "macos")]
