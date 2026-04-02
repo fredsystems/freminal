@@ -673,10 +673,14 @@ impl eframe::App for FreminalGui {
                 });
             } else {
                 ui.ctx().global_style_mut(|style| {
+                    // window_fill: always opaque (menus, settings, chrome).
                     style.visuals.window_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
+                    // panel_fill: respects background_opacity (terminal area only).
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let alpha = (bg_opacity * 255.0).round() as u8;
                     style.visuals.panel_fill =
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
                 });
             }
 
@@ -687,6 +691,7 @@ impl eframe::App for FreminalGui {
                 &self.input_tx,
                 &self.clipboard_rx,
                 self.settings_modal.is_open,
+                bg_opacity,
             );
 
             // Only schedule a wakeup when there is work to do:
@@ -759,7 +764,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
                         error!("Failed to send ThemeChange to PTY thread: {e}");
                     }
-                    update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
+                    update_egui_theme(ui.ctx(), theme, new_cfg.ui.background_opacity);
                     // Force a full vertex rebuild on the next frame so
                     // foreground/background colors are re-resolved against
                     // the new palette.  Without this, the preview's rebuild
@@ -772,12 +777,23 @@ impl eframe::App for FreminalGui {
                     .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
                 self.config = new_cfg;
             }
-            SettingsAction::PreviewTheme(ref slug) | SettingsAction::RevertTheme(ref slug) => {
+            SettingsAction::PreviewTheme(ref slug) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
                     if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
-                        error!("Failed to send theme preview/revert to PTY thread: {e}");
+                        error!("Failed to send theme preview to PTY thread: {e}");
                     }
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
+                }
+            }
+            SettingsAction::RevertTheme(ref slug, original_opacity) => {
+                if let Some(theme) = freminal_common::themes::by_slug(slug) {
+                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                        error!("Failed to send theme revert to PTY thread: {e}");
+                    }
+                    // Restore opacity first so update_egui_theme uses the
+                    // correct value for panel_fill.
+                    self.config.ui.background_opacity = original_opacity;
+                    update_egui_theme(ui.ctx(), theme, original_opacity);
                 }
             }
             SettingsAction::PreviewOpacity(opacity) | SettingsAction::RevertOpacity(opacity) => {

@@ -1216,6 +1216,7 @@ impl FreminalTerminalWidget {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)] // bg_opacity must be threaded from config
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -1224,6 +1225,7 @@ impl FreminalTerminalWidget {
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
         modal_is_open: bool,
+        bg_opacity: f32,
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1592,7 +1594,7 @@ impl FreminalTerminalWidget {
                     rs.cell_width_px = cell_w as f32;
                     rs.cell_height_px = cell_h as f32;
                 }
-                rs.bg_opacity = 1.0; // Wired to config in a later subtask (34.6).
+                rs.bg_opacity = bg_opacity;
                 drop(rs);
 
                 // Remember which `visible_chars` allocation we rendered, so

@@ -60,8 +60,9 @@ pub enum SettingsAction {
     /// so they can preview it in the terminal.  Carries the new theme slug.
     PreviewTheme(String),
     /// The modal was closed without Apply while a preview was active —
-    /// revert to the original theme.  Carries the original theme slug.
-    RevertTheme(String),
+    /// revert to the original theme.  Carries the original theme slug and
+    /// the original opacity (in case opacity was also previewed).
+    RevertTheme(String, f32),
     /// The user changed the opacity slider — apply it temporarily so they
     /// can preview the effect in real time.
     PreviewOpacity(f32),
@@ -286,16 +287,17 @@ impl SettingsModal {
         // If the modal just closed (Cancel or X) without Apply, revert any
         // previewed settings to their originals.
         if !self.is_open && action != SettingsAction::Applied {
-            // Opacity revert takes priority over theme revert because the
-            // caller will process both on the next frame (theme revert also
-            // triggers a full style update which picks up the reverted
-            // opacity).  In practice they are mutually exclusive since they
-            // live on different tabs.
-            if (self.original_opacity - opacity_before).abs() > f32::EPSILON {
+            let theme_changed = self.original_theme_slug != theme_before;
+            let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
+            // Theme revert carries the original opacity so the caller can
+            // restore both in a single action.
+            if theme_changed {
+                return SettingsAction::RevertTheme(
+                    self.original_theme_slug.clone(),
+                    self.original_opacity,
+                );
+            } else if opacity_changed {
                 return SettingsAction::RevertOpacity(self.original_opacity);
-            }
-            if self.original_theme_slug != theme_before {
-                return SettingsAction::RevertTheme(self.original_theme_slug.clone());
             }
             return action;
         }
