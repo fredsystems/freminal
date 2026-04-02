@@ -1,6 +1,6 @@
 # PLAN 34 — Instanced Renderer + Background Opacity
 
-## Status: In Progress
+## Status: Complete
 
 ---
 
@@ -705,7 +705,7 @@ gl.draw_arrays_instanced(TRIANGLES, 0, 6, glyph_instance_count);
 
 ### 34.7 — Update cursor-only fast path for instanced buffers
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 2 — Medium
 **Scope:** `freminal/src/gui/renderer.rs`, `freminal/src/gui/terminal.rs`
 
@@ -733,7 +733,7 @@ or zero it out when hidden.
 
 ### 34.8 — Remove old per-quad vertex builders
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 2 — Medium
 **Scope:** `freminal/src/gui/renderer.rs`
 
@@ -766,7 +766,7 @@ Keep `push_quad()` if it's still used for the decoration mini-VBO.
 
 ### 34.9 — Handle opacity changes on Apply (hot-reload)
 
-**Status:** Pending
+**Status:** Complete (superseded — hot-reload implemented during 34.4 bugfix commits)
 **Priority:** 2 — Medium
 **Scope:** `freminal/src/gui/mod.rs`
 
@@ -803,7 +803,7 @@ next draw call.
 
 ### 34.10 — Benchmark the instanced renderer
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 1 — High
 **Scope:** `freminal/benches/render_loop_bench.rs`
 
@@ -839,7 +839,7 @@ Expected results:
 
 ### 34.11 — Dead code cleanup and final verification
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 2 — Medium
 **Scope:** Entire `freminal` crate
 
@@ -863,7 +863,7 @@ Expected results:
 
 ### 34.12 — Update plan documents and MASTER_PLAN
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 2 — Medium
 **Scope:** `Documents/PLAN_34_BACKGROUND_OPACITY.md`, `Documents/MASTER_PLAN.md`
 
