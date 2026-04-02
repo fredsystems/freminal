@@ -40,7 +40,9 @@ use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
-    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
+    alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
+    decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, mouse::MouseEncoding,
+    mouse::MouseTrack, rl_bracket::RlBracket,
 };
 
 use freminal_common::{
@@ -51,19 +53,18 @@ use freminal_common::{
 /// Mode-related fields extracted from the emulator state for a snapshot.
 ///
 /// Factored out so `build_snapshot` stays within Clippy's 100-line limit.
-#[allow(clippy::struct_excessive_bools)]
 struct SnapshotModeFields {
     bracketed_paste: RlBracket,
     mouse_tracking: MouseTrack,
     mouse_encoding: MouseEncoding,
-    repeat_keys: bool,
-    cursor_key_app_mode: bool,
-    keypad_app_mode: bool,
+    repeat_keys: Decarm,
+    cursor_key_app_mode: Decckm,
+    keypad_app_mode: KeypadMode,
     skip_draw: bool,
     modify_other_keys: u8,
-    application_escape_key: bool,
-    backarrow_sends_bs: bool,
-    alternate_scroll: bool,
+    application_escape_key: ApplicationEscapeKey,
+    backarrow_sends_bs: Decbkm,
+    alternate_scroll: AlternateScroll,
 }
 
 #[must_use]
@@ -593,22 +594,18 @@ impl TerminalEmulator {
 
     /// Collect all mode flags needed by the snapshot in a single pass.
     fn collect_mode_fields(&self) -> SnapshotModeFields {
-        use freminal_common::buffer_states::modes::{
-            alternate_scroll::AlternateScroll, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode,
-        };
-
         SnapshotModeFields {
             bracketed_paste: self.internal.modes.bracketed_paste.clone(),
             mouse_tracking: self.internal.modes.mouse_tracking.clone(),
             mouse_encoding: self.internal.modes.mouse_encoding.clone(),
-            repeat_keys: self.internal.should_repeat_keys(),
-            cursor_key_app_mode: self.internal.get_cursor_key_mode() == Decckm::Application,
-            keypad_app_mode: self.internal.modes.keypad_mode == KeypadMode::Application,
+            repeat_keys: self.internal.modes.repeat_keys,
+            cursor_key_app_mode: self.internal.get_cursor_key_mode(),
+            keypad_app_mode: self.internal.modes.keypad_mode,
             skip_draw: self.internal.skip_draw_always(),
             modify_other_keys: self.internal.handler.modify_other_keys_level(),
             application_escape_key: self.internal.handler.application_escape_key(),
-            backarrow_sends_bs: self.internal.modes.backarrow_key_mode == Decbkm::BackarrowSendsBs,
-            alternate_scroll: self.internal.modes.alternate_scroll == AlternateScroll::Enabled,
+            backarrow_sends_bs: self.internal.modes.backarrow_key_mode,
+            alternate_scroll: self.internal.modes.alternate_scroll,
         }
     }
 

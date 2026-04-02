@@ -7,6 +7,10 @@ use freminal_common::buffer_states::{
     buffer_type::BufferType,
     cursor::{CursorPos, CursorState},
     format_tag::FormatTag,
+    modes::{
+        decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm,
+        reverse_wrap_around::ReverseWrapAround, xt_rev_wrap2::XtRevWrap2,
+    },
     tchar::TChar,
 };
 
@@ -18,7 +22,6 @@ use crate::{
 };
 
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct Buffer {
     /// All rows in this buffer: scrollback + visible region.
     /// In the primary buffer, this grows until `scrollback_limit` is hit.
@@ -69,12 +72,12 @@ pub struct Buffer {
     current_tag: FormatTag,
 
     /// LNM mode
-    lnm_enabled: bool,
+    lnm_enabled: Lnm,
 
     /// DECAWM — whether soft-wrapping is enabled.
-    /// `true` (default): text wraps at the terminal width.
-    /// `false`: text is clamped to the last column; overflow is discarded.
-    wrap_enabled: bool,
+    /// `AutoWrap` (default): text wraps at the terminal width.
+    /// `NoAutoWrap`: text is clamped to the last column; overflow is discarded.
+    wrap_enabled: Decawm,
 
     /// Preserve the scrollback anchor when resizing
     preserve_scrollback_anchor: bool,
@@ -91,9 +94,9 @@ pub struct Buffer {
     scroll_region_right: usize,
 
     /// Whether DECLRMM (`?69`) is currently enabled.
-    /// When false, `scroll_region_left`/`scroll_region_right` are ignored by
+    /// When disabled, `scroll_region_left`/`scroll_region_right` are ignored by
     /// all buffer operations that would otherwise respect them.
-    declrmm_enabled: bool,
+    declrmm_enabled: Declrmm,
 
     /// Tab stops as a boolean vector indexed by column.
     /// `tab_stops[c] == true` means column `c` is a tab stop.
@@ -102,7 +105,7 @@ pub struct Buffer {
 
     /// DECOM (Origin Mode) — when enabled, cursor addressing is relative
     /// to the scroll region top/bottom instead of the full screen.
-    decom_enabled: bool,
+    decom_enabled: Decom,
 
     /// Central storage for inline images.
     ///
@@ -167,16 +170,16 @@ impl Buffer {
             kind: BufferType::Primary,
             saved_primary: None,
             saved_cursor: None,
-            lnm_enabled: false,
-            wrap_enabled: true,
+            lnm_enabled: Lnm::LineFeed,
+            wrap_enabled: Decawm::AutoWrap,
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
             scroll_region_bottom: height.saturating_sub(1),
             scroll_region_left: 0,
             scroll_region_right: width.saturating_sub(1),
-            declrmm_enabled: false,
+            declrmm_enabled: Declrmm::Disabled,
             tab_stops: Self::default_tab_stops(width),
-            decom_enabled: false,
+            decom_enabled: Decom::NormalCursor,
             image_store: ImageStore::new(),
         }
     }
@@ -210,16 +213,16 @@ impl Buffer {
         self.kind = BufferType::Primary;
         self.saved_primary = None;
         self.saved_cursor = None;
-        self.lnm_enabled = false;
-        self.wrap_enabled = true;
+        self.lnm_enabled = Lnm::LineFeed;
+        self.wrap_enabled = Decawm::AutoWrap;
         self.preserve_scrollback_anchor = false;
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
         self.scroll_region_left = 0;
         self.scroll_region_right = self.width.saturating_sub(1);
-        self.declrmm_enabled = false;
+        self.declrmm_enabled = Declrmm::Disabled;
         self.tab_stops = Self::default_tab_stops(self.width);
-        self.decom_enabled = false;
+        self.decom_enabled = Decom::NormalCursor;
         self.image_store.clear();
     }
 
@@ -442,7 +445,7 @@ impl Buffer {
         // When DECLRMM is active the effective right wrap column is
         // scroll_region_right + 1; wrapping starts a new row at
         // scroll_region_left rather than column 0.
-        let (wrap_col, wrap_start_col) = if self.declrmm_enabled {
+        let (wrap_col, wrap_start_col) = if self.declrmm_enabled == Declrmm::Enabled {
             (self.scroll_region_right + 1, self.scroll_region_left)
         } else {
             (self.width, 0)
@@ -461,7 +464,7 @@ impl Buffer {
             // │ move to the next row as a soft-wrap row.    │
             // └─────────────────────────────────────────────┘
             if col >= wrap_col {
-                if !self.wrap_enabled {
+                if self.wrap_enabled == Decawm::NoAutoWrap {
                     // DECAWM NoAutoWrap: clamp cursor to last column and discard
                     // all remaining text.
                     self.cursor.pos.x = wrap_col.saturating_sub(1);
@@ -549,7 +552,7 @@ impl Buffer {
                     self.cursor.pos.x = final_col;
                     self.cursor.pos.y = row_idx;
 
-                    if !self.wrap_enabled {
+                    if self.wrap_enabled == Decawm::NoAutoWrap {
                         // DECAWM NoAutoWrap: clamp cursor to last column and discard
                         // the overflow — do not continue onto the next row.
                         self.cursor.pos.x = wrap_col.saturating_sub(1);
@@ -984,9 +987,9 @@ impl Buffer {
     ///   last column of the previous line (within the visible screen, or
     ///   into scrollback if `xt_rev_wrap2` is also true).
     /// - Never deletes characters.
-    pub fn handle_backspace(&mut self, reverse_wrap: bool, xt_rev_wrap2: bool) {
+    pub fn handle_backspace(&mut self, reverse_wrap: ReverseWrapAround, xt_rev_wrap2: XtRevWrap2) {
         if self.cursor.pos.x == 0 {
-            if !reverse_wrap {
+            if reverse_wrap == ReverseWrapAround::DontWrap {
                 return;
             }
             self.reverse_wrap_up(xt_rev_wrap2);
@@ -1027,14 +1030,14 @@ impl Buffer {
     /// If the cursor is already at the top of the visible screen and
     /// `into_scrollback` is true, the cursor enters the scrollback region.
     /// If at the top and `into_scrollback` is false, the cursor stays put.
-    fn reverse_wrap_up(&mut self, into_scrollback: bool) {
+    fn reverse_wrap_up(&mut self, into_scrollback: XtRevWrap2) {
         let visible_start = self.visible_window_start(0);
 
         if self.cursor.pos.y > visible_start {
             // Not at the top of the visible screen — wrap to previous row.
             self.cursor.pos.y -= 1;
             self.cursor.pos.x = self.width.saturating_sub(1);
-        } else if into_scrollback && self.cursor.pos.y > 0 {
+        } else if into_scrollback == XtRevWrap2::Enabled && self.cursor.pos.y > 0 {
             // At top of visible screen, but scrollback exists and
             // extended reverse-wrap is enabled.
             self.cursor.pos.y -= 1;
@@ -1152,7 +1155,7 @@ impl Buffer {
         match self.kind {
             BufferType::Primary => {
                 // LNM: CR implied
-                if self.lnm_enabled {
+                if self.lnm_enabled == Lnm::NewLine {
                     self.cursor.pos.x = 0;
                 }
 
@@ -1245,7 +1248,7 @@ impl Buffer {
 
             BufferType::Alternate => {
                 // (keep your existing Alternate LF unchanged)
-                if self.lnm_enabled {
+                if self.lnm_enabled == Lnm::NewLine {
                     self.cursor.pos.x = 0;
                 }
 
@@ -1277,7 +1280,7 @@ impl Buffer {
     pub fn handle_ind(&mut self) {
         // Temporarily disable LNM so `handle_lf` won't do CR.
         let old_lnm = self.lnm_enabled;
-        self.lnm_enabled = false;
+        self.lnm_enabled = Lnm::LineFeed;
         self.handle_lf();
         self.lnm_enabled = old_lnm;
     }
@@ -1352,7 +1355,7 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                if self.declrmm_enabled {
+                if self.declrmm_enabled == Declrmm::Enabled {
                     let (left, right) = (self.scroll_region_left, self.scroll_region_right);
                     for _ in 0..count {
                         self.scroll_slice_down_columns(y, self.scroll_region_bottom, left, right);
@@ -1377,7 +1380,7 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                if self.declrmm_enabled {
+                if self.declrmm_enabled == Declrmm::Enabled {
                     let (left, right) = (self.scroll_region_left, self.scroll_region_right);
                     for _ in 0..count {
                         self.scroll_slice_down_columns(row, b, left, right);
@@ -1411,7 +1414,7 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                if self.declrmm_enabled {
+                if self.declrmm_enabled == Declrmm::Enabled {
                     let (left, right) = (self.scroll_region_left, self.scroll_region_right);
                     for _ in 0..count {
                         self.scroll_slice_up_columns(y, self.scroll_region_bottom, left, right);
@@ -1436,7 +1439,7 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                if self.declrmm_enabled {
+                if self.declrmm_enabled == Declrmm::Enabled {
                     let (left, right) = (self.scroll_region_left, self.scroll_region_right);
                     for _ in 0..count {
                         self.scroll_slice_up_columns(row, b, left, right);
@@ -1489,7 +1492,7 @@ impl Buffer {
         }
 
         let tag = self.current_tag.clone();
-        if self.declrmm_enabled {
+        if self.declrmm_enabled == Declrmm::Enabled {
             // ICH: shift only within [col, scroll_region_right]; cells that
             // fall off the right margin are discarded.
             self.rows[row].insert_spaces_at_with_right_limit(
@@ -1526,7 +1529,7 @@ impl Buffer {
             return;
         }
 
-        if self.declrmm_enabled {
+        if self.declrmm_enabled == Declrmm::Enabled {
             self.rows[row].delete_cells_at_with_right_limit(
                 col,
                 n,
@@ -1560,7 +1563,7 @@ impl Buffer {
         }
 
         // Clamp erase count to right margin when DECLRMM is active.
-        let effective_n = if self.declrmm_enabled {
+        let effective_n = if self.declrmm_enabled == Declrmm::Enabled {
             let max_erase = self.scroll_region_right.saturating_sub(col) + 1;
             n.min(max_erase)
         } else {
@@ -1629,16 +1632,16 @@ impl Buffer {
     /// Enable or disable DECLRMM (`?69`).
     ///
     /// When disabled, left/right margins are also reset to full-screen.
-    pub const fn set_declrmm(&mut self, enabled: bool) {
-        self.declrmm_enabled = enabled;
-        if !enabled {
+    pub fn set_declrmm(&mut self, mode: Declrmm) {
+        self.declrmm_enabled = mode;
+        if self.declrmm_enabled == Declrmm::Disabled {
             self.reset_scroll_region_left_right();
         }
     }
 
-    /// Returns `true` if DECLRMM (`?69`) is currently active.
+    /// Returns the current DECLRMM (`?69`) state.
     #[must_use]
-    pub const fn is_declrmm_enabled(&self) -> bool {
+    pub const fn is_declrmm_enabled(&self) -> Declrmm {
         self.declrmm_enabled
     }
 
@@ -2062,7 +2065,7 @@ impl Buffer {
         // mode, or 0 = top of scroll region in DECOM mode).
         let new_buffer_y = match y {
             Some(row) => {
-                if self.decom_enabled {
+                if self.decom_enabled == Decom::OriginMode {
                     // DECOM: row is relative to scroll_region_top, clamped to
                     // the scroll region height.
                     let region_height = self
@@ -2099,7 +2102,7 @@ impl Buffer {
     pub fn move_cursor_relative(&mut self, dx: i32, dy: i32) {
         // When DECLRMM is active and moving horizontally, clamp to the
         // left/right margins if the cursor is currently within the margin zone.
-        let new_x = if self.declrmm_enabled && dx != 0 {
+        let new_x = if self.declrmm_enabled == Declrmm::Enabled && dx != 0 {
             let cx = self.cursor.pos.x;
             if cx >= self.scroll_region_left && cx <= self.scroll_region_right {
                 // Cursor is inside the margin zone: clamp to [left, right].
@@ -2618,30 +2621,30 @@ impl Buffer {
 
     /// Set whether Line Feed Mode (LNM) is enabled.
     ///
-    /// `true`: LF behaves like CRLF (cursor moves to column 0 on line feed).
-    /// `false` (default): LF only advances the row; column is unchanged.
-    pub const fn set_lnm(&mut self, enabled: bool) {
-        self.lnm_enabled = enabled;
+    /// `Lnm::NewLine`: LF behaves like CRLF (cursor moves to column 0 on line feed).
+    /// `Lnm::LineFeed` (default): LF only advances the row; column is unchanged.
+    pub const fn set_lnm(&mut self, mode: Lnm) {
+        self.lnm_enabled = mode;
     }
 
     /// Return whether Line Feed Mode is currently enabled.
     #[must_use]
-    pub const fn is_lnm_enabled(&self) -> bool {
+    pub const fn is_lnm_enabled(&self) -> Lnm {
         self.lnm_enabled
     }
 
     /// Set whether soft-wrapping is enabled (DECAWM).
     ///
-    /// `true` (default): text wraps at the terminal width onto the next row.
-    /// `false`: text is clamped to the last column; any characters that would
+    /// `Decawm::AutoWrap` (default): text wraps at the terminal width onto the next row.
+    /// `Decawm::NoAutoWrap`: text is clamped to the last column; any characters that would
     /// overflow the current row are discarded.
-    pub const fn set_wrap(&mut self, enabled: bool) {
-        self.wrap_enabled = enabled;
+    pub const fn set_wrap(&mut self, mode: Decawm) {
+        self.wrap_enabled = mode;
     }
 
     /// Return whether soft-wrapping is currently enabled.
     #[must_use]
-    pub const fn is_wrap_enabled(&self) -> bool {
+    pub const fn is_wrap_enabled(&self) -> Decawm {
         self.wrap_enabled
     }
 
@@ -2652,8 +2655,8 @@ impl Buffer {
     /// Cursor movement is also constrained to the scroll region boundaries.
     ///
     /// Per DEC spec: enabling or disabling DECOM homes the cursor.
-    pub fn set_decom(&mut self, enabled: bool) {
-        self.decom_enabled = enabled;
+    pub fn set_decom(&mut self, mode: Decom) {
+        self.decom_enabled = mode;
         // DEC spec: changing DECOM homes the cursor to position (1,1) in the
         // current addressing mode.  With `set_cursor_pos` already DECOM-aware,
         // passing (0, 0) does the right thing for both modes.
@@ -2662,7 +2665,7 @@ impl Buffer {
 
     /// Return whether DECOM (Origin Mode) is currently enabled.
     #[must_use]
-    pub const fn is_decom_enabled(&self) -> bool {
+    pub const fn is_decom_enabled(&self) -> Decom {
         self.decom_enabled
     }
 
@@ -2688,7 +2691,7 @@ impl Buffer {
         self.scroll_region_bottom = self.height.saturating_sub(1);
 
         // Reset DECOM without the cursor-home side effect (we home below).
-        self.decom_enabled = false;
+        self.decom_enabled = Decom::NormalCursor;
 
         // Home cursor.
         self.set_cursor_pos(Some(0), Some(0));
@@ -3922,7 +3925,7 @@ mod pty_behavior_tests {
     #[test]
     fn lnm_enabled_lf_behaves_like_crlf() {
         let mut buf = Buffer::new(20, 100);
-        buf.lnm_enabled = true;
+        buf.lnm_enabled = Lnm::NewLine;
 
         buf.insert_text(&to_tchars("hello"));
         buf.cursor.pos.x = 5;
@@ -4128,17 +4131,17 @@ mod backspace_tests {
         buf.insert_text(&"abc".chars().map(TChar::from).collect::<Vec<_>>());
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 2);
 
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 1);
 
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // stays at 0
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
@@ -4155,16 +4158,16 @@ mod backspace_tests {
         // "b" (col 3)
         assert_eq!(buf.cursor.pos.x, 4);
 
-        buf.handle_backspace(false, false); // over b → x=3
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // over b → x=3
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace(false, false); // over wide glyph (continuation cell)
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // over wide glyph (continuation cell)
         assert_eq!(buf.cursor.pos.x, 1);
 
-        buf.handle_backspace(false, false); // over 'a'
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // over 'a'
         assert_eq!(buf.cursor.pos.x, 0);
 
-        buf.handle_backspace(false, false); // can't go lower
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // can't go lower
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
@@ -4180,12 +4183,12 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.x, 1);
 
         // backspace never moves Y (without reverse wrap)
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // at col 0 → stays there
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
     }
@@ -4205,12 +4208,12 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.x, 1);
 
         // Move to col 0
-        buf.handle_backspace(true, false);
+        buf.handle_backspace(ReverseWrapAround::WrapAround, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // With reverse_wrap=true, at col 0 → wraps to last col of row 0
-        buf.handle_backspace(true, false);
+        buf.handle_backspace(ReverseWrapAround::WrapAround, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, 0);
         assert_eq!(buf.cursor.pos.x, 9); // last column (width - 1)
     }
@@ -4224,7 +4227,7 @@ mod backspace_tests {
         buf.cursor.pos.y = 0;
 
         // reverse_wrap is on but no row above → stays put
-        buf.handle_backspace(true, false);
+        buf.handle_backspace(ReverseWrapAround::WrapAround, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, 0);
         assert_eq!(buf.cursor.pos.x, 0);
     }
@@ -4241,7 +4244,7 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.y, 1);
 
         // reverse_wrap=false → stays at col 0
-        buf.handle_backspace(false, false);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
     }
@@ -4271,12 +4274,12 @@ mod backspace_tests {
         buf.cursor.pos.x = 0;
 
         // Without xt_rev_wrap2: stays put at top of visible screen
-        buf.handle_backspace(true, false);
+        buf.handle_backspace(ReverseWrapAround::WrapAround, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.y, vis_start);
         assert_eq!(buf.cursor.pos.x, 0);
 
         // With xt_rev_wrap2=true: wraps into scrollback
-        buf.handle_backspace(true, true);
+        buf.handle_backspace(ReverseWrapAround::WrapAround, XtRevWrap2::Enabled);
         assert_eq!(buf.cursor.pos.y, vis_start - 1);
         assert_eq!(buf.cursor.pos.x, 9); // last column
     }
@@ -4292,7 +4295,7 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.y, 1);
 
         // reverse_wrap=false, xt_rev_wrap2=true → no wrap (reverse_wrap gate is checked first)
-        buf.handle_backspace(false, true);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Enabled);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
     }
@@ -6378,7 +6381,7 @@ mod declrmm_tests {
     /// Create a 10-wide, 5-tall buffer with DECLRMM enabled and margins [2, 7].
     fn buf_with_margins() -> Buffer {
         let mut buf = Buffer::new(10, 5);
-        buf.set_declrmm(true);
+        buf.set_declrmm(Declrmm::Enabled);
         buf.set_left_right_margins(3, 8); // 1-based: cols 3..8 → 0-based: 2..7
         buf
     }
@@ -6392,7 +6395,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(start_col), Some(0));
         buf.insert_text(&text(content));
         // Now enable DECLRMM + margins; set_left_right_margins homes cursor.
-        buf.set_declrmm(true);
+        buf.set_declrmm(Declrmm::Enabled);
         buf.set_left_right_margins(3, 8); // 1-based → 0-based [2, 7]
         buf
     }
@@ -6402,20 +6405,20 @@ mod declrmm_tests {
     #[test]
     fn set_declrmm_enables_mode() {
         let mut buf = Buffer::new(10, 5);
-        assert!(!buf.is_declrmm_enabled());
-        buf.set_declrmm(true);
-        assert!(buf.is_declrmm_enabled());
+        assert_eq!(buf.is_declrmm_enabled(), Declrmm::Disabled);
+        buf.set_declrmm(Declrmm::Enabled);
+        assert_eq!(buf.is_declrmm_enabled(), Declrmm::Enabled);
     }
 
     #[test]
     fn set_declrmm_false_resets_margins() {
         let mut buf = Buffer::new(10, 5);
-        buf.set_declrmm(true);
+        buf.set_declrmm(Declrmm::Enabled);
         buf.set_left_right_margins(3, 8); // 0-based: 2..7
         assert_eq!(buf.left_right_margins(), (2, 7));
 
-        buf.set_declrmm(false);
-        assert!(!buf.is_declrmm_enabled());
+        buf.set_declrmm(Declrmm::Disabled);
+        assert_eq!(buf.is_declrmm_enabled(), Declrmm::Disabled);
         // Margins should be reset to full width.
         assert_eq!(buf.left_right_margins(), (0, 9));
     }
@@ -6425,7 +6428,7 @@ mod declrmm_tests {
     #[test]
     fn set_margins_valid() {
         let mut buf = Buffer::new(10, 5);
-        buf.set_declrmm(true);
+        buf.set_declrmm(Declrmm::Enabled);
         buf.set_left_right_margins(2, 8); // 0-based: 1..7
         assert_eq!(buf.left_right_margins(), (1, 7));
         // Cursor homed to (0, 0).
@@ -6435,7 +6438,7 @@ mod declrmm_tests {
     #[test]
     fn set_margins_invalid_left_ge_right_resets() {
         let mut buf = Buffer::new(10, 5);
-        buf.set_declrmm(true);
+        buf.set_declrmm(Declrmm::Enabled);
         buf.set_left_right_margins(5, 5); // left == right → invalid
         assert_eq!(buf.left_right_margins(), (0, 9));
     }
@@ -6443,7 +6446,7 @@ mod declrmm_tests {
     #[test]
     fn set_margins_right_beyond_width_resets() {
         let mut buf = Buffer::new(10, 5);
-        buf.set_declrmm(true);
+        buf.set_declrmm(Declrmm::Enabled);
         buf.set_left_right_margins(1, 11); // right >= width → invalid
         assert_eq!(buf.left_right_margins(), (0, 9));
     }
@@ -6616,9 +6619,9 @@ mod declrmm_tests {
     #[test]
     fn full_reset_clears_declrmm() {
         let mut buf = buf_with_margins();
-        assert!(buf.is_declrmm_enabled());
+        assert_eq!(buf.is_declrmm_enabled(), Declrmm::Enabled);
         buf.full_reset();
-        assert!(!buf.is_declrmm_enabled());
+        assert_eq!(buf.is_declrmm_enabled(), Declrmm::Disabled);
         assert_eq!(buf.left_right_margins(), (0, 9));
     }
 }

@@ -17,7 +17,7 @@ use super::ReportMode;
 ///   VT340 16-color palette (current behavior, default).
 /// - **Reset** (`CSI ? 1070 l`): Shared — palette changes in one image persist
 ///   into subsequent images.
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum PrivateColorRegisters {
     /// Set: Each Sixel image uses its own private palette (default).
     #[default]

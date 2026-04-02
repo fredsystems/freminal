@@ -14,7 +14,7 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 /// wraparound) to also be set for any reverse wrapping to occur.
 ///
 /// Default: reset (disabled).
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum XtRevWrap2 {
     /// Mode is set — allow reverse-wrap into scrollback.
     Enabled,

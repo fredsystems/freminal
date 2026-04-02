@@ -10,7 +10,7 @@ use crate::buffer_states::mode::SetMode;
 use super::ReportMode;
 
 /// Show cursor (DECTCEM) ?40
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum AllowColumnModeSwitch {
     #[default]
     /// Normal (Set) Mode

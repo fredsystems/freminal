@@ -11,6 +11,11 @@
 
 use std::borrow::Cow;
 
+use freminal_common::buffer_states::modes::{
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
+    keypad::KeypadMode,
+};
+
 const fn char_to_ctrl_code(c: u8) -> u8 {
     // https://catern.com/posts/terminal_quirks.html
     // man ascii
@@ -154,14 +159,14 @@ pub enum TerminalInput {
 
 impl TerminalInput {
     #[must_use]
-    #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
+    #[allow(clippy::too_many_lines)]
     pub fn to_payload(
         &self,
-        decckm_mode: bool,
-        keypad_mode: bool,
+        decckm_mode: Decckm,
+        keypad_mode: KeypadMode,
         modify_other_keys: u8,
-        application_escape_key: bool,
-        backarrow_sends_bs: bool,
+        application_escape_key: ApplicationEscapeKey,
+        backarrow_sends_bs: Decbkm,
     ) -> TerminalInputPayload {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
@@ -185,7 +190,7 @@ impl TerminalInput {
             Self::LineFeed => TerminalInputPayload::Single(b'\n'),
             // DECBKM (?67): set → BS (0x08), reset → DEL (0x7F).
             Self::Backspace => {
-                if backarrow_sends_bs {
+                if backarrow_sends_bs == Decbkm::BackarrowSendsBs {
                     TerminalInputPayload::Single(char_to_ctrl_code(b'H'))
                 } else {
                     TerminalInputPayload::Single(0x7F)
@@ -195,7 +200,7 @@ impl TerminalInput {
                 // Mode 7727 (Application Escape Key): send CSI 27 ; 1 ; 27 ~
                 // instead of bare ESC so tmux can instantly distinguish the
                 // Escape key from the start of an escape sequence.
-                if application_escape_key {
+                if application_escape_key == ApplicationEscapeKey::Set {
                     TerminalInputPayload::Owned(b"\x1b[27;1;27~".to_vec())
                 } else {
                     TerminalInputPayload::Single(0x1b)
@@ -208,36 +213,36 @@ impl TerminalInput {
             // DECCKM mode — xterm convention.
             Self::ArrowRight(mods) => match mods.modifier_param() {
                 Some(m) => modified_csi_final(m, b'C'),
-                None if decckm_mode => TerminalInputPayload::Many(b"\x1bOC"),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOC"),
                 None => TerminalInputPayload::Many(b"\x1b[C"),
             },
             Self::ArrowLeft(mods) => match mods.modifier_param() {
                 Some(m) => modified_csi_final(m, b'D'),
-                None if decckm_mode => TerminalInputPayload::Many(b"\x1bOD"),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOD"),
                 None => TerminalInputPayload::Many(b"\x1b[D"),
             },
             Self::ArrowUp(mods) => match mods.modifier_param() {
                 Some(m) => modified_csi_final(m, b'A'),
-                None if decckm_mode => TerminalInputPayload::Many(b"\x1bOA"),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOA"),
                 None => TerminalInputPayload::Many(b"\x1b[A"),
             },
             Self::ArrowDown(mods) => match mods.modifier_param() {
                 Some(m) => modified_csi_final(m, b'B'),
-                None if decckm_mode => TerminalInputPayload::Many(b"\x1bOB"),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOB"),
                 None => TerminalInputPayload::Many(b"\x1b[B"),
             },
             Self::Home(mods) => match mods.modifier_param() {
                 Some(m) => modified_csi_final(m, b'H'),
-                None if decckm_mode => TerminalInputPayload::Many(b"\x1bOH"),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOH"),
                 None => TerminalInputPayload::Many(b"\x1b[H"),
             },
             Self::End(mods) => match mods.modifier_param() {
                 Some(m) => modified_csi_final(m, b'F'),
-                None if decckm_mode => TerminalInputPayload::Many(b"\x1bOF"),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOF"),
                 None => TerminalInputPayload::Many(b"\x1b[F"),
             },
             Self::KeyPad(c) => {
-                if keypad_mode {
+                if keypad_mode == KeypadMode::Numeric {
                     TerminalInputPayload::Single(*c)
                 } else {
                     match c {

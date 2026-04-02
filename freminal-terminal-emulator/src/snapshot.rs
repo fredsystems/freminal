@@ -20,6 +20,12 @@ use freminal_common::{
         format_tag::FormatTag,
         ftcs::FtcsState,
         modes::{
+            alternate_scroll::AlternateScroll,
+            application_escape_key::ApplicationEscapeKey,
+            decarm::Decarm,
+            decbkm::Decbkm,
+            decckm::Decckm,
+            keypad::KeypadMode,
             mouse::{MouseEncoding, MouseTrack},
             rl_bracket::RlBracket,
         },
@@ -59,7 +65,7 @@ pub struct PlaybackInfo {
 /// `visible_chars` and `visible_tags` are wrapped in `Arc` so that cloning a
 /// snapshot (or handing the same content to a second snapshot on the clean
 /// path) is a cheap atomic refcount increment rather than a full `Vec` copy.
-#[allow(clippy::struct_excessive_bools)] // Four independent semantic flags; enums would add noise
+#[allow(clippy::struct_excessive_bools)] // Seven independent rendering/bookkeeping bools; enums would add noise
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {
     /// Flattened visible character content, already converted from `Row`/`Cell`.
@@ -166,20 +172,20 @@ pub struct TerminalSnapshot {
     pub mouse_encoding: MouseEncoding,
 
     /// Whether the terminal should repeat key-press events while a key is held.
-    pub repeat_keys: bool,
+    pub repeat_keys: Decarm,
 
-    /// Whether the cursor key is in application mode (`DECCKM`).
+    /// Cursor key mode (`DECCKM`).
     ///
     /// Needed by the GUI to encode arrow / home / end keys correctly without
     /// consulting the emulator.
-    pub cursor_key_app_mode: bool,
+    pub cursor_key_app_mode: Decckm,
 
-    /// Whether the keypad is in application mode (`DECPAM`).
+    /// Keypad mode (`DECPAM` / `DECPNM`).
     ///
     /// Needed by the GUI to encode keypad key presses correctly: application
     /// mode sends escape sequences (`ESC O …`) while numeric mode sends the
     /// literal digit/operator character.
-    pub keypad_app_mode: bool,
+    pub keypad_app_mode: KeypadMode,
 
     /// Whether the terminal has requested that rendering be suppressed
     /// (Synchronized Output / `DEC 2026`).
@@ -200,21 +206,20 @@ pub struct TerminalSnapshot {
     /// (unambiguous CSI format) instead of bare `ESC` (`0x1b`), allowing
     /// tmux to instantly distinguish the Escape key from the start of an
     /// escape sequence.
-    pub application_escape_key: bool,
+    pub application_escape_key: ApplicationEscapeKey,
 
-    /// Whether the Backspace key sends BS (0x08) or DEL (0x7F).
+    /// Backarrow key mode (`DECBKM` / `?67`).
     ///
-    /// Controlled by DECBKM (`?67`): `true` when set (BS), `false` when
-    /// reset (DEL).  Default is `true` (BS).
-    pub backarrow_sends_bs: bool,
+    /// Controls whether the Backspace key sends BS (0x08) or DEL (0x7F).
+    pub backarrow_sends_bs: Decbkm,
 
-    /// Whether alternate scroll mode (`?1007`) is enabled.
+    /// Alternate scroll mode (`?1007`).
     ///
-    /// When `true` and the alternate screen is active, mouse scroll-wheel
+    /// When enabled and the alternate screen is active, mouse scroll-wheel
     /// events are translated into arrow-key sequences sent to the PTY.
-    /// When `false`, scroll events on the alternate screen are ignored
+    /// When disabled, scroll events on the alternate screen are ignored
     /// (unless mouse tracking is active).
-    pub alternate_scroll: bool,
+    pub alternate_scroll: AlternateScroll,
 
     /// Current working directory reported by the shell via OSC 7, if any.
     ///
@@ -297,14 +302,14 @@ impl TerminalSnapshot {
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
             mouse_encoding: MouseEncoding::default(),
-            repeat_keys: true,
-            cursor_key_app_mode: false,
-            keypad_app_mode: false,
+            repeat_keys: Decarm::RepeatKey,
+            cursor_key_app_mode: Decckm::Ansi,
+            keypad_app_mode: KeypadMode::Numeric,
             skip_draw: false,
             modify_other_keys: 0,
-            application_escape_key: false,
-            backarrow_sends_bs: true,
-            alternate_scroll: false,
+            application_escape_key: ApplicationEscapeKey::Reset,
+            backarrow_sends_bs: Decbkm::BackarrowSendsBs,
+            alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
@@ -327,8 +332,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_application_escape_key_is_false() {
-        assert!(!TerminalSnapshot::empty().application_escape_key);
+    fn empty_application_escape_key_is_reset() {
+        assert!(TerminalSnapshot::empty().application_escape_key == ApplicationEscapeKey::Reset);
     }
 
     #[test]

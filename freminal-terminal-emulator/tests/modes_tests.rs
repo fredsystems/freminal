@@ -61,7 +61,7 @@ fn display_and_debug_match_expected_strings() {
 #[test]
 fn equality_and_clone_semantics() {
     let a = Decawm::AutoWrap;
-    let b = a.clone();
+    let b = a;
     assert_eq!(a, b);
     assert_ne!(a, Decawm::NoAutoWrap);
 }

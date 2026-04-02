@@ -16,7 +16,7 @@ use super::ReportMode;
 ///   image (image overwrites in-place).
 /// - **Reset** (`CSI ? 80 l`): Scrolling Mode (default) — cursor advances below
 ///   the image, scrolling if needed.
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decsdm {
     /// Set: Display Mode — no cursor advancement after Sixel placement.
     DisplayMode,

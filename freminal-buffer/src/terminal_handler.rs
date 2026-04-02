@@ -114,7 +114,6 @@ struct PrevPlaceholder {
 /// It receives parsed terminal sequences (via a TerminalOutput-like enum) and updates
 /// the buffer state accordingly.
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalHandler {
     buffer: Buffer,
     current_format: FormatTag,
@@ -142,12 +141,12 @@ pub struct TerminalHandler {
     palette: ColorPalette,
     /// Whether DECCOLM (132-column mode switching) is allowed.
     /// Controlled by `CSI?40h` / `CSI?40l` (`AllowColumnModeSwitch`).
-    allow_column_mode_switch: bool,
+    allow_column_mode_switch: AllowColumnModeSwitch,
     /// Whether alternate screen switching is allowed (`?1046`).
     ///
-    /// When `false`, `?47`/`?1047`/`?1049` Set/Reset are silently ignored.
-    /// Default is `true` (allowed).
-    allow_alt_screen: bool,
+    /// When `Disallow`, `?47`/`?1047`/`?1049` Set/Reset are silently ignored.
+    /// Default is `Allow` (allowed).
+    allow_alt_screen: AllowAltScreen,
     /// The terminal width before DECCOLM was activated.
     ///
     /// Saved when `CSI?3h` (132-column mode) is received so that `CSI?3l`
@@ -232,39 +231,39 @@ pub struct TerminalHandler {
     /// When set, pressing Escape sends `CSI 27 ; 1 ; 27 ~` instead of bare
     /// `ESC` (`0x1b`), allowing tmux to instantly distinguish the Escape key
     /// from the start of an escape sequence.
-    application_escape_key: bool,
+    application_escape_key: ApplicationEscapeKey,
     /// Whether Sixel Display Mode (DECSDM `?80`) is active.
     ///
     /// When set (`CSI ? 80 h`), Sixel images are placed at the cursor position
     /// but the cursor does NOT advance past the image.
     /// When reset (`CSI ? 80 l`, the default), the cursor advances below the
     /// image after placement (scrolling mode).
-    sixel_display_mode: bool,
+    sixel_display_mode: Decsdm,
     /// Whether each Sixel image uses a private (independent) color register
     /// set (`?1070 h`, default) or all images share a single persistent
     /// palette (`?1070 l`).
-    private_color_registers: bool,
+    private_color_registers: PrivateColorRegisters,
     /// Whether DECNRCM (National Replacement Character Set Mode, `?42`) is
-    /// active. When `true`, character set designations map specific ASCII
-    /// positions to national characters. Default is `false` (disabled).
-    nrc_mode: bool,
+    /// active. When `NrcEnabled`, character set designations map specific ASCII
+    /// positions to national characters. Default is `NrcDisabled`.
+    nrc_mode: Decnrcm,
     /// Whether reverse-wraparound (`?45`) is active.
     ///
-    /// When set, the cursor can wrap backwards from column 0 to the end
+    /// When `WrapAround`, the cursor can wrap backwards from column 0 to the end
     /// of the previous line within the visible screen.
-    /// Default is `true` (enabled) — matches xterm's default.
-    reverse_wrap: bool,
+    /// Default is `WrapAround` (enabled) — matches xterm's default.
+    reverse_wrap: ReverseWrapAround,
     /// Whether extended reverse-wraparound (`?1045`) is active.
     ///
-    /// When set (and `?45` is also set), the cursor can wrap backwards
+    /// When `Enabled` (and `?45` is also set), the cursor can wrap backwards
     /// past row 0 of the visible screen into the scrollback buffer.
-    /// Default is `false` (disabled).
-    xt_rev_wrap2: bool,
+    /// Default is `Disabled`.
+    xt_rev_wrap2: XtRevWrap2,
     /// Whether the terminal is in VT52 compatibility mode (`?2 reset`).
     ///
-    /// When `true`, the parser uses the reduced VT52 escape set.
-    /// Default is `false` (ANSI mode).
-    vt52_mode: bool,
+    /// When `Vt52`, the parser uses the reduced VT52 escape set.
+    /// Default is `Ansi` mode.
+    vt52_mode: Decanm,
     /// The persistent Sixel palette used when `private_color_registers` is
     /// `false` (shared mode, `?1070 l`).  Palette changes in one image carry
     /// over to the next.  `None` when private mode is active; populated the
@@ -290,8 +289,8 @@ impl TerminalHandler {
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
             palette: ColorPalette::default(),
-            allow_column_mode_switch: true,
-            allow_alt_screen: true,
+            allow_column_mode_switch: AllowColumnModeSwitch::AllowColumnModeSwitch,
+            allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             fg_color_override: None,
@@ -306,13 +305,13 @@ impl TerminalHandler {
             tmux_reparse_queue: Vec::new(),
             in_tmux_passthrough: false,
             modify_other_keys_level: 0,
-            application_escape_key: false,
-            sixel_display_mode: false,
-            private_color_registers: true,
-            nrc_mode: false,
-            reverse_wrap: true,
-            xt_rev_wrap2: false,
-            vt52_mode: false,
+            application_escape_key: ApplicationEscapeKey::Reset,
+            sixel_display_mode: Decsdm::ScrollingMode,
+            private_color_registers: PrivateColorRegisters::Private,
+            nrc_mode: Decnrcm::NrcDisabled,
+            reverse_wrap: ReverseWrapAround::WrapAround,
+            xt_rev_wrap2: XtRevWrap2::Disabled,
+            vt52_mode: Decanm::Ansi,
             sixel_shared_palette: None,
         }
     }
@@ -374,11 +373,11 @@ impl TerminalHandler {
         self.fg_color_override = None;
         self.bg_color_override = None;
         self.cursor_color_override = None;
-        self.allow_column_mode_switch = true;
+        self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
         self.virtual_placements.clear();
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
-        self.application_escape_key = false;
+        self.application_escape_key = ApplicationEscapeKey::Reset;
     }
 
     /// Get a reference to the underlying buffer
@@ -756,7 +755,7 @@ impl TerminalHandler {
     /// `left` and `right` are **1-based inclusive** column numbers as delivered
     /// by the parser.  Only effective when DECLRMM (`?69`) is active.
     pub fn handle_set_left_right_margins(&mut self, left: usize, right: usize) {
-        if self.buffer.is_declrmm_enabled() {
+        if self.buffer.is_declrmm_enabled() == Declrmm::Enabled {
             self.buffer.set_left_right_margins(left, right);
         }
     }
@@ -833,8 +832,8 @@ impl TerminalHandler {
     }
 
     /// Handle DECAWM — enable or disable soft-wrapping.
-    pub const fn handle_set_wrap(&mut self, enabled: bool) {
-        self.buffer.set_wrap(enabled);
+    pub const fn handle_set_wrap(&mut self, mode: Decawm) {
+        self.buffer.set_wrap(mode);
     }
 
     /// Return `true` when the cursor should be painted.
@@ -887,8 +886,8 @@ impl TerminalHandler {
     }
 
     /// Handle LNM — enable or disable Line Feed Mode.
-    pub const fn handle_set_lnm(&mut self, enabled: bool) {
-        self.buffer.set_lnm(enabled);
+    pub const fn handle_set_lnm(&mut self, mode: Lnm) {
+        self.buffer.set_lnm(mode);
     }
 
     /// Set the PTY write channel.  Once set, responses such as CPR and DA1
@@ -932,9 +931,9 @@ impl TerminalHandler {
         self.modify_other_keys_level
     }
 
-    /// Return whether Application Escape Key mode (`?7727`) is active.
+    /// Return the Application Escape Key mode (`?7727`) state.
     #[must_use]
-    pub const fn application_escape_key(&self) -> bool {
+    pub const fn application_escape_key(&self) -> ApplicationEscapeKey {
         self.application_escape_key
     }
 
@@ -1519,7 +1518,7 @@ impl TerminalHandler {
             default_sixel_palette, parse_sixel, parse_sixel_with_shared_palette,
         };
 
-        let sixel_image = if self.private_color_registers {
+        let sixel_image = if self.private_color_registers == PrivateColorRegisters::Private {
             // Private mode (default): each image gets the default palette.
             let Some(img) = parse_sixel(inner) else {
                 tracing::warn!("Sixel: failed to decode image from DCS payload");
@@ -1575,7 +1574,7 @@ impl TerminalHandler {
         // In DECSDM display mode (?80 h), the cursor does not advance past
         // the image.  Save the cursor position so we can restore it after
         // place_image (which always moves the cursor below the image).
-        let saved_cursor = if self.sixel_display_mode {
+        let saved_cursor = if self.sixel_display_mode == Decsdm::DisplayMode {
             Some(self.buffer.get_cursor().pos)
         } else {
             None
@@ -2589,7 +2588,7 @@ impl TerminalHandler {
     pub fn handle_cursor_report(&mut self) {
         let screen_pos = self.buffer.get_cursor_screen_pos();
         let x = screen_pos.x + 1;
-        let y = if self.buffer.is_decom_enabled() {
+        let y = if self.buffer.is_decom_enabled() == Decom::OriginMode {
             let (region_top, _) = self.buffer.scroll_region();
             screen_pos.y.saturating_sub(region_top) + 1
         } else {
@@ -2615,7 +2614,7 @@ impl TerminalHandler {
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
-        if self.vt52_mode {
+        if self.vt52_mode == Decanm::Vt52 {
             // VT52 identify response: ESC / Z
             self.write_to_pty("\x1b/Z");
         } else {
@@ -3379,12 +3378,12 @@ impl TerminalHandler {
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate)
                 | Mode::AltScreen47(AltScreen47::Alternate) => {
-                    if self.allow_alt_screen {
+                    if self.allow_alt_screen == AllowAltScreen::Allow {
                         self.handle_enter_alternate();
                     }
                 }
                 Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary) => {
-                    if self.allow_alt_screen {
+                    if self.allow_alt_screen == AllowAltScreen::Allow {
                         self.handle_leave_alternate();
                     }
                 }
@@ -3396,7 +3395,7 @@ impl TerminalHandler {
                     self.write_to_pty(&current.report(None));
                 }
                 Mode::Decawm(Decawm::Query) => {
-                    let mode = if self.buffer.is_wrap_enabled() {
+                    let mode = if self.buffer.is_wrap_enabled() == Decawm::AutoWrap {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3404,7 +3403,7 @@ impl TerminalHandler {
                     self.write_to_pty(&Decawm::AutoWrap.report(Some(mode)));
                 }
                 Mode::LineFeedMode(Lnm::Query) => {
-                    let mode = if self.buffer.is_lnm_enabled() {
+                    let mode = if self.buffer.is_lnm_enabled() == Lnm::NewLine {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3457,17 +3456,17 @@ impl TerminalHandler {
                     tracing::warn!("DECRQM: unknown mode ?{digits}, responding not recognized");
                     self.write_to_pty(&format!("\x1b[?{digits};0$y"));
                 }
-                Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(true),
-                Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(false),
-                Mode::LineFeedMode(Lnm::NewLine) => self.handle_set_lnm(true),
-                Mode::LineFeedMode(Lnm::LineFeed) => self.handle_set_lnm(false),
+                Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(Decawm::AutoWrap),
+                Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(Decawm::NoAutoWrap),
+                Mode::LineFeedMode(Lnm::NewLine) => self.handle_set_lnm(Lnm::NewLine),
+                Mode::LineFeedMode(Lnm::LineFeed) => self.handle_set_lnm(Lnm::LineFeed),
                 Mode::Dectem(Dectcem::Show) => self.show_cursor = Dectcem::Show,
                 Mode::Dectem(Dectcem::Hide) => self.show_cursor = Dectcem::Hide,
                 Mode::XtCBlink(blink) => self.apply_xtcblink(blink),
-                Mode::Decom(Decom::OriginMode) => self.buffer.set_decom(true),
-                Mode::Decom(Decom::NormalCursor) => self.buffer.set_decom(false),
+                Mode::Decom(Decom::OriginMode) => self.buffer.set_decom(Decom::OriginMode),
+                Mode::Decom(Decom::NormalCursor) => self.buffer.set_decom(Decom::NormalCursor),
                 Mode::Decom(Decom::Query) => {
-                    let mode = if self.buffer.is_decom_enabled() {
+                    let mode = if self.buffer.is_decom_enabled() == Decom::OriginMode {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3475,7 +3474,8 @@ impl TerminalHandler {
                     self.write_to_pty(&Decom::OriginMode.report(Some(mode)));
                 }
                 Mode::Deccolm(Deccolm::Column132) => {
-                    if self.allow_column_mode_switch {
+                    if self.allow_column_mode_switch == AllowColumnModeSwitch::AllowColumnModeSwitch
+                    {
                         // Save the current width so CSI?3l can restore it
                         // instead of hardcoding 80.
                         if self.pre_deccolm_width.is_none() {
@@ -3486,7 +3486,8 @@ impl TerminalHandler {
                     }
                 }
                 Mode::Deccolm(Deccolm::Column80) => {
-                    if self.allow_column_mode_switch {
+                    if self.allow_column_mode_switch == AllowColumnModeSwitch::AllowColumnModeSwitch
+                    {
                         // Restore the pre-DECCOLM width (falls back to 80 if
                         // no prior width was saved — e.g. CSI?3l without a
                         // preceding CSI?3h).
@@ -3506,14 +3507,14 @@ impl TerminalHandler {
                 }
                 // ── DECLRMM — Left/Right Margin Mode (?69) ───────
                 Mode::Declrmm(Declrmm::Enabled) => {
-                    self.buffer.set_declrmm(true);
+                    self.buffer.set_declrmm(Declrmm::Enabled);
                 }
                 Mode::Declrmm(Declrmm::Disabled) => {
-                    // set_declrmm(false) resets margins as a side effect.
-                    self.buffer.set_declrmm(false);
+                    // set_declrmm(Disabled) resets margins as a side effect.
+                    self.buffer.set_declrmm(Declrmm::Disabled);
                 }
                 Mode::Declrmm(Declrmm::Query) => {
-                    let mode = if self.buffer.is_declrmm_enabled() {
+                    let mode = if self.buffer.is_declrmm_enabled() == Declrmm::Enabled {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3521,13 +3522,15 @@ impl TerminalHandler {
                     self.write_to_pty(&Declrmm::Enabled.report(Some(mode)));
                 }
                 Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch) => {
-                    self.allow_column_mode_switch = true;
+                    self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
                 }
                 Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::NoAllowColumnModeSwitch) => {
-                    self.allow_column_mode_switch = false;
+                    self.allow_column_mode_switch = AllowColumnModeSwitch::NoAllowColumnModeSwitch;
                 }
                 Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::Query) => {
-                    let mode = if self.allow_column_mode_switch {
+                    let mode = if self.allow_column_mode_switch
+                        == AllowColumnModeSwitch::AllowColumnModeSwitch
+                    {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3538,13 +3541,13 @@ impl TerminalHandler {
                 }
                 // ── Sixel Display Mode (?80) ──────────────────────────
                 Mode::Decsdm(Decsdm::DisplayMode) => {
-                    self.sixel_display_mode = true;
+                    self.sixel_display_mode = Decsdm::DisplayMode;
                 }
                 Mode::Decsdm(Decsdm::ScrollingMode) => {
-                    self.sixel_display_mode = false;
+                    self.sixel_display_mode = Decsdm::ScrollingMode;
                 }
                 Mode::Decsdm(Decsdm::Query) => {
-                    let mode = if self.sixel_display_mode {
+                    let mode = if self.sixel_display_mode == Decsdm::DisplayMode {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3553,13 +3556,13 @@ impl TerminalHandler {
                 }
                 // ── Allow Alternate Screen Switching (?1046) ──────────
                 Mode::AllowAltScreen(AllowAltScreen::Allow) => {
-                    self.allow_alt_screen = true;
+                    self.allow_alt_screen = AllowAltScreen::Allow;
                 }
                 Mode::AllowAltScreen(AllowAltScreen::Disallow) => {
-                    self.allow_alt_screen = false;
+                    self.allow_alt_screen = AllowAltScreen::Disallow;
                 }
                 Mode::AllowAltScreen(AllowAltScreen::Query) => {
-                    let mode = if self.allow_alt_screen {
+                    let mode = if self.allow_alt_screen == AllowAltScreen::Allow {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3568,15 +3571,15 @@ impl TerminalHandler {
                 }
                 // ── Private Color Registers for Sixel (?1070) ────────
                 Mode::PrivateColorRegisters(PrivateColorRegisters::Private) => {
-                    self.private_color_registers = true;
+                    self.private_color_registers = PrivateColorRegisters::Private;
                     // Switching back to private mode discards the shared palette.
                     self.sixel_shared_palette = None;
                 }
                 Mode::PrivateColorRegisters(PrivateColorRegisters::Shared) => {
-                    self.private_color_registers = false;
+                    self.private_color_registers = PrivateColorRegisters::Shared;
                 }
                 Mode::PrivateColorRegisters(PrivateColorRegisters::Query) => {
-                    let mode = if self.private_color_registers {
+                    let mode = if self.private_color_registers == PrivateColorRegisters::Private {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3585,13 +3588,13 @@ impl TerminalHandler {
                 }
                 // ── DECNRCM — National Replacement Character Set (?42) ─
                 Mode::Decnrcm(Decnrcm::NrcEnabled) => {
-                    self.nrc_mode = true;
+                    self.nrc_mode = Decnrcm::NrcEnabled;
                 }
                 Mode::Decnrcm(Decnrcm::NrcDisabled) => {
-                    self.nrc_mode = false;
+                    self.nrc_mode = Decnrcm::NrcDisabled;
                 }
                 Mode::Decnrcm(Decnrcm::Query) => {
-                    let mode = if self.nrc_mode {
+                    let mode = if self.nrc_mode == Decnrcm::NrcEnabled {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3600,13 +3603,13 @@ impl TerminalHandler {
                 }
                 // ── Reverse Wrap Around (?45) ─────────────────────
                 Mode::ReverseWrapAround(ReverseWrapAround::WrapAround) => {
-                    self.reverse_wrap = true;
+                    self.reverse_wrap = ReverseWrapAround::WrapAround;
                 }
                 Mode::ReverseWrapAround(ReverseWrapAround::DontWrap) => {
-                    self.reverse_wrap = false;
+                    self.reverse_wrap = ReverseWrapAround::DontWrap;
                 }
                 Mode::ReverseWrapAround(ReverseWrapAround::Query) => {
-                    let mode = if self.reverse_wrap {
+                    let mode = if self.reverse_wrap == ReverseWrapAround::WrapAround {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3615,13 +3618,13 @@ impl TerminalHandler {
                 }
                 // ── Extended Reverse Wrap (?1045) ─────────────────
                 Mode::XtRevWrap2(XtRevWrap2::Enabled) => {
-                    self.xt_rev_wrap2 = true;
+                    self.xt_rev_wrap2 = XtRevWrap2::Enabled;
                 }
                 Mode::XtRevWrap2(XtRevWrap2::Disabled) => {
-                    self.xt_rev_wrap2 = false;
+                    self.xt_rev_wrap2 = XtRevWrap2::Disabled;
                 }
                 Mode::XtRevWrap2(XtRevWrap2::Query) => {
-                    let mode = if self.xt_rev_wrap2 {
+                    let mode = if self.xt_rev_wrap2 == XtRevWrap2::Enabled {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -3630,13 +3633,13 @@ impl TerminalHandler {
                 }
                 // ── DECANM — ANSI/VT52 Mode (?2) ─────────────────
                 Mode::Decanm(Decanm::Vt52) => {
-                    self.vt52_mode = true;
+                    self.vt52_mode = Decanm::Vt52;
                 }
                 Mode::Decanm(Decanm::Ansi) => {
-                    self.vt52_mode = false;
+                    self.vt52_mode = Decanm::Ansi;
                 }
                 Mode::Decanm(Decanm::Query) => {
-                    let mode = if self.vt52_mode {
+                    let mode = if self.vt52_mode == Decanm::Vt52 {
                         SetMode::DecRst
                     } else {
                         SetMode::DecSet
@@ -3667,13 +3670,13 @@ impl TerminalHandler {
 
                 // ── Application Escape Key (?7727) ────────────────────
                 Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set) => {
-                    self.application_escape_key = true;
+                    self.application_escape_key = ApplicationEscapeKey::Set;
                 }
                 Mode::ApplicationEscapeKey(ApplicationEscapeKey::Reset) => {
-                    self.application_escape_key = false;
+                    self.application_escape_key = ApplicationEscapeKey::Reset;
                 }
                 Mode::ApplicationEscapeKey(ApplicationEscapeKey::Query) => {
-                    let mode = if self.application_escape_key {
+                    let mode = if self.application_escape_key == ApplicationEscapeKey::Set {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst

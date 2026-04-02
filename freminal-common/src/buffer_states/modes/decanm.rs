@@ -16,7 +16,7 @@ use super::ReportMode;
 /// - **Reset** (`CSI ? 2 l`): VT52 mode — the terminal interprets the
 ///   reduced VT52 escape set (`ESC A`..`ESC Z`, `ESC Y Pl Pc`, etc.).
 ///   `ESC <` from VT52 mode returns to ANSI mode.
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decanm {
     /// Set: ANSI mode (default).
     #[default]

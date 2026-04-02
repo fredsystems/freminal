@@ -6,7 +6,7 @@
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 use core::fmt;
 /// Show cursor (DECOM) ?6
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decom {
     #[default]
     NormalCursor,

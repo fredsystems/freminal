@@ -68,7 +68,6 @@ fn hex_preview(data: &[u8], max_bytes: usize) -> String {
 }
 
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalState {
     pub parser: FreminalAnsiParser,
     pub modes: TerminalModes,
@@ -197,8 +196,8 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub fn get_cursor_key_mode(&self) -> Decckm {
-        self.modes.cursor_key.clone()
+    pub const fn get_cursor_key_mode(&self) -> Decckm {
+        self.modes.cursor_key
     }
 
     /// Send the focus-change escape sequence to the PTY if focus reporting is enabled.
@@ -259,28 +258,28 @@ impl TerminalState {
                 self.handle_mode_query(mode);
             }
             // ── Set/Reset variants — sync into self.modes ─────
-            Mode::Decckm(v) => self.modes.cursor_key = v.clone(),
+            Mode::Decckm(v) => self.modes.cursor_key = *v,
             Mode::BracketedPaste(v) => self.modes.bracketed_paste = v.clone(),
             Mode::MouseMode(v) => self.modes.mouse_tracking = v.clone(),
             Mode::MouseEncodingMode(v) => self.modes.mouse_encoding = v.clone(),
             Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
             Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
-            Mode::Decarm(v) => self.modes.repeat_keys = v.clone(),
+            Mode::Decarm(v) => self.modes.repeat_keys = *v,
             // ?45 set/reset: sync into TerminalModes for backwards compat.
             // Query is answered by the handler; ignore it here.
             Mode::ReverseWrapAround(
                 v @ (ReverseWrapAround::WrapAround | ReverseWrapAround::DontWrap),
-            ) => self.modes.reverse_wrap_around = v.clone(),
+            ) => self.modes.reverse_wrap_around = *v,
             Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-            Mode::LineFeedMode(v) => self.modes.line_feed_mode = v.clone(),
+            Mode::LineFeedMode(v) => self.modes.line_feed_mode = *v,
             Mode::Decnkm(Decnkm::Application) => {
                 self.modes.keypad_mode = KeypadMode::Application;
             }
             Mode::Decnkm(Decnkm::Numeric) => {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
-            Mode::Decbkm(v) => self.modes.backarrow_key_mode = v.clone(),
-            Mode::AlternateScroll(v) => self.modes.alternate_scroll = v.clone(),
+            Mode::Decbkm(v) => self.modes.backarrow_key_mode = *v,
+            Mode::AlternateScroll(v) => self.modes.alternate_scroll = *v,
             // ── Modes handled entirely by TerminalHandler ──────
             Mode::XtExtscrn(_)
             | Mode::AltScreen47(_)
@@ -308,10 +307,10 @@ impl TerminalState {
             // the parser also needs to know so it routes ESC bytes to
             // the correct state machine.
             Mode::Decanm(Decanm::Vt52) => {
-                self.parser.vt52_mode = true;
+                self.parser.vt52_mode = Decanm::Vt52;
             }
             Mode::Decanm(Decanm::Ansi) => {
-                self.parser.vt52_mode = false;
+                self.parser.vt52_mode = Decanm::Ansi;
             }
             // ── Modes parsed but not yet acted on ─────────────
             Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
@@ -557,14 +556,11 @@ impl TerminalState {
     /// # Errors
     /// Will return an error if the write fails
     pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
-        let decckm = self.get_cursor_key_mode() == Decckm::Application;
-        let keypad_app = self.modes.keypad_mode == KeypadMode::Application;
+        let decckm = self.get_cursor_key_mode();
+        let keypad_app = self.modes.keypad_mode;
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
-        let backarrow_sends_bs = {
-            use freminal_common::buffer_states::modes::decbkm::Decbkm;
-            self.modes.backarrow_key_mode == Decbkm::BackarrowSendsBs
-        };
+        let backarrow_sends_bs = self.modes.backarrow_key_mode;
         match to_write.to_payload(
             decckm,
             keypad_app,

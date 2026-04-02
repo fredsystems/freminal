@@ -10,7 +10,7 @@ use crate::buffer_states::{line_wrap::LineWrap, mode::SetMode};
 use super::ReportMode;
 
 /// Autowrap Mode (DECAWM) ?7
-#[derive(Eq, PartialEq, Debug, Default, Clone)]
+#[derive(Eq, PartialEq, Debug, Default, Clone, Copy)]
 pub enum Decawm {
     /// Normal (Reset) Mode
     /// Disables autowrap mode.

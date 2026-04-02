@@ -8,7 +8,7 @@ use core::fmt;
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
 /// Line Feed (LNM) 20
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Lnm {
     NewLine,
     #[default]

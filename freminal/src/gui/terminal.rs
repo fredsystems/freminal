@@ -14,7 +14,14 @@ use crate::gui::{
 
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
-    buffer_states::{modes::mouse::MouseTrack, modes::rl_bracket::RlBracket, tchar::TChar},
+    buffer_states::{
+        modes::{
+            alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
+            decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, mouse::MouseTrack,
+            rl_bracket::RlBracket,
+        },
+        tchar::TChar,
+    },
     config::Config,
     themes::ThemePalette,
 };
@@ -191,7 +198,7 @@ fn handle_scroll_fallback(
     let lines = (scroll_amount_to_do / character_size_y).round();
     let abs_lines = lines.abs();
 
-    if snap.is_alternate_screen && snap.alternate_scroll {
+    if snap.is_alternate_screen && snap.alternate_scroll == AlternateScroll::Enabled {
         // Convert scroll delta to arrow key presses.
         // Safety: abs_lines >= 0, and we clamp to 1 below.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -249,21 +256,25 @@ fn handle_scroll_fallback(
 /// as individual characters rather than as one escape sequence, causing
 /// them to be interpreted as literal typed text.
 ///
-/// The `cursor_key_app_mode` flag from the snapshot drives `DECCKM`-sensitive
-/// key encoding (arrow keys, home, end).  `keypad_app_mode` drives `DECPAM` /
-/// `DECPNM` encoding for keypad keys.  `modify_other_keys` carries the
-/// xterm `modifyOtherKeys` level (0/1/2) for extended Ctrl+letter encoding.
-/// `application_escape_key` drives the `?7727` escape key encoding.
-/// `backarrow_sends_bs` drives the DECBKM (`?67`) backspace key encoding.
-#[allow(clippy::fn_params_excessive_bools)]
+/// The mode states from the snapshot control key encoding:
+/// - `cursor_key_app_mode` (`Decckm`) — `DECCKM`-sensitive encoding for
+///   arrow keys, home, end.
+/// - `keypad_app_mode` (`KeypadMode`) — `DECPAM` / `DECPNM` encoding for
+///   keypad keys.
+/// - `modify_other_keys` — xterm `modifyOtherKeys` level (0/1/2) for
+///   extended Ctrl+letter encoding.
+/// - `application_escape_key` (`ApplicationEscapeKey`) — `?7727` escape key
+///   encoding.
+/// - `backarrow_sends_bs` (`Decbkm`) — DECBKM (`?67`) backspace key
+///   encoding.
 fn send_terminal_inputs(
     inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
-    cursor_key_app_mode: bool,
-    keypad_app_mode: bool,
+    cursor_key_app_mode: Decckm,
+    keypad_app_mode: KeypadMode,
     modify_other_keys: u8,
-    application_escape_key: bool,
-    backarrow_sends_bs: bool,
+    application_escape_key: ApplicationEscapeKey,
+    backarrow_sends_bs: Decbkm,
 ) {
     let bytes: Vec<u8> = inputs
         .iter()
@@ -303,7 +314,7 @@ fn write_input_to_terminal(
     character_size_y: f32,
     terminal_origin: Pos2,
     last_reported_mouse_pos: Option<PreviousMouseState>,
-    repeat_characters: bool,
+    repeat_characters: Decarm,
     previous_key: Option<Key>,
     scroll_amount: f32,
 ) -> (bool, Option<PreviousMouseState>, Option<Key>, f32, bool) {
@@ -346,7 +357,7 @@ fn write_input_to_terminal(
             // FIXME: We don't support separating out numpad vs regular keys
             // This is an egui issue. See: https://github.com/emilk/egui/issues/3653
             Event::Text(text) => {
-                if repeat_characters || previous_key.is_none() {
+                if repeat_characters == Decarm::RepeatKey || previous_key.is_none() {
                     collect_text(text)
                 } else {
                     continue;
@@ -1050,7 +1061,7 @@ struct RenderState {
     cursor_vert_float_offset: usize,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // Six GUI rendering bookkeeping bools; not terminal modes
 pub struct FreminalTerminalWidget {
     font_manager: FontManager,
     shaping_cache: ShapingCache,

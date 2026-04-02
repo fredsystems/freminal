@@ -1666,8 +1666,9 @@ fn lnm_toggle() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Default: LNM off.
-    assert!(
-        !handler.buffer().is_lnm_enabled(),
+    assert_eq!(
+        handler.buffer().is_lnm_enabled(),
+        Lnm::LineFeed,
         "LNM must be disabled by default"
     );
 
@@ -1675,8 +1676,9 @@ fn lnm_toggle() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(
         &SetMode::DecSet,
     )))]);
-    assert!(
+    assert_eq!(
         handler.buffer().is_lnm_enabled(),
+        Lnm::NewLine,
         "LNM must be enabled after NewLine mode"
     );
 
@@ -1693,8 +1695,9 @@ fn lnm_toggle() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(
         &SetMode::DecRst,
     )))]);
-    assert!(
-        !handler.buffer().is_lnm_enabled(),
+    assert_eq!(
+        handler.buffer().is_lnm_enabled(),
+        Lnm::LineFeed,
         "LNM must be disabled after LineFeed mode"
     );
 
@@ -1716,8 +1719,9 @@ fn lnm_toggle() {
 
     // Query variant must not panic and must leave state unchanged.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::Query))]);
-    assert!(
-        !handler.buffer().is_lnm_enabled(),
+    assert_eq!(
+        handler.buffer().is_lnm_enabled(),
+        Lnm::LineFeed,
         "LNM state must not change after a Query mode"
     );
 }
@@ -1735,8 +1739,9 @@ fn decawm_mode_dispatch() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Default is wrap-enabled.
-    assert!(
+    assert_eq!(
         handler.buffer().is_wrap_enabled(),
+        Decawm::AutoWrap,
         "wrap must be enabled by default"
     );
 
@@ -1744,8 +1749,9 @@ fn decawm_mode_dispatch() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
         &SetMode::DecRst,
     )))]);
-    assert!(
-        !handler.buffer().is_wrap_enabled(),
+    assert_eq!(
+        handler.buffer().is_wrap_enabled(),
+        Decawm::NoAutoWrap,
         "wrap must be disabled after NoAutoWrap mode"
     );
 
@@ -1753,15 +1759,17 @@ fn decawm_mode_dispatch() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::new(
         &SetMode::DecSet,
     )))]);
-    assert!(
+    assert_eq!(
         handler.buffer().is_wrap_enabled(),
+        Decawm::AutoWrap,
         "wrap must be re-enabled after AutoWrap mode"
     );
 
     // Query variant must not panic and must leave the state unchanged.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::Query))]);
-    assert!(
+    assert_eq!(
         handler.buffer().is_wrap_enabled(),
+        Decawm::AutoWrap,
         "wrap state must not change after a Query mode"
     );
 }
@@ -3670,8 +3678,9 @@ fn decom_mode_dispatch() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Default is DECOM off.
-    assert!(
-        !handler.buffer().is_decom_enabled(),
+    assert_eq!(
+        handler.buffer().is_decom_enabled(),
+        Decom::NormalCursor,
         "DECOM must be disabled by default"
     );
 
@@ -3679,8 +3688,9 @@ fn decom_mode_dispatch() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
         &SetMode::DecSet,
     )))]);
-    assert!(
+    assert_eq!(
         handler.buffer().is_decom_enabled(),
+        Decom::OriginMode,
         "DECOM must be enabled after DecSet"
     );
 
@@ -3688,15 +3698,17 @@ fn decom_mode_dispatch() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
         &SetMode::DecRst,
     )))]);
-    assert!(
-        !handler.buffer().is_decom_enabled(),
+    assert_eq!(
+        handler.buffer().is_decom_enabled(),
+        Decom::NormalCursor,
         "DECOM must be disabled after DecRst"
     );
 
     // Query variant must not panic and must leave state unchanged.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::Query))]);
-    assert!(
-        !handler.buffer().is_decom_enabled(),
+    assert_eq!(
+        handler.buffer().is_decom_enabled(),
+        Decom::NormalCursor,
         "DECOM state must not change after a Query"
     );
 }
@@ -3988,15 +4000,20 @@ fn deccolm_resets_decom() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
         &SetMode::DecSet,
     )))]);
-    assert!(handler.buffer().is_decom_enabled());
+    assert_eq!(
+        handler.buffer().is_decom_enabled(),
+        Decom::OriginMode,
+        "DECOM must be enabled"
+    );
 
     // Switch to 132-column mode — should reset DECOM.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::new(
         &SetMode::DecSet,
     )))]);
 
-    assert!(
-        !handler.buffer().is_decom_enabled(),
+    assert_eq!(
+        handler.buffer().is_decom_enabled(),
+        Decom::NormalCursor,
         "DECCOLM set must reset DECOM"
     );
 }
@@ -4767,7 +4784,11 @@ fn handler_default_modify_other_keys_level_is_zero() {
 #[test]
 fn handler_default_application_escape_key_is_false() {
     let handler = TerminalHandler::new(80, 24);
-    assert!(!handler.application_escape_key());
+    assert_eq!(
+        handler.application_escape_key(),
+        ApplicationEscapeKey::Reset,
+        "application_escape_key must be reset by default"
+    );
 }
 
 // ── ModifyOtherKeys via CSI > 4 ; Pv m (TerminalOutput variant) ─────────
@@ -4803,7 +4824,11 @@ fn handler_application_escape_key_set() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
         ApplicationEscapeKey::Set,
     ))]);
-    assert!(handler.application_escape_key());
+    assert_eq!(
+        handler.application_escape_key(),
+        ApplicationEscapeKey::Set,
+        "application_escape_key must be set"
+    );
 }
 
 #[test]
@@ -4816,7 +4841,11 @@ fn handler_application_escape_key_reset() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
         ApplicationEscapeKey::Reset,
     ))]);
-    assert!(!handler.application_escape_key());
+    assert_eq!(
+        handler.application_escape_key(),
+        ApplicationEscapeKey::Reset,
+        "application_escape_key must be reset"
+    );
 }
 
 #[test]
@@ -4967,12 +4996,20 @@ fn handler_full_reset_clears_modify_other_keys() {
         ApplicationEscapeKey::Set,
     ))]);
     assert_eq!(handler.modify_other_keys_level(), 2);
-    assert!(handler.application_escape_key());
+    assert_eq!(
+        handler.application_escape_key(),
+        ApplicationEscapeKey::Set,
+        "application_escape_key must be set before reset"
+    );
 
     handler.full_reset();
 
     assert_eq!(handler.modify_other_keys_level(), 0);
-    assert!(!handler.application_escape_key());
+    assert_eq!(
+        handler.application_escape_key(),
+        ApplicationEscapeKey::Reset,
+        "application_escape_key must be reset after full_reset"
+    );
 }
 
 // ── Query with no write_tx does not panic ───────────────────────────────

@@ -15,12 +15,22 @@
 //!  4. `FunctionKey(n)` for F1–F12 produces the xterm/VT escape sequences that
 //!     most terminal applications (including nano) expect.
 
+use freminal_common::buffer_states::modes::{
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
+    keypad::KeypadMode,
+};
 use freminal_terminal_emulator::input::{KeyModifiers, TerminalInput, TerminalInputPayload};
 
-/// Convenience: call `to_payload` with both mode flags `false` (normal cursor mode,
-/// normal keypad mode) and unwrap the result as a `Vec<u8>`.
+/// Convenience: call `to_payload` with both mode flags in normal/default state
+/// and unwrap the result as a `Vec<u8>`.
 fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
-    match input.to_payload(false, false, 0, false, true) {
+    match input.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
         TerminalInputPayload::Owned(bs) => bs,
@@ -343,7 +353,13 @@ fn ctrl_c_and_ctrl_x_are_different() {
 
 /// Convenience: call `to_payload` with DECCKM mode on and unwrap.
 fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
-    match input.to_payload(true, false, 0, false, true) {
+    match input.to_payload(
+        Decckm::Application,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
         TerminalInputPayload::Owned(bs) => bs,
@@ -541,7 +557,13 @@ fn key_modifiers_all_combinations() {
 
 /// Convenience: call `to_payload` with `modify_other_keys = 2`.
 fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
-    match input.to_payload(false, false, 2, false, true) {
+    match input.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        2,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
         TerminalInputPayload::Owned(bs) => bs,
@@ -580,7 +602,13 @@ fn ctrl_a_modify_other_keys_level_0() {
 /// (level 1 only affects ambiguous keys, and Freminal sends control codes at level 1).
 #[test]
 fn ctrl_a_modify_other_keys_level_1() {
-    match TerminalInput::Ctrl(b'A').to_payload(false, false, 1, false, true) {
+    match TerminalInput::Ctrl(b'A').to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        1,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
     }
@@ -599,9 +627,15 @@ fn arrow_up_unaffected_by_modify_other_keys() {
 // Application Escape Key (?7727) tests
 // ---------------------------------------------------------------------------
 
-/// Convenience: call `to_payload` with `application_escape_key = true`.
+/// Convenience: call `to_payload` with `application_escape_key = Set`.
 fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
-    match input.to_payload(false, false, 0, true, true) {
+    match input.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Set,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
         TerminalInputPayload::Owned(bs) => bs,
@@ -656,7 +690,13 @@ fn enter_unaffected_by_application_escape_key() {
 /// (level 1 only modifies ambiguous keys; Freminal sends C0 codes at level 1).
 #[test]
 fn ctrl_b_modify_other_keys_level_1() {
-    match TerminalInput::Ctrl(b'B').to_payload(false, false, 1, false, true) {
+    match TerminalInput::Ctrl(b'B').to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        1,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x02),
         other => panic!("Expected Single(0x02), got {other:?}"),
     }
@@ -665,7 +705,13 @@ fn ctrl_b_modify_other_keys_level_1() {
 /// At modifyOtherKeys level 1, Ctrl+Z should still produce 0x1A.
 #[test]
 fn ctrl_z_modify_other_keys_level_1() {
-    match TerminalInput::Ctrl(b'Z').to_payload(false, false, 1, false, true) {
+    match TerminalInput::Ctrl(b'Z').to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        1,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x1A),
         other => panic!("Expected Single(0x1A), got {other:?}"),
     }
@@ -719,7 +765,13 @@ fn ctrl_space_modify_other_keys_level_2() {
 /// The Escape key is handled by its own match arm, independent of MOK.
 #[test]
 fn escape_with_both_mok2_and_aek() {
-    match TerminalInput::Escape.to_payload(false, false, 2, true, true) {
+    match TerminalInput::Escape.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        2,
+        ApplicationEscapeKey::Set,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;1;27~");
         }
@@ -731,7 +783,13 @@ fn escape_with_both_mok2_and_aek() {
 /// Ctrl+C should use the MOK2 encoding (CSI 27;5;67~), not the AEK one.
 #[test]
 fn ctrl_c_with_both_mok2_and_aek() {
-    match TerminalInput::Ctrl(b'c').to_payload(false, false, 2, true, true) {
+    match TerminalInput::Ctrl(b'c').to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        2,
+        ApplicationEscapeKey::Set,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;5;67~");
         }
@@ -739,10 +797,16 @@ fn ctrl_c_with_both_mok2_and_aek() {
     }
 }
 
-/// Ctrl+A with application_escape_key=true and mok=0 — AEK has no effect on Ctrl.
+/// Ctrl+A with application_escape_key=Set and mok=0 — AEK has no effect on Ctrl.
 #[test]
 fn ctrl_a_with_aek_and_mok0() {
-    match TerminalInput::Ctrl(b'A').to_payload(false, false, 0, true, true) {
+    match TerminalInput::Ctrl(b'A').to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Set,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
     }
@@ -755,7 +819,13 @@ fn ctrl_a_with_aek_and_mok0() {
 /// Backspace with DECBKM set (default): sends BS (0x08).
 #[test]
 fn backspace_decbkm_set_sends_bs() {
-    match TerminalInput::Backspace.to_payload(false, false, 0, false, true) {
+    match TerminalInput::Backspace.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+    ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x08, "DECBKM set: Backspace must send BS (0x08)")
         }
@@ -766,7 +836,13 @@ fn backspace_decbkm_set_sends_bs() {
 /// Backspace with DECBKM reset: sends DEL (0x7F).
 #[test]
 fn backspace_decbkm_reset_sends_del() {
-    match TerminalInput::Backspace.to_payload(false, false, 0, false, false) {
+    match TerminalInput::Backspace.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsDel,
+    ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x7F, "DECBKM reset: Backspace must send DEL (0x7F)")
         }

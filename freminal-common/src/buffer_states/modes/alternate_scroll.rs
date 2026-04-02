@@ -18,7 +18,7 @@ use super::ReportMode;
 /// reported as mouse events).
 ///
 /// Primary-screen scroll behaviour is unaffected by this mode.
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum AlternateScroll {
     #[default]
     /// Disabled — DECRST `?1007` (default)
