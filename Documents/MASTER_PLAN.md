@@ -431,7 +431,7 @@ Update this section as tasks complete:
 | 31   |            |            |                                                  |
 | 32   |            |            |                                                  |
 | 33   |            |            |                                                  |
-| 34   | 2026-04-02 |            | 34.1-34.5 complete on task-34/background-opacity |
+| 34   | 2026-04-02 |            | 34.1-34.6 complete on task-34/background-opacity |
 
 ---
 

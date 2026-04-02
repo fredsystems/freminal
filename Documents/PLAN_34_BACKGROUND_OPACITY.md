@@ -627,7 +627,7 @@ field needed since decorations use an entirely separate shader/VAO/VBO pipeline.
 
 ### 34.6 — Instanced foreground shader and instance buffer builder
 
-**Status:** Pending
+**Status:** Complete
 **Priority:** 1 — High
 **Scope:** `freminal/src/gui/renderer.rs`
 

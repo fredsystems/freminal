@@ -10,7 +10,7 @@
 //! glyph quads from the atlas), VAOs, double-buffered VBOs, and the atlas GL texture.
 //!
 //! Rendering is triggered via egui's [`eframe::egui_glow::CallbackFn`] mechanism.
-//! The CPU-side vertex builders (`build_background_verts` / `build_foreground_verts`)
+//! The CPU-side instance/vertex builders (`build_background_instances` / `build_foreground_instances`)
 //! are pure functions and are fully testable without a GL context.
 
 use eframe::glow::{self, HasContext};
@@ -109,15 +109,22 @@ void main() {
 }
 ";
 
-/// Foreground pass: textured glyph quads sampled from the atlas.
+/// Foreground pass: instanced textured glyph quads sampled from the atlas.
 ///
-/// Vertex layout: `vec2 a_pos, vec2 a_uv, vec4 a_color, float a_is_color`
-///   (stride = 9 × f32 = 36 bytes)
+/// Per-vertex: `vec2 a_pos` (unit quad in [0,1]², divisor 0).
+/// Per-instance (divisor 1):
+///   location 1: `vec2  a_glyph_origin` — pixel position of the glyph quad
+///   location 2: `vec2  a_glyph_size`   — pixel size of the glyph quad
+///   location 3: `vec4  a_uv_rect`      — (u0, v0, u1, v1) atlas UV
+///   location 4: `vec4  a_fg_color`     — RGBA foreground color
+///   location 5: `float a_is_color`     — 1.0 for color emoji, 0.0 for mono
 const FG_VERT_SRC: &str = r"#version 330 core
 layout(location = 0) in vec2  a_pos;
-layout(location = 1) in vec2  a_uv;
-layout(location = 2) in vec4  a_color;
-layout(location = 3) in float a_is_color;
+layout(location = 1) in vec2  a_glyph_origin;
+layout(location = 2) in vec2  a_glyph_size;
+layout(location = 3) in vec4  a_uv_rect;
+layout(location = 4) in vec4  a_fg_color;
+layout(location = 5) in float a_is_color;
 
 out vec2  v_uv;
 out vec4  v_color;
@@ -126,10 +133,11 @@ out float v_is_color;
 uniform vec2 u_viewport_size;
 
 void main() {
-    vec2 ndc = (a_pos / u_viewport_size) * 2.0 - 1.0;
+    vec2 pixel_pos = a_glyph_origin + a_pos * a_glyph_size;
+    vec2 ndc = (pixel_pos / u_viewport_size) * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
-    v_uv       = a_uv;
-    v_color    = a_color;
+    v_uv       = mix(a_uv_rect.xy, a_uv_rect.zw, a_pos);
+    v_color    = a_fg_color;
     v_is_color = a_is_color;
 }
 ";
@@ -196,8 +204,9 @@ void main() {
 /// Used for underlines, strikethrough, cursor, and selection highlight quads.
 /// These are the same layout as the old background pass.
 const DECO_VERTEX_FLOATS: usize = 6;
-/// Foreground vertex: `x, y, u, v, r, g, b, a, is_color` — 9 floats per vertex.
-const FG_VERTEX_FLOATS: usize = 9;
+/// Foreground instance: `glyph_x, glyph_y, glyph_w, glyph_h, u0, v0, u1, v1,
+/// r, g, b, a, is_color` — 13 floats per glyph instance.
+pub(crate) const FG_INSTANCE_FLOATS: usize = 13;
 /// Image vertex: `x, y, u, v` — 4 floats per vertex.
 const IMG_VERTEX_FLOATS: usize = 4;
 /// Vertices per quad (2 triangles, 6 vertices).
@@ -439,7 +448,10 @@ impl TerminalRenderer {
         Ok(())
     }
 
-    /// Initialise the foreground pass (shader, VAO, double-buffered VBOs).
+    /// Initialise the foreground pass (shader, VAO, double-buffered instance VBOs).
+    ///
+    /// Reuses the shared unit-quad VBO from the instanced background pass
+    /// (must be initialised first via [`init_bg_inst_pass`]).
     fn init_fg_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
 
@@ -452,17 +464,21 @@ impl TerminalRenderer {
         };
         let vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create foreground VBO 0: {e}"))?
+                .map_err(|e| format!("create foreground instance VBO 0: {e}"))?
         };
         let vbo1 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create foreground VBO 1: {e}"))?
+                .map_err(|e| format!("create foreground instance VBO 1: {e}"))?
         };
+
+        // The unit-quad VBO must already exist (created by init_bg_inst_pass).
+        let unit_quad_vbo = self.bg_unit_quad_vbo.ok_or_else(|| {
+            "FG init: unit-quad VBO not yet created (call init_bg_inst_pass first)".to_owned()
+        })?;
 
         unsafe {
             gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo0));
-            setup_fg_attribs(gl);
+            setup_fg_inst_attribs(gl, unit_quad_vbo, vbo0);
             gl.bind_vertex_array(None);
         }
 
@@ -601,7 +617,7 @@ impl TerminalRenderer {
             &freminal_common::themes::CATPPUCCIN_MOCHA,
             None,
         );
-        let fg_verts = build_foreground_verts(
+        let fg_instances = build_foreground_instances(
             shaped_lines,
             atlas,
             font_manager,
@@ -615,7 +631,7 @@ impl TerminalRenderer {
         let buf_idx = self.vbo_index;
         self.upload_bg_instances(gl, &bg_instances, buf_idx);
         self.upload_deco_verts(gl, &deco_verts, buf_idx);
-        self.upload_fg_verts(gl, &fg_verts, buf_idx);
+        self.upload_fg_instances(gl, &fg_instances, buf_idx);
 
         // 4. Draw instanced background, decorations, then foreground.
         #[allow(clippy::cast_precision_loss)]
@@ -638,7 +654,7 @@ impl TerminalRenderer {
             buf_idx,
         );
         self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, buf_idx);
-        self.draw_foreground(gl, fg_verts.len(), vp_w, vp_h, buf_idx);
+        self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
 
         // 5. Restore egui's framebuffer binding.
         unsafe {
@@ -667,7 +683,7 @@ impl TerminalRenderer {
         atlas: &mut GlyphAtlas,
         bg_instances: &[f32],
         deco_verts: &[f32],
-        fg_verts: &[f32],
+        fg_instances: &[f32],
         image_verts: &[f32],
         snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
@@ -692,7 +708,7 @@ impl TerminalRenderer {
         let buf_idx = self.vbo_index;
         self.upload_bg_instances(gl, bg_instances, buf_idx);
         self.upload_deco_verts(gl, deco_verts, buf_idx);
-        self.upload_fg_verts(gl, fg_verts, buf_idx);
+        self.upload_fg_instances(gl, fg_instances, buf_idx);
         self.upload_img_verts(gl, image_verts, buf_idx);
 
         // 3. Draw instanced backgrounds, decorations, foreground, images.
@@ -712,7 +728,7 @@ impl TerminalRenderer {
             buf_idx,
         );
         self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, buf_idx);
-        self.draw_foreground(gl, fg_verts.len(), vp_w, vp_h, buf_idx);
+        self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_verts.len(), snap_images, vp_w, vp_h, buf_idx);
 
         // 4. Restore egui's framebuffer binding.
@@ -894,12 +910,12 @@ impl TerminalRenderer {
         upload_verts(gl, vbo, instances);
     }
 
-    /// Upload foreground vertex data via orphan-then-write.
-    fn upload_fg_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
+    /// Upload foreground instance data via orphan-then-write.
+    fn upload_fg_instances(&self, gl: &glow::Context, instances: &[f32], buf_idx: usize) {
         let Some(vbo) = self.fg_vbo[buf_idx] else {
             return;
         };
-        upload_verts(gl, vbo, verts);
+        upload_verts(gl, vbo, instances);
     }
 
     /// Upload image vertex data via orphan-then-write.
@@ -1163,30 +1179,29 @@ impl TerminalRenderer {
         }
     }
 
-    /// Execute the foreground draw call.
+    /// Execute the instanced foreground draw call.
     fn draw_foreground(
         &self,
         gl: &glow::Context,
-        vert_floats: usize,
+        instance_floats: usize,
         vp_w: f32,
         vp_h: f32,
         buf_idx: usize,
     ) {
-        let (Some(prog), Some(vao), Some(vbo), Some(tex)) = (
+        let (Some(prog), Some(vao), Some(unit_vbo), Some(inst_vbo), Some(tex)) = (
             self.fg_program,
             self.fg_vao,
+            self.bg_unit_quad_vbo,
             self.fg_vbo[buf_idx],
             self.atlas_texture,
         ) else {
             return;
         };
 
-        if vert_floats == 0 {
+        let instance_count = instance_floats / FG_INSTANCE_FLOATS;
+        if instance_count == 0 {
             return;
         }
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let vertex_count = (vert_floats / FG_VERTEX_FLOATS) as i32;
 
         unsafe {
             gl.use_program(Some(prog));
@@ -1199,9 +1214,10 @@ impl TerminalRenderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            setup_fg_attribs(gl);
-            gl.draw_arrays(glow::TRIANGLES, 0, vertex_count);
+            // Re-bind both buffers into the VAO for this draw call.
+            setup_fg_inst_attribs(gl, unit_vbo, inst_vbo);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, instance_count as i32);
             gl.bind_vertex_array(None);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
@@ -1341,25 +1357,56 @@ unsafe fn setup_deco_attribs(gl: &glow::Context) {
     }
 }
 
-/// Configure vertex attributes for the foreground shader.
+/// Configure vertex attributes for the instanced foreground shader.
 ///
-/// Layout: `location 0 = vec2 pos, location 1 = vec2 uv,
-///          location 2 = vec4 color, location 3 = float is_color`.
-/// Stride = `FG_VERTEX_FLOATS * 4` bytes.
-unsafe fn setup_fg_attribs(gl: &glow::Context) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let stride = (FG_VERTEX_FLOATS * size_of::<f32>()) as i32;
+/// Binds the static unit-quad VBO to location 0 (per-vertex, divisor 0)
+/// and the instance VBO to locations 1–5 (per-instance, divisor 1).
+///
+/// - Location 0: `vec2  a_pos`          (unit quad)       — divisor 0
+/// - Location 1: `vec2  a_glyph_origin` (pixel position)  — divisor 1
+/// - Location 2: `vec2  a_glyph_size`   (pixel size)      — divisor 1
+/// - Location 3: `vec4  a_uv_rect`      (u0, v0, u1, v1)  — divisor 1
+/// - Location 4: `vec4  a_fg_color`     (r, g, b, a)      — divisor 1
+/// - Location 5: `float a_is_color`     (1.0 or 0.0)      — divisor 1
+unsafe fn setup_fg_inst_attribs(
+    gl: &glow::Context,
+    unit_quad_vbo: glow::Buffer,
+    instance_vbo: glow::Buffer,
+) {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let f = size_of::<f32>() as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let inst_stride = (FG_INSTANCE_FLOATS * size_of::<f32>()) as i32;
+
     unsafe {
+        // Location 0: unit-quad vertex position (per-vertex).
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(unit_quad_vbo));
         gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 2 * f, 0);
+        gl.vertex_attrib_divisor(0, 0);
+
+        // Locations 1–5: instance data (per-instance).
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(instance_vbo));
+        // Location 1: vec2 a_glyph_origin (glyph_x, glyph_y).
         gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 2 * f);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, inst_stride, 0);
+        gl.vertex_attrib_divisor(1, 1);
+        // Location 2: vec2 a_glyph_size (glyph_w, glyph_h).
         gl.enable_vertex_attrib_array(2);
-        gl.vertex_attrib_pointer_f32(2, 4, glow::FLOAT, false, stride, 4 * f);
+        gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, inst_stride, 2 * f);
+        gl.vertex_attrib_divisor(2, 1);
+        // Location 3: vec4 a_uv_rect (u0, v0, u1, v1).
         gl.enable_vertex_attrib_array(3);
-        gl.vertex_attrib_pointer_f32(3, 1, glow::FLOAT, false, stride, 8 * f);
+        gl.vertex_attrib_pointer_f32(3, 4, glow::FLOAT, false, inst_stride, 4 * f);
+        gl.vertex_attrib_divisor(3, 1);
+        // Location 4: vec4 a_fg_color (r, g, b, a).
+        gl.enable_vertex_attrib_array(4);
+        gl.vertex_attrib_pointer_f32(4, 4, glow::FLOAT, false, inst_stride, 8 * f);
+        gl.vertex_attrib_divisor(4, 1);
+        // Location 5: float a_is_color.
+        gl.enable_vertex_attrib_array(5);
+        gl.vertex_attrib_pointer_f32(5, 1, glow::FLOAT, false, inst_stride, 12 * f);
+        gl.vertex_attrib_divisor(5, 1);
     }
 }
 
@@ -2001,7 +2048,7 @@ pub fn build_cursor_verts_only(
 
 /// Options controlling per-glyph foreground rendering.
 ///
-/// Bundled to keep `build_foreground_verts` within the 7-argument lint limit.
+/// Bundled to keep `build_foreground_instances` within the 7-argument lint limit.
 pub struct FgRenderOptions {
     /// Normalised selection region `(start_col, start_row, end_col, end_row)`,
     /// or `None` when no selection is active.
@@ -2025,18 +2072,18 @@ impl FgRenderOptions {
     }
 }
 
-/// Build the foreground vertex buffer from shaped lines.
+/// Build the foreground instance buffer from shaped lines.
 ///
 /// For each shaped glyph: looks up the atlas entry (rasterising on miss) and
-/// emits a textured quad at the cell-grid position adjusted by the bearing offsets.
+/// emits a single instance at the cell-grid position adjusted by the bearing offsets.
 ///
 /// `opts.selection` is `Some((start_col, start_row, end_col, end_row))` in normalised
 /// reading order.  Glyphs that fall within the selection use `SELECTION_FG_F`
 /// instead of their normal foreground color.
 ///
-/// Returns a flat `Vec<f32>` with `FG_VERTEX_FLOATS` floats per vertex.
+/// Returns a flat `Vec<f32>` with `FG_INSTANCE_FLOATS` floats per glyph instance.
 #[must_use]
-pub fn build_foreground_verts(
+pub fn build_foreground_instances(
     shaped_lines: &[ShapedLine],
     atlas: &mut GlyphAtlas,
     font_manager: &FontManager,
@@ -2045,7 +2092,7 @@ pub fn build_foreground_verts(
     opts: &FgRenderOptions,
     theme: &ThemePalette,
 ) -> Vec<f32> {
-    let mut verts: Vec<f32> = Vec::new();
+    let mut instances: Vec<f32> = Vec::new();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
@@ -2081,8 +2128,8 @@ pub fn build_foreground_verts(
                 };
 
                 if run_visible {
-                    emit_glyph_quad(
-                        &mut verts,
+                    emit_glyph_instance(
+                        &mut instances,
                         glyph,
                         atlas,
                         font_manager,
@@ -2097,7 +2144,7 @@ pub fn build_foreground_verts(
         }
     }
 
-    verts
+    instances
 }
 
 /// Build the image vertex buffer from the visible placements.
@@ -2249,15 +2296,15 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
     ]
 }
 
-/// Emit a textured quad for a single shaped glyph.
+/// Emit a single foreground glyph instance (13 floats).
 ///
-/// Looks up (or rasterises) the atlas entry for the glyph, then pushes 6
-/// vertices (`VERTS_PER_QUAD`) into `verts`.  Glyphs that extend beyond the
-/// cell's vertical extent (`cell_y_range[0]`..`cell_y_range[1]`) are clipped,
-/// and their UV coordinates are adjusted proportionally so the visible portion
-/// of the atlas texture is correct.
-fn emit_glyph_quad(
-    verts: &mut Vec<f32>,
+/// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
+/// instance into `instances`.  Glyphs that extend beyond the cell's vertical
+/// extent (`cell_y_range[0]`..`cell_y_range[1]`) are clipped, and their UV
+/// and position are adjusted proportionally so the visible portion of the
+/// atlas texture is correct.
+fn emit_glyph_instance(
+    instances: &mut Vec<f32>,
     glyph: &ShapedGlyph,
     atlas: &mut GlyphAtlas,
     font_manager: &FontManager,
@@ -2326,48 +2373,14 @@ fn emit_glyph_quad(
 
     let is_color_f: f32 = if glyph.is_color { 1.0 } else { 0.0 };
 
-    // Two triangles = 6 vertices.  Each vertex: x, y, u, v, r, g, b, a, is_color.
-    let quad = [
-        // Triangle 1
+    // One instance: glyph_x, glyph_y, glyph_w, glyph_h, u0, v0, u1, v1, r, g, b, a, is_color
+    instances.extend_from_slice(&[
         x0,
         y0,
+        x1 - x0,
+        y1 - y0,
         u0,
         v0_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        x1,
-        y0,
-        u1,
-        v0_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        x0,
-        y1,
-        u0,
-        v1_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        // Triangle 2
-        x1,
-        y0,
-        u1,
-        v0_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-        x1,
-        y1,
         u1,
         v1_adj,
         fg_color[0],
@@ -2375,18 +2388,7 @@ fn emit_glyph_quad(
         fg_color[2],
         fg_color[3],
         is_color_f,
-        x0,
-        y1,
-        u0,
-        v1_adj,
-        fg_color[0],
-        fg_color[1],
-        fg_color[2],
-        fg_color[3],
-        is_color_f,
-    ];
-
-    verts.extend_from_slice(&quad);
+    ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2892,12 +2894,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  Foreground vertex tests
+    //  Foreground instance tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn fg_verts_empty_on_empty_lines() {
-        let verts = build_foreground_verts(
+    fn fg_instances_empty_on_empty_lines() {
+        let instances = build_foreground_instances(
             &[],
             &mut GlyphAtlas::default(),
             &FontManager::new(&Config::default(), 1.0),
@@ -2906,11 +2908,11 @@ mod tests {
             &FgRenderOptions::all_visible(None),
             &themes::CATPPUCCIN_MOCHA,
         );
-        assert_eq!(verts.len(), 0);
+        assert_eq!(instances.len(), 0);
     }
 
     #[test]
-    fn fg_verts_produces_quads_for_ascii_glyphs() {
+    fn fg_instances_produces_data_for_ascii_glyphs() {
         let mut fm = FontManager::new(&Config::default(), 1.0);
         let mut atlas = GlyphAtlas::new(256, 1024);
         #[allow(clippy::cast_precision_loss)]
@@ -2927,7 +2929,7 @@ mod tests {
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
         let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
 
-        let verts = build_foreground_verts(
+        let instances = build_foreground_instances(
             &lines,
             &mut atlas,
             &fm,
@@ -2937,18 +2939,17 @@ mod tests {
             &themes::CATPPUCCIN_MOCHA,
         );
 
-        // Three ASCII glyphs each produce one quad = VERTS_PER_QUAD * FG_VERTEX_FLOATS.
-        // Some glyphs may be spaces (zero-size) — so at minimum some quads must exist.
+        // Three ASCII glyphs each produce one instance = FG_INSTANCE_FLOATS floats.
+        // Some glyphs may be spaces (zero-size) — so at minimum some instances must exist.
         assert!(
-            verts.len() >= FG_VERTEX_FLOATS,
-            "at least one foreground quad expected, got {} floats",
-            verts.len()
+            instances.len() >= FG_INSTANCE_FLOATS,
+            "at least one foreground instance expected, got {} floats",
+            instances.len()
         );
         assert_eq!(
-            verts.len() % (VERTS_PER_QUAD * FG_VERTEX_FLOATS),
+            instances.len() % FG_INSTANCE_FLOATS,
             0,
-            "foreground vertex count must be a multiple of one quad ({} floats)",
-            VERTS_PER_QUAD * FG_VERTEX_FLOATS
+            "foreground instance count must be a multiple of one instance ({FG_INSTANCE_FLOATS} floats)",
         );
     }
 

@@ -42,7 +42,7 @@ use super::{
     font_manager::FontManager,
     renderer::{
         CURSOR_QUAD_FLOATS, FgRenderOptions, TerminalRenderer, build_background_instances,
-        build_cursor_verts_only, build_foreground_verts, build_image_verts,
+        build_cursor_verts_only, build_foreground_instances, build_image_verts,
     },
     shaping::ShapingCache,
 };
@@ -1052,7 +1052,7 @@ struct RenderState {
     bg_instances: Vec<f32>,
     /// Decoration vertex data (underlines, strikethrough, cursor, selection).
     deco_verts: Vec<f32>,
-    fg_verts: Vec<f32>,
+    fg_instances: Vec<f32>,
     /// Pre-built image vertex data (one quad per unique inline image).
     image_verts: Vec<f32>,
     /// Snapshot image map from the last full rebuild, cloned into `RenderState`
@@ -1136,7 +1136,7 @@ impl FreminalTerminalWidget {
                 atlas: GlyphAtlas::default(),
                 bg_instances: Vec::new(),
                 deco_verts: Vec::new(),
-                fg_verts: Vec::new(),
+                fg_instances: Vec::new(),
                 image_verts: Vec::new(),
                 snap_images: std::collections::HashMap::new(),
                 cursor_vert_float_offset: 0,
@@ -1544,7 +1544,7 @@ impl FreminalTerminalWidget {
                     deco_verts.len()
                 };
 
-                // `build_foreground_verts` needs mutable access to the atlas for
+                // `build_foreground_instances` needs mutable access to the atlas for
                 // rasterisation, so acquire the lock before calling it.
                 let mut rs = self
                     .render_state
@@ -1555,7 +1555,7 @@ impl FreminalTerminalWidget {
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };
-                let fg_verts = build_foreground_verts(
+                let fg_instances = build_foreground_instances(
                     &shaped_lines,
                     &mut rs.atlas,
                     &self.font_manager,
@@ -1573,7 +1573,7 @@ impl FreminalTerminalWidget {
                 );
                 rs.bg_instances = bg_instances;
                 rs.deco_verts = deco_verts;
-                rs.fg_verts = fg_verts;
+                rs.fg_instances = fg_instances;
                 rs.image_verts = image_verts;
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
@@ -1638,7 +1638,7 @@ impl FreminalTerminalWidget {
                 // Clone pre-built verts to avoid conflicting borrows of `rs`.
                 let bg_inst = rs.bg_instances.clone();
                 let deco = rs.deco_verts.clone();
-                let fg = rs.fg_verts.clone();
+                let fg = rs.fg_instances.clone();
                 let img = rs.image_verts.clone();
                 let images = rs.snap_images.clone();
                 let cw = rs.cell_width_px;
@@ -1797,7 +1797,7 @@ mod subtask_1_7_tests {
             atlas: GlyphAtlas::default(),
             bg_instances: Vec::new(),
             deco_verts: Vec::new(),
-            fg_verts: Vec::new(),
+            fg_instances: Vec::new(),
             cursor_vert_float_offset: 0,
             image_verts: Vec::new(),
             snap_images: std::collections::HashMap::new(),
@@ -1807,7 +1807,7 @@ mod subtask_1_7_tests {
         };
         assert!(rs.bg_instances.is_empty(), "bg_instances should be empty");
         assert!(rs.deco_verts.is_empty(), "deco_verts should be empty");
-        assert!(rs.fg_verts.is_empty(), "fg_verts should be empty");
+        assert!(rs.fg_instances.is_empty(), "fg_instances should be empty");
     }
 
     /// Verify that `FontManager::cell_size()` returns non-zero dimensions for
