@@ -52,7 +52,7 @@ and plan document maintenance rules.
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
 | 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Complete | None                 |
 | 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Complete | None                 |
-| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Pending  | None                 |
+| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Complete | None                 |
 | 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
 | 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Pending  | None                 |
 | 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Complete | None                 |
@@ -424,7 +424,7 @@ Update this section as tasks complete:
 | 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality       |
 | 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                 |
 | 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit         |
-| 28   |            |            |                                                        |
+| 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit      |
 | 29   |            |            |                                                        |
 | 30   |            |            |                                                        |
 | 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)        |
