@@ -172,15 +172,14 @@ impl ShapingCache {
         for (line_idx, line_chars) in lines.iter().enumerate() {
             let line_hash = hash_line(line_chars, visible_tags, global_offset);
 
-            let shaped = if self
+            let shaped = if let Some((_h, shaped_line)) = self
                 .entries
                 .get(line_idx)
                 .and_then(|e| e.as_ref())
-                .is_some_and(|(h, _)| *h == line_hash)
+                .filter(|(h, _)| *h == line_hash)
             {
                 // Cache hit — reuse.
-                #[allow(clippy::unwrap_used)] // We just verified Some above.
-                self.entries[line_idx].as_ref().unwrap().1.clone()
+                shaped_line.clone()
             } else {
                 // Cache miss — segment and shape.
                 let runs = segment_line(

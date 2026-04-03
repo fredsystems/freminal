@@ -355,7 +355,16 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.7 — Fix Remaining Non-Casting Suppressions
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Fixed the one genuinely fixable production allow: replaced the
+  `#[allow(clippy::unwrap_used)]` in `shaping.rs:182` with an `if let` pattern that avoids the
+  double-lookup entirely. The two `missing_const_for_fn`/`needless_pass_by_ref_mut` allows in
+  `internal.rs` and the `missing_const_for_fn`/`unnecessary_wraps` allow in `config.rs` are
+  legitimate and were annotated with justification comments (cannot be made `const` due to
+  `PathBuf::from()` / row-cache mutation; `&mut self` genuinely required). All 29
+  `too_many_lines` and 13 `too_many_arguments` sites were annotated with justification comments
+  explaining why splitting is not warranted. `significant_drop_tightening`, `implicit_hasher`,
+  and `module_name_repetitions` sites were also annotated.
 - **Priority:** 3 — Medium
 - **Scope:** Various files across all crates
 - **Details:**

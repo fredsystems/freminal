@@ -622,6 +622,8 @@ impl TerminalRenderer {
     ///
     /// This method calls `glow` functions which are marked `unsafe`.  The
     /// caller is responsible for ensuring a valid GL context exists.
+    // All parameters are required GPU render inputs: vertex data, uniforms, dimensions, and
+    // flags. Grouping into a struct would not reduce the OpenGL call complexity.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_verts(
         &mut self,
@@ -700,6 +702,7 @@ impl TerminalRenderer {
     /// # Safety
     ///
     /// Caller must ensure a valid GL context exists.
+    // Same rationale as `draw_with_verts`: all parameters are required GPU render inputs.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_cursor_only_update(
         &mut self,
@@ -953,6 +956,8 @@ impl TerminalRenderer {
     /// Iterates images in the order they appear (by ID from the map); each
     /// image is bound to `TEXTURE1` and drawn with the corresponding 6-vertex
     /// slab from `image_verts`.
+    // All parameters are required GPU context and data. Image rendering requires separate
+    // texture binding, program, and geometry inputs that cannot be sensibly grouped.
     #[allow(clippy::too_many_arguments)]
     fn draw_images(
         &self,
@@ -1028,6 +1033,8 @@ impl TerminalRenderer {
     /// Each instance is one cell-sized quad; the instance buffer provides the
     /// grid position and resolved RGBA color.  `u_bg_opacity` is applied in the
     /// fragment shader.
+    // All parameters are required GPU render context: program, VAO, instance data, uniforms,
+    // and dimensions. No subset forms a coherent intermediate abstraction.
     #[allow(clippy::too_many_arguments)]
     fn draw_background_instanced(
         &self,
@@ -1514,6 +1521,8 @@ const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> b
 /// The cursor quad (if visible) is always appended **last** in `deco_verts`
 /// so that cursor-only partial updates can patch just the tail.
 #[must_use]
+// All parameters are required geometric and style inputs for GPU instance data generation.
+// Inherently large: iterates all shaped lines, resolving background color for every cell.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn build_background_instances(
     shaped_lines: &[ShapedLine],
@@ -1672,6 +1681,8 @@ pub fn build_background_instances(
 /// rebuilding the entire background VBO, the caller patches only the cursor
 /// quad region in-place via `upload_verts_sub`.
 #[must_use]
+// All parameters are required for cursor geometry: cell dimensions, screen position, cursor
+// style, and color. No subset is independently reusable.
 #[allow(clippy::too_many_arguments)]
 pub fn build_cursor_verts_only(
     cell_width: u32,
@@ -1844,6 +1855,9 @@ struct ImageBounds {
 }
 
 #[must_use]
+// All parameters are required for image vertex generation: placements, cell dimensions,
+// terminal size, and display area.
+// `implicit_hasher`: `build_image_verts` is an internal function; generic hasher adds no value.
 #[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub fn build_image_verts(
     placements: &[Option<ImagePlacement>],

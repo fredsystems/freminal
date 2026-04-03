@@ -702,6 +702,9 @@ impl Buffer {
         final_offset
     }
 
+    // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
+    // new width, and preserves all cell content and tags. The size reflects algorithmic
+    // complexity, not lack of structure.
     #[allow(clippy::too_many_lines)]
     /// Re-wrap all rows to `new_width` columns without losing any text.
     ///

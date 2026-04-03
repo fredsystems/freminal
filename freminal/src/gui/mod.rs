@@ -115,6 +115,8 @@ struct FreminalGui {
 }
 
 impl FreminalGui {
+    // All parameters are required to construct the GUI: channels, snapshot handle, config, and
+    // font settings. Grouping into a builder struct would add complexity without reducing count.
     #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
@@ -326,6 +328,10 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
 /// 6. **OSC 52 clipboard** — `SetClipboard` and `QueryClipboard` are handled
 ///    upstream (in `update()`) before this function is called; they will not
 ///    appear in the `window_cmd_rx` stream.
+// Inherently large: handles all `WindowCommand` variants — viewport commands, Report* PTY
+// responses, title stack, clipboard. Each variant requires distinct context (ui, pty_write_tx,
+// title_stack). Splitting further would scatter a cohesive protocol handler.
+// All arguments are required context that cannot be easily grouped without obscuring intent.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn handle_window_manipulation(
     ui: &egui::Ui,
@@ -600,6 +606,9 @@ impl eframe::App for FreminalGui {
         }
     }
 
+    // Inherently large: the main per-frame UI function handles menu bar, settings modal, window
+    // manipulation drain, terminal widget layout, and resize detection — all in one pass over
+    // the shared snapshot. Artificial sub-functions would not reduce the coupling.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         debug!("Starting new frame");
@@ -872,6 +881,8 @@ impl eframe::App for FreminalGui {
 ///
 /// # Errors
 /// Will return an error if the GUI fails to run
+// All parameters are required to wire the GUI to the PTY thread: snapshot handle, channels,
+// config, and font. Grouping into a struct would hide required coupling without reducing it.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,

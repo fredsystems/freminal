@@ -212,6 +212,8 @@ pub fn run_playback_thread(
 }
 
 /// Handle a single `InputEvent`.  Returns `false` if the thread should exit.
+// All parameters are required context for playback event dispatch: shared state, channels,
+// timing, and frame control. Grouping would obscure the data flow.
 #[allow(clippy::too_many_arguments)]
 fn handle_event(
     event: &InputEvent,

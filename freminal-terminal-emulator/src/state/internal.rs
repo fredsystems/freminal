@@ -163,6 +163,10 @@ impl TerminalState {
         self.handler.get_win_size()
     }
 
+    // `missing_const_for_fn`: calls `TerminalHandler::data_and_format_data_for_gui` which is not
+    // `const` (it mutates the row cache).
+    // `needless_pass_by_ref_mut`: the `&mut self` is required because
+    // `TerminalHandler::data_and_format_data_for_gui` takes `&mut self` (it writes the row cache).
     #[allow(clippy::missing_const_for_fn)]
     #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn data_and_format_data_for_gui(

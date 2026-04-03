@@ -114,6 +114,9 @@ enum ExtractTerminfoError {
     },
 }
 
+// Inherently large: the PTY thread event loop integrating the PTY reader, input channel, and
+// window-command dispatch. Splitting would produce artificial sub-functions with no clear
+// independent responsibility.
 #[allow(clippy::too_many_lines)]
 pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,

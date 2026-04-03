@@ -152,6 +152,8 @@ pub enum TerminalOutput {
     ModifyOtherKeys(u8),
 }
 
+// Inherently large: exhaustive `Display` impl for all `TerminalOutput` variants used in
+// diagnostic output. Each arm is a single format call; splitting is not warranted.
 #[allow(clippy::too_many_lines)]
 impl std::fmt::Display for TerminalOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

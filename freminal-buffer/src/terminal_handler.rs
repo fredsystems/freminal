@@ -1191,6 +1191,8 @@ impl TerminalHandler {
     /// This handles the subset of CSI commands that are purely buffer-level
     /// (cursor movement, erase) so they execute immediately — critical for
     /// correct ordering when a CUP precedes a Kitty Put in the same frame.
+    // Inherently large: tmux-passthrough CSI dispatch table. Each arm handles a distinct CSI
+    // sequence. Splitting would scatter related escape-sequence handling.
     #[allow(clippy::too_many_lines)]
     fn dispatch_tmux_csi(&mut self, csi_body: &[u8]) -> bool {
         if csi_body.is_empty() {
@@ -2381,6 +2383,8 @@ impl TerminalHandler {
 
     /// Compute display dimensions, store an `InlineImage`, and optionally place
     /// it into the buffer.
+    // All parameters are required image placement inputs; grouping into a struct would obscure
+    // the data flow without reducing coupling.
     #[allow(clippy::too_many_arguments)]
     fn place_kitty_image(
         &mut self,
@@ -3048,6 +3052,8 @@ impl TerminalHandler {
     /// When `preserve_aspect_ratio` is true and one dimension is auto/unspecified,
     /// scale the auto dimension to match the other using real cell pixel
     /// dimensions for correct terminal-cell aspect-ratio compensation.
+    // All parameters represent independent geometric inputs. A struct would not improve clarity
+    // for this pure geometric helper.
     #[allow(clippy::too_many_arguments)]
     fn apply_aspect_ratio(
         width_spec: Option<&ImageDimension>,
@@ -3256,6 +3262,9 @@ impl TerminalHandler {
     }
 
     /// Process a single `TerminalOutput` command
+    // Inherently large: exhaustive match over all `TerminalOutput` variants. Each arm is
+    // tightly coupled to buffer state. Splitting would require passing the full handler context
+    // to sub-functions without any reduction in complexity.
     #[allow(clippy::too_many_lines)]
     fn process_output(&mut self, output: &TerminalOutput) {
         match output {
@@ -3924,6 +3933,8 @@ fn apply_dec_special<'a>(data: &'a [u8], mode: &DecSpecialGraphics) -> Cow<'a, [
 ///
 /// This is the central mapping between the parser's SGR enum and the buffer's format
 /// representation.  It is a pure function — it has no side effects beyond mutating `tag`.
+// Inherently large: exhaustive match over all SGR variants mapping to `FormatTag` fields.
+// Splitting would scatter a single coherent mapping.
 #[allow(clippy::too_many_lines)]
 fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
     match sgr {

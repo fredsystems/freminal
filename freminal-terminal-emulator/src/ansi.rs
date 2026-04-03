@@ -309,6 +309,9 @@ impl FreminalAnsiParser {
     /// single `TerminalOutput::Data(Vec<u8>)` whenever a control sequence
     /// interrupts the data stream, minimising allocations for the common case
     /// of long runs of ASCII text.
+    // Inherently large: the ANSI parser state machine handles many escape sequence prefixes
+    // (ESC, CSI, OSC, DCS, APC, SOS, PM, ST). Each branch is essential and tightly coupled to
+    // the parser state. Splitting would fragment the state machine without reducing complexity.
     #[allow(clippy::too_many_lines)]
     pub fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput> {
         // Take the pending buffer out temporarily

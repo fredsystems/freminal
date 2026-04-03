@@ -1278,8 +1278,12 @@ impl FreminalTerminalWidget {
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
     /// - `modal_is_open` — suppresses terminal input while a modal is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
+    // Inherently large: the main per-frame terminal widget handler — processes input, handles
+    // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
-    #[allow(clippy::too_many_arguments)] // bg_opacity must be threaded from config
+    // All parameters are required: `bg_opacity` must be threaded from config through to the
+    // renderer; there is no sensible grouping that reduces the count without hiding the intent.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut Ui,

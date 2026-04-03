@@ -512,6 +512,10 @@ fn load_partial(path: &Path) -> Result<ConfigPartial, ConfigError> {
 /// ---------------------------------------------------------------------------------------------
 ///  Platform-specific config paths
 /// ---------------------------------------------------------------------------------------------
+// `missing_const_for_fn`: `PathBuf::from()` is not `const`, so the Linux branch prevents
+// making this `const` even though the non-Linux branch would qualify.
+// `unnecessary_wraps`: the `Option` is necessary for the shared return type across cfg branches;
+// the non-Linux arm returns `None` by design, not by accident.
 #[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
 fn system_config_path() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
