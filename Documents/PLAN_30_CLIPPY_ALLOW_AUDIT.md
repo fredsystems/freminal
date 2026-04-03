@@ -152,7 +152,13 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.2 — Replace Casting Suppressions in `freminal-buffer`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all 24 production `#[allow(clippy::cast_*)]` in
+  `terminal_handler.rs`. Cursor movement uses `i32::value_from().unwrap_or(i32::MAX)`.
+  Image dimension `u32->usize` uses `usize::value_from().unwrap_or(0)`. Aspect ratio
+  `usize->u64` and `u64->usize` use `ValueFrom`. Bit-extraction `u32->u8` uses
+  `u8::try_from((x >> N) & 0xFF).unwrap_or(0)`. Two test-only allows in `buffer.rs` kept
+  (acceptable per convention). Zero production casting suppression attributes remain.
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (~22 sites),
   `freminal-buffer/src/buffer.rs` (~2 test sites)
@@ -257,7 +263,10 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.5 — Replace Casting Suppressions in `freminal` (Non-Renderer)
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all production `#[allow(clippy::cast_*)]` in
+  `terminal.rs`, `mod.rs`, `font_manager.rs`, `atlas.rs`, `shaping.rs`, `view_state.rs`,
+  and `mouse.rs`. Committed as `33c6aaa`.
 - **Priority:** 2 — High
 - **Scope:** `freminal/src/gui/terminal.rs` (~8 sites),
   `freminal/src/gui/mod.rs` (~4 sites),
@@ -292,7 +301,14 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.6 — Replace Casting Suppressions in `renderer.rs`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all ~60 production `#[allow(clippy::cast_*)]` in
+  `renderer.rs`. Added helper functions `gl_i32(usize)->i32`, `gl_i32_u32(u32)->i32`,
+  `gl_f32(usize)->f32`, `gl_f32_u32(u32)->f32`, `gl_f32_i32(i32)->f32` using `conv2`
+  traits. All OpenGL stride/offset/count casts use `gl_i32`; coordinate casts use `gl_f32`
+  variants. `emit_glyph_instance` narrowing `u32->u16` uses `u16::value_from().unwrap_or(u16::MAX)`.
+  Two `cast_precision_loss` allows in `#[cfg(test)]` retained (acceptable per convention).
+  Zero production casting suppression attributes remain.
 - **Priority:** 2 — High
 - **Scope:** `freminal/src/gui/renderer.rs` (~60+ sites)
 - **Details:**
