@@ -7,9 +7,10 @@ use core::fmt;
 
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
-// FIXME: I'm not sure we actually want to blink the cursor.
-// Most terminals seem to either not do this, or give the user the option to disable it.
-// For now, we'll track it and decide later.
+// NOTE: Cursor blink mode (?12) is tracked and reported via DECRPM.
+// Rendering actual cursor blinking is deferred — the blink infrastructure
+// from Task 23 (SGR 5/6) can be reused when this is implemented.
+// Most terminals give the user the option to enable/disable cursor blink.
 
 /// Alternate Screen (`XT_EXTSCRN`) ?12
 #[derive(Debug, Eq, PartialEq, Default, Clone)]

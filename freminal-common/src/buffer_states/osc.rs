@@ -248,8 +248,8 @@ pub enum AnsiOscType {
     RequestColorQueryBackground(AnsiOscInternalType),
     RequestColorQueryForeground(AnsiOscInternalType),
     Ftcs(FtcsMarker),
-    // FIXME: We're handling 0 and 2 as just title bar for now
-    // if we go tabbed, we'll need to handle 2 differently
+    // NOTE: OSC 0 and 2 are conflated as title-bar-only. If tabs are added,
+    // OSC 0 should also set the icon name and OSC 2 should set only the title.
     SetTitleBar(String),
     Url(UrlResponse),
     RemoteHost(String),

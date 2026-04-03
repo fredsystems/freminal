@@ -11,7 +11,6 @@ use crate::buffer_states::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FormatTag {
-    // FIXME: The start and end are irrelevant once we move to the line buffer
     pub start: usize,
     pub end: usize,
     pub colors: StateColors,

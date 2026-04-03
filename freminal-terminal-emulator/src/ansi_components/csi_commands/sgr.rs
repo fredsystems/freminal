@@ -77,8 +77,9 @@ pub fn ansi_parser_inner_csi_finished_sgr(
 }
 
 fn default_color(output: &mut Vec<TerminalOutput>, custom_color_control_code: usize) {
-    // FIXME: we'll treat '\x1b[38m' or '\x1b[48m' as a color reset.
-    // I can't find documentation for this, but it seems that other terminals handle it this way
+    // NOTE: Per xterm/VTE convention, bare 38/48/58 with no subparam resets the respective
+    // color channel. This is not explicitly specified in ECMA-48 but is de facto standard
+    // across all major terminal emulators.
 
     output.push(match custom_color_control_code {
         38 => TerminalOutput::Sgr(SelectGraphicRendition::Foreground(TerminalColor::Default)),

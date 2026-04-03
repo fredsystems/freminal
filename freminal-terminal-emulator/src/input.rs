@@ -185,7 +185,6 @@ impl TerminalInput {
             // lazygit) which expect CR (0x0d) for the Enter key.  Interactive shells
             // handle '\n' fine, but the POSIX tty layer translates CR→NL on input when
             // ICRNL is set, so sending CR is correct for both cases.
-            // TODO: investigate further — the tty driver should be handling this.
             Self::Enter => TerminalInputPayload::Single(char_to_ctrl_code(b'm')),
             Self::LineFeed => TerminalInputPayload::Single(b'\n'),
             // DECBKM (?67): set → BS (0x08), reset → DEL (0x7F).

@@ -167,8 +167,6 @@ impl From<Vec<u8>> for TChar {
     }
 }
 
-// FIXME: Ideally this should be a generic implementation for all types instead of one for each type
-
 impl PartialEq<u8> for TChar {
     fn eq(&self, other: &u8) -> bool {
         match self {

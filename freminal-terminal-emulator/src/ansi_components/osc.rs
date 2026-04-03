@@ -294,7 +294,9 @@ const fn is_osc_terminator(b: &[u8]) -> bool {
     matches!(b, [.., 0x07] | [.., 0x1b, 0x5c])
 }
 
-// FIXME: Support ST (0x1b)\ as a terminator
+// Strips individual trailing terminator bytes from the accumulated OSC parameter buffer.
+// Works in tandem with `is_osc_terminator` (which detects the full ST sequence on the buffer)
+// to clean up after termination is detected.
 const fn is_final_character_osc_terminator(b: u8) -> bool {
     b == 0x5c || b == 0x07 || b == 0x1b
 }

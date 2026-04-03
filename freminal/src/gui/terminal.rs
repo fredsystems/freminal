@@ -354,8 +354,9 @@ fn write_input_to_terminal(
         }
 
         let inputs: Cow<'static, [TerminalInput]> = match event {
-            // FIXME: We don't support separating out numpad vs regular keys
-            // This is an egui issue. See: https://github.com/emilk/egui/issues/3653
+            // LIMITATION (egui#3653): egui unifies numpad and main-row keys.
+            // Application keypad mode cannot distinguish them until egui exposes
+            // separate key variants.
             Event::Text(text) => {
                 if repeat_characters == Decarm::RepeatKey || previous_key.is_none() {
                     collect_text(text)
@@ -826,7 +827,8 @@ fn write_input_to_terminal(
                         continue;
                     }
                 }
-                // TODO: should we care if we scrolled in the x axis?
+                // Horizontal (x-axis) scroll is intentionally ignored — the terminal
+                // mouse protocol has no horizontal wheel events (see mouse.rs).
 
                 if scroll_amount.abs() < character_size_y {
                     continue;
