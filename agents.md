@@ -405,6 +405,20 @@ Coverage target: 100% across crates.
 - Prefer explicit types for clarity
 - Follow standard Rust naming conventions
 
+### Numeric Conversions
+
+- Raw `as` casts are forbidden for numeric type conversions in production code
+- Use `conv2` crate traits for all numeric conversions:
+  - `ValueFrom` / `ValueInto` for lossless conversions that may fail (e.g., `usize` -> `i32`)
+  - `ApproxFrom` / `ApproxInto` with `RoundToZero` for float conversions (e.g., `usize` -> `f32`)
+  - `ConvUtil::value_as` and `ConvUtil::approx_as` for inline conversions
+- `as` casts are permitted only for:
+  - Casts that are guaranteed lossless by the type system (e.g., `u8` -> `u32`)
+  - Test code (`#[cfg(test)]` or `tests/`)
+  - Benchmark code
+- When a conversion can fail, handle the error explicitly — do not use `.unwrap()` on the
+  conversion result in production code
+
 ---
 
 ## AI-Specific Rules

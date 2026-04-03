@@ -111,7 +111,10 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.1 — Add `conv2` to `freminal-buffer` and Update `agents.md`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Added `conv2.workspace = true` to `freminal-buffer/Cargo.toml`.
+  Added "Numeric Conversions" subsection to `agents.md` under "Code Style". `cargo build --all`
+  passes.
 - **Priority:** 1 — High (unblocks all other subtasks)
 - **Scope:** `freminal-buffer/Cargo.toml`, `agents.md`
 - **Details:**
