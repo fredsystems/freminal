@@ -183,20 +183,23 @@ pub fn run_terminal(
     cmd.env("TERM_PROGRAM_VERSION", version);
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 
-    // FIXME: I don't know if this works for all locales
-    // the problem here is some programs (like ohmyposh and zsh)
-    // want the LANG env variable set, otherwise it fucks up.
-    // at least on my system, LANG isn't set by default.
-    // I'm assuming this is the case for others, that `.utf-8` is
-    // correct and that `-` in the locale should be replaced with `_`.
+    // NOTE: Some programs (e.g. ohmyposh, zsh) require LANG to be set.  On
+    // many Linux installs LANG is unset by default, so we synthesise it here.
+    //
+    // If the detected locale already contains a codeset separator (`.`), we
+    // use it verbatim — the system already knows its codeset.  Otherwise we
+    // apply POSIX `_` normalisation only to the language/region portion and
+    // append `.UTF-8`.
+    //
+    // NOTE: This assumes the system's native codeset is UTF-8 when none is
+    // declared.  Non-UTF-8 locales (e.g. EUC-JP) that rely on LANG being
+    // absent are an edge case that freminal does not handle today — the
+    // correct fix would require a `locale(1)` query, which adds platform
+    // complexity.  Filed for future improvement.
 
     if cmd.get_env("LANG").is_none() || cmd.get_env("LANG") == Some(std::ffi::OsStr::new("")) {
-        let locale = format!(
-            "{}.UTF-8",
-            get_locale()
-                .unwrap_or_else(|| String::from("en_US"))
-                .replace('-', "_")
-        );
+        let raw = get_locale().unwrap_or_else(|| String::from("en_US"));
+        let locale = normalize_locale(&raw);
         info!("No LANG detected in the environment. Detected locale: {locale}. Setting LANG");
 
         cmd.env("LANG", locale);
@@ -412,5 +415,91 @@ impl FreminalPtyInputOutput {
             _termcaps: termcaps,
             child_exit_rx,
         })
+    }
+}
+
+/// Normalise a raw locale string into a `LANG`-compatible value.
+///
+/// POSIX locale format: `language[_territory][.codeset][@modifier]`
+///
+/// If `raw` already contains a codeset separator (`.`), it is returned
+/// verbatim — the system already declared its codeset, so we must not
+/// clobber it.  Otherwise, `.UTF-8` is inserted before any `@modifier`
+/// suffix, and any `-` characters in the language/region portion are
+/// replaced with `_` (POSIX convention).
+///
+/// Examples:
+/// - `"en-US"` → `"en_US.UTF-8"`
+/// - `"en_US"` → `"en_US.UTF-8"`
+/// - `"en_US.UTF-8"` → `"en_US.UTF-8"` (unchanged)
+/// - `"ja_JP.EUC-JP"` → `"ja_JP.EUC-JP"` (unchanged)
+/// - `"en_US@euro"` → `"en_US.UTF-8@euro"`
+/// - `"en-GB@euro"` → `"en_GB.UTF-8@euro"`
+fn normalize_locale(raw: &str) -> String {
+    if raw.contains('.') {
+        // Codeset already declared — use as-is.
+        raw.to_string()
+    } else {
+        // No codeset — normalise separators and insert `.UTF-8` before
+        // any `@modifier` suffix.
+        let (lang_region, modifier) = match raw.split_once('@') {
+            Some((lr, m)) => (lr, Some(m)),
+            None => (raw, None),
+        };
+        let normalised = lang_region.replace('-', "_");
+        modifier.map_or_else(
+            || format!("{normalised}.UTF-8"),
+            |m| format!("{normalised}.UTF-8@{m}"),
+        )
+    }
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::normalize_locale;
+
+    #[test]
+    fn locale_with_codeset_is_returned_unchanged() {
+        assert_eq!(normalize_locale("en_US.UTF-8"), "en_US.UTF-8");
+    }
+
+    #[test]
+    fn locale_with_non_utf8_codeset_is_returned_unchanged() {
+        assert_eq!(normalize_locale("ja_JP.EUC-JP"), "ja_JP.EUC-JP");
+    }
+
+    #[test]
+    fn locale_without_codeset_gets_utf8_appended() {
+        assert_eq!(normalize_locale("en_US"), "en_US.UTF-8");
+    }
+
+    #[test]
+    fn locale_with_dash_separator_is_normalised_to_underscore() {
+        assert_eq!(normalize_locale("en-US"), "en_US.UTF-8");
+    }
+
+    #[test]
+    fn locale_with_already_underscore_separator_unchanged_apart_from_codeset() {
+        assert_eq!(normalize_locale("fr_FR"), "fr_FR.UTF-8");
+    }
+
+    #[test]
+    fn empty_locale_gets_utf8_appended() {
+        assert_eq!(normalize_locale(""), ".UTF-8");
+    }
+
+    #[test]
+    fn locale_with_modifier_inserts_codeset_before_modifier() {
+        assert_eq!(normalize_locale("en_US@euro"), "en_US.UTF-8@euro");
+    }
+
+    #[test]
+    fn locale_with_dash_and_modifier_normalises_and_inserts_codeset() {
+        assert_eq!(normalize_locale("en-GB@euro"), "en_GB.UTF-8@euro");
+    }
+
+    #[test]
+    fn locale_with_codeset_and_modifier_returned_unchanged() {
+        assert_eq!(normalize_locale("en_US.UTF-8@euro"), "en_US.UTF-8@euro");
     }
 }

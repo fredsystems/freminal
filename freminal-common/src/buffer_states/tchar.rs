@@ -70,7 +70,7 @@ impl TChar {
 
     /// Convert a vector of u8s to a vector of `TChars`
     /// The assumption here is that the vector of u8s will contain one or more `TChars`.
-    /// If the byte vector is known to contain a single `TChar`, then use `TChar::from` instead.
+    /// If the byte vector is known to contain a single `TChar`, use `TChar::try_from` instead.
     ///
     /// # Errors
     /// Will return an error if the vector is not a valid utf8 string, or if the vector contains characters that are not valid `TChar`
@@ -154,20 +154,13 @@ impl From<char> for TChar {
     }
 }
 
-impl From<Vec<u8>> for TChar {
-    fn from(v: Vec<u8>) -> Self {
-        match Self::new_from_many_chars(v) {
-            Ok(c) => c,
-            Err(e) => {
-                // FIXME: We should probably propagate the error instead of ignoring it
-                error!("Error: {}. Will use ascii 0 character", e);
-                Self::Ascii(0)
-            }
-        }
+impl TryFrom<Vec<u8>> for TChar {
+    type Error = anyhow::Error;
+
+    fn try_from(v: Vec<u8>) -> Result<Self> {
+        Self::new_from_many_chars(v)
     }
 }
-
-// FIXME: Ideally this should be a generic implementation for all types instead of one for each type
 
 impl PartialEq<u8> for TChar {
     fn eq(&self, other: &u8) -> bool {

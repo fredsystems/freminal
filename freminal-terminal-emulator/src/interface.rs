@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Cached flat representation of the visible window stored between snapshots.
 ///
@@ -104,6 +105,16 @@ pub fn split_format_data_for_scrollback(
     }
 }
 
+/// Auto-resume timeout for `SynchronizedUpdates::DontDraw` (?2026).
+///
+/// If a program sets `DontDraw` but crashes or never resets it, rendering would
+/// freeze indefinitely.  After this many milliseconds of continuous `DontDraw`,
+/// `build_snapshot` automatically resets the mode to `Draw`.
+///
+/// NOTE: Timeout implementation lives in `TerminalEmulator::apply_sync_updates_timeout`.
+/// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for spec references.
+const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
+
 pub struct TerminalEmulator {
     pub internal: TerminalState,
     /// PTY I/O layer (holds the terminfo `TempDir` and child-exit receiver).
@@ -131,6 +142,18 @@ pub struct TerminalEmulator {
     /// from the current `gui_scroll_offset`, the visible window has moved and
     /// the cached snapshot must be invalidated.
     previous_scroll_offset: usize,
+    /// The instant at which `SynchronizedUpdates::DontDraw` was first observed
+    /// during `build_snapshot`.  Used to enforce the 200 ms auto-resume timeout:
+    /// if `DontDraw` is still active when this deadline passes, the mode is
+    /// automatically reset to `Draw` and rendering resumes.
+    ///
+    /// `None` when `SynchronizedUpdates` is not currently `DontDraw`.
+    ///
+    /// NOTE: The timeout is implemented here in `TerminalEmulator::build_snapshot()`
+    /// rather than inside `SynchronizedUpdates` itself (which is a pure data type).
+    /// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for the spec
+    /// references.
+    dont_draw_entered_at: Option<Instant>,
 }
 
 impl TerminalEmulator {
@@ -152,6 +175,7 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             previous_scroll_offset: 0,
+            dont_draw_entered_at: None,
         }
     }
 
@@ -175,6 +199,7 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             previous_scroll_offset: 0,
+            dont_draw_entered_at: None,
         };
         (emulator, write_rx)
     }
@@ -228,6 +253,7 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             previous_scroll_offset: 0,
+            dont_draw_entered_at: None,
         };
         Ok((ret, pty_rx))
     }
@@ -485,6 +511,8 @@ impl TerminalEmulator {
         };
 
         // ── Remaining cheap reads ────────────────────────────────────────────
+        self.apply_sync_updates_timeout();
+
         let mode_fields = self.collect_mode_fields();
         let cursor_pos = self.internal.cursor_pos();
         // Hide the cursor when the user is scrolled back into history —
@@ -549,6 +577,40 @@ impl TerminalEmulator {
             visible_image_placements,
             playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),
+        }
+    }
+
+    /// Enforce the 200 ms auto-resume timeout for `SynchronizedUpdates::DontDraw`.
+    ///
+    /// DEC ?2026 lets programs suppress rendering while composing a frame.  A
+    /// crashed program that sets `DontDraw` and never resets it would freeze the
+    /// display indefinitely.  This method starts `dont_draw_entered_at` on the
+    /// first snapshot where `DontDraw` is active and resets `synchronized_updates`
+    /// back to `Draw` once `SYNC_UPDATES_TIMEOUT_MS` milliseconds have elapsed.
+    ///
+    /// When the mode is not `DontDraw` the timer is cleared so it does not carry
+    /// stale state into the next `DontDraw` activation.
+    fn apply_sync_updates_timeout(&mut self) {
+        use freminal_common::buffer_states::modes::sync_updates::SynchronizedUpdates;
+
+        if self.internal.skip_draw_always() {
+            match self.dont_draw_entered_at {
+                None => {
+                    // First snapshot with DontDraw active — start the clock.
+                    self.dont_draw_entered_at = Some(Instant::now());
+                }
+                Some(entered_at) => {
+                    if entered_at.elapsed() >= Duration::from_millis(SYNC_UPDATES_TIMEOUT_MS) {
+                        // Timeout expired — reset to Draw so the next snapshot
+                        // carries skip_draw = false, and clear the timer.
+                        self.internal.modes.synchronized_updates = SynchronizedUpdates::Draw;
+                        self.dont_draw_entered_at = None;
+                    }
+                }
+            }
+        } else {
+            // Mode is Draw (or Query) — clear stale timer state.
+            self.dont_draw_entered_at = None;
         }
     }
 

@@ -228,10 +228,6 @@ fn encode_mouse_for_x11(button: &MouseEvent, pressed: bool) -> usize {
                 0
             }
             MouseEvent::Scroll(amount) => {
-                // FIXME: This is not correct. eframe encodes a x and y event together I think.
-                // For now we'll prefer the y event as the driver for the scroll
-                // If that is the case should we be sending a two different events for scroll?
-
                 if amount.y != 0.0 {
                     if amount.y > 0.0 {
                         return 64;

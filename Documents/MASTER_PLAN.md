@@ -51,7 +51,7 @@ and plan document maintenance rules.
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
 | 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Complete | None                 |
-| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Stub     | None                 |
+| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Complete | None                 |
 | 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Stub     | None                 |
 | 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
 | 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Pending  | None                 |
@@ -103,7 +103,7 @@ Task 25 (Code Quality Refactoring) ── independent, can run any time
 
 Task 26 (Bool-to-Enum Mode Refactor) ── independent, can run any time
 
-Task 27 (FIXME/TODO Audit) ── independent, stub (requires audit before subtask creation)
+Task 27 (FIXME/TODO Audit) ── independent, pending (audit complete, 9 subtasks defined)
 
 Task 28 (Code Comment Audit) ── independent, stub (requires audit before subtask creation)
 
@@ -303,7 +303,7 @@ Independent of each other and of Phases 3-7. Can run at any time in parallel wit
 - **Task 24** — Benchmark Improvements (independent)
 - **Task 25** — Code Quality Refactoring (independent)
 - **Task 26** — Bool-to-Enum Mode Refactor (independent)
-- **Task 27** — FIXME/TODO Audit (stub — requires audit first)
+- **Task 27** — FIXME/TODO Audit (pending — 9 subtasks defined)
 - **Task 28** — Code Comment Audit (stub — requires audit first)
 - **Task 30** — Clippy Allow Audit (independent)
 - **Task 31** — Dead Code Audit (complete)
@@ -324,7 +324,7 @@ Phase 7:      ├── Task 18 (Update Client) ──┤
               │                              │
 Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
               ├── Task 24 (Benchmarks)       ┤ (any time)
-              ├── Task 27 (FIXME Audit)      ┤ (stub — audit first)
+              ├── Task 27 (FIXME Audit)      ┤ (pending — 9 subtasks)
               ├── Task 28 (Comment Audit)    ┤ (stub — audit first)
               ├── Task 30 (Clippy Allows)    ┤ (any time)
               ├── Task 31 (Dead Code Audit)  ┤ (complete)
@@ -422,7 +422,7 @@ Update this section as tasks complete:
 | 24   |            |            |                                                        |
 | 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality       |
 | 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                 |
-| 27   |            |            |                                                        |
+| 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit         |
 | 28   |            |            |                                                        |
 | 29   |            |            |                                                        |
 | 30   |            |            |                                                        |

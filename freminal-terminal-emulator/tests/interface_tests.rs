@@ -325,3 +325,89 @@ fn test_scroll_offset_zero_in_alternate() {
         "alternate screen must always report max_scroll_offset = 0"
     );
 }
+
+// ─── synchronized updates (?2026) timeout ────────────────────────────────────
+
+/// After the program sets DontDraw (?2026h) and then immediately resets it
+/// (?2026l), the snapshot must carry `skip_draw = false`.
+#[test]
+fn test_sync_updates_normal_reset() {
+    let (mut emu, _rx) = make_emulator();
+
+    // Set DontDraw.
+    emu.handle_incoming_data(b"\x1b[?2026h");
+    let snap = emu.build_snapshot();
+    assert!(
+        snap.skip_draw,
+        "skip_draw must be true immediately after ?2026h"
+    );
+
+    // Reset DontDraw — program finished its frame.
+    emu.handle_incoming_data(b"\x1b[?2026l");
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.skip_draw,
+        "skip_draw must be false after ?2026l (normal program reset)"
+    );
+}
+
+/// When a program sets DontDraw but never resets it, `build_snapshot` must
+/// automatically override `skip_draw` to `false` once 200 ms have elapsed.
+///
+/// This test sleeps briefly past the 200 ms boundary.  It is the only test
+/// that touches wall-clock time; keep it in a dedicated function so CI can
+/// quarantine it if flakiness arises.
+#[test]
+fn test_sync_updates_timeout_auto_resume() {
+    use std::time::Duration;
+
+    let (mut emu, _rx) = make_emulator();
+
+    // Activate DontDraw — simulates a program that sets ?2026 then crashes.
+    emu.handle_incoming_data(b"\x1b[?2026h");
+
+    // First snapshot must honour DontDraw.
+    let snap = emu.build_snapshot();
+    assert!(
+        snap.skip_draw,
+        "skip_draw must be true immediately after ?2026h"
+    );
+
+    // Sleep past the 200 ms timeout boundary (add a small margin).
+    std::thread::sleep(Duration::from_millis(250));
+
+    // After the timeout, build_snapshot must auto-reset and return skip_draw = false.
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.skip_draw,
+        "skip_draw must be false after the 200 ms timeout has elapsed without a ?2026l reset"
+    );
+}
+
+/// When DontDraw is active and then reset by the program *before* the timeout,
+/// a subsequent `build_snapshot` call after the 200 ms window must still report
+/// `skip_draw = false` (not re-fire the timeout on stale timer state).
+#[test]
+fn test_sync_updates_timer_cleared_on_reset() {
+    use std::time::Duration;
+
+    let (mut emu, _rx) = make_emulator();
+
+    // Set DontDraw, take a snapshot to start the timer.
+    emu.handle_incoming_data(b"\x1b[?2026h");
+    let _ = emu.build_snapshot();
+
+    // Reset DontDraw immediately — program behaved correctly.
+    emu.handle_incoming_data(b"\x1b[?2026l");
+    let snap = emu.build_snapshot();
+    assert!(!snap.skip_draw, "skip_draw must be false after ?2026l");
+
+    // Sleep past the timeout period.  The timer must have been cleared by the
+    // reset so this must NOT cause skip_draw to flip.
+    std::thread::sleep(Duration::from_millis(250));
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.skip_draw,
+        "skip_draw must remain false after timeout period when DontDraw was already reset"
+    );
+}

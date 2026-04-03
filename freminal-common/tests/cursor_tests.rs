@@ -119,14 +119,13 @@ fn test_get_underline_color_reverse_on() {
 
 #[test]
 fn test_get_underline_color_reverse_on_custom_ul() {
-    // FIXME behavior: when reverse video is on, underline color is derived from
-    // background_color, not underline_color.  The underline_color field is ignored.
+    // An explicitly-set underline colour is independent of fg/bg inversion.
+    // Even under reverse video, the explicit green should be returned unchanged.
     let sc = StateColors::default()
         .with_underline_color(TerminalColor::Green)
         .with_background_color(TerminalColor::Cyan)
         .with_reverse_video(ReverseVideo::On);
-    // get_underline_color() = background_color.default_to_regular() = Cyan (unchanged)
-    assert_eq!(sc.get_underline_color(), TerminalColor::Cyan);
+    assert_eq!(sc.get_underline_color(), TerminalColor::Green);
 }
 
 // ---------------------------------------------------------------------------

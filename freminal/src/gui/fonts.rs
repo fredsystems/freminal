@@ -170,7 +170,8 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
 // -------------------------------------------------------------------------------------------------
 // 2. Bundled Nerd Symbols (fallback)
 // -------------------------------------------------------------------------------------------------
-// FIXME: for now, we're just going to ignore bundled emoji fonts, but we probably should bundle here
+// NOTE: Emoji fonts are loaded from the system fallback chain (step 4 in setup_font_files).
+// Bundling an emoji font would increase binary size; deferred as a quality-of-life improvement.
 const fn load_bundled_nerd_symbols(_defs: &mut FontDefinitions) {
     // If you have a separate Nerd symbols file, load it here.
     // If MesloLGS Nerd Mono already includes full symbols, you can comment this out.

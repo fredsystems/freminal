@@ -109,12 +109,18 @@ impl StateColors {
         }
     }
 
-    // FIXME: How does this work if an underline color is set but reverse video is on?
-    // Probably should also check if underline color is set to default
     #[must_use]
     pub const fn get_underline_color(&self) -> TerminalColor {
         match self.reverse_video {
-            ReverseVideo::On => self.background_color.default_to_regular(),
+            ReverseVideo::On => {
+                // An explicitly-set underline colour is independent of fg/bg inversion.
+                // Only fall back to the inverted background when no underline colour was set.
+                if matches!(self.underline_color, TerminalColor::DefaultUnderlineColor) {
+                    self.background_color.default_to_regular()
+                } else {
+                    self.underline_color
+                }
+            }
             ReverseVideo::Off => self.underline_color,
         }
     }
