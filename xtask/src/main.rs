@@ -5,7 +5,6 @@
 
 #![deny(
     clippy::pedantic,
-    //clippy::cargo,
     clippy::nursery,
     clippy::style,
     clippy::correctness,

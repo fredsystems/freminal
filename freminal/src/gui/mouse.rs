@@ -68,6 +68,10 @@ pub enum MouseEvent {
     Scroll(Vec2),
 }
 
+// The `x` and `y` pixel-coordinate fields are stored for potential future use
+// (e.g. pixel-precise hover reporting) but are not currently read after
+// construction.  The allow suppresses the dead-code lint for those two fields
+// without removing the information from the struct.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FreminalMousePosition {

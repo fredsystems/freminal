@@ -333,6 +333,5 @@ pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option
 }
 
 pub fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {
-    // get the parameter at the index
     params.get(idx).and_then(std::clone::Clone::clone)
 }

@@ -627,23 +627,19 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle newline (LF)
     pub fn handle_newline(&mut self) {
         self.buffer.handle_lf();
     }
 
-    /// Handle carriage return (CR)
     pub const fn handle_carriage_return(&mut self) {
         self.buffer.handle_cr();
     }
 
-    /// Handle backspace
     pub fn handle_backspace(&mut self) {
         self.buffer
             .handle_backspace(self.reverse_wrap, self.xt_rev_wrap2);
     }
 
-    /// Handle horizontal tab (HT / 0x09)
     pub fn handle_tab(&mut self) {
         self.buffer.advance_to_next_tab_stop();
     }
@@ -656,30 +652,25 @@ impl TerminalHandler {
         self.buffer.set_cursor_pos(x_zero, y_zero);
     }
 
-    /// Handle relative cursor movement
     pub fn handle_cursor_relative(&mut self, dx: i32, dy: i32) {
         self.buffer.move_cursor_relative(dx, dy);
     }
 
-    /// Handle cursor up (CUU)
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_up(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, -(n as i32));
     }
 
-    /// Handle cursor down (CUD)
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_down(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, n as i32);
     }
 
-    /// Handle cursor forward (CUF)
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_forward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(n as i32, 0);
     }
 
-    /// Handle cursor backward (CUB)
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_backward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(-(n as i32), 0);
@@ -706,37 +697,30 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle insert lines (IL)
     pub fn handle_insert_lines(&mut self, n: usize) {
         self.buffer.insert_lines(n);
     }
 
-    /// Handle delete lines (DL)
     pub fn handle_delete_lines(&mut self, n: usize) {
         self.buffer.delete_lines(n);
     }
 
-    /// Handle erase characters (ECH)
     pub fn handle_erase_chars(&mut self, n: usize) {
         self.buffer.erase_chars(n);
     }
 
-    /// Handle delete characters (DCH)
     pub fn handle_delete_chars(&mut self, n: usize) {
         self.buffer.delete_chars(n);
     }
 
-    /// Handle save cursor (DECSC)
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
     }
 
-    /// Handle restore cursor (DECRC)
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
     }
 
-    /// Handle insert spaces (ICH)
     pub fn handle_insert_spaces(&mut self, n: usize) {
         self.buffer.insert_spaces(n);
     }
@@ -760,17 +744,14 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle index (IND)
     pub fn handle_index(&mut self) {
         self.buffer.handle_ind();
     }
 
-    /// Handle reverse index (RI)
     pub fn handle_reverse_index(&mut self) {
         self.buffer.handle_ri();
     }
 
-    /// Handle next line (NEL)
     pub fn handle_next_line(&mut self) {
         self.buffer.handle_nel();
     }
