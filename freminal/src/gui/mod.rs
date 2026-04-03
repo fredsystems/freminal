@@ -289,6 +289,43 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
     }
 }
 
+/// Drain and dispatch all pending [`WindowCommand`]s for this frame.
+///
+/// ## Flow
+///
+/// 1. **Non-blocking drain** — `window_cmd_rx.try_recv()` is called in a
+///    loop until the channel is empty.  All commands queued by the PTY
+///    consumer thread since the last frame are processed before rendering.
+///
+/// 2. **Variant routing** — both `Viewport` and `Report` commands carry
+///    the same inner `WindowManipulation` value; the outer tag is not used
+///    for routing here (the dispatch is done entirely on the inner value).
+///
+/// 3. **Viewport operations** — forwarded to egui via
+///    `ui.ctx().send_viewport_cmd(ViewportCommand::…)`.  Covers move,
+///    resize, minimize/restore, maximize/restore, fullscreen, raise/lower,
+///    de-iconify, and resize-to-lines-and-columns.
+///
+/// 4. **Report queries** — the function measures the current viewport
+///    geometry from `ui.ctx()` (pixel positions, sizes) and the font metrics
+///    (`font_width`, `font_height`), then builds the appropriate escape
+///    sequence response string and sends it directly to the PTY via
+///    `pty_write_tx` using `send_pty_response()`.  The emulator is never
+///    involved.  Covered variants:
+///    - `ReportWindowState` → `ESC [ 1 t` or `ESC [ 2 t`
+///    - `ReportWindowPosition*` → `ESC [ 3 ; x ; y t`
+///    - `ReportWindowSize*` and `ReportRootWindowSize*` → `ESC [ 4/5/6/7 ; h ; w t`
+///    - `ReportCharacterSizeInPixels` → `ESC [ 9 ; h ; w t`
+///    - `ReportTerminalSizeInCharacters` → uses `snap.term_width` / `term_height`
+///    - `ReportIconLabel` and `ReportTitle` → `ESC ] 0 / 1 / 2 ; <title> ST`
+///
+/// 5. **Title stack** — `SaveWindowTitleToStack` and
+///    `RestoreWindowTitleFromStack` push/pop from `title_stack`; `SetTitleBarText`
+///    calls `ViewportCommand::Title`.
+///
+/// 6. **OSC 52 clipboard** — `SetClipboard` and `QueryClipboard` are handled
+///    upstream (in `update()`) before this function is called; they will not
+///    appear in the `window_cmd_rx` stream.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn handle_window_manipulation(
     ui: &egui::Ui,

@@ -3086,7 +3086,21 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle resize
+    /// Resize the terminal grid to `width` × `height` characters.
+    ///
+    /// Also updates the stored pixel-per-cell dimensions used for building
+    /// `PtyWrite::Resize` payloads.  Zero values for the pixel dimensions are
+    /// ignored (the stored value is not overwritten).
+    ///
+    /// `scroll_offset` is **always `0`** here — it is owned by `ViewState` on
+    /// the GUI side.  The PTY thread never holds a scroll offset.  `set_size`
+    /// returns the post-reflow offset (which may differ when scrollback rows
+    /// are removed), but we discard it because the GUI's `ViewState` will
+    /// clamp its own offset the next time it sends a snapshot request.
+    ///
+    /// The underlying `Buffer::set_size` call triggers `reflow_to_width` when
+    /// the column count changes, and adjusts the row count by appending blank
+    /// rows or truncating from the live bottom when the height changes.
     pub fn handle_resize(
         &mut self,
         width: usize,
@@ -3817,10 +3831,21 @@ impl TerminalHandler {
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
             }
-            // Silently ignore invalid, skipped, and any future variants
-            TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {
-                // Silently ignore for forward compatibility
-            }
+            // Silently ignore `Invalid`, `Skipped`, and any future variants.
+            //
+            // `Invalid` — a sequence the parser recognised as malformed; the
+            //   error was already logged by the parser.  There is nothing the
+            //   buffer can do with it.
+            //
+            // `Skipped` — a sequence the parser intentionally dropped (e.g.
+            //   an OSC that was too long or a DCS string with an unknown
+            //   introducer).  Ignored for the same reason.
+            //
+            // `_` (catch-all) — forward compatibility: new `TerminalOutput`
+            //   variants added in future will not cause a compile error or
+            //   panic here.  Any variant that needs buffer-level handling must
+            //   be added as an explicit arm above.
+            TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {}
         }
     }
 }

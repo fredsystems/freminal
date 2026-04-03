@@ -5,6 +5,37 @@
 
 use anyhow::Result;
 
+/// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).
+///
+/// This enum covers two categories:
+///
+/// **Viewport operations** (fully implemented) — forwarded to the egui
+/// viewport via `send_viewport_cmd()` by the GUI's `handle_window_manipulation`
+/// function:
+/// - De-iconify / minimize, move, resize, raise/lower, maximize/restore,
+///   enter/exit/toggle full-screen.
+/// - Title-bar set/save/restore stack.
+///
+/// **Report queries** (implemented) — the GUI measures the viewport geometry
+/// and sends a formatted escape-sequence response directly to the PTY:
+/// - `ReportWindowState`, `ReportWindowPosition*`, `ReportWindowSize*`,
+///   `ReportCharacterSizeInPixels`, `ReportTerminalSizeInCharacters`,
+///   `ReportRootWindowSizeInCharacters`, `ReportIconLabel`, `ReportTitle`.
+///
+/// **OSC 52 clipboard** (fully implemented) — handled in
+/// `handle_window_manipulation` via dedicated match arms:
+/// - `SetClipboard` writes text to the system clipboard.
+/// - `QueryClipboard` reads the clipboard and replies with base64-encoded
+///   content.
+///
+/// **Intentional stubs / no-ops:**
+/// - `RaiseWindowToTopOfStackingOrder`, `LowerWindowToBottomOfStackingOrder`,
+///   `RefreshWindow` — these have no meaningful egui equivalent and are
+///   silently accepted (the PTY application rarely depends on them).
+/// - `ResizeWindowToLinesAndColumns` — implemented but the row/column to
+///   pixel calculation uses `font_width` / `font_height` from the snapshot,
+///   so it may be off by one on high-DPI displays until the metrics path is
+///   pixel-perfect.
 #[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WindowManipulation {

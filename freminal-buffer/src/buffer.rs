@@ -681,6 +681,32 @@ impl Buffer {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// Re-wrap all rows to `new_width` columns without losing any text.
+    ///
+    /// ## Algorithm
+    ///
+    /// 1. **Group into logical lines.** Rows are joined by a `RowJoin` flag:
+    ///    `NewLogicalLine` starts a new logical line and `ContinueLogicalLine`
+    ///    means this row is a soft-wrapped continuation of the previous one.
+    ///    We split `self.rows` into groups where each group represents one
+    ///    original logical line (a paragraph, in word-processor terms).
+    ///
+    /// 2. **Flatten each logical line.** The cells from every physical row in
+    ///    the group are concatenated into a single `Vec<Cell>`, discarding the
+    ///    old row boundaries.
+    ///
+    /// 3. **Re-wrap at the new width.** Wide glyphs (display width > 1) are
+    ///    kept whole — if a glyph does not fit at the current column it is
+    ///    moved to the next row rather than split.  Each flushed row records
+    ///    whether it is the first physical row of its logical line
+    ///    (`RowJoin::NewLogicalLine`) or a continuation (`ContinueLogicalLine`),
+    ///    and inherits the original `RowOrigin` of its logical line.
+    ///
+    /// 4. **Install the new rows.** `self.rows` is replaced with the reflow
+    ///    result, `self.width` is updated, and `self.row_cache` is reset to
+    ///    all-`None` (every row is dirty after reflow).
+    ///
+    /// The operation is O(total cells) — linear in the amount of text.
     pub fn reflow_to_width(&mut self, new_width: usize) {
         if new_width == 0 || self.rows.is_empty() || new_width == self.width {
             // Nothing to do

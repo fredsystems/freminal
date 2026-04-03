@@ -1046,6 +1046,31 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
 /// When the win height is larger, the extra vertical space is distributed evenly
 /// above and below the typographic region so that standard Latin glyphs remain
 /// vertically centred within the cell.
+/// Compute the pixel dimensions of a single terminal cell from a loaded font face.
+///
+/// Returns `(cell_width_u32, cell_height_u32, ascent_f32, descent_f32,
+/// line_gap_f32, underline_offset_f32, underline_thickness_f32)`.
+///
+/// ## Cell width
+///
+/// The advance width of the ASCII character `'0'` at `font_size_ppem` is used
+/// as the canonical cell width.  This avoids the inflated `max_width` that
+/// Nerd Font variants carry (their icon/symbol glyphs are far wider than the
+/// monospace text glyphs).  Fallback chain:
+/// 1. `gm.advance_width(glyph_for_'0')`
+/// 2. `metrics.average_width` (if `'0'` has no glyph or zero advance)
+/// 3. `metrics.max_width` (last resort)
+///
+/// ## Cell height
+///
+/// The tallest of three independent height signals is chosen to ensure nothing
+/// is clipped:
+/// - **Typographic height** (`ascent + |descent| + leading`) from swash.
+/// - **Win height** from the OS/2 `sTypoAscender` + `|sTypoDescender|` fields
+///   scaled from design units to pixels.
+/// - **Line gap height** (`ascent + |descent| + line_gap`) — handles fonts
+///   that encode inter-line spacing via the `hhea.lineGap` field rather than
+///   via explicit ascent/descent values.
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_ppem: f32,

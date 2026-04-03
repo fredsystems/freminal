@@ -8,6 +8,19 @@ use core::fmt;
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
 /// Set number of columns (DECCOLM) ?3
+///
+/// DECSET `?3` sets 132-column mode (`Column132`) and DECRST `?3` sets
+/// 80-column mode (`Column80`).
+///
+/// **Non-standard default:** The `#[default]` here is `Column132` (the
+/// *set* state).  The DEC spec and most terminals default to 80 columns,
+/// but Freminal does not resize the grid in response to DECCOLM — the
+/// terminal is always pixel-resized by the GUI.  `Column132` is kept as
+/// default purely so that `Deccolm::new(&SetMode::DecSet)` round-trips
+/// correctly through `report()`, which maps `Column132 → ESC[?3;1$y`
+/// (mode set).  Applications that query `DECRQM ?3` therefore always
+/// receive "set" (1), which is the semantically correct response for a
+/// terminal that does not enforce a column limit.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum Deccolm {
     Column80,

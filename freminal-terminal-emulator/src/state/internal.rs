@@ -220,6 +220,29 @@ impl TerminalState {
     /// Sync a single `TerminalOutput` into `self.modes` when it carries a
     /// mode flag that lives in `TerminalState` rather than `TerminalHandler`.
     ///
+    /// ## Mode ownership split
+    ///
+    /// Terminal modes are split across two layers:
+    ///
+    /// - **`TerminalHandler` (buffer layer)** owns modes that directly affect
+    ///   buffer mutations: DECAWM, DECOM, DECLRMM, DECCOLM, alternate screen
+    ///   (`XtExtscrn` / `AltScreen47`), DEC special graphics, etc.  The
+    ///   handler processes these inside `process_outputs()` and updates its own
+    ///   internal state.  `sync_mode_flags` receives the same output list but
+    ///   hits the catch-all `_ => {}` branch for these variants.
+    ///
+    /// - **`TerminalState.modes` (`TerminalModes`)** owns modes that affect
+    ///   input encoding or GUI-visible behaviour: `cursor_key` (DECCKM),
+    ///   `bracketed_paste`, `mouse_tracking`, `mouse_encoding`, `focus_reporting`
+    ///   (`XtMseWin`), `repeat_keys` (DECARM), `keypad_mode` (DECPAM/DECNKM),
+    ///   `invert_screen` (DECSCNM), `synchronized_updates`, `line_feed_mode`,
+    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and `reverse_wrap_around`.
+    ///
+    /// - **`FreminalAnsiParser.vt52_mode` (parser layer)** — DECANM must also
+    ///   be mirrored into the parser so it routes ESC bytes to the correct
+    ///   VT52 or ANSI state machine.  This is the only mode flag that needs
+    ///   to be copied to a third layer.
+    ///
     /// Query variants are intercepted here: the current state is looked up
     /// and a DECRPM response is sent.
     fn sync_mode_flags(&mut self, output: &TerminalOutput) {
@@ -410,6 +433,40 @@ impl TerminalState {
         }
     }
 
+    /// Process one chunk of raw PTY bytes through the full terminal pipeline.
+    ///
+    /// ## Pipeline stages
+    ///
+    /// 1. **UTF-8 reassembly** — prepends any bytes saved from the previous
+    ///    call (`leftover_data`) that form an incomplete multi-byte sequence.
+    ///
+    /// 2. **Tail scan** — scans at most the last 3 bytes of the combined buffer
+    ///    looking for a UTF-8 leading byte whose declared sequence length extends
+    ///    past the end of the buffer.  If found, those bytes are split off and
+    ///    stored in `leftover_data` for the next call.  This is O(1) — no
+    ///    full-buffer clone is required.
+    ///
+    /// 3. **Parser** — feeds the complete (non-trailing) bytes to
+    ///    `FreminalAnsiParser::push()`, which produces a `Vec<TerminalOutput>`.
+    ///
+    /// 4. **Buffer mutations** — `TerminalHandler::process_outputs()` applies
+    ///    every `TerminalOutput` item to the buffer: text insertion, cursor
+    ///    movement, erase operations, mode changes, etc.
+    ///
+    /// 5. **Mode sync** — iterates the same output list a second time to update
+    ///    the mode flags that live in `TerminalState` rather than the handler
+    ///    (mouse tracking, bracketed paste, focus reporting, DECANM, etc.).
+    ///
+    /// 6. **RIS reset** — if any item is `ResetDevice` (ESC c), resets all
+    ///    `TerminalState`-owned mode fields and clears window commands.
+    ///
+    /// 7. **Window commands** — drains the handler's `window_commands` queue
+    ///    into `self.window_commands` so the GUI's `handle_window_manipulation`
+    ///    drain loop can pick them up on the next frame.
+    ///
+    /// 8. **tmux reparse** — drains any raw bytes queued by the DCS tmux
+    ///    passthrough handler, re-runs them through the parser and handler,
+    ///    and loops until the queue is empty.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         debug!("Handling Incoming Data");
         trace!(

@@ -305,6 +305,45 @@ fn send_terminal_inputs(
     clippy::too_many_lines,
     clippy::too_many_arguments
 )]
+/// Translate egui input events into terminal input and send them to the PTY.
+///
+/// ## Input routing
+///
+/// Each egui `Event` is classified and converted into one or more
+/// [`TerminalInput`] values which are then serialised to bytes and sent as a
+/// single `InputEvent::Key(Vec<u8>)` via `input_tx`.  Sending all bytes in a
+/// single message is critical for multi-byte sequences (mouse reports,
+/// modifier-encoded arrows) — splitting across multiple sends would let the
+/// PTY application see them as individual typed characters.
+///
+/// | egui event           | Routing                                               |
+/// |----------------------|-------------------------------------------------------|
+/// | `Text(s)`            | UTF-8 bytes, possibly wrapped in bracketed-paste markers. |
+/// | `Key` (printable)    | `Ctrl+letter` → C0 control byte; `Ctrl+punctuation` → low-ASCII byte via `control_key()`. |
+/// | `Key` (special)      | Arrows, Home/End, Delete, Insert, PgUp/Dn, F1–F12 → xterm escape sequences via `to_payload()`. |
+/// | `PointerButton`      | Translated to X10/X11/SGR mouse report bytes when mouse tracking is active. |
+/// | `PointerMoved`       | Mouse-move report when button-motion or any-event tracking is active; updates text selection when tracking is off. |
+/// | `Scroll`             | Alternate screen: converted to arrow-key bytes (`AlternateScroll` mode). Primary screen: updates `ViewState::scroll_offset` and sends `InputEvent::ScrollOffset`. |
+/// | `WindowFocused`      | Sends `InputEvent::FocusChange`; clears mouse position on unfocus. |
+/// | `Paste`              | Bracketed-paste wrapped if `RlBracket::Bracketed` is set. |
+/// | `Copy`               | Selection text placed on system clipboard. |
+///
+/// ## Mouse tracking suppression
+///
+/// When `view_state.scroll_offset > 0` (user scrolled into history), mouse
+/// tracking is suppressed — `effective_mouse_tracking` is overridden to
+/// `NoTracking`.  This matches the behavior of xterm/kitty/WezTerm: the
+/// visible content is historical, not the live terminal the PTY application
+/// expects mouse coordinates to reference.
+///
+/// ## Return value
+///
+/// Returns `(state_changed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending)`:
+/// - `state_changed` — true if the view state was mutated (scroll, selection) and a repaint is needed.
+/// - `last_reported_mouse_pos` — updated mouse tracking state for the next call.
+/// - `previous_key` — last pressed key (used for key-repeat deduplication).
+/// - `scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
+/// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
 fn write_input_to_terminal(
     input: &InputState,
     snap: &TerminalSnapshot,
