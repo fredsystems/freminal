@@ -10,17 +10,16 @@ use crate::ansi::ParserOutcome;
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 
 #[derive(Eq, PartialEq, Debug)]
-pub enum StandardParserState {
+pub(crate) enum StandardParserState {
     Params,
     Intermediates,
     Finished,
     Invalid,
-    InvalidFinished,
 }
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct StandardParser {
-    pub state: StandardParserState,
+    pub(crate) state: StandardParserState,
     pub params: Vec<u8>,
     pub intermediates: Vec<u8>,
 
@@ -70,7 +69,7 @@ impl StandardParser {
     pub fn push(&mut self, b: u8) -> ParserOutcome {
         self.append_trace(b);
 
-        if let StandardParserState::Finished | StandardParserState::InvalidFinished = &self.state {
+        if let StandardParserState::Finished | StandardParserState::Invalid = &self.state {
             return ParserOutcome::Invalid("Parser pushed to after finish".to_string());
         }
 

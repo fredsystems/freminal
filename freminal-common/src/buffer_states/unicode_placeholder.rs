@@ -19,11 +19,8 @@
 
 use crate::colors::TerminalColor;
 
-/// The Unicode codepoint used as the Kitty image placeholder character.
-pub const PLACEHOLDER_CHAR: char = '\u{10EEEE}';
-
 /// UTF-8 encoding of U+10EEEE: F4 8E BB AE (4 bytes).
-pub const PLACEHOLDER_UTF8: [u8; 4] = [0xF4, 0x8E, 0xBB, 0xAE];
+pub(crate) const PLACEHOLDER_UTF8: [u8; 4] = [0xF4, 0x8E, 0xBB, 0xAE];
 
 /// Diacritics used to encode row/column indices in Kitty Unicode placeholders.
 ///
@@ -66,7 +63,7 @@ const DIACRITICS: [u32; 297] = [
 /// Returns `None` if the codepoint is not in the Kitty placeholder
 /// diacritics table.
 #[must_use]
-pub fn diacritic_to_index(codepoint: u32) -> Option<u16> {
+pub(crate) fn diacritic_to_index(codepoint: u32) -> Option<u16> {
     // Binary search — the table is sorted by codepoint value.
     DIACRITICS.binary_search(&codepoint).ok().map(|i| {
         // The table has at most 297 entries, which fits in u16.
@@ -193,6 +190,9 @@ pub fn is_placeholder(bytes: &[u8]) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The Unicode codepoint used as the Kitty image placeholder character.
+    const PLACEHOLDER_CHAR: char = '\u{10EEEE}';
 
     #[test]
     fn test_diacritic_to_index_known_values() {

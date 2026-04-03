@@ -55,7 +55,7 @@ and plan document maintenance rules.
 | 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Stub     | None                 |
 | 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
 | 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Pending  | None                 |
-| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Stub     | None                 |
+| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Complete | None                 |
 | 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
@@ -306,7 +306,7 @@ Independent of each other and of Phases 3-7. Can run at any time in parallel wit
 - **Task 27** — FIXME/TODO Audit (stub — requires audit first)
 - **Task 28** — Code Comment Audit (stub — requires audit first)
 - **Task 30** — Clippy Allow Audit (independent)
-- **Task 31** — Dead Code Audit (stub — requires audit first)
+- **Task 31** — Dead Code Audit (complete)
 - **Task 32** — Playback Feature Flag (stub — requires audit first)
 - **Task 33** — WezTerm & Ghostty Palettes (independent)
 
@@ -317,7 +317,7 @@ Must run after all other tasks are complete to avoid merge conflicts.
 - **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 34
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 31, 34
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
@@ -327,7 +327,7 @@ Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
               ├── Task 27 (FIXME Audit)      ┤ (stub — audit first)
               ├── Task 28 (Comment Audit)    ┤ (stub — audit first)
               ├── Task 30 (Clippy Allows)    ┤ (any time)
-              ├── Task 31 (Dead Code Audit)  ┤ (stub — audit first)
+              ├── Task 31 (Dead Code Audit)  ┤ (complete)
               ├── Task 32 (Playback Flag)    ┤ (stub — audit first)
               ├── Task 33 (Palettes)         ┤ (any time)
               │                              │
@@ -426,7 +426,7 @@ Update this section as tasks complete:
 | 28   |            |            |                                                        |
 | 29   |            |            |                                                        |
 | 30   |            |            |                                                        |
-| 31   |            |            |                                                        |
+| 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)        |
 | 32   |            |            |                                                        |
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity |

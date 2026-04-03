@@ -1,6 +1,6 @@
 # PLAN_31 — Dead Code Audit
 
-## Status: Stub
+## Status: Complete
 
 ---
 
@@ -26,17 +26,16 @@ visibility to `pub(crate)` / private if internal callers exist).
 **Dependents:** Task 29 (God File Refactoring) — a smaller API surface makes splitting easier
 **Primary crates:** All (`freminal`, `freminal-terminal-emulator`, `freminal-buffer`,
 `freminal-common`)
-**Estimated scope:** Unknown until audit completes
+**Estimated scope:** 6 subtasks (13 deletions, 15 demotions, plus iterative cleanup)
 
 ---
 
-## Why This Is a Stub
+## Audit History
 
-The subtask list cannot be written until the audit is performed. The codebase has been through
-extensive refactoring (performance plan, code quality task, escape sequence overhaul, etc.) and
-each phase likely left behind public items whose callers were removed or relocated. A manual
-audit is required because automated tools cannot reliably detect this across workspace crate
-boundaries.
+The audit was initiated 2026-04-02. Four parallel read-only subagents (one per crate) enumerated
+all `pub` items and classified them by checking callers across the entire workspace using ripgrep.
+Results were cross-validated manually before subtask creation. The "stub" phase is complete; the
+document now contains actionable subtasks.
 
 ## The Problem with `pub`
 
@@ -106,14 +105,142 @@ These areas have undergone significant refactoring and are likely to harbor dead
 | `freminal-common` types    | Types added for early designs that were later redesigned               |
 | Snapshot/IO types          | Performance plan introduced new types; old intermediaries may remain   |
 
+## Audit Results
+
+The audit was performed across all four crates (2026-04-02). Each `pub` item was checked for
+callers using `rg` / `grep` across the entire workspace, including integration tests and
+benchmarks.
+
+### Classification
+
+- **DEAD** — Zero callers anywhere (production, tests, benchmarks). Delete.
+- **DEMOTE** — Callers only within the defining crate. Change `pub` → `pub(crate)`.
+- **KEEP** — Callers in downstream crates, integration tests, or benchmarks. Leave as `pub`.
+
+---
+
 ## Subtasks
 
-To be created after the audit. Expected categories:
+### Subtask 31.1 — Delete dead items in `freminal-common`
 
-- Delete dead `pub` items with zero callers
-- Demote `pub` to `pub(crate)` for items only used within their crate
-- Gate test-only items behind `#[cfg(test)]`
-- Document findings for items that appear dead but are intentionally kept (e.g., future use)
+**Action:** Delete the following items that have zero callers anywhere in the workspace.
+
+| Item                          | File                               | Line | Evidence                         |
+| ----------------------------- | ---------------------------------- | ---- | -------------------------------- |
+| `display_vec_tchar_as_string` | `buffer_states/tchar.rs`           | 138  | Only definition; zero references |
+| `EraseMode` enum              | `buffer_states/terminal_output.rs` | 17   | Only definition; zero references |
+| `CursorDirection` enum        | `buffer_states/terminal_output.rs` | 30   | Only definition; zero references |
+| `LineOperation` enum          | `buffer_states/terminal_output.rs` | 39   | Only definition; zero references |
+| `CharOperation` enum          | `buffer_states/terminal_output.rs` | 46   | Only definition; zero references |
+
+**Note:** If `terminal_output.rs` becomes empty after deletions, delete the file and remove its
+`pub mod` from `buffer_states/mod.rs`.
+
+**Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
+
+---
+
+### Subtask 31.2 — Demote `pub` → `pub(crate)` in `freminal-common`
+
+**Action:** Change visibility for items only used within `freminal-common` itself.
+
+| Item                     | File                                   | Line | Callers                                      |
+| ------------------------ | -------------------------------------- | ---- | -------------------------------------------- |
+| `TCharError` enum        | `buffer_states/error.rs`               | 10   | Only `tchar.rs` within crate                 |
+| `user_config_path` fn    | `config.rs`                            | 534  | Only `config.rs` internal calls              |
+| `diacritic_to_index` fn  | `buffer_states/unicode_placeholder.rs` | 69   | Only same file (production + `#[cfg(test)]`) |
+| `PLACEHOLDER_CHAR` const | `buffer_states/unicode_placeholder.rs` | 23   | Only same file                               |
+| `PLACEHOLDER_UTF8` const | `buffer_states/unicode_placeholder.rs` | 26   | Only same file                               |
+| `SixelBackground` enum   | `buffer_states/sixel.rs`               | 61   | Only same file                               |
+
+**Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
+
+---
+
+### Subtask 31.3 — Delete dead items in `freminal-terminal-emulator`
+
+**Action:** Delete orphaned `TerminalEmulator` wrapper methods and `TerminalState` accessors.
+
+| Item                                               | File                | Line | Evidence                                                        |
+| -------------------------------------------------- | ------------------- | ---- | --------------------------------------------------------------- |
+| `TerminalEmulator::data()`                         | `interface.rs`      | 418  | Zero callers; `build_snapshot` uses `internal.handler` directly |
+| `TerminalEmulator::data_and_format_data_for_gui()` | `interface.rs`      | 430  | Zero callers; `build_snapshot` uses `internal` directly         |
+| `TerminalEmulator::cursor_pos()`                   | `interface.rs`      | 439  | Zero callers; `build_snapshot` uses `internal.cursor_pos()`     |
+| `TerminalEmulator::show_cursor()`                  | `interface.rs`      | 443  | Zero callers; `build_snapshot` uses `internal.show_cursor()`    |
+| `TerminalEmulator::get_cursor_visual_style()`      | `interface.rs`      | 261  | Zero callers; `build_snapshot` uses `internal` directly         |
+| `TerminalEmulator::skip_draw_always()`             | `interface.rs`      | 266  | Zero callers; `build_snapshot` uses `internal` directly         |
+| `TerminalState::cursor_color()`                    | `state/internal.rs` | 141  | Zero callers; codebase uses `cursor_color_override` instead     |
+
+**Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
+
+---
+
+### Subtask 31.4 — Demote `pub` → `pub(crate)` in `freminal-terminal-emulator`
+
+**Action:** Change visibility for items only used within the crate.
+
+| Item                                       | File                          | Line | Callers                     |
+| ------------------------------------------ | ----------------------------- | ---- | --------------------------- |
+| `TerminalState::cursor_pos()`              | `state/internal.rs`           | 183  | Only `interface.rs`         |
+| `TerminalState::show_cursor()`             | `state/internal.rs`           | 156  | Only `interface.rs`         |
+| `TerminalState::get_cursor_visual_style()` | `state/internal.rs`           | 134  | Only `interface.rs`         |
+| `TerminalState::skip_draw_always()`        | `state/internal.rs`           | 161  | Only `interface.rs` + tests |
+| `TerminalState::is_normal_display()`       | `state/internal.rs`           | 146  | Only `interface.rs` + tests |
+| `TerminalState::get_cursor_key_mode()`     | `state/internal.rs`           | 199  | Only `interface.rs`         |
+| `AnsiCsiParserState` enum                  | `ansi_components/csi.rs`      | 78   | Only within crate           |
+| `AnsiOscParserState` enum                  | `ansi_components/osc.rs`      | 22   | Only within crate           |
+| `StandardParserState` enum                 | `ansi_components/standard.rs` | 13   | Only within crate           |
+
+**Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
+
+---
+
+### Subtask 31.5 — Delete dead item in `freminal` (binary)
+
+**Action:** Delete the following item with zero callers.
+
+| Item                | File            | Line | Evidence                         |
+| ------------------- | --------------- | ---- | -------------------------------- |
+| `color32_to_f32` fn | `gui/colors.rs` | 16   | Only definition; zero references |
+
+**Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
+
+---
+
+### Subtask 31.6 — Final verification and iterative cleanup
+
+After all deletions and demotions are applied:
+
+1. Run `cargo test --all` — all tests pass.
+2. Run `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+   - Clippy may now fire new `dead_code` warnings on items that were previously reachable
+     only through the deleted items (transitive dead code). Fix any such warnings by
+     deleting or demoting the newly-exposed dead items.
+3. Run `cargo-machete` — no unused dependencies.
+4. Iterate until no new warnings appear.
+
+---
+
+## Deferred / Out of Scope
+
+The following categories were identified during the audit but are deferred:
+
+- **`freminal-buffer` DEMOTE candidates** (~37 items including `TerminalHandler::handle_*` methods,
+  `Buffer` methods, `Row` fields, `ImageStore` methods): These are internal-only items used within
+  `freminal-buffer` but exposed as `pub` because `TerminalHandler` is consumed by
+  `freminal-terminal-emulator` via `pub internal: TerminalState` field chains. A proper fix
+  requires making `TerminalState::handler` non-public and exposing only the needed API — this is
+  architectural and belongs in Task 29 (God File Refactoring).
+
+- **`freminal` binary DEMOTE candidates** (~65 items): Since this is a binary crate, `pub` items
+  are only needed for benchmarks. A blanket `pub(crate)` sweep would break the benchmark harness.
+  The items that benchmarks need must stay `pub`; the rest could be demoted but the risk/reward
+  ratio is low for a binary crate where `pub` has no external consumers.
+
+- **TEST-ONLY items** in `freminal-terminal-emulator` (~52 items including parser subcomponents,
+  tracer infrastructure): These are `pub` for the integration test and benchmark files that live
+  in `tests/` and `benches/` (which are external to the crate). Gating them behind `#[cfg(test)]`
+  would break benchmarks. A proper solution requires a `test-support` feature flag — deferred.
 
 ---
 

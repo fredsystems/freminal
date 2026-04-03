@@ -75,7 +75,7 @@ use crate::ansi_components::tracer::SequenceTracer;
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
 
 #[derive(Eq, PartialEq, Debug, Default)]
-pub enum AnsiCsiParserState {
+pub(crate) enum AnsiCsiParserState {
     #[default]
     Params,
     Intermediates,
@@ -85,7 +85,7 @@ pub enum AnsiCsiParserState {
 }
 #[derive(Eq, PartialEq, Debug, Default)]
 pub struct AnsiCsiParser {
-    pub state: AnsiCsiParserState,
+    pub(crate) state: AnsiCsiParserState,
     pub params: Vec<u8>,
     pub intermediates: Vec<u8>,
     pub sequence: Vec<u8>,

@@ -37,7 +37,6 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
-use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
@@ -46,8 +45,8 @@ use freminal_common::buffer_states::modes::{
 };
 
 use freminal_common::{
-    args::Args, buffer_states::tchar::TChar, cursor::CursorVisualStyle,
-    terminal_size::DEFAULT_HEIGHT, terminal_size::DEFAULT_WIDTH,
+    args::Args, buffer_states::tchar::TChar, terminal_size::DEFAULT_HEIGHT,
+    terminal_size::DEFAULT_WIDTH,
 };
 
 /// Mode-related fields extracted from the emulator state for a snapshot.
@@ -257,16 +256,6 @@ impl TerminalEmulator {
         self.pty_io.as_ref().map(|io| io.child_exit_rx.clone())
     }
 
-    #[must_use]
-    pub fn get_cursor_visual_style(&self) -> CursorVisualStyle {
-        self.internal.get_cursor_visual_style()
-    }
-
-    #[must_use]
-    pub fn skip_draw_always(&self) -> bool {
-        self.internal.skip_draw_always()
-    }
-
     /// Extract text from the full buffer for a selection range.
     ///
     /// Coordinates are buffer-absolute row indices and 0-indexed columns.
@@ -413,35 +402,6 @@ impl TerminalEmulator {
         self.write_tx
             .send(PtyWrite::Write(bytes.to_vec()))
             .map_err(|e| anyhow::anyhow!("Failed to send raw bytes to PTY: {e}"))
-    }
-
-    pub fn data(&mut self, include_scrollback: bool) -> TerminalSections<Vec<TChar>> {
-        let (chars, _tags) = self.internal.handler.data_and_format_data_for_gui(0);
-        if include_scrollback {
-            chars
-        } else {
-            TerminalSections {
-                scrollback: vec![],
-                visible: chars.visible,
-            }
-        }
-    }
-
-    pub fn data_and_format_data_for_gui(
-        &mut self,
-    ) -> (
-        TerminalSections<Vec<TChar>>,
-        TerminalSections<Vec<FormatTag>>,
-    ) {
-        self.internal.data_and_format_data_for_gui(0)
-    }
-
-    pub fn cursor_pos(&mut self) -> CursorPos {
-        self.internal.cursor_pos()
-    }
-
-    pub const fn show_cursor(&mut self) -> bool {
-        self.internal.show_cursor()
     }
 
     /// Build a point-in-time snapshot of the terminal state.

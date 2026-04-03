@@ -19,7 +19,7 @@ use super::osc_iterm2::handle_osc_iterm2;
 use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
 
 #[derive(Eq, PartialEq, Debug)]
-pub enum AnsiOscParserState {
+pub(crate) enum AnsiOscParserState {
     Params,
     //Intermediates,
     Finished,

@@ -7,7 +7,6 @@ use core::fmt;
 
 use crate::buffer_states::error::TCharError;
 use anyhow::Result;
-use std::fmt::Write;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, Eq)]
@@ -132,14 +131,6 @@ impl TChar {
             })
             .collect::<Result<Vec<Self>>>()
     }
-}
-
-#[must_use]
-pub fn display_vec_tchar_as_string(v: &[TChar]) -> String {
-    v.iter().fold(String::new(), |mut acc, c| {
-        write!(&mut acc, "{c}").unwrap_or_default();
-        acc
-    })
 }
 
 impl From<u8> for TChar {

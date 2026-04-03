@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Eq, PartialEq, Clone)]
 #[error(transparent)]
-pub enum TCharError {
+pub(crate) enum TCharError {
     #[error("Invalid TChar: {0:?}")]
     InvalidTChar(Vec<u8>),
 }
