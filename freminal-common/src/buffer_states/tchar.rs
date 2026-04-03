@@ -154,16 +154,11 @@ impl From<char> for TChar {
     }
 }
 
-impl From<Vec<u8>> for TChar {
-    fn from(v: Vec<u8>) -> Self {
-        match Self::new_from_many_chars(v) {
-            Ok(c) => c,
-            Err(e) => {
-                // FIXME: We should probably propagate the error instead of ignoring it
-                error!("Error: {}. Will use ascii 0 character", e);
-                Self::Ascii(0)
-            }
-        }
+impl TryFrom<Vec<u8>> for TChar {
+    type Error = anyhow::Error;
+
+    fn try_from(v: Vec<u8>) -> Result<Self> {
+        Self::new_from_many_chars(v)
     }
 }
 

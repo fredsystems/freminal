@@ -3,10 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-// FIXME: I would really really like this to be compiled as part of the build pipeline
-// We had it that way. However, because I am stupid (or cargo is stupid, unclear but likely me)
-// it would ALWAYS rerun the `tic` and `tar` part of the build, even with a rerun-if-changed
-// directive. This is a workaround until I can figure out how to make it work properly.
-//
-// WE NEED TO ALWAYS HAND RECOMPILE THE terminfo IF WE CHANGE IT!!!!
+// NOTE: `terminfo.tar` is regenerated automatically by `freminal-terminal-emulator/build.rs`
+// whenever `res/freminal.ti` changes.  The build script runs `tic` + `tar` and writes the result
+// back into `res/terminfo.tar` which is committed to source control so that builds without `tic`
+// (e.g. Windows CI, minimal containers) still work.
 pub const TERMINFO: &[u8] = include_bytes!("../../res/terminfo.tar");
