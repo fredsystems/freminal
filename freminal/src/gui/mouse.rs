@@ -12,6 +12,10 @@ use freminal_terminal_emulator::input::{
     TerminalInput, collect_text, raw_ascii_bytes_to_terminal_input,
 };
 
+/// Snapshot of the mouse button and position state from the previous frame.
+///
+/// Used to detect state transitions (e.g. press → release) and to suppress
+/// redundant mouse-tracking reports to the PTY when nothing has changed.
 #[derive(Debug, PartialEq, Clone)]
 pub struct PreviousMouseState {
     pub(crate) button: PointerButton,
@@ -32,6 +36,7 @@ impl Default for PreviousMouseState {
 }
 
 impl PreviousMouseState {
+    /// Create a new `PreviousMouseState` from `self`, updating only the position.
     #[must_use]
     pub const fn new_from_previous_mouse_state(&self, position: FreminalMousePosition) -> Self {
         Self {
@@ -42,6 +47,7 @@ impl PreviousMouseState {
         }
     }
 
+    /// Create a new `PreviousMouseState` with all fields specified explicitly.
     #[must_use]
     pub const fn new(
         button: PointerButton,
@@ -57,17 +63,27 @@ impl PreviousMouseState {
         }
     }
 
+    /// Returns `true` if the mouse position has changed relative to `new`.
     #[must_use]
     pub fn should_report(&self, new: &Self) -> bool {
         self.mouse_position != new.mouse_position
     }
 }
 
+/// A mouse input event to encode for the PTY.
 pub enum MouseEvent {
+    /// A pointer button press or release.
     Button(PointerButton),
+    /// A scroll-wheel delta.
     Scroll(Vec2),
 }
 
+/// Terminal mouse position expressed in both character-cell coordinates and
+/// raw pixel coordinates.
+// The `x` and `y` pixel-coordinate fields are stored for potential future use
+// (e.g. pixel-precise hover reporting) but are not currently read after
+// construction.  The allow suppresses the dead-code lint for those two fields
+// without removing the information from the struct.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FreminalMousePosition {
@@ -78,6 +94,7 @@ pub struct FreminalMousePosition {
 }
 
 impl FreminalMousePosition {
+    /// Create a new `FreminalMousePosition` from cell coordinates and raw pixel coordinates.
     #[must_use]
     pub const fn new(
         x_as_character_column: usize,
@@ -254,7 +271,9 @@ const fn encode_modifiers_for_x11(modifiers: Modifiers) -> usize {
         cb += 4;
     }
 
-    // This is for meta, but wezterm seems to use alt as the meta?
+    // The X11 mouse protocol uses bit 3 (value 8) for the Meta modifier.
+    // In practice, most terminal emulators (including WezTerm) map the Alt key
+    // to Meta for mouse reporting purposes, matching the behavior of xterm.
     if modifiers.alt {
         cb += 8;
     }

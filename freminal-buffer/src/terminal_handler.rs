@@ -108,11 +108,13 @@ struct PrevPlaceholder {
     underline_color: TerminalColor,
 }
 
-/// High-level handler that processes terminal output commands and applies them to a buffer.
+/// Processes parsed terminal output sequences and drives mutations on the underlying [`Buffer`].
 ///
-/// This is the main entry point for integrating the buffer with a terminal emulator.
-/// It receives parsed terminal sequences (via a TerminalOutput-like enum) and updates
-/// the buffer state accordingly.
+/// `TerminalHandler` owns the buffer plus all terminal mode state (cursor style, color palette,
+/// SGR attributes, image transfer state, etc.).  It is driven by
+/// [`TerminalHandler::process_outputs`], which dispatches each [`TerminalOutput`] variant to the
+/// appropriate handler method.  Write-back responses (CPR, DA1, etc.) are sent through the
+/// optional `write_tx` PTY channel.
 #[derive(Debug)]
 pub struct TerminalHandler {
     buffer: Buffer,
@@ -627,23 +629,23 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle newline (LF)
+    /// Handle LF (Line Feed) — advance cursor to the next line, scrolling if needed.
     pub fn handle_newline(&mut self) {
         self.buffer.handle_lf();
     }
 
-    /// Handle carriage return (CR)
+    /// Handle CR (Carriage Return) — move cursor to column 0 of the current row.
     pub const fn handle_carriage_return(&mut self) {
         self.buffer.handle_cr();
     }
 
-    /// Handle backspace
+    /// Handle BS (Backspace) — move cursor one column to the left, respecting reverse-wrap modes.
     pub fn handle_backspace(&mut self) {
         self.buffer
             .handle_backspace(self.reverse_wrap, self.xt_rev_wrap2);
     }
 
-    /// Handle horizontal tab (HT / 0x09)
+    /// Handle HT (Horizontal Tab) — advance cursor to the next tab stop.
     pub fn handle_tab(&mut self) {
         self.buffer.advance_to_next_tab_stop();
     }
@@ -656,30 +658,30 @@ impl TerminalHandler {
         self.buffer.set_cursor_pos(x_zero, y_zero);
     }
 
-    /// Handle relative cursor movement
+    /// Move the cursor by `(dx, dy)` cells relative to its current position.
     pub fn handle_cursor_relative(&mut self, dx: i32, dy: i32) {
         self.buffer.move_cursor_relative(dx, dy);
     }
 
-    /// Handle cursor up (CUU)
+    /// Handle CUU (Cursor Up) — move cursor up `n` rows.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_up(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, -(n as i32));
     }
 
-    /// Handle cursor down (CUD)
+    /// Handle CUD (Cursor Down) — move cursor down `n` rows.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_down(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, n as i32);
     }
 
-    /// Handle cursor forward (CUF)
+    /// Handle CUF (Cursor Forward) — move cursor forward `n` columns.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_forward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(n as i32, 0);
     }
 
-    /// Handle cursor backward (CUB)
+    /// Handle CUB (Cursor Backward) — move cursor backward `n` columns.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_backward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(-(n as i32), 0);
@@ -706,37 +708,37 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle insert lines (IL)
+    /// Handle IL — insert `n` blank lines at the cursor row, pushing existing lines down (Insert Lines).
     pub fn handle_insert_lines(&mut self, n: usize) {
         self.buffer.insert_lines(n);
     }
 
-    /// Handle delete lines (DL)
+    /// Handle DL — delete `n` lines starting at the cursor row, pulling lines below up (Delete Lines).
     pub fn handle_delete_lines(&mut self, n: usize) {
         self.buffer.delete_lines(n);
     }
 
-    /// Handle erase characters (ECH)
+    /// Handle ECH (Erase Characters) — erase `n` characters starting at the cursor column.
     pub fn handle_erase_chars(&mut self, n: usize) {
         self.buffer.erase_chars(n);
     }
 
-    /// Handle delete characters (DCH)
+    /// Handle DCH (Delete Characters) — delete `n` characters at the cursor column, shifting remaining characters left.
     pub fn handle_delete_chars(&mut self, n: usize) {
         self.buffer.delete_chars(n);
     }
 
-    /// Handle save cursor (DECSC)
+    /// Handle DECSC — save the current cursor position and SGR state.
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
     }
 
-    /// Handle restore cursor (DECRC)
+    /// Handle DECRC — restore the cursor position and SGR state saved by the most recent DECSC.
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
     }
 
-    /// Handle insert spaces (ICH)
+    /// Handle ICH (Insert Characters) — insert `n` blank spaces at the cursor column, shifting existing characters right.
     pub fn handle_insert_spaces(&mut self, n: usize) {
         self.buffer.insert_spaces(n);
     }
@@ -760,17 +762,17 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle index (IND)
+    /// Handle IND — Index: move cursor down one row, scrolling the scroll region up if at the bottom margin.
     pub fn handle_index(&mut self) {
         self.buffer.handle_ind();
     }
 
-    /// Handle reverse index (RI)
+    /// Handle RI — Reverse Index: move cursor up one row, scrolling the scroll region down if at the top margin.
     pub fn handle_reverse_index(&mut self) {
         self.buffer.handle_ri();
     }
 
-    /// Handle next line (NEL)
+    /// Handle NEL — Next Line: perform a carriage return followed by an index (move to start of next line).
     pub fn handle_next_line(&mut self) {
         self.buffer.handle_nel();
     }
@@ -820,14 +822,15 @@ impl TerminalHandler {
 
     /// Handle entering alternate screen
     pub fn handle_enter_alternate(&mut self) {
-        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
-        // correct wiring happens in Task 7/8.
+        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
+        // always passes 0 when entering the alternate screen.
         self.buffer.enter_alternate(0);
     }
 
     /// Handle leaving alternate screen
     pub fn handle_leave_alternate(&mut self) {
-        // Returns the saved scroll_offset; discarded here until ViewState is wired (Task 7/8).
+        // Returns the saved scroll_offset from the primary screen; discarded here
+        // because scroll_offset is owned by ViewState on the GUI side.
         let _restored_offset = self.buffer.leave_alternate();
     }
 
@@ -3104,7 +3107,21 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle resize
+    /// Resize the terminal grid to `width` × `height` characters.
+    ///
+    /// Also updates the stored pixel-per-cell dimensions used for building
+    /// `PtyWrite::Resize` payloads.  Zero values for the pixel dimensions are
+    /// ignored (the stored value is not overwritten).
+    ///
+    /// `scroll_offset` is **always `0`** here — it is owned by `ViewState` on
+    /// the GUI side.  The PTY thread never holds a scroll offset.  `set_size`
+    /// returns the post-reflow offset (which may differ when scrollback rows
+    /// are removed), but we discard it because the GUI's `ViewState` will
+    /// clamp its own offset the next time it sends a snapshot request.
+    ///
+    /// The underlying `Buffer::set_size` call triggers `reflow_to_width` when
+    /// the column count changes, and adjusts the row count by appending blank
+    /// rows or truncating from the live bottom when the height changes.
     pub fn handle_resize(
         &mut self,
         width: usize,
@@ -3118,8 +3135,8 @@ impl TerminalHandler {
         if cell_pixel_height > 0 {
             self.cell_pixel_height = cell_pixel_height;
         }
-        // scroll_offset lives in `ViewState` (Task 4). Pass 0 temporarily;
-        // correct wiring happens in Task 7/8.
+        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
+        // always passes 0 when resizing.
         let _new_offset = self.buffer.set_size(width, height, 0);
     }
 
@@ -3835,10 +3852,21 @@ impl TerminalHandler {
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
             }
-            // Silently ignore invalid, skipped, and any future variants
-            TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {
-                // Silently ignore for forward compatibility
-            }
+            // Silently ignore `Invalid`, `Skipped`, and any future variants.
+            //
+            // `Invalid` — a sequence the parser recognised as malformed; the
+            //   error was already logged by the parser.  There is nothing the
+            //   buffer can do with it.
+            //
+            // `Skipped` — a sequence the parser intentionally dropped (e.g.
+            //   an OSC that was too long or a DCS string with an unknown
+            //   introducer).  Ignored for the same reason.
+            //
+            // `_` (catch-all) — forward compatibility: new `TerminalOutput`
+            //   variants added in future will not cause a compile error or
+            //   panic here.  Any variant that needs buffer-level handling must
+            //   be added as an explicit arm above.
+            TerminalOutput::Invalid | TerminalOutput::Skipped | _ => {}
         }
     }
 }

@@ -3,9 +3,17 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+//! Build and CI orchestration tool for the Freminal workspace.
+//!
+//! This is a `cargo xtask` binary — run it with `cargo xtask <subcommand>`.
+//! It provides subcommands for building, testing, linting, formatting,
+//! generating coverage reports, and checking dependencies.
+//!
+//! This crate is **not** production code. `anyhow`/`color-eyre` are
+//! acceptable here.
+
 #![deny(
     clippy::pedantic,
-    //clippy::cargo,
     clippy::nursery,
     clippy::style,
     clippy::correctness,
@@ -40,12 +48,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// CLI argument parser for `cargo xtask`.
 #[derive(Debug, Parser)]
 #[command(bin_name = "cargo xtask", styles = clap_cargo::style::CLAP_STYLING)]
 struct Args {
+    /// The subcommand to run.
     #[command(subcommand)]
     command: Command,
 
+    /// Verbosity level; repeat `-v` to increase, `-q` to decrease.
     #[command(flatten)]
     verbosity: Verbosity<InfoLevel>,
 }
@@ -62,7 +73,7 @@ impl Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
-    /// Run CI checks (lint, build, test)
+    /// Run CI checks (lint, deny, machete, build, test)
     CI,
 
     /// Build the project
@@ -85,7 +96,7 @@ enum Command {
     #[command(visible_alias = "cd")]
     Deny,
 
-    // Check unused dependencies
+    /// Check for unused dependencies with `cargo-machete`
     #[command(visible_alias = "m")]
     Machete,
 
@@ -138,13 +149,6 @@ enum Command {
     TestLibs,
 }
 
-// #[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
-// enum Backend {
-//     Crossterm,
-//     Termion,
-//     Termwiz,
-// }
-
 impl Command {
     fn run(self) -> Result<()> {
         match self {
@@ -171,7 +175,19 @@ impl Command {
     }
 }
 
-/// Run CI checks (lint, build, test)
+/// Run CI checks (lint, deny, machete, build, test)
+///
+/// ## Step ordering rationale
+///
+/// 1. `lint` — fast feedback on style, typos, and clippy warnings before
+///    spending time building or running tests.
+/// 2. `deny` — checks license compatibility and known-vulnerable dependencies;
+///    fails fast if a new dep violates policy.
+/// 3. `machete` — detects unused dependencies that would otherwise silently
+///    inflate compile times and binary size.
+/// 4. `build` — validates that the workspace compiles cleanly with all targets
+///    and features; must pass before tests are meaningful.
+/// 5. `test` — runs lib + doc tests only after the build is confirmed clean.
 fn ci() -> Result<()> {
     lint()?;
     deny()?;
@@ -181,10 +197,12 @@ fn ci() -> Result<()> {
     Ok(())
 }
 
+/// Check license compatibility and known-vulnerable dependencies with `cargo-deny`
 fn deny() -> Result<()> {
     run_cargo(vec!["deny", "check"])
 }
 
+/// Check for unused dependencies with `cargo-machete`
 fn machete() -> Result<()> {
     cmd!("cargo-machete").run_with_trace()?;
     Ok(())
@@ -256,6 +274,21 @@ fn fix_clippy() -> Result<()> {
 }
 
 /// Check that docs build without errors using flags for docs.rs
+///
+/// `docs-rs` is a third-party cargo subcommand that simulates the docs.rs
+/// build environment, running `cargo doc` with the same feature flags and
+/// `RUSTDOCFLAGS` that docs.rs uses.  It is a **soft dependency**: if the
+/// binary is not installed the check is skipped with a warning rather than
+/// failing CI.  This allows contributors without the tool installed to run
+/// `cargo xtask ci` locally without errors.
+///
+/// The function iterates over all workspace default packages because docs.rs
+/// builds each crate independently — a doc error in one crate may not surface
+/// when building the whole workspace at once.
+///
+/// `run_cargo_nightly` is used because docs.rs requires the nightly toolchain
+/// to resolve intra-doc links and generate the `--document-private-items`
+/// output that docs.rs produces.
 fn lint_docs() -> Result<()> {
     // ensure docs-rs is installed, if not, just return Ok(())
     if cmd!("docs-rs").run().is_err() {
@@ -301,10 +334,10 @@ fn fix_typos() -> Result<()> {
     Ok(())
 }
 
-/// Run tests for libs, backends, and docs
+/// Run tests for libs and docs
 fn test() -> Result<()> {
     test_libs()?;
-    test_docs()?; // run last because it's slow
+    test_docs()?;
     Ok(())
 }
 
@@ -325,6 +358,26 @@ fn run_cargo(args: Vec<&str>) -> Result<()> {
 }
 
 /// Run a cargo subcommand with the nightly toolchain
+///
+/// The nightly toolchain is requested by setting the `RUSTUP_TOOLCHAIN=nightly`
+/// environment variable rather than a `+nightly` flag on the cargo invocation.
+/// This is necessary because `cargo xtask` is itself a cargo subcommand: the
+/// `CARGO` environment variable is set by the outer `cargo` process to the path
+/// of the stable binary, which `duct::cmd("cargo", …)` inherits.  Passing
+/// `+nightly` as an argument would be parsed by the *outer* cargo, not by the
+/// inner invocation.  Removing `CARGO` and setting `RUSTUP_TOOLCHAIN` bypasses
+/// this and lets rustup dispatch to the nightly binary directly.
+///
+/// ## Flag choices for `fix_clippy`
+///
+/// `--fix` — applies clippy's machine-applicable suggestions automatically.
+/// `--allow-dirty` — required when the working tree has unstaged changes;
+///   without it cargo refuses to modify files it cannot safely roll back.
+/// `--allow-staged` — required when some changes are already staged;
+///   prevents cargo from refusing to run when the index and worktree differ.
+/// `-D warnings` — ensures that `fix_clippy` targets the same strictness
+///   level as `lint_clippy`, so all auto-fixed suggestions are ones that
+///   would have been errors under CI.
 fn run_cargo_nightly(args: Vec<&str>) -> Result<()> {
     cmd("cargo", args)
         // CARGO env var is set because we're running in a cargo subcommand

@@ -295,8 +295,11 @@ fn tag_at_position(tags: &[FormatTag], global_pos: usize) -> &FormatTag {
         }
     }
 
-    // Should not happen in practice — there's always a default tag.
-    // Return the first tag if available, or we'll need a static default.
+    // No tag covers this position — this can occur when the snapshot's tag
+    // list is empty or when a character falls outside all tag ranges (e.g.
+    // after a partial snapshot or during a buffer transition).  Fall back to
+    // the first tag if one exists, otherwise use a static default tag with
+    // default colors and no decorations.
     tags.first().unwrap_or_else(|| {
         // This is a compile-time-known static default, safe to leak.
         static DEFAULT_TAG: FormatTag = FormatTag {

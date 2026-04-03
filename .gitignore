@@ -553,3 +553,4 @@ dump.txt
 doc/
 !freminal.bin
 vttest-20251205
+config.toml

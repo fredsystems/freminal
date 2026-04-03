@@ -7,6 +7,11 @@ use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
 
 use crate::image_store::ImagePlacement;
 
+/// A single terminal cell containing a character glyph and its formatting.
+///
+/// Each cell holds a [`TChar`] (the rendered character), a [`FormatTag`] (colors and
+/// attributes), wide-character bookkeeping flags, and an optional inline image reference.
+/// Empty (unwritten) cells are represented explicitly rather than by absence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     value: TChar,
@@ -20,6 +25,10 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// Create a new cell with the given character and format tag.
+    ///
+    /// Wide characters (display width > 1) are automatically marked as heads;
+    /// callers must also insert a [`Cell::wide_continuation`] for each extra column.
     #[must_use]
     pub fn new(value: TChar, format: FormatTag) -> Self {
         let width = value.display_width();
@@ -33,6 +42,7 @@ impl Cell {
         }
     }
 
+    /// Create a blank cell (space character) carrying the given format tag.
     #[must_use]
     pub const fn blank_with_tag(format: FormatTag) -> Self {
         Self {
@@ -44,6 +54,10 @@ impl Cell {
         }
     }
 
+    /// Create a wide-character continuation filler cell.
+    ///
+    /// Continuation cells occupy the extra columns beyond the head cell of a
+    /// double-wide glyph and carry no visible character.
     #[must_use]
     pub fn wide_continuation() -> Self {
         Self {
@@ -55,26 +69,31 @@ impl Cell {
         }
     }
 
+    /// Returns `true` if this cell is the head (first column) of a wide glyph.
     #[must_use]
     pub const fn is_head(&self) -> bool {
         self.is_wide_head
     }
 
+    /// Returns a reference to the character value stored in this cell.
     #[must_use]
     pub const fn tchar(&self) -> &TChar {
         &self.value
     }
 
+    /// Returns a reference to the format tag (colors and text attributes) for this cell.
     #[must_use]
     pub const fn tag(&self) -> &FormatTag {
         &self.format
     }
 
+    /// Returns the display column width of this cell's character (0, 1, or 2).
     #[must_use]
     pub fn display_width(&self) -> usize {
         self.value.display_width()
     }
 
+    /// Converts the cell's character value to a UTF-8 `String`.
     #[must_use]
     pub fn into_utf8(&self) -> String {
         match self.value {
@@ -85,6 +104,7 @@ impl Cell {
         }
     }
 
+    /// Returns `true` if this cell is a wide-character continuation filler.
     #[must_use]
     pub const fn is_continuation(&self) -> bool {
         self.is_wide_continuation

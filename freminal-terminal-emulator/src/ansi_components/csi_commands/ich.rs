@@ -29,7 +29,9 @@ pub fn ansi_parser_inner_csi_finished_ich(
         Some(n) => n,
     };
 
-    // ecma-48 8.3.64
+    // ECMA-48 §8.3.64 specifies ICH: insert Ps blank characters at the current
+    // cursor position, shifting existing characters to the right and discarding
+    // any that overflow the right margin.
     output.push(TerminalOutput::InsertSpaces(param));
 
     ParserOutcome::Finished

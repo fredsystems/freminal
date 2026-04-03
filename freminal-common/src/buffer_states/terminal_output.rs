@@ -18,9 +18,8 @@ use crate::{
 /// erasures, SGR, window ops, etc.) emitted by parsing.
 /// The set may grow; match exhaustively with a wildcard for forward-compat.
 ///
-/// Note: Some variants contain types from freminal-terminal-emulator crate
-/// (`SelectGraphicRendition`, Mode, etc.) which will be available when that
-/// crate is in scope.
+/// All referenced types (`SelectGraphicRendition`, `Mode`, etc.) are defined
+/// within this crate (`freminal-common`).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalOutput {

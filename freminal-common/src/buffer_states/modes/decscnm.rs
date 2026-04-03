@@ -7,7 +7,11 @@ use core::fmt;
 
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
-/// Show cursor (DECSCNM) ?5
+/// Screen Mode (DECSCNM) ?5
+///
+/// Controls normal vs reverse video display.
+/// When set (`ReverseDisplay`), the screen uses reverse video (dark text on light background).
+/// When reset (`NormalDisplay`, default), the screen uses normal video (light text on dark background).
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum Decscnm {
     #[default]

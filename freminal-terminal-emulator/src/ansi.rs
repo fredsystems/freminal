@@ -271,6 +271,44 @@ impl FreminalAnsiParser {
         }
     }
 
+    /// Feed a raw byte slice from the PTY into the parser, returning all
+    /// completed [`TerminalOutput`] events produced by the input.
+    ///
+    /// ## State machine overview
+    ///
+    /// The parser is a single-byte state machine (`ParserInner`).  Each call
+    /// iterates over `incoming` byte-by-byte, routing each byte through the
+    /// active state:
+    ///
+    /// ```text
+    /// Empty          — base state; plain text accumulates in `pending_data`.
+    ///                  C0 controls (CR, LF, BEL, BS, TAB, NUL, DEL) are
+    ///                  emitted immediately as discrete TerminalOutput variants.
+    ///                  ESC (0x1B) transitions to Escape (or Vt52Escape when
+    ///                  vt52_mode is Vt52).
+    /// Escape         — waiting for the introducer byte after ESC:
+    ///                    '[' → Csi    ']' → Osc    'P' → Dcs
+    ///                    '_' → Apc    anything else → StandardParser
+    ///                  ESC ESC restarts Escape; ESC '\' (ST) ends a string.
+    /// Csi            — collecting CSI parameters and intermediates until a
+    ///                  final byte in 0x40–0x7E is received; then dispatches
+    ///                  to the appropriate csi_commands sub-handler.
+    /// Osc            — collecting the OSC string until BEL (0x07) or ST
+    ///                  (ESC '\') terminates it; then dispatches to osc.rs.
+    /// Standard       — handles two-byte Fe sequences (ESC # Pn, ESC ( G, …).
+    /// Dcs            — Device Control String; passes bytes to dcs.rs until ST.
+    /// Apc            — Application Program Command; passes bytes to apc.rs
+    ///                  until ST (used by tmux passthrough passthrough).
+    /// Vt52Escape     — waiting for the single command byte after ESC in VT52
+    ///                  mode; 'Y' transitions to Vt52CursorAddress.
+    /// Vt52CursorAddress — collects the row byte then column byte for the
+    ///                  ESC Y row col direct-cursor-address sequence.
+    /// ```
+    ///
+    /// Plain text bytes are coalesced into `pending_data` and flushed as a
+    /// single `TerminalOutput::Data(Vec<u8>)` whenever a control sequence
+    /// interrupts the data stream, minimising allocations for the common case
+    /// of long runs of ASCII text.
     #[allow(clippy::too_many_lines)]
     pub fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput> {
         // Take the pending buffer out temporarily

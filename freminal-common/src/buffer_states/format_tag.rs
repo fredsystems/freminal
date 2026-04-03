@@ -9,14 +9,32 @@ use crate::buffer_states::{
     url::Url,
 };
 
+/// A half-open character-index range `[start, end)` with its associated
+/// text format.
+///
+/// The `start` and `end` fields index into the flat `Vec<TChar>` produced by
+/// `Buffer::visible_as_tchars_and_tags` (or its scrollback counterpart).
+/// Multiple non-overlapping `FormatTag` values cover the entire flat vector;
+/// together they describe all color, weight, decoration, URL, and blink state
+/// changes across the visible terminal content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FormatTag {
+    /// Index of the first character covered by this tag (inclusive).
     pub start: usize,
+    /// Index past the last character covered by this tag (exclusive).
+    ///
+    /// May be `usize::MAX` for an open-ended range that reaches the end of
+    /// the flat character vector.
     pub end: usize,
+    /// Foreground and background colors for this range.
     pub colors: StateColors,
+    /// Font weight (normal or bold) for this range.
     pub font_weight: FontWeight,
+    /// Active font decorations (underline, strikethrough, etc.) for this range.
     pub font_decorations: Vec<FontDecorations>,
+    /// OSC 8 hyperlink URL active for this range, if any.
     pub url: Option<Url>,
+    /// Text blink state (none, slow SGR 5, or fast SGR 6) for this range.
     pub blink: BlinkState,
 }
 

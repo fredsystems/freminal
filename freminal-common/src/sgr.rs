@@ -9,7 +9,7 @@ use anyhow::Result;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum SelectGraphicRendition {
     #[default]
-    NoOp, // added to allow default construction
+    NoOp,
     // NOTE: Non-exhaustive list
     Reset,
     Bold,

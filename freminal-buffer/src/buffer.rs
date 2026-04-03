@@ -21,6 +21,12 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
+/// The primary terminal buffer owning all rows, the cursor, and display state.
+///
+/// In primary-screen mode the buffer grows dynamically (up to `scrollback_limit` rows above
+/// the visible window). In alternate-screen mode it has exactly `height` rows and no scrollback.
+/// All row indices are absolute (into `self.rows`); the GUI maps to screen coordinates by
+/// subtracting `visible_window_start(scroll_offset)`.
 #[derive(Debug)]
 pub struct Buffer {
     /// All rows in this buffer: scrollback + visible region.
@@ -114,23 +120,26 @@ pub struct Buffer {
     image_store: ImageStore,
 }
 
-/// Everything we need to restore when leaving alternate buffer.
-#[derive(Debug, Clone)]
-/// State saved when entering the alternate screen buffer, restored on exit.
+/// Snapshot of the primary buffer state saved when entering the alternate screen.
 ///
-/// Note: `tab_stops` is intentionally NOT saved here. Tab stops are shared
-/// between primary and alternate screens — changes made while in alternate
-/// mode persist when returning to the primary screen. This matches xterm
-/// behavior. The `tab_stops` field lives on `Buffer` and is never swapped.
+/// Restored verbatim by [`Buffer::leave_alternate`].
+#[derive(Debug, Clone)]
 pub struct SavedPrimaryState {
+    /// All primary-buffer rows (scrollback + visible region) at the time of the switch.
     pub rows: Vec<Row>,
     /// Per-row flat-representation cache saved alongside `rows`.
     pub row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+    /// Cursor state (position, attributes) at the time of the switch.
     pub cursor: CursorState,
+    /// Caller-owned scroll offset (from `ViewState`) at the time of the switch.
     pub scroll_offset: usize,
+    /// Top of the DECSTBM scroll region at the time of the switch.
     pub scroll_region_top: usize,
+    /// Bottom of the DECSTBM scroll region at the time of the switch.
     pub scroll_region_bottom: usize,
+    /// Left margin (DECSLRM) at the time of the switch.
     pub scroll_region_left: usize,
+    /// Right margin (DECSLRM) at the time of the switch.
     pub scroll_region_right: usize,
     /// Saved DECSC cursor carried across alternate-screen round-trips.
     pub saved_cursor: Option<CursorState>,
@@ -331,11 +340,13 @@ impl Buffer {
         self.row_cache.push(None);
     }
 
+    /// Returns a reference to all rows in this buffer (scrollback + visible region).
     #[must_use]
     pub const fn get_rows(&self) -> &Vec<Row> {
         &self.rows
     }
 
+    /// Returns a reference to the current cursor state (position and attributes).
     #[must_use]
     pub const fn get_cursor(&self) -> &CursorState {
         &self.cursor
@@ -433,6 +444,11 @@ impl Buffer {
         &self.rows[start.min(total)..end.min(total)]
     }
 
+    /// Insert `text` at the current cursor position, soft-wrapping as needed.
+    ///
+    /// Advances the cursor to the column after the last character written.
+    /// When `DECAWM` (auto-wrap) is disabled, overflow beyond the right margin
+    /// is silently discarded rather than wrapped.
     pub fn insert_text(&mut self, text: &[TChar]) {
         // `start` is an index cursor into the original `text` slice.
         // We never clone the slice — `InsertResponse::Leftover` now returns
@@ -451,7 +467,7 @@ impl Buffer {
             (self.width, 0)
         };
 
-        // FIX #3: first write into row 0 turns it into a real logical line
+        // First write into row 0 turns it into a real logical line
         if row_idx == 0 && self.rows[0].origin == RowOrigin::ScrollFill {
             let row = &mut self.rows[0];
             row.origin = RowOrigin::HardBreak;
@@ -589,9 +605,6 @@ impl Buffer {
         }
     }
 
-    /// Resize the terminal buffer.
-    /// Reflows lines when width changes.
-    /// Adjusts scrollback when height changes.
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
     ///
     /// The caller passes in the current `scroll_offset` (from `ViewState`) and
@@ -690,6 +703,32 @@ impl Buffer {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// Re-wrap all rows to `new_width` columns without losing any text.
+    ///
+    /// ## Algorithm
+    ///
+    /// 1. **Group into logical lines.** Rows are joined by a `RowJoin` flag:
+    ///    `NewLogicalLine` starts a new logical line and `ContinueLogicalLine`
+    ///    means this row is a soft-wrapped continuation of the previous one.
+    ///    We split `self.rows` into groups where each group represents one
+    ///    original logical line (a paragraph, in word-processor terms).
+    ///
+    /// 2. **Flatten each logical line.** The cells from every physical row in
+    ///    the group are concatenated into a single `Vec<Cell>`, discarding the
+    ///    old row boundaries.
+    ///
+    /// 3. **Re-wrap at the new width.** Wide glyphs (display width > 1) are
+    ///    kept whole — if a glyph does not fit at the current column it is
+    ///    moved to the next row rather than split.  Each flushed row records
+    ///    whether it is the first physical row of its logical line
+    ///    (`RowJoin::NewLogicalLine`) or a continuation (`ContinueLogicalLine`),
+    ///    and inherits the original `RowOrigin` of its logical line.
+    ///
+    /// 4. **Install the new rows.** `self.rows` is replaced with the reflow
+    ///    result, `self.width` is updated, and `self.row_cache` is reset to
+    ///    all-`None` (every row is dirty after reflow).
+    ///
+    /// The operation is O(total cells) — linear in the amount of text.
     pub fn reflow_to_width(&mut self, new_width: usize) {
         if new_width == 0 || self.rows.is_empty() || new_width == self.width {
             // Nothing to do
@@ -1151,6 +1190,11 @@ impl Buffer {
         self.cursor.pos.y = visible_start;
     }
 
+    /// Handle ANSI LF (line feed), IND-style advance, and LNM mode.
+    ///
+    /// Moves the cursor down one row within the current `DECSTBM` scroll region.
+    /// When the cursor is at the bottom margin the region scrolls up by one line.
+    /// In `LNM` (new-line) mode an implicit CR is also applied.
     pub fn handle_lf(&mut self) {
         match self.kind {
             BufferType::Primary => {
@@ -1247,7 +1291,6 @@ impl Buffer {
             }
 
             BufferType::Alternate => {
-                // (keep your existing Alternate LF unchanged)
                 if self.lnm_enabled == Lnm::NewLine {
                     self.cursor.pos.x = 0;
                 }
@@ -1271,6 +1314,7 @@ impl Buffer {
         }
     }
 
+    /// Handle ANSI CR (carriage return) — move cursor to column 0.
     pub const fn handle_cr(&mut self) {
         self.cursor.pos.x = 0;
     }
@@ -1319,7 +1363,6 @@ impl Buffer {
             }
 
             BufferType::Alternate => {
-                // (unchanged)
                 let y = self.cursor.pos.y;
 
                 if y >= self.scroll_region_top && y <= self.scroll_region_bottom {
@@ -1680,8 +1723,6 @@ impl Buffer {
         (self.scroll_region_left, self.scroll_region_right)
     }
 
-    /// Index in `rows` of the first visible line.
-    /// This is the same start index used by `visible_rows()`.
     /// Index in `rows` of the first visible line for the given `scroll_offset`.
     /// The PTY thread always calls this with `scroll_offset = 0`; the GUI thread
     /// passes the value from `ViewState`.
@@ -2022,6 +2063,10 @@ impl Buffer {
         0
     }
 
+    /// Scroll the visible window up by one row, discarding the top row and appending a blank row at
+    /// the bottom.
+    ///
+    /// In the primary buffer the cursor row index is also decremented to follow the visible window.
     pub fn scroll_up(&mut self) {
         // remove topmost row (and its cache entry)
         self.rows.remove(0);
@@ -2040,15 +2085,11 @@ impl Buffer {
         }
     }
 
-    /// Switch from the primary buffer to the alternate screen.
+    /// Move cursor to absolute position (CUP, HVP).
     ///
-    /// - Saves current rows, cursor, and `scroll_offset`.
-    /// - Replaces contents with a fresh empty screen (height rows).
-    /// - Disables scrollback semantics for the alternate screen.
-    ///
-    /// Move cursor to absolute position (CUP, HVP)
-    ///
-    /// x and y are 0-indexed screen coordinates.
+    /// `x` and `y` are 0-indexed screen coordinates.  `None` means "leave this
+    /// axis unchanged" (e.g. CHA only supplies x, VPA only supplies y, CUP
+    /// supplies both).
     ///
     /// When DECOM (origin mode) is enabled, `y` is relative to `scroll_region_top`
     /// and is clamped to the scroll region height.  When DECOM is disabled, `y` is
@@ -2099,6 +2140,10 @@ impl Buffer {
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss
     )]
+    /// Move the cursor by a relative offset `(dx, dy)` in screen coordinates.
+    ///
+    /// Positive `dx` moves right; negative moves left. Positive `dy` moves down; negative moves
+    /// up.  The cursor is clamped to the visible screen boundaries and never enters scrollback.
     pub fn move_cursor_relative(&mut self, dx: i32, dy: i32) {
         // When DECLRMM is active and moving horizontally, clamp to the
         // left/right margins if the cursor is currently within the margin zone.
@@ -2288,17 +2333,6 @@ impl Buffer {
     }
 
     /// Convert the currently visible rows into a flat `(Vec<TChar>, Vec<FormatTag>)` pair
-    /// suitable for consumption by the GUI renderer.
-    ///
-    /// Algorithm:
-    /// - Iterate over `visible_rows()`.
-    /// - For each non-continuation cell, append its `TChar` and either extend the last
-    ///   `FormatTag` (if the format is identical and the tag is adjacent) or push a new one.
-    /// - After each row except the last, append a `TChar::NewLine` and extend the last tag.
-    /// - Continuation cells are skipped — they are internal bookkeeping for wide glyphs.
-    ///
-    /// The returned `FormatTag` entries use `start`/`end` as half-open byte indices into
-    /// the returned `Vec<TChar>`, matching the convention used by the old `FormatTracker`.
     /// Convert visible rows (with the given `scroll_offset`) into flat
     /// `(Vec<TChar>, Vec<FormatTag>)` suitable for the GUI renderer.
     ///
@@ -2322,7 +2356,7 @@ impl Buffer {
 
     /// Flatten all scrollback rows (everything before the visible window) into
     /// a linear `(Vec<TChar>, Vec<FormatTag>)` pair using the same algorithm as
-    /// [`visible_as_tchars_and_tags`].
+    /// [`Self::visible_as_tchars_and_tags`].
     ///
     /// Returns `(vec![], vec![])` for the alternate screen buffer, which never
     /// accumulates scrollback.
@@ -2702,7 +2736,7 @@ impl Buffer {
     /// Enter the alternate screen buffer.
     ///
     /// Saves the primary buffer state (rows, cursor, scroll region, image store)
-    /// so it can be restored by [`leave_alternate`]. Tab stops are NOT saved —
+    /// so it can be restored by [`Self::leave_alternate`]. Tab stops are NOT saved —
     /// they are shared between primary and alternate screens (matching xterm).
     ///
     /// The caller must pass the current `scroll_offset` from `ViewState` so it can
@@ -3238,8 +3272,6 @@ fn tags_same_format(a: &FormatTag, b: &FormatTag) -> bool {
         && a.url == b.url
         && a.blink == b.blink
 }
-
-// tests
 
 // ============================================================================
 // Unit Tests for Buffer

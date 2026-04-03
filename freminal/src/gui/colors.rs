@@ -130,7 +130,9 @@ pub fn internal_color_to_egui_with_alpha(
 
 /// Map a `TerminalColor` to an `[f32; 4]` RGBA value for GL vertex attributes.
 ///
-/// Faint dimming is applied by halving the alpha channel.
+/// Faint dimming is applied by halving the alpha channel (`base[3] * 0.5`).
+/// This differs from the egui path ([`internal_color_to_egui`]), which uses
+/// `Color32::gamma_multiply(0.5)` and therefore dims the RGB channels instead.
 #[must_use]
 pub fn internal_color_to_gl(
     color: TerminalColor,

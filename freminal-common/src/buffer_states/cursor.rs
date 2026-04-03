@@ -14,18 +14,32 @@ use crate::{
     colors::TerminalColor,
 };
 
+/// Whether reverse-video mode (DECSCNM / SGR 7) is currently active.
+///
+/// When `On`, foreground and background colors are swapped when drawing text.
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub enum ReverseVideo {
+    /// Reverse-video is enabled — foreground and background are swapped.
     On,
+    /// Normal display (default).
     #[default]
     Off,
 }
 
+/// The active foreground, background, and underline colors for a cursor position,
+/// together with the current reverse-video state.
+///
+/// All color lookups respect `reverse_video`: when `On`, `get_color` returns
+/// the background and `get_background_color` returns the foreground.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StateColors {
+    /// Active text foreground color.
     pub color: TerminalColor,
+    /// Active cell background color.
     pub background_color: TerminalColor,
+    /// Active underline decoration color (independent of fg/bg inversion).
     pub underline_color: TerminalColor,
+    /// Whether reverse-video mode is currently active for this cell.
     pub reverse_video: ReverseVideo,
 }
 
@@ -41,11 +55,13 @@ impl Default for StateColors {
 }
 
 impl StateColors {
+    /// Create a new `StateColors` with default terminal colors.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Reset all colors to their terminal defaults.
     pub const fn set_default(&mut self) {
         self.color = TerminalColor::Default;
         self.background_color = TerminalColor::DefaultBackground;
@@ -59,40 +75,48 @@ impl StateColors {
         self
     }
 
+    /// Return a copy of `self` with `color` (foreground) replaced.
     #[must_use]
     pub const fn with_color(mut self, color: TerminalColor) -> Self {
         self.color = color;
         self
     }
 
+    /// Return a copy of `self` with `underline_color` replaced.
     #[must_use]
     pub const fn with_underline_color(mut self, underline_color: TerminalColor) -> Self {
         self.underline_color = underline_color;
         self
     }
 
+    /// Return a copy of `self` with `reverse_video` replaced.
     #[must_use]
     pub const fn with_reverse_video(mut self, reverse_video: ReverseVideo) -> Self {
         self.reverse_video = reverse_video;
         self
     }
 
+    /// Set the foreground color in-place.
     pub const fn set_color(&mut self, color: TerminalColor) {
         self.color = color;
     }
 
+    /// Set the background color in-place.
     pub const fn set_background_color(&mut self, background_color: TerminalColor) {
         self.background_color = background_color;
     }
 
+    /// Set the underline decoration color in-place.
     pub const fn set_underline_color(&mut self, underline_color: TerminalColor) {
         self.underline_color = underline_color;
     }
 
+    /// Set the reverse-video state in-place.
     pub const fn set_reverse_video(&mut self, reverse_video: ReverseVideo) {
         self.reverse_video = reverse_video;
     }
 
+    /// Return the effective foreground color, accounting for reverse-video.
     #[must_use]
     pub const fn get_color(&self) -> TerminalColor {
         match self.reverse_video {

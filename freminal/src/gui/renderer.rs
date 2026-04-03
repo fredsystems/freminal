@@ -234,7 +234,7 @@ const UNIT_QUAD: [f32; 12] = [
 ///
 /// Call [`TerminalRenderer::init`] once (inside the first `PaintCallback`
 /// invocation) to create shaders, VAOs, VBOs, and the atlas texture.  Then call
-/// [`TerminalRenderer::draw`] every frame.
+/// [`TerminalRenderer::draw_with_verts`] every frame.
 pub struct TerminalRenderer {
     /// Whether GPU resources have been created.
     initialized: bool,
@@ -1669,7 +1669,7 @@ pub fn build_background_instances(
 ///
 /// This is the "cheap path" used for cursor-only frame updates: instead of
 /// rebuilding the entire background VBO, the caller patches only the cursor
-/// quad region in-place via [`upload_verts_sub`].
+/// quad region in-place via `upload_verts_sub`.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn build_cursor_verts_only(

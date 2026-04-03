@@ -3,6 +3,27 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+//! Binary entry point and PTY threading model for the Freminal terminal emulator.
+//!
+//! # Threading model
+//!
+//! ```text
+//! OS PTY fd
+//!   └─ reader thread: reads chunks, sends PtyRead over channel
+//!
+//! PTY Processing Thread (owns TerminalEmulator exclusively)
+//!   ├─ Receives PtyRead from OS PTY reader thread
+//!   ├─ Receives InputEvent from GUI (keyboard, resize, focus)
+//!   ├─ After each batch: publishes Arc<TerminalSnapshot> via ArcSwap
+//!   └─ Sends WindowCommand to GUI for Report*/Viewport handling
+//!
+//! GUI Thread (eframe update() — pure render, no mutation)
+//!   ├─ Loads TerminalSnapshot from ArcSwap (atomic, lock-free)
+//!   ├─ Sends InputEvent through crossbeam channel
+//!   ├─ Sends PtyWrite directly for Report* responses
+//!   └─ Owns ViewState (scroll offset, mouse, focus — never shared)
+//! ```
+
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 #![deny(
     clippy::pedantic,
@@ -19,8 +40,6 @@
 )]
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
-
-// #![warn(missing_docs)]
 
 #[macro_use]
 extern crate tracing;

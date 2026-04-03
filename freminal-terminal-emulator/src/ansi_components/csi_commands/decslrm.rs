@@ -25,10 +25,13 @@ pub fn ansi_parser_inner_csi_finished_decslrm(
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     if params.is_empty() {
-        // `CSI s` with no params and no DECLRMM context is SCOSC.
-        // The caller (`csi.rs`) is responsible for routing: it only calls
-        // this function when params are present.  But be defensive and emit
-        // the full-screen reset variant.
+        // `CSI s` with no params is ambiguous: without DECLRMM active it means
+        // SCOSC (save cursor).  The dispatcher in `csi.rs` only calls this
+        // function when DECLRMM is set AND params are non-empty, so in theory
+        // this branch is unreachable.  It is kept as a defensive fallback that
+        // emits the "full-screen" margin reset (Pl=1, Pr=MAX) — the safest
+        // interpretation of a bare `CSI s` within DECLRMM context — rather than
+        // panicking or returning an error on unexpected input.
         output.push(TerminalOutput::SetLeftAndRightMargins {
             left_margin: 1,
             right_margin: usize::MAX,

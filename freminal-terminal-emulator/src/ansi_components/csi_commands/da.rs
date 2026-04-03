@@ -14,6 +14,27 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// - ESC [ > c        → Secondary Device Attributes (DA2, implicit param 0)
 /// - ESC [ > Ps c     → Secondary Device Attributes (DA2, explicit param)
 ///
+/// ## Disambiguation logic
+///
+/// The `>` character appears in two positions depending on the terminal
+/// program:
+/// - As an **intermediate byte** (`intermediates = [b'>']`): standards-
+///   compliant form produced by most modern terminals.
+/// - As the **first parameter byte** (`params = [b'>', ...]`): produced by
+///   some older programs that include `>` in the parameter string.
+///
+/// Both cases are normalised to `is_gt_prefix = true` before the three
+/// sub-cases are evaluated:
+/// - **Case 1** — `>` alone, no numeric params → DA2 with `param = 0`.
+/// - **Case 2** — `>` followed by a single numeric value → DA2 with that
+///   param (only `0` is meaningful; other values are rarely used).
+/// - **Case 3** — `>` followed by anything unparsable (e.g. `"1;2"`) →
+///   error (malformed).
+///
+/// Without a `>` prefix the only valid form is a bare `ESC [ c` or
+/// `ESC [ 0 c` (DA1 with `param = 0`).  Any non-zero param or stray
+/// intermediates are rejected.
+///
 /// Note: the XTVERSION query (`ESC [ > q`) uses terminator `q` and is
 /// dispatched through `report_xt_version.rs`, not this function.
 ///

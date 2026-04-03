@@ -25,13 +25,11 @@ pub fn ansi_parser_inner_csi_finished_cpl(
         Some(n) => n,
     };
 
-    // Move cursor up N lines (negative Y)
     output.push(TerminalOutput::SetCursorPosRel {
         x: None,
         y: Some(-param),
     });
 
-    // Move cursor to column 1
     output.push(TerminalOutput::SetCursorPos {
         x: Some(1),
         y: None,

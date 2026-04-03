@@ -7,19 +7,33 @@ use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
 
 use crate::{cell::Cell, response::InsertResponse};
 
+/// Indicates whether a row was produced by a hard line break, a soft wrap, or as
+/// a blank scroll-fill placeholder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowOrigin {
+    /// The row begins a new logical line (e.g. from a newline character or initial content).
     HardBreak,
+    /// The row is a continuation produced by soft-wrapping a long logical line.
     SoftWrap,
+    /// The row is a blank placeholder created to fill newly visible screen space during scrolling.
     ScrollFill,
 }
 
+/// Indicates how a row connects to the next row in a multi-row logical line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowJoin {
+    /// This row starts a new logical line; the previous logical line ends here.
     NewLogicalLine,
+    /// This row is a soft-wrap continuation of the preceding logical line.
     ContinueLogicalLine,
 }
 
+/// A single row of terminal cells with a fixed logical width.
+///
+/// Cells are stored sparsely: trailing default-blank cells are not allocated.
+/// The `origin` and `join` fields record how this row relates to the logical
+/// line structure, which is used during reflow when the terminal is resized.
+/// The `dirty` flag tracks whether the row's cached flat representation is stale.
 #[derive(Debug, Clone)]
 pub struct Row {
     cells: Vec<Cell>,
@@ -30,6 +44,7 @@ pub struct Row {
 }
 
 impl Row {
+    /// Create a new empty row with the given logical width, marked as a `ScrollFill` placeholder.
     #[must_use]
     pub const fn new(width: usize) -> Self {
         Self {
@@ -41,6 +56,7 @@ impl Row {
         }
     }
 
+    /// Create a new empty row with the given width, origin, and join metadata.
     #[must_use]
     pub const fn new_with_origin(width: usize, origin: RowOrigin, join: RowJoin) -> Self {
         Self {
@@ -52,6 +68,10 @@ impl Row {
         }
     }
 
+    /// Create a row with the given width, origin, join, and pre-populated cells.
+    ///
+    /// Used by `Buffer::reflow_to_width` to install re-wrapped rows directly.
+    /// The new row is marked dirty because it has never been snapshotted.
     #[must_use]
     pub const fn from_cells(
         width: usize,
@@ -68,6 +88,7 @@ impl Row {
         }
     }
 
+    /// Clear all cells in this row, leaving it empty (sparse).
     pub fn clear(&mut self) {
         self.dirty = true;
         self.cells.clear();
@@ -112,6 +133,7 @@ impl Row {
         cols
     }
 
+    /// Returns the cell at the given column index, or `None` if out of bounds.
     #[must_use]
     pub fn get_char_at(&self, idx: usize) -> Option<&Cell> {
         self.cells.get(idx)
@@ -127,6 +149,10 @@ impl Row {
         }
     }
 
+    /// Returns a reference to the backing cell vector.
+    ///
+    /// Prefer [`Row::cells`] for slice access. This method is retained for
+    /// callers that need a `&Vec<Cell>` specifically.
     #[must_use]
     pub const fn get_characters(&self) -> &Vec<Cell> {
         &self.cells
@@ -206,6 +232,12 @@ impl Row {
         }
     }
 
+    /// Insert `text` starting at `start_col`, wrapping at `self.width`.
+    ///
+    /// Returns [`InsertResponse::Consumed`] with the final cursor column if all
+    /// characters fit, or [`InsertResponse::Leftover`] with the index into `text`
+    /// at which the un-inserted portion begins if the row filled before all text
+    /// was consumed.
     pub fn insert_text(
         &mut self,
         start_col: usize,

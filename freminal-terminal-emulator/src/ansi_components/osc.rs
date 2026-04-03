@@ -3,8 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//use eframe::egui::Color32;
-
 use crate::ansi::ParserOutcome;
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use anyhow::Result;
@@ -21,7 +19,6 @@ use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) enum AnsiOscParserState {
     Params,
-    //Intermediates,
     Finished,
     Invalid,
     InvalidFinished,
@@ -120,9 +117,6 @@ impl AnsiOscParser {
 
                 ParserOutcome::Continue
             }
-            // OscParserState::Intermediates => {
-            //     panic!("OscParser should not be in intermediates state");
-            // }
             AnsiOscParserState::Finished | AnsiOscParserState::InvalidFinished => {
                 unreachable!()
             }
@@ -339,6 +333,5 @@ pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option
 }
 
 pub fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {
-    // get the parameter at the index
     params.get(idx).and_then(std::clone::Clone::clone)
 }
