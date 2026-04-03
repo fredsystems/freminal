@@ -5,12 +5,20 @@
 
 use std::fmt;
 
+/// An OSC 8 hyperlink URL, optionally identified by an opaque string ID.
+///
+/// The OSC 8 spec (`\e]8;params;uri\e\\`) allows a `id=...` key/value pair in
+/// the parameter field. Freminal stores only the `id` value (if present) and the
+/// URI string.  Adjacent cells that share the same `id` and `url` are treated as
+/// the same hyperlink region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url {
-    // Ostensibly, the ID is a key/value pair that is used to identify the URL
-    // However, the current spec (https://iterm2.com/documentation-escape-codes.html) only
-    // defines the ID as the only valid parameter
+    /// Optional opaque link identifier from the `id=` parameter.
+    ///
+    /// Per the spec, matching IDs across separate OSC 8 sequences marks the
+    /// same logical hyperlink even if the URI differs.
     pub id: Option<String>,
+    /// The URI string for this hyperlink.
     pub url: String,
 }
 
