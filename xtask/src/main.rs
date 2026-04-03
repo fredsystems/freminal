@@ -3,6 +3,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+//! Build and CI orchestration tool for the Freminal workspace.
+//!
+//! This is a `cargo xtask` binary — run it with `cargo xtask <subcommand>`.
+//! It provides subcommands for building, testing, linting, formatting,
+//! generating coverage reports, and checking dependencies.
+//!
+//! This crate is **not** production code. `anyhow`/`color-eyre` are
+//! acceptable here.
+
 #![deny(
     clippy::pedantic,
     clippy::nursery,

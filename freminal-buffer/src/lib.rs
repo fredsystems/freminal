@@ -3,6 +3,22 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+//! Cell-based terminal buffer model for the Freminal terminal emulator.
+//!
+//! This crate implements the pure data model for terminal content. It is
+//! responsible for cells, rows, cursor tracking, soft-wrapping, and producing
+//! explicit mutation results. It does **not** parse escape sequences, implement
+//! terminal semantics, perform rendering, interact with UI frameworks, or
+//! access OS/platform APIs.
+//!
+//! Key types:
+//! - [`Buffer`] — the primary terminal buffer, owning all rows and cursor state
+//! - [`Row`] — a single row of terminal cells with wrapping metadata
+//! - [`Cell`] — the smallest addressable unit; always valid (empty cells are
+//!   explicit)
+//! - [`TerminalHandler`] — processes parsed terminal output and drives buffer
+//!   mutations
+
 #![deny(
     clippy::pedantic,
     clippy::cargo,

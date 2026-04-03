@@ -3,6 +3,25 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+//! ANSI/VT terminal emulator library for the Freminal terminal emulator.
+//!
+//! This crate owns the ANSI parser (`FreminalAnsiParser`), terminal state
+//! machine (`TerminalState`), and handler (`TerminalHandler`) that together
+//! drive buffer mutations. It produces [`TerminalSnapshot`] values for the GUI
+//! via [`TerminalEmulator::build_snapshot`].
+//!
+//! The crate does **not** render, interact with egui, or hold GUI state.
+//! All terminal input events arrive through a `crossbeam_channel` and all
+//! PTY write-backs go through a `Sender<PtyWrite>`.
+//!
+//! Key types:
+//! - [`TerminalEmulator`] — top-level owner; wraps `TerminalState` and manages
+//!   snapshot publishing
+//! - [`snapshot::TerminalSnapshot`] — immutable view of terminal state shared
+//!   lock-free with the GUI via `ArcSwap`
+//! - [`io::InputEvent`] — keyboard, resize, and focus events sent from the GUI
+//! - [`io::WindowCommand`] — viewport and report commands sent to the GUI
+
 #![deny(
     clippy::pedantic,
     clippy::cargo,
