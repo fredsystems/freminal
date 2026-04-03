@@ -12,6 +12,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use conv2::{ConvUtil, ValueFrom};
+
 use freminal_common::buffer_states::{
     fonts::{BlinkState, FontDecorations, FontWeight},
     format_tag::FormatTag,
@@ -611,11 +613,9 @@ fn build_shaped_glyphs(
         // Cell-grid x position from the cumulative column offset.
         let col_for_glyph = col_start + cum_cols.get(char_idx).copied().unwrap_or(0);
 
-        #[allow(clippy::cast_precision_loss)]
-        let x_px = col_for_glyph as f32 * cell_width;
+        let x_px = col_for_glyph.approx_as::<f32>().unwrap_or(0.0) * cell_width;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let gid = info.glyph_id as u16;
+        let gid = u16::value_from(info.glyph_id).unwrap_or(0);
 
         glyphs.push(ShapedGlyph {
             glyph_id: gid,
@@ -641,8 +641,7 @@ fn build_tofu_glyphs(
     let mut col = col_start;
 
     for &cw in char_widths {
-        #[allow(clippy::cast_precision_loss)]
-        let x_px = col as f32 * cell_width;
+        let x_px = col.approx_as::<f32>().unwrap_or(0.0) * cell_width;
 
         glyphs.push(ShapedGlyph {
             glyph_id: 0,

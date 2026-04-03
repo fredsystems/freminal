@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use conv2::ConvUtil;
+use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
@@ -635,14 +635,10 @@ impl eframe::App for FreminalGui {
             // font metrics.  egui's coordinate system uses logical points, so we
             // convert with `pixels_per_point` when doing layout math.
             let (cell_w_u, cell_height_u) = self.terminal_widget.cell_size();
-            #[allow(clippy::cast_possible_truncation)]
-            let font_width = cell_w_u as usize;
-            #[allow(clippy::cast_possible_truncation)]
-            let font_height = cell_height_u as usize;
-            #[allow(clippy::cast_precision_loss)]
-            let logical_char_w = cell_w_u as f32 / ppp;
-            #[allow(clippy::cast_precision_loss)]
-            let logical_char_h = cell_height_u as f32 / ppp;
+            let font_width = usize::value_from(cell_w_u).unwrap_or(0);
+            let font_height = usize::value_from(cell_height_u).unwrap_or(0);
+            let logical_char_w = f32::approx_from(cell_w_u).unwrap_or(0.0) / ppp;
+            let logical_char_h = f32::approx_from(cell_height_u).unwrap_or(0.0) / ppp;
 
             let available = ui.available_size();
             let width_chars = (available.x / logical_char_w)
@@ -714,8 +710,10 @@ impl eframe::App for FreminalGui {
                     style.visuals.window_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
                     // panel_fill: respects background_opacity (terminal area only).
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let alpha = (bg_opacity * 255.0).round() as u8;
+                    let alpha = (bg_opacity * 255.0)
+                        .round()
+                        .approx_as::<u8>()
+                        .unwrap_or(255);
                     style.visuals.panel_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
                 });

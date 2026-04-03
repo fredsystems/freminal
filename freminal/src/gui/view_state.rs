@@ -13,6 +13,7 @@
 
 use std::time::Instant;
 
+use conv2::ConvUtil;
 use eframe::egui;
 
 use super::mouse::PreviousMouseState;
@@ -197,8 +198,14 @@ impl ViewState {
 
         // Advance by the number of ticks elapsed (normally 1, but could be
         // more if the frame rate dropped below the tick rate).
-        #[allow(clippy::cast_possible_truncation)]
-        let ticks = (elapsed.as_millis() / TEXT_BLINK_TICK_DURATION.as_millis() % 6) as u8;
+        // `as_millis()` returns `u128`; conv2 has no `ValueFrom<u128>`, so we
+        // first narrow to `u64` via `try_from` (infallible for any realistic
+        // duration), then use `approx_as` for the final `u64 → u8` step.
+        let raw_u128 = elapsed.as_millis() / TEXT_BLINK_TICK_DURATION.as_millis() % 6;
+        let ticks = u64::try_from(raw_u128)
+            .unwrap_or(0)
+            .approx_as::<u8>()
+            .unwrap_or(0);
         self.text_blink_cycle = (self.text_blink_cycle + ticks) % 6;
         self.text_blink_last_tick = now;
 

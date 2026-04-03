@@ -201,8 +201,7 @@ fn handle_scroll_fallback(
     if snap.is_alternate_screen && snap.alternate_scroll == AlternateScroll::Enabled {
         // Convert scroll delta to arrow key presses.
         // Safety: abs_lines >= 0, and we clamp to 1 below.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let count = (abs_lines as usize).max(1);
+        let count = abs_lines.approx_as::<usize>().unwrap_or(0).max(1);
         let key = if lines > 0.0 {
             TerminalInput::ArrowUp(KeyModifiers::NONE)
         } else {
@@ -225,8 +224,7 @@ fn handle_scroll_fallback(
         // default behavior of most terminal emulators (iTerm2, Alacritty,
         // kitty, GNOME Terminal, etc.).
         const SCROLL_MULTIPLIER: usize = 3;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let n = ((abs_lines as usize).max(1)) * SCROLL_MULTIPLIER;
+        let n = abs_lines.approx_as::<usize>().unwrap_or(0).max(1) * SCROLL_MULTIPLIER;
 
         let new_offset = if lines > 0.0 {
             // Scroll up (into history) — increase offset.
@@ -896,8 +894,12 @@ fn write_input_to_terminal(
                     // Compute how many discrete scroll lines this delta
                     // represents and the unit direction (+1.0 up, -1.0 down).
                     let lines_f = scroll_amount_to_do / character_size_y;
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let line_count = lines_f.abs().round().max(1.0) as usize;
+                    let line_count = lines_f
+                        .abs()
+                        .round()
+                        .max(1.0)
+                        .approx_as::<usize>()
+                        .unwrap_or(1);
                     let direction = lines_f.signum(); // +1.0 or -1.0
                     let unit_delta = egui::Vec2::new(0.0, direction);
 
@@ -1053,9 +1055,7 @@ fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
     // which simplifies when we use the pixel track_height as the visible
     // proxy (they are proportional).
     //
-    // Precision loss is acceptable — these are pixel coordinates.
-    #[allow(clippy::cast_precision_loss)]
-    let max_f = max_scroll_offset as f32;
+    let max_f = max_scroll_offset.approx_as::<f32>().unwrap_or(0.0);
     let total = max_f + track_height;
     let thumb_fraction = (track_height / total).clamp(0.05, 1.0);
     let thumb_height = (track_height * thumb_fraction)
@@ -1064,8 +1064,7 @@ fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
 
     // Position: scroll_offset 0 = bottom, max = top.
     let scrollable_track = track_height - thumb_height;
-    #[allow(clippy::cast_precision_loss)]
-    let position_fraction = scroll_offset as f32 / max_f;
+    let position_fraction = scroll_offset.approx_as::<f32>().unwrap_or(0.0) / max_f;
     let thumb_top = track_top + scrollable_track * (1.0 - position_fraction);
 
     let thumb_rect = Rect::from_min_max(
@@ -1300,10 +1299,8 @@ impl FreminalTerminalWidget {
 
         let (cell_w, cell_h) = self.font_manager.cell_size();
         // Physical pixel dimensions (for vertex building / OpenGL renderer).
-        #[allow(clippy::cast_precision_loss)]
-        let cell_w_f = cell_w as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let row_h_f = cell_h as f32;
+        let cell_w_f = f32::approx_from(cell_w).unwrap_or(0.0);
+        let row_h_f = f32::approx_from(cell_h).unwrap_or(0.0);
 
         // Logical point dimensions (for egui layout, mouse hit-testing, scroll).
         let logical_cell_w = cell_w_f / ppp;
@@ -1653,11 +1650,8 @@ impl FreminalTerminalWidget {
                 // (which must be Send+Sync+'static) can pass it to the renderer.
                 rs.snap_images.clone_from(snap.images.as_ref());
                 rs.cursor_vert_float_offset = cursor_vert_float_offset;
-                #[allow(clippy::cast_precision_loss)]
-                {
-                    rs.cell_width_px = cell_w as f32;
-                    rs.cell_height_px = cell_h as f32;
-                }
+                rs.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
+                rs.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
                 rs.bg_opacity = bg_opacity;
                 drop(rs);
 
@@ -1681,10 +1675,9 @@ impl FreminalTerminalWidget {
         self.previous_cursor_color_override = snap.cursor_color_override;
 
         // Allocate the exact terminal rect (in logical points for egui).
-        #[allow(clippy::cast_precision_loss)]
         let desired_size = egui::Vec2::new(
-            snap.term_width as f32 * logical_cell_w,
-            snap.height as f32 * logical_cell_h,
+            snap.term_width.approx_as::<f32>().unwrap_or(0.0) * logical_cell_w,
+            snap.height.approx_as::<f32>().unwrap_or(0.0) * logical_cell_h,
         );
         let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
 

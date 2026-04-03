@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
 use freminal_common::buffer_states::fonts::{FontDecorations, FontWeight};
 use freminal_common::config::Config;
@@ -490,8 +491,10 @@ impl FontManager {
     #[must_use]
     pub fn rustybuzz_face(&self, face_id: FaceId) -> Option<rustybuzz::Face<'_>> {
         let loaded = self.get_loaded_face(face_id)?;
-        #[allow(clippy::cast_possible_truncation)]
-        rustybuzz::Face::from_slice(loaded.as_bytes(), loaded.index as u32)
+        rustybuzz::Face::from_slice(
+            loaded.as_bytes(),
+            u32::value_from(loaded.index).unwrap_or(0),
+        )
     }
 
     /// Create a `swash::FontRef` for the given `FaceId`.
@@ -1103,23 +1106,23 @@ fn compute_cell_metrics(
         let gm = font_ref.glyph_metrics(&[]).scale(font_size_ppem);
         let advance = gm.advance_width(glyph_id);
         if advance > 0.0 {
-            advance.ceil() as u32
+            advance.ceil().approx_as::<u32>().unwrap_or(1)
         } else {
             // Fallback: average_width > max_width
-            let aw = metrics.average_width.ceil() as u32;
+            let aw = metrics.average_width.ceil().approx_as::<u32>().unwrap_or(0);
             if aw > 0 {
                 aw
             } else {
-                metrics.max_width.ceil() as u32
+                metrics.max_width.ceil().approx_as::<u32>().unwrap_or(1)
             }
         }
     } else {
         // '0' not in font — use average_width as a reasonable default.
-        let aw = metrics.average_width.ceil() as u32;
+        let aw = metrics.average_width.ceil().approx_as::<u32>().unwrap_or(0);
         if aw > 0 {
             aw
         } else {
-            metrics.max_width.ceil() as u32
+            metrics.max_width.ceil().approx_as::<u32>().unwrap_or(1)
         }
     };
 
@@ -1147,8 +1150,7 @@ fn compute_cell_metrics(
 
     let effective_height = typo_height.max(win_height);
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cell_height = effective_height.ceil() as u32;
+    let cell_height = effective_height.ceil().approx_as::<u32>().unwrap_or(1);
 
     // --- Baseline offset ---
     //
