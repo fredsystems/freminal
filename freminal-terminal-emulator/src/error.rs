@@ -24,8 +24,10 @@ pub enum ParserFailures {
     UnhandledCUFCommand(String),
     #[error("Invalid cursor (CUP) set position sequence: {0:?}")]
     UnhandledCUPCommand(Vec<u8>),
-    #[error("Invalid cursor (DCH) set position sequence: {0}")]
+    #[error("Invalid delete character (DCH) sequence: {0}")]
     UnhandledDCHCommand(String),
+    #[error("Invalid erase character (ECH) sequence: {0}")]
+    UnhandledECHCommand(String),
     #[error("Invalid cursor (ED) set position sequence: {0}")]
     UnhandledEDCommand(String),
     #[error("Invalid cursor (EL) set position sequence: {0}")]

@@ -16,7 +16,7 @@ pub fn ansi_parser_inner_csi_finished_ech(
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     let Ok(param) = parse_param_as::<usize>(params) else {
-        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDCHCommand(format!(
+        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledECHCommand(format!(
             "{params:?}"
         )));
     };
