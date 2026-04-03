@@ -63,8 +63,9 @@ pub fn ansi_parser_inner_csi_finished_modify_other_keys(
             let level = parts.get(1).copied().flatten().unwrap_or(0);
             // Clamp to valid range 0–2.
             let level = if level > 2 { 2 } else { level };
-            #[allow(clippy::cast_possible_truncation)]
-            output.push(TerminalOutput::ModifyOtherKeys(level as u8));
+            output.push(TerminalOutput::ModifyOtherKeys(
+                u8::try_from(level).unwrap_or(0),
+            ));
         }
         // Other resources (modifyCursorKeys=1, modifyFunctionKeys=2,
         // modifyKeyboard=8, etc.) — not yet supported; skip.

@@ -138,8 +138,7 @@ pub fn handle_custom_color(
 
             // Clamp to 0–255 and emit a PaletteIndex.  The handler
             // resolves it against the mutable ColorPalette.
-            #[allow(clippy::cast_possible_truncation)]
-            let idx = (lookup & 0xFF) as u8;
+            let idx = u8::try_from(lookup & 0xFF).unwrap_or(0);
             let color = TerminalColor::PaletteIndex(idx);
 
             match custom_color_control_code {

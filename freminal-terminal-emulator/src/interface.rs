@@ -30,6 +30,8 @@ pub use crate::input::{
     raw_ascii_bytes_to_terminal_input,
 };
 
+use conv2::ValueFrom;
+
 use crate::io::FreminalPtyInputOutput;
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
@@ -335,12 +337,11 @@ impl TerminalEmulator {
         font_pixel_height: usize,
     ) -> Result<()> {
         let (old_width, old_height) = self.internal.get_win_size();
-        #[allow(clippy::cast_possible_truncation)]
         self.internal.set_win_size(
             width_chars,
             height_chars,
-            font_pixel_width as u32,
-            font_pixel_height as u32,
+            u32::value_from(font_pixel_width).unwrap_or(0),
+            u32::value_from(font_pixel_height).unwrap_or(0),
         );
 
         if old_width != width_chars || old_height != height_chars {
@@ -374,12 +375,11 @@ impl TerminalEmulator {
         font_pixel_width: usize,
         font_pixel_height: usize,
     ) {
-        #[allow(clippy::cast_possible_truncation)]
         self.internal.set_win_size(
             width_chars,
             height_chars,
-            font_pixel_width as u32,
-            font_pixel_height as u32,
+            u32::value_from(font_pixel_width).unwrap_or(0),
+            u32::value_from(font_pixel_height).unwrap_or(0),
         );
 
         // The PTY's TIOCGWINSZ expects the *total* window pixel dimensions
