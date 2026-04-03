@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
@@ -664,27 +665,27 @@ impl TerminalHandler {
     }
 
     /// Handle CUU (Cursor Up) — move cursor up `n` rows.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_up(&mut self, n: usize) {
-        self.buffer.move_cursor_relative(0, -(n as i32));
+        let dy = i32::value_from(n).unwrap_or(i32::MAX);
+        self.buffer.move_cursor_relative(0, -dy);
     }
 
     /// Handle CUD (Cursor Down) — move cursor down `n` rows.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_down(&mut self, n: usize) {
-        self.buffer.move_cursor_relative(0, n as i32);
+        let dy = i32::value_from(n).unwrap_or(i32::MAX);
+        self.buffer.move_cursor_relative(0, dy);
     }
 
     /// Handle CUF (Cursor Forward) — move cursor forward `n` columns.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_forward(&mut self, n: usize) {
-        self.buffer.move_cursor_relative(n as i32, 0);
+        let dx = i32::value_from(n).unwrap_or(i32::MAX);
+        self.buffer.move_cursor_relative(dx, 0);
     }
 
     /// Handle CUB (Cursor Backward) — move cursor backward `n` columns.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_backward(&mut self, n: usize) {
-        self.buffer.move_cursor_relative(-(n as i32), 0);
+        let dx = i32::value_from(n).unwrap_or(i32::MAX);
+        self.buffer.move_cursor_relative(-dx, 0);
     }
 
     /// Handle erase in display (ED)
@@ -1297,8 +1298,7 @@ impl TerminalHandler {
                     .unwrap_or(Some(1))
                     .unwrap_or(1)
                     .max(1);
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                let n_i32 = n as i32;
+                let n_i32 = i32::value_from(n).unwrap_or(i32::MAX);
                 self.handle_cursor_relative(0, n_i32);
                 self.handle_cursor_pos(Some(1), None);
                 true
@@ -1311,9 +1311,8 @@ impl TerminalHandler {
                     .unwrap_or(Some(1))
                     .unwrap_or(1)
                     .max(1);
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                let n_i32 = -(n as i32);
-                self.handle_cursor_relative(0, n_i32);
+                let n_i32 = i32::value_from(n).unwrap_or(i32::MAX);
+                self.handle_cursor_relative(0, -n_i32);
                 self.handle_cursor_pos(Some(1), None);
                 true
             }
@@ -1552,14 +1551,14 @@ impl TerminalHandler {
         let (term_width, term_height) = self.get_win_size();
 
         // Compute display size in terminal cells using actual cell pixel dimensions.
-        #[allow(clippy::cast_possible_truncation)]
         let display_cols = {
-            let cols = sixel_image.width.div_ceil(self.cell_pixel_width) as usize;
+            let cols =
+                usize::value_from(sixel_image.width.div_ceil(self.cell_pixel_width)).unwrap_or(0);
             cols.min(term_width).max(1)
         };
-        #[allow(clippy::cast_possible_truncation)]
         let display_rows = {
-            let rows = sixel_image.height.div_ceil(self.cell_pixel_height) as usize;
+            let rows =
+                usize::value_from(sixel_image.height.div_ceil(self.cell_pixel_height)).unwrap_or(0);
             rows.min(term_height).max(1)
         };
 
@@ -2110,8 +2109,7 @@ impl TerminalHandler {
             .control
             .display_cols
             .map_or(stored_image.display_cols, |c| {
-                #[allow(clippy::cast_possible_truncation)]
-                let cols = c as usize;
+                let cols = usize::value_from(c).unwrap_or(0);
                 cols.min(term_width).max(1)
             });
 
@@ -2119,8 +2117,7 @@ impl TerminalHandler {
             .control
             .display_rows
             .map_or(stored_image.display_rows, |r| {
-                #[allow(clippy::cast_possible_truncation)]
-                let rows = r as usize;
+                let rows = usize::value_from(r).unwrap_or(0);
                 rows.min(term_height).max(1)
             });
 
@@ -2178,8 +2175,7 @@ impl TerminalHandler {
 
         // Send OK response unless suppressed.
         if quiet < 1 && id > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let response_id = id as u32;
+            let response_id = u32::value_from(id).unwrap_or(0);
             let response = format_kitty_response(response_id, true, "");
             self.write_to_pty(&response);
         }
@@ -2405,26 +2401,24 @@ impl TerminalHandler {
 
         let display_cols = control.display_cols.map_or_else(
             || {
-                #[allow(clippy::cast_possible_truncation)]
-                let cols = img_width_px.div_ceil(self.cell_pixel_width) as usize;
+                let cols =
+                    usize::value_from(img_width_px.div_ceil(self.cell_pixel_width)).unwrap_or(0);
                 cols.min(term_width).max(1)
             },
             |c| {
-                #[allow(clippy::cast_possible_truncation)]
-                let cols = c as usize;
+                let cols = usize::value_from(c).unwrap_or(0);
                 cols.min(term_width).max(1)
             },
         );
 
         let display_rows = control.display_rows.map_or_else(
             || {
-                #[allow(clippy::cast_possible_truncation)]
-                let rows = img_height_px.div_ceil(self.cell_pixel_height) as usize;
+                let rows =
+                    usize::value_from(img_height_px.div_ceil(self.cell_pixel_height)).unwrap_or(0);
                 rows.min(term_height).max(1)
             },
             |r| {
-                #[allow(clippy::cast_possible_truncation)]
-                let rows = r as usize;
+                let rows = usize::value_from(r).unwrap_or(0);
                 rows.min(term_height).max(1)
             },
         );
@@ -2483,8 +2477,7 @@ impl TerminalHandler {
 
         // Send OK response unless suppressed.
         if quiet < 1 && assigned_id > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let response_id = assigned_id as u32;
+            let response_id = u32::value_from(assigned_id).unwrap_or(0);
             let response = format_kitty_response(response_id, true, "");
             self.write_to_pty(&response);
         }
@@ -3033,27 +3026,19 @@ impl TerminalHandler {
             None | Some(ImageDimension::Auto) => {
                 // image_pixels / cell_pixels, rounded up, clamped to term size.
                 let cells = image_pixels.saturating_add(cell_pixels - 1) / cell_pixels;
-                #[allow(clippy::cast_possible_truncation)]
-                let result = (cells as usize).min(term_cells).max(1);
-                result
+                usize::value_from(cells).unwrap_or(0).min(term_cells).max(1)
             }
             Some(ImageDimension::Cells(n)) => {
-                #[allow(clippy::cast_possible_truncation)]
-                let result = (*n as usize).min(term_cells).max(1);
-                result
+                usize::value_from(*n).unwrap_or(0).min(term_cells).max(1)
             }
             Some(ImageDimension::Pixels(px)) => {
                 let cells = px.saturating_add(cell_pixels - 1) / cell_pixels;
-                #[allow(clippy::cast_possible_truncation)]
-                let result = (cells as usize).min(term_cells).max(1);
-                result
+                usize::value_from(cells).unwrap_or(0).min(term_cells).max(1)
             }
             Some(ImageDimension::Percent(pct)) => {
-                let cells = (u64::from(*pct) * term_cells as u64) / 100;
+                let cells = (u64::from(*pct) * u64::value_from(term_cells).unwrap_or(0)) / 100;
                 // Safe: cells is bounded by term_cells which fits in usize.
-                #[allow(clippy::cast_possible_truncation)]
-                let result = (cells as usize).min(term_cells).max(1);
-                result
+                usize::value_from(cells).unwrap_or(0).min(term_cells).max(1)
             }
         }
     }
@@ -3086,20 +3071,26 @@ impl TerminalHandler {
         if width_is_auto && !height_is_auto {
             // Height was explicitly set; scale width to preserve aspect ratio.
             // scaled_cols = display_rows * (img_w / img_h) * (cell_h / cell_w)
-            let scaled = (u64::from(img_width_px) * display_rows as u64 * cph)
-                / (u64::from(img_height_px).max(1) * cpw);
+            let scaled =
+                (u64::from(img_width_px) * u64::value_from(display_rows).unwrap_or(0) * cph)
+                    / (u64::from(img_height_px).max(1) * cpw);
             // Safe: scaled is bounded by term_width which fits in usize.
-            #[allow(clippy::cast_possible_truncation)]
-            let cols = (scaled as usize).min(term_width).max(1);
+            let cols = usize::value_from(scaled)
+                .unwrap_or(0)
+                .min(term_width)
+                .max(1);
             (cols, display_rows)
         } else if !width_is_auto && height_is_auto {
             // Width was explicitly set; scale height to preserve aspect ratio.
             // scaled_rows = display_cols * (img_h / img_w) * (cell_w / cell_h)
-            let scaled = (u64::from(img_height_px) * display_cols as u64 * cpw)
-                / (u64::from(img_width_px).max(1) * cph);
+            let scaled =
+                (u64::from(img_height_px) * u64::value_from(display_cols).unwrap_or(0) * cpw)
+                    / (u64::from(img_width_px).max(1) * cph);
             // Safe: scaled is bounded by term_height which fits in usize.
-            #[allow(clippy::cast_possible_truncation)]
-            let rows = (scaled as usize).min(term_height).max(1);
+            let rows = usize::value_from(scaled)
+                .unwrap_or(0)
+                .min(term_height)
+                .max(1);
             (display_cols, rows)
         } else {
             // Both auto or both explicit — no adjustment needed.
@@ -7763,18 +7754,16 @@ mod tests {
     fn format_for_placeholder(image_id: u32, placement_id: u32) -> FormatTag {
         use freminal_common::buffer_states::cursor::StateColors;
 
-        #[allow(clippy::cast_possible_truncation)]
         let fg = TerminalColor::Custom(
-            (image_id >> 16) as u8,
-            (image_id >> 8) as u8,
-            image_id as u8,
+            u8::try_from((image_id >> 16) & 0xFF).unwrap_or(0),
+            u8::try_from((image_id >> 8) & 0xFF).unwrap_or(0),
+            u8::try_from(image_id & 0xFF).unwrap_or(0),
         );
 
-        #[allow(clippy::cast_possible_truncation)]
         let ul = TerminalColor::Custom(
-            (placement_id >> 16) as u8,
-            (placement_id >> 8) as u8,
-            placement_id as u8,
+            u8::try_from((placement_id >> 16) & 0xFF).unwrap_or(0),
+            u8::try_from((placement_id >> 8) & 0xFF).unwrap_or(0),
+            u8::try_from(placement_id & 0xFF).unwrap_or(0),
         );
 
         let mut tag = FormatTag::default();
