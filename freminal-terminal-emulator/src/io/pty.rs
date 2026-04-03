@@ -420,24 +420,37 @@ impl FreminalPtyInputOutput {
 
 /// Normalise a raw locale string into a `LANG`-compatible value.
 ///
+/// POSIX locale format: `language[_territory][.codeset][@modifier]`
+///
 /// If `raw` already contains a codeset separator (`.`), it is returned
 /// verbatim — the system already declared its codeset, so we must not
-/// clobber it.  Otherwise, the language/region portion has any `-`
-/// characters replaced with `_` (POSIX convention) and `.UTF-8` is
-/// appended to signal UTF-8 encoding.
+/// clobber it.  Otherwise, `.UTF-8` is inserted before any `@modifier`
+/// suffix, and any `-` characters in the language/region portion are
+/// replaced with `_` (POSIX convention).
 ///
 /// Examples:
 /// - `"en-US"` → `"en_US.UTF-8"`
 /// - `"en_US"` → `"en_US.UTF-8"`
 /// - `"en_US.UTF-8"` → `"en_US.UTF-8"` (unchanged)
 /// - `"ja_JP.EUC-JP"` → `"ja_JP.EUC-JP"` (unchanged)
+/// - `"en_US@euro"` → `"en_US.UTF-8@euro"`
+/// - `"en-GB@euro"` → `"en_GB.UTF-8@euro"`
 fn normalize_locale(raw: &str) -> String {
     if raw.contains('.') {
         // Codeset already declared — use as-is.
         raw.to_string()
     } else {
-        // No codeset — normalise separators and assume UTF-8.
-        format!("{}.UTF-8", raw.replace('-', "_"))
+        // No codeset — normalise separators and insert `.UTF-8` before
+        // any `@modifier` suffix.
+        let (lang_region, modifier) = match raw.split_once('@') {
+            Some((lr, m)) => (lr, Some(m)),
+            None => (raw, None),
+        };
+        let normalised = lang_region.replace('-', "_");
+        modifier.map_or_else(
+            || format!("{normalised}.UTF-8"),
+            |m| format!("{normalised}.UTF-8@{m}"),
+        )
     }
 }
 
@@ -473,5 +486,20 @@ mod locale_tests {
     #[test]
     fn empty_locale_gets_utf8_appended() {
         assert_eq!(normalize_locale(""), ".UTF-8");
+    }
+
+    #[test]
+    fn locale_with_modifier_inserts_codeset_before_modifier() {
+        assert_eq!(normalize_locale("en_US@euro"), "en_US.UTF-8@euro");
+    }
+
+    #[test]
+    fn locale_with_dash_and_modifier_normalises_and_inserts_codeset() {
+        assert_eq!(normalize_locale("en-GB@euro"), "en_GB.UTF-8@euro");
+    }
+
+    #[test]
+    fn locale_with_codeset_and_modifier_returned_unchanged() {
+        assert_eq!(normalize_locale("en_US.UTF-8@euro"), "en_US.UTF-8@euro");
     }
 }

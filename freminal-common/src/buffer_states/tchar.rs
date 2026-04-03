@@ -70,7 +70,7 @@ impl TChar {
 
     /// Convert a vector of u8s to a vector of `TChars`
     /// The assumption here is that the vector of u8s will contain one or more `TChars`.
-    /// If the byte vector is known to contain a single `TChar`, then use `TChar::from` instead.
+    /// If the byte vector is known to contain a single `TChar`, use `TChar::try_from` instead.
     ///
     /// # Errors
     /// Will return an error if the vector is not a valid utf8 string, or if the vector contains characters that are not valid `TChar`
