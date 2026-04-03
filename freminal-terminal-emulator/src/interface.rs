@@ -319,10 +319,14 @@ impl TerminalEmulator {
         self.internal.get_win_size()
     }
 
-    /// Set the window title
+    /// Set the terminal window dimensions in characters and notify the PTY of the size change.
+    ///
+    /// Updates the internal buffer to the new `(width_chars × height_chars)` grid and, if the
+    /// dimensions have changed, sends a `PtyWrite::Resize` through the write channel so that
+    /// the kernel's tty layer (TIOCSWINSZ) sees the new size.
     ///
     /// # Errors
-    /// Will error if the terminal cannot be locked
+    /// Returns an error if the `PtyWrite::Resize` message cannot be sent through the channel.
     pub fn set_win_size(
         &mut self,
         width_chars: usize,

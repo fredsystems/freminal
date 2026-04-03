@@ -1680,8 +1680,6 @@ impl Buffer {
         (self.scroll_region_left, self.scroll_region_right)
     }
 
-    /// Index in `rows` of the first visible line.
-    /// This is the same start index used by `visible_rows()`.
     /// Index in `rows` of the first visible line for the given `scroll_offset`.
     /// The PTY thread always calls this with `scroll_offset = 0`; the GUI thread
     /// passes the value from `ViewState`.
@@ -2040,15 +2038,11 @@ impl Buffer {
         }
     }
 
-    /// Switch from the primary buffer to the alternate screen.
+    /// Move cursor to absolute position (CUP, HVP).
     ///
-    /// - Saves current rows, cursor, and `scroll_offset`.
-    /// - Replaces contents with a fresh empty screen (height rows).
-    /// - Disables scrollback semantics for the alternate screen.
-    ///
-    /// Move cursor to absolute position (CUP, HVP)
-    ///
-    /// x and y are 0-indexed screen coordinates.
+    /// `x` and `y` are 0-indexed screen coordinates.  `None` means "leave this
+    /// axis unchanged" (e.g. CHA only supplies x, VPA only supplies y, CUP
+    /// supplies both).
     ///
     /// When DECOM (origin mode) is enabled, `y` is relative to `scroll_region_top`
     /// and is clamped to the scroll region height.  When DECOM is disabled, `y` is

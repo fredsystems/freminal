@@ -91,8 +91,9 @@ fn lookup_default_256_color(index: usize, theme: &ThemePalette) -> TerminalColor
             let (r, g, b) = theme.ansi[index];
             TerminalColor::Custom(r, g, b)
         }
-        // Alias: index 16 maps to the same as index 0 (black).
-        // Out-of-range (256+) also maps to black.
+        // Index 16 is the first entry of the 6x6x6 color cube and evaluates to
+        // (0, 0, 0) — the same as the theme's ANSI black.  Out-of-range indices
+        // (256+) are clamped to black as a safe fallback.
         16 | 256.. => {
             let (r, g, b) = theme.ansi[0];
             TerminalColor::Custom(r, g, b)

@@ -34,7 +34,7 @@ pub enum ParserFailures {
     UnhandledILCommand(String),
     #[error("Invalid delete lines (DL) sequence: {0}")]
     UnhandledDLCommand(String),
-    #[error("Invalid cursor (SGR) set position sequence: {0}")]
+    #[error("Unhandled SGR (Select Graphic Rendition) command: {0}")]
     UnhandledSGRCommand(String),
     #[error("Invalid cursor (ICH) set position sequence: {0}")]
     UnhandledICHCommand(String),

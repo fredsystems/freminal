@@ -12,7 +12,11 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 // from Task 23 (SGR 5/6) can be reused when this is implemented.
 // Most terminals give the user the option to enable/disable cursor blink.
 
-/// Alternate Screen (`XT_EXTSCRN`) ?12
+/// Cursor Blink (`XT_CBLINK`) ?12
+///
+/// Controls whether the terminal cursor blinks.
+/// When set, the cursor blinks.
+/// When reset (default), the cursor is steady and does not blink.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum XtCBlink {
     /// Reset mode. Default.

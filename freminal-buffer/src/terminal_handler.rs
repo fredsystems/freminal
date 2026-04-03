@@ -820,14 +820,15 @@ impl TerminalHandler {
 
     /// Handle entering alternate screen
     pub fn handle_enter_alternate(&mut self) {
-        // scroll_offset lives in ViewState (Task 4). Pass 0 temporarily;
-        // correct wiring happens in Task 7/8.
+        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
+        // always passes 0 when entering the alternate screen.
         self.buffer.enter_alternate(0);
     }
 
     /// Handle leaving alternate screen
     pub fn handle_leave_alternate(&mut self) {
-        // Returns the saved scroll_offset; discarded here until ViewState is wired (Task 7/8).
+        // Returns the saved scroll_offset from the primary screen; discarded here
+        // because scroll_offset is owned by ViewState on the GUI side.
         let _restored_offset = self.buffer.leave_alternate();
     }
 
@@ -3118,8 +3119,8 @@ impl TerminalHandler {
         if cell_pixel_height > 0 {
             self.cell_pixel_height = cell_pixel_height;
         }
-        // scroll_offset lives in `ViewState` (Task 4). Pass 0 temporarily;
-        // correct wiring happens in Task 7/8.
+        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
+        // always passes 0 when resizing.
         let _new_offset = self.buffer.set_size(width, height, 0);
     }
 

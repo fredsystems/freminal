@@ -6,7 +6,11 @@
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 use core::fmt;
 
-/// Set number of columns (DECSCLM) ?4
+/// Scroll Mode (DECSCLM) ?4
+///
+/// Controls smooth (slow) vs jump (fast) scrolling.
+/// When set, scrolling is smooth (one line at a time, visibly animated).
+/// When reset (default), scrolling is fast (jump scroll — multiple lines at once).
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum Decsclm {
     SmoothScroll,

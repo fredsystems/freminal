@@ -12,7 +12,7 @@
 /// lifetime -- zero-cost references, no heap allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemePalette {
-    /// Human-readable name for display in the Settings Modal.
+    /// Human-readable display name for the theme (e.g. "Catppuccin Mocha").
     pub name: &'static str,
 
     /// Machine-readable slug for TOML config (e.g. "catppuccin-mocha").

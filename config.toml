@@ -1,0 +1,25 @@
+version = 1
+
+[font]
+family = "CaskaydiaCove Nerd Font Mono"
+size = 12.0
+ligatures = true
+
+[cursor]
+shape = "block"
+blink = true
+
+[theme]
+name = "catppuccin-mocha"
+
+[shell]
+
+[logging]
+write_to_file = false
+
+[scrollback]
+limit = 4000
+
+[ui]
+hide_menu_bar = false
+background_opacity = 0.9

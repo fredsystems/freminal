@@ -62,7 +62,7 @@ impl Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
-    /// Run CI checks (lint, build, test)
+    /// Run CI checks (lint, deny, machete, build, test)
     CI,
 
     /// Build the project
@@ -171,7 +171,7 @@ impl Command {
     }
 }
 
-/// Run CI checks (lint, build, test)
+/// Run CI checks (lint, deny, machete, build, test)
 fn ci() -> Result<()> {
     lint()?;
     deny()?;
@@ -301,7 +301,7 @@ fn fix_typos() -> Result<()> {
     Ok(())
 }
 
-/// Run tests for libs, backends, and docs
+/// Run tests for libs and docs
 fn test() -> Result<()> {
     test_libs()?;
     test_docs()?; // run last because it's slow

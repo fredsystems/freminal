@@ -9,7 +9,11 @@ use crate::buffer_states::mode::SetMode;
 
 use super::ReportMode;
 
-/// Show cursor (DECTCEM) ?8
+/// Auto Repeat Mode (DECARM) ?8
+///
+/// Controls whether keys auto-repeat when held down.
+/// When set, held keys produce repeated input events.
+/// When reset, each key generates only one event regardless of how long it is held.
 #[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decarm {
     #[default]

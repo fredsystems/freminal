@@ -7,7 +7,12 @@ use core::fmt;
 
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
-/// Synchronized Updates Mode ?2027
+/// Grapheme Clustering Mode ?2027
+///
+/// Controls whether the terminal uses Unicode grapheme cluster segmentation or legacy
+/// per-codepoint width calculation.
+/// When set (Legacy), each codepoint is measured individually.
+/// When reset (Unicode, default), grapheme clusters are treated as a single unit.
 #[derive(Debug, Default, Eq, PartialEq, Clone)]
 pub enum GraphemeClustering {
     #[default]

@@ -254,7 +254,9 @@ const fn encode_modifiers_for_x11(modifiers: Modifiers) -> usize {
         cb += 4;
     }
 
-    // This is for meta, but wezterm seems to use alt as the meta?
+    // The X11 mouse protocol uses bit 3 (value 8) for the Meta modifier.
+    // In practice, most terminal emulators (including WezTerm) map the Alt key
+    // to Meta for mouse reporting purposes, matching the behavior of xterm.
     if modifiers.alt {
         cb += 8;
     }

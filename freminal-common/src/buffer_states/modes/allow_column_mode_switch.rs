@@ -9,7 +9,11 @@ use crate::buffer_states::mode::SetMode;
 
 use super::ReportMode;
 
-/// Show cursor (DECTCEM) ?40
+/// Allow Column Mode Switch (DECCOLM) ?40
+///
+/// Controls whether the terminal allows 80/132 column mode switching via DECCOLM (?3).
+/// When set, DECCOLM can switch between 80 and 132 column mode.
+/// When reset, DECCOLM has no effect.
 #[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum AllowColumnModeSwitch {
     #[default]

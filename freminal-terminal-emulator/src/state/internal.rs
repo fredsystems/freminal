@@ -82,8 +82,11 @@ pub struct TerminalState {
 }
 
 impl Default for TerminalState {
-    /// This method should never really be used. It was added to allow the test suite to pass.
-    /// The problem here is that you most likely really really want a rx channel to go with the tx channel.
+    /// Creates a `TerminalState` with a disconnected (dropped-receiver) PTY write channel.
+    ///
+    /// This is provided solely so that the test suite can construct a `TerminalState` without
+    /// a live PTY.  In production the emulator is always constructed via `TerminalState::new`
+    /// with a real `Sender<PtyWrite>` wired to the PTY consumer thread.
     fn default() -> Self {
         Self::new(crossbeam_channel::unbounded().0, None)
     }

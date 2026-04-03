@@ -9,7 +9,7 @@
 //! loop and has no business being inside the `TerminalEmulator` or `Buffer`.
 //! It is never shared with the PTY thread.
 //!
-//! See the architecture plan (`Documents/PERFORMANCE_PLAN.md`, Section 4.5).
+//! See `Documents/PERFORMANCE_PLAN.md`, Section 4.5 for the architecture context.
 
 use std::time::Instant;
 
@@ -86,10 +86,9 @@ impl SelectionState {
 /// Everything here belongs to the render thread only.  The PTY thread never
 /// reads or writes any of these fields.
 ///
-/// Fields are gradually populated as later tasks (5–8) migrate state out of
-/// `TerminalEmulator` / `TerminalState`.  For now, only `scroll_offset` is
-/// moved here (Task 4).  The remaining fields are stubs that will replace the
-/// corresponding fields on `TerminalState` in Task 5.
+/// All fields that were previously on `TerminalEmulator` / `TerminalState` have
+/// been migrated here as part of the lock-free architecture refactor
+/// (see `Documents/PERFORMANCE_PLAN.md`, Section 4.5).
 #[derive(Debug)]
 pub struct ViewState {
     /// How many lines the user has scrolled back from the live bottom.
@@ -103,39 +102,27 @@ pub struct ViewState {
     pub scroll_offset: usize,
 
     /// The last mouse position reported to the terminal, if any.
-    ///
-    /// Moved here from `TerminalState::mouse_position` (Task 5).
     pub mouse_position: Option<egui::Pos2>,
 
     /// Whether the terminal window currently has keyboard focus.
-    ///
-    /// Moved here from `TerminalState::window_focused` (Task 5).
     pub window_focused: bool,
 
     /// The last `(width, height)` in character cells that was sent to the PTY
     /// as a resize.  Used to debounce resize events so we only send a new
     /// `InputEvent::Resize` when the size actually changes.
-    ///
-    /// Populated in Task 7.
     pub last_sent_size: (usize, usize),
 
     /// The most-recently pressed key, used to suppress auto-repeat on the
     /// first frame a key is held down.
-    ///
-    /// Moved here from the `write_input_to_terminal` call-chain (Task 5/9).
     pub previous_key: Option<egui::Key>,
 
     /// Accumulated scroll delta (in fractional lines) carried over between
     /// frames so sub-line scroll events are not lost.
-    ///
-    /// Moved here from the `write_input_to_terminal` call-chain (Task 5/9).
     pub previous_scroll_amount: f32,
 
     /// The mouse button / position / modifier state from the previous frame,
     /// used to detect button-state transitions and avoid sending redundant
     /// mouse reports to the PTY.
-    ///
-    /// Moved here from the `write_input_to_terminal` call-chain (Task 5/9).
     pub previous_mouse_state: Option<PreviousMouseState>,
 
     /// Current text selection state (anchor, end, `is_selecting`).

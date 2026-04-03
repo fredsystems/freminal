@@ -5,7 +5,11 @@
 
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 use core::fmt;
-/// Show cursor (DECOM) ?6
+/// Origin Mode (DECOM) ?6
+///
+/// Controls whether cursor addressing is relative to the scroll region or the absolute screen.
+/// When set (`OriginMode`), cursor positions are relative to the top-left of the scroll region.
+/// When reset (`NormalCursor`), cursor positions are relative to the absolute screen origin.
 #[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decom {
     #[default]
