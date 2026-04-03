@@ -270,8 +270,9 @@ impl StandardParser {
                         None => ParserOutcome::Invalid("No params".to_string()),
                         Some(value) => {
                             match value {
-                                // FIXME: Should this be the same as DecSpecialGraphics::Replace?
-                                b'0' => output.push(TerminalOutput::DecSpecial),
+                                b'0' => output.push(TerminalOutput::DecSpecialGraphics(
+                                    DecSpecialGraphics::Replace,
+                                )),
                                 b'A' => output.push(TerminalOutput::CharsetUK),
                                 b'B' => output.push(TerminalOutput::CharsetUSASCII),
                                 b'4' => output.push(TerminalOutput::CharsetDutch),

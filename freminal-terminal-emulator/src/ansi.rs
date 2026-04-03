@@ -1317,4 +1317,18 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn esc_plus_0_designates_g3_as_dec_special_graphics() {
+        // ESC + 0 should designate the G3 character set as DEC Special Graphics,
+        // producing the same output as ESC ( 0 does for G0.
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x1b+0");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::DecSpecialGraphics(
+                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
+            )]
+        );
+    }
 }

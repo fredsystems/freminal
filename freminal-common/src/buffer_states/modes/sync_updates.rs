@@ -7,8 +7,13 @@ use core::fmt;
 
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
-// FIXME: We should handle timeouts here.
-// The spec doesn't give a timeout, but gives guidance.
+// NOTE: The 200 ms auto-resume timeout for DontDraw is implemented in
+// `TerminalEmulator::build_snapshot()` in
+// `freminal-terminal-emulator/src/interface.rs`.  That is the correct place
+// because it requires a wall-clock `Instant` and mutable access to both the
+// emulator modes and the snapshot timer — none of which belong on a pure data
+// type.
+// Spec references:
 // https://gist.github.com/christianparpart/d8a62cc1ab659194337d73e399004036
 // https://gitlab.com/gnachman/iterm2/-/wikis/synchronized-updates-spec
 

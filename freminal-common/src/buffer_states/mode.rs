@@ -35,7 +35,7 @@ use crate::buffer_states::modes::{
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
-    unknown::UnknownMode,
+    unknown::{ModeNamespace, UnknownMode},
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
@@ -195,17 +195,23 @@ impl Mode {
             b"?7727" => Self::ApplicationEscapeKey(ApplicationEscapeKey::new(&mode)),
             b"?2048" => Self::ModifyOtherKeysMode(ModifyOtherKeysMode::new(&mode)),
             _ => {
+                let is_dec = params.first() == Some(&b'?');
                 let output_params = params
                     .to_vec()
                     .iter()
-                    .skip(usize::from(params.first().unwrap_or(&b'?') == &b'?'))
+                    .skip(usize::from(is_dec))
                     .copied()
                     .collect::<Vec<u8>>();
 
                 if mode == SetMode::DecQuery {
                     Self::UnknownQuery(output_params)
                 } else {
-                    Self::Unknown(UnknownMode::new(&output_params, mode))
+                    let namespace = if is_dec {
+                        ModeNamespace::Dec
+                    } else {
+                        ModeNamespace::Ansi
+                    };
+                    Self::Unknown(UnknownMode::new(&output_params, mode, namespace))
                 }
             }
         }

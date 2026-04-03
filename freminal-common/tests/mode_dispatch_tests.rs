@@ -32,7 +32,7 @@ use freminal_common::buffer_states::modes::{
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
-    unknown::UnknownMode,
+    unknown::{ModeNamespace, UnknownMode},
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
     xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
@@ -499,18 +499,20 @@ fn unknown_q999_with_decset_returns_unknown_stripped() {
         Mode::Unknown(UnknownMode {
             params: "999".to_string(),
             mode: SetMode::DecSet,
+            namespace: ModeNamespace::Dec,
         })
     );
 }
 
 #[test]
 fn unknown_42_no_prefix_with_decset_returns_unknown_full_bytes() {
-    // Params without '?' are kept as-is.
+    // Params without '?' are kept as-is; no prefix → ANSI namespace.
     assert_eq!(
         dispatch(b"42", SetMode::DecSet),
         Mode::Unknown(UnknownMode {
             params: "42".to_string(),
             mode: SetMode::DecSet,
+            namespace: ModeNamespace::Ansi,
         })
     );
 }
@@ -531,6 +533,7 @@ fn unknown_q999_with_decrst_returns_unknown_stripped() {
         Mode::Unknown(UnknownMode {
             params: "999".to_string(),
             mode: SetMode::DecRst,
+            namespace: ModeNamespace::Dec,
         })
     );
 }
