@@ -1101,7 +1101,6 @@ fn compute_cell_metrics(
     // `metrics.max_width` far beyond the regular character advance.  Measuring
     // a concrete glyph gives us the correct monospace cell width.
     let glyph_id = font_ref.charmap().map('0');
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let cell_width = if glyph_id != 0 {
         let gm = font_ref.glyph_metrics(&[]).scale(font_size_ppem);
         let advance = gm.advance_width(glyph_id);

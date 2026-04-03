@@ -1,6 +1,6 @@
 # PLAN_30 — Clippy Allow Audit: Eliminate Lint Suppressions
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -419,7 +419,19 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.8 — Final Audit and Verification
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Removed one stale leftover allow (`cast_possible_truncation` +
+  `cast_sign_loss` on `font_manager.rs:1104` — was superseded by 30.5's `approx_as` migration
+  but not removed). Final suppression count: **73 lines** across all production crates.
+  Breakdown: 18 casting (all in `#[cfg(test)]` or `const fn` with justification comments), 29
+  `too_many_lines`/`too_many_arguments` (all annotated with justification), 5
+  `module_name_repetitions` (legitimate re-exports), 2 `struct_excessive_bools` (pending Task 26),
+  2 `missing_const_for_fn`/`needless_pass_by_ref_mut` (justified, annotated), 1
+  `missing_const_for_fn`/`unnecessary_wraps` (justified, annotated), 1
+  `significant_drop_tightening` (false positive, annotated), 1 `implicit_hasher` (internal
+  function, annotated), and ~14 `unwrap_used`/`expect_used` in test modules. Zero unjustified
+  production casting suppressions remain. `cargo test --all`, `cargo clippy --all-targets
+--all-features -- -D warnings`, and `cargo-machete` all pass clean.
 - **Priority:** 3 — Medium
 - **Scope:** All crates
 - **Details:**
