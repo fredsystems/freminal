@@ -108,11 +108,13 @@ struct PrevPlaceholder {
     underline_color: TerminalColor,
 }
 
-/// High-level handler that processes terminal output commands and applies them to a buffer.
+/// Processes parsed terminal output sequences and drives mutations on the underlying [`Buffer`].
 ///
-/// This is the main entry point for integrating the buffer with a terminal emulator.
-/// It receives parsed terminal sequences (via a TerminalOutput-like enum) and updates
-/// the buffer state accordingly.
+/// `TerminalHandler` owns the buffer plus all terminal mode state (cursor style, color palette,
+/// SGR attributes, image transfer state, etc.).  It is driven by
+/// [`TerminalHandler::process_outputs`], which dispatches each [`TerminalOutput`] variant to the
+/// appropriate handler method.  Write-back responses (CPR, DA1, etc.) are sent through the
+/// optional `write_tx` PTY channel.
 #[derive(Debug)]
 pub struct TerminalHandler {
     buffer: Buffer,
@@ -627,19 +629,23 @@ impl TerminalHandler {
         }
     }
 
+    /// Handle LF (Line Feed) — advance cursor to the next line, scrolling if needed.
     pub fn handle_newline(&mut self) {
         self.buffer.handle_lf();
     }
 
+    /// Handle CR (Carriage Return) — move cursor to column 0 of the current row.
     pub const fn handle_carriage_return(&mut self) {
         self.buffer.handle_cr();
     }
 
+    /// Handle BS (Backspace) — move cursor one column to the left, respecting reverse-wrap modes.
     pub fn handle_backspace(&mut self) {
         self.buffer
             .handle_backspace(self.reverse_wrap, self.xt_rev_wrap2);
     }
 
+    /// Handle HT (Horizontal Tab) — advance cursor to the next tab stop.
     pub fn handle_tab(&mut self) {
         self.buffer.advance_to_next_tab_stop();
     }
@@ -652,25 +658,30 @@ impl TerminalHandler {
         self.buffer.set_cursor_pos(x_zero, y_zero);
     }
 
+    /// Move the cursor by `(dx, dy)` cells relative to its current position.
     pub fn handle_cursor_relative(&mut self, dx: i32, dy: i32) {
         self.buffer.move_cursor_relative(dx, dy);
     }
 
+    /// Handle CUU (Cursor Up) — move cursor up `n` rows.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_up(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, -(n as i32));
     }
 
+    /// Handle CUD (Cursor Down) — move cursor down `n` rows.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_down(&mut self, n: usize) {
         self.buffer.move_cursor_relative(0, n as i32);
     }
 
+    /// Handle CUF (Cursor Forward) — move cursor forward `n` columns.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_forward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(n as i32, 0);
     }
 
+    /// Handle CUB (Cursor Backward) — move cursor backward `n` columns.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn handle_cursor_backward(&mut self, n: usize) {
         self.buffer.move_cursor_relative(-(n as i32), 0);
@@ -697,30 +708,37 @@ impl TerminalHandler {
         }
     }
 
+    /// Handle IL — insert `n` blank lines at the cursor row, pushing existing lines down (Insert Lines).
     pub fn handle_insert_lines(&mut self, n: usize) {
         self.buffer.insert_lines(n);
     }
 
+    /// Handle DL — delete `n` lines starting at the cursor row, pulling lines below up (Delete Lines).
     pub fn handle_delete_lines(&mut self, n: usize) {
         self.buffer.delete_lines(n);
     }
 
+    /// Handle ECH (Erase Characters) — erase `n` characters starting at the cursor column.
     pub fn handle_erase_chars(&mut self, n: usize) {
         self.buffer.erase_chars(n);
     }
 
+    /// Handle DCH (Delete Characters) — delete `n` characters at the cursor column, shifting remaining characters left.
     pub fn handle_delete_chars(&mut self, n: usize) {
         self.buffer.delete_chars(n);
     }
 
+    /// Handle DECSC — save the current cursor position and SGR state.
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
     }
 
+    /// Handle DECRC — restore the cursor position and SGR state saved by the most recent DECSC.
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
     }
 
+    /// Handle ICH (Insert Characters) — insert `n` blank spaces at the cursor column, shifting existing characters right.
     pub fn handle_insert_spaces(&mut self, n: usize) {
         self.buffer.insert_spaces(n);
     }
@@ -744,14 +762,17 @@ impl TerminalHandler {
         }
     }
 
+    /// Handle IND — Index: move cursor down one row, scrolling the scroll region up if at the bottom margin.
     pub fn handle_index(&mut self) {
         self.buffer.handle_ind();
     }
 
+    /// Handle RI — Reverse Index: move cursor up one row, scrolling the scroll region down if at the top margin.
     pub fn handle_reverse_index(&mut self) {
         self.buffer.handle_ri();
     }
 
+    /// Handle NEL — Next Line: perform a carriage return followed by an index (move to start of next line).
     pub fn handle_next_line(&mut self) {
         self.buffer.handle_nel();
     }

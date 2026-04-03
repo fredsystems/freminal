@@ -1110,6 +1110,19 @@ struct RenderState {
     bg_opacity: f32,
 }
 
+/// The egui widget that owns and drives the terminal render pipeline.
+///
+/// `FreminalTerminalWidget` bridges the PTY snapshot model and the OpenGL
+/// renderer. It holds the [`FontManager`], the per-line shaping cache, and the
+/// GPU render state. On each call to [`show`](Self::show) it:
+///
+/// 1. Detects content changes via `Arc` pointer comparison.
+/// 2. Re-shapes only dirty lines using the [`ShapingCache`].
+/// 3. Rebuilds GPU vertex buffers when content, theme, selection, or blink
+///    state has changed.
+/// 4. Submits a `PaintCallback` to egui that executes the GL draw calls.
+/// 5. Processes keyboard, mouse, scroll, and focus input and forwards them
+///    to the PTY thread via `input_tx`.
 #[allow(clippy::struct_excessive_bools)] // Six GUI rendering bookkeeping bools; not terminal modes
 pub struct FreminalTerminalWidget {
     font_manager: FontManager,
@@ -1158,6 +1171,8 @@ pub struct FreminalTerminalWidget {
 }
 
 impl FreminalTerminalWidget {
+    /// Create a new `FreminalTerminalWidget`, loading fonts and initialising
+    /// the GPU render state from the provided config.
     #[must_use]
     pub fn new(ctx: &Context, config: &Config) -> Self {
         let font_config = FontConfig {
@@ -1238,7 +1253,7 @@ impl FreminalTerminalWidget {
     /// monitor with a different DPI), cell metrics are recomputed and all
     /// render caches are invalidated.
     ///
-    /// **Must be called before [`cell_size()`] each frame** so that resize
+    /// **Must be called before [`Self::cell_size`] each frame** so that resize
     /// calculations in `FreminalGui::ui()` use up-to-date metrics.
     pub fn sync_pixels_per_point(&mut self, ppp: f32) {
         if self.font_manager.update_pixels_per_point(ppp) {
@@ -1256,6 +1271,14 @@ impl FreminalTerminalWidget {
         }
     }
 
+    /// Render the terminal for one egui frame and process all pending input.
+    ///
+    /// - `snap` — the latest terminal snapshot from the PTY thread (lock-free).
+    /// - `view_state` — GUI-local scroll, selection, blink, and focus state.
+    /// - `input_tx` — channel to send keyboard/resize/focus events to the PTY.
+    /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
+    /// - `modal_is_open` — suppresses terminal input while a modal is visible.
+    /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::too_many_arguments)] // bg_opacity must be threaded from config
     pub fn show(

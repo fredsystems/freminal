@@ -144,7 +144,7 @@ impl SettingsModal {
     /// Open the modal, cloning the live config into the draft for editing.
     ///
     /// `monospace_families` is the sorted, deduplicated list of monospaced font
-    /// family names available on the system (from [`FontManager::enumerate_monospace_families`]).
+    /// family names available on the system (from `FontManager::enumerate_monospace_families`).
     pub fn open(&mut self, live_config: &Config, monospace_families: Vec<String>) {
         self.draft = live_config.clone();
         self.active_tab = SettingsTab::Font;

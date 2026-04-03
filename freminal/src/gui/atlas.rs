@@ -110,7 +110,7 @@ pub struct DirtyRect {
 ///
 /// Manages CPU-side RGBA pixel data, shelf-based bin packing, LRU eviction,
 /// and delta-upload tracking.  GPU texture operations are handled externally
-/// by the renderer using the dirty rects reported by [`Self::dirty_rects`].
+/// by the renderer using the dirty rects reported by [`Self::take_dirty_rects`].
 pub struct GlyphAtlas {
     /// Atlas texture width and height in pixels (always square).
     size: u32,

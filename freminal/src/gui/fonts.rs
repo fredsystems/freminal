@@ -28,7 +28,12 @@ const PRIMARY_BOLD: &str = "freminal-primary-bold";
 const PRIMARY_ITALIC: &str = "freminal-primary-italic";
 const PRIMARY_BOLD_ITALIC: &str = "freminal-primary-bold-italic";
 
-/// Example use:
+/// Configuration for the terminal font stack.
+///
+/// Controls which font family is used as the primary face, the render size,
+/// and which optional fallback layers are enabled.
+///
+/// # Example
 ///
 /// ```rust
 /// use freminal::gui::fonts::FontConfig;
@@ -42,12 +47,19 @@ const PRIMARY_BOLD_ITALIC: &str = "freminal-primary-bold-italic";
 ///
 /// assert_eq!(cfg.size, 15.0);
 /// ```
-
 #[derive(Clone, Debug)]
 pub struct FontConfig {
+    /// Optional user-selected font family name or file path.
+    ///
+    /// When `Some`, this font is prepended to every terminal font family list,
+    /// making it the primary face. When `None`, the bundled `MesloLGS Nerd Mono`
+    /// is used as the primary font.
     pub user_font: Option<String>,
+    /// Font size in logical points.
     pub size: f32,
+    /// Whether to search for a system emoji font and add it as a fallback.
     pub enable_emoji_fallback: bool,
+    /// Whether to add a minimal last-resort system font as the final fallback.
     pub enable_system_last_resort: bool,
 }
 
@@ -66,6 +78,12 @@ impl Default for FontConfig {
 //  Public entry point: set up all fonts
 // -------------------------------------------------------------------------------------------------
 
+/// Initialise the egui font stack from `cfg` and register it with `ctx`.
+///
+/// Loads the bundled primary fonts, applies the optional user font override,
+/// emoji fallback, and last-resort system fonts according to `cfg`. Registers
+/// the resulting `FontDefinitions` with the egui context and returns a clone
+/// so the caller can save it for the settings modal preview.
 #[must_use]
 pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinitions {
     let mut defs = FontDefinitions::default();

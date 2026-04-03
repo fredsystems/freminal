@@ -12,12 +12,12 @@
 //! access OS/platform APIs.
 //!
 //! Key types:
-//! - [`Buffer`] — the primary terminal buffer, owning all rows and cursor state
-//! - [`Row`] — a single row of terminal cells with wrapping metadata
-//! - [`Cell`] — the smallest addressable unit; always valid (empty cells are
+//! - [`buffer::Buffer`] — the primary terminal buffer, owning all rows and cursor state
+//! - [`row::Row`] — a single row of terminal cells with wrapping metadata
+//! - [`cell::Cell`] — the smallest addressable unit; always valid (empty cells are
 //!   explicit)
-//! - [`TerminalHandler`] — processes parsed terminal output and drives buffer
-//!   mutations
+//! - [`terminal_handler::TerminalHandler`] — processes parsed terminal output and drives
+//!   buffer mutations
 
 #![deny(
     clippy::pedantic,

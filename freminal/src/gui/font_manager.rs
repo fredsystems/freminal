@@ -48,13 +48,19 @@ const EMOJI_CANDIDATES: &[&str] = &[
 pub enum FaceId {
     /// Primary face (user font if configured, else bundled `MesloLGS`).
     PrimaryRegular,
+    /// Primary bold face.
     PrimaryBold,
+    /// Primary italic face.
     PrimaryItalic,
+    /// Primary bold-italic face.
     PrimaryBoldItalic,
     /// Bundled `MesloLGS` — only present as fallback when a user font is primary.
     BundledRegular,
+    /// Bundled bold face (fallback only).
     BundledBold,
+    /// Bundled italic face (fallback only).
     BundledItalic,
+    /// Bundled bold-italic face (fallback only).
     BundledBoldItalic,
     /// System emoji face.
     Emoji,
@@ -65,11 +71,14 @@ pub enum FaceId {
 /// Style selector for glyph resolution, derived from format tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphStyle {
+    /// Whether the glyph should use the bold face.
     pub bold: bool,
+    /// Whether the glyph should use the italic face.
     pub italic: bool,
 }
 
 impl GlyphStyle {
+    /// Create a new `GlyphStyle` from explicit bold and italic flags.
     #[must_use]
     pub const fn new(bold: bool, italic: bool) -> Self {
         Self { bold, italic }

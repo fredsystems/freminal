@@ -10,8 +10,9 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 /// Reverse Wrap Around (xterm private mode ?45)
 ///
 /// Controls whether the cursor wraps backwards from column 0 to the end of the previous line.
-/// When set, moving left past column 0 wraps the cursor to the last column of the previous line.
-/// When reset (default), the cursor stops at column 0 and does not reverse-wrap.
+/// When set (default), moving left past column 0 wraps the cursor to the last column of the
+/// previous line.
+/// When reset, the cursor stops at column 0 and does not reverse-wrap.
 #[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum ReverseWrapAround {
     #[default]

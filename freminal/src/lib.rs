@@ -6,7 +6,7 @@
 //! GUI application library for the Freminal terminal emulator.
 //!
 //! This crate implements the eframe/egui-based graphical front-end. The render
-//! loop in `update()` is a pure read of [`TerminalSnapshot`] — it performs no
+//! loop in `update()` is a pure read of `TerminalSnapshot` — it performs no
 //! terminal state mutation. All user input is routed through a
 //! `Sender<InputEvent>` to the PTY processing thread.
 //!

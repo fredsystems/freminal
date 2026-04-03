@@ -17,7 +17,7 @@
 //! - [`colors`] — terminal color representation and 256-color palette
 //! - [`cursor`] — cursor position and visual style types
 //! - [`themes`] — embedded color theme palettes
-//! - [`fonts`] — font decoration and weight types
+//! - [`buffer_states::fonts`] — font decoration and weight types
 //! - [`pty_write`] — PTY write command types shared with the emulator
 
 #![deny(

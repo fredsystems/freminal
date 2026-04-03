@@ -48,12 +48,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// CLI argument parser for `cargo xtask`.
 #[derive(Debug, Parser)]
 #[command(bin_name = "cargo xtask", styles = clap_cargo::style::CLAP_STYLING)]
 struct Args {
+    /// The subcommand to run.
     #[command(subcommand)]
     command: Command,
 
+    /// Verbosity level; repeat `-v` to increase, `-q` to decrease.
     #[command(flatten)]
     verbosity: Verbosity<InfoLevel>,
 }
@@ -93,7 +96,7 @@ enum Command {
     #[command(visible_alias = "cd")]
     Deny,
 
-    // Check unused dependencies
+    /// Check for unused dependencies with `cargo-machete`
     #[command(visible_alias = "m")]
     Machete,
 
@@ -194,10 +197,12 @@ fn ci() -> Result<()> {
     Ok(())
 }
 
+/// Check license compatibility and known-vulnerable dependencies with `cargo-deny`
 fn deny() -> Result<()> {
     run_cargo(vec!["deny", "check"])
 }
 
+/// Check for unused dependencies with `cargo-machete`
 fn machete() -> Result<()> {
     cmd!("cargo-machete").run_with_trace()?;
     Ok(())
