@@ -187,7 +187,13 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.3 — Replace Casting Suppressions in `freminal-common`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced 6 of 8 `#[allow(clippy::cast_*)]` in `freminal-common`.
+  `colors.rs`: `scale_hex_channel` uses `u8::try_from().ok()`. `sixel.rs`: `pct_to_rgb` uses
+  `u8::value_from().unwrap_or(0)`, `finish`/`finish_with_palette` use `u32::value_from().ok()?`.
+  `unicode_placeholder.rs`: `diacritic_to_index` uses `u16::try_from().ok()`. `base64.rs`:
+  `decode` uses `u8::try_from().unwrap_or(0)`. Two allows kept in const fns (`f64_to_u8`,
+  `usize_from_u32`) with justification comments — `conv2` traits not available in `const fn`.
 - **Priority:** 2 — High
 - **Scope:** `freminal-common/src/buffer_states/sixel.rs` (~8 sites),
   `freminal-common/src/colors.rs` (~6 sites)
@@ -216,7 +222,12 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.4 — Replace Casting Suppressions in `freminal-terminal-emulator`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all 8 `#[allow(clippy::cast_*)]` in
+  `freminal-terminal-emulator`. `osc_palette.rs` (4 sites): `u8::try_from().unwrap_or(0)`.
+  `sgr.rs` (1 site): `u8::try_from(lookup & 0xFF).unwrap_or(0)`. `modify_other_keys.rs`
+  (1 site): `u8::try_from(level).unwrap_or(0)`. `interface.rs` (2 sites):
+  `u32::value_from().unwrap_or(0)` for pixel dimensions. Zero casting suppressions remain.
 - **Priority:** 2 — High
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc_palette.rs` (~4 sites),
   `freminal-terminal-emulator/src/ansi_components/csi_commands/sgr.rs` (~2 sites),
