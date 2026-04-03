@@ -138,13 +138,6 @@ enum Command {
     TestLibs,
 }
 
-// #[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
-// enum Backend {
-//     Crossterm,
-//     Termion,
-//     Termwiz,
-// }
-
 impl Command {
     fn run(self) -> Result<()> {
         match self {
@@ -304,7 +297,7 @@ fn fix_typos() -> Result<()> {
 /// Run tests for libs and docs
 fn test() -> Result<()> {
     test_libs()?;
-    test_docs()?; // run last because it's slow
+    test_docs()?;
     Ok(())
 }
 

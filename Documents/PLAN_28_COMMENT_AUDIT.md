@@ -1,6 +1,6 @@
 # PLAN_28 — Code Comment Audit
 
-## Status: Pending
+## Status: In Progress
 
 ---
 

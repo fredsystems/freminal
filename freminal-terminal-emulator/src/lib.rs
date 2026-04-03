@@ -19,7 +19,6 @@
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
 #![allow(clippy::range_plus_one)]
-// #![warn(missing_docs)]
 
 pub mod ansi;
 pub mod ansi_components;

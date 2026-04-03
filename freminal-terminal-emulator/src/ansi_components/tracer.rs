@@ -28,7 +28,6 @@ impl SequenceTracer {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn clear(&mut self) {
         self.len = 0;
         self.idx = 0;
@@ -80,7 +79,6 @@ impl SequenceTracer {
 
 /// A small helper trait that standardizes how parsers collect and present
 /// the raw bytes of the *current* sequence they are parsing.
-#[allow(dead_code)]
 pub trait SequenceTraceable {
     fn seq_tracer(&mut self) -> &mut SequenceTracer;
     fn seq_tracer_ref(&self) -> &SequenceTracer;

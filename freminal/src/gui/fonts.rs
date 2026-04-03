@@ -28,9 +28,6 @@ const PRIMARY_BOLD: &str = "freminal-primary-bold";
 const PRIMARY_ITALIC: &str = "freminal-primary-italic";
 const PRIMARY_BOLD_ITALIC: &str = "freminal-primary-bold-italic";
 
-// Bundled Nerd symbols fallback (optional separate file)
-//const NERD_SYMBOLS: &str = "freminal-nerd-symbols";
-
 /// Example use:
 ///
 /// ```rust

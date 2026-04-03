@@ -116,12 +116,6 @@ pub struct Buffer {
 
 /// Everything we need to restore when leaving alternate buffer.
 #[derive(Debug, Clone)]
-/// State saved when entering the alternate screen buffer, restored on exit.
-///
-/// Note: `tab_stops` is intentionally NOT saved here. Tab stops are shared
-/// between primary and alternate screens — changes made while in alternate
-/// mode persist when returning to the primary screen. This matches xterm
-/// behavior. The `tab_stops` field lives on `Buffer` and is never swapped.
 pub struct SavedPrimaryState {
     pub rows: Vec<Row>,
     /// Per-row flat-representation cache saved alongside `rows`.
@@ -451,7 +445,7 @@ impl Buffer {
             (self.width, 0)
         };
 
-        // FIX #3: first write into row 0 turns it into a real logical line
+        // First write into row 0 turns it into a real logical line
         if row_idx == 0 && self.rows[0].origin == RowOrigin::ScrollFill {
             let row = &mut self.rows[0];
             row.origin = RowOrigin::HardBreak;
@@ -589,9 +583,6 @@ impl Buffer {
         }
     }
 
-    /// Resize the terminal buffer.
-    /// Reflows lines when width changes.
-    /// Adjusts scrollback when height changes.
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
     ///
     /// The caller passes in the current `scroll_offset` (from `ViewState`) and
@@ -1247,7 +1238,6 @@ impl Buffer {
             }
 
             BufferType::Alternate => {
-                // (keep your existing Alternate LF unchanged)
                 if self.lnm_enabled == Lnm::NewLine {
                     self.cursor.pos.x = 0;
                 }
@@ -1319,7 +1309,6 @@ impl Buffer {
             }
 
             BufferType::Alternate => {
-                // (unchanged)
                 let y = self.cursor.pos.y;
 
                 if y >= self.scroll_region_top && y <= self.scroll_region_bottom {
@@ -2282,17 +2271,6 @@ impl Buffer {
     }
 
     /// Convert the currently visible rows into a flat `(Vec<TChar>, Vec<FormatTag>)` pair
-    /// suitable for consumption by the GUI renderer.
-    ///
-    /// Algorithm:
-    /// - Iterate over `visible_rows()`.
-    /// - For each non-continuation cell, append its `TChar` and either extend the last
-    ///   `FormatTag` (if the format is identical and the tag is adjacent) or push a new one.
-    /// - After each row except the last, append a `TChar::NewLine` and extend the last tag.
-    /// - Continuation cells are skipped — they are internal bookkeeping for wide glyphs.
-    ///
-    /// The returned `FormatTag` entries use `start`/`end` as half-open byte indices into
-    /// the returned `Vec<TChar>`, matching the convention used by the old `FormatTracker`.
     /// Convert visible rows (with the given `scroll_offset`) into flat
     /// `(Vec<TChar>, Vec<FormatTag>)` suitable for the GUI renderer.
     ///
@@ -3232,8 +3210,6 @@ fn tags_same_format(a: &FormatTag, b: &FormatTag) -> bool {
         && a.url == b.url
         && a.blink == b.blink
 }
-
-// tests
 
 // ============================================================================
 // Unit Tests for Buffer

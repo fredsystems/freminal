@@ -20,8 +20,6 @@
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
 
-// #![warn(missing_docs)]
-
 #[macro_use]
 extern crate tracing;
 
