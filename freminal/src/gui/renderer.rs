@@ -42,38 +42,58 @@ use freminal_terminal_emulator::{ImagePlacement, InlineImage};
 // defensive.
 
 /// Convert a `usize` to `i32` for OpenGL counts, strides, or byte offsets.
-/// Returns `0` on overflow (astronomically unlikely for terminal dimensions).
+/// Returns `0` on overflow (astronomically unlikely for terminal dimensions)
+/// and logs an error so the impossible is visible if it ever occurs.
 #[inline]
 fn gl_i32(val: usize) -> i32 {
-    i32::value_from(val).unwrap_or(0)
+    i32::value_from(val).unwrap_or_else(|_| {
+        error!("gl_i32: usize {val} overflows i32");
+        0
+    })
 }
 
 /// Convert a `u32` to `i32` for OpenGL texture dimensions.
-/// Returns `0` on overflow (texture sizes are always well within `i32` range).
+/// Returns `0` on overflow (texture sizes are always well within `i32` range)
+/// and logs an error so the impossible is visible if it ever occurs.
 #[inline]
 fn gl_i32_u32(val: u32) -> i32 {
-    i32::value_from(val).unwrap_or(0)
+    i32::value_from(val).unwrap_or_else(|_| {
+        error!("gl_i32_u32: u32 {val} overflows i32");
+        0
+    })
 }
 
 /// Convert a `usize` to `f32` for GPU coordinate math.
-/// Returns `0.0` on precision loss beyond what is representable in f32.
+/// Returns `0.0` on precision loss beyond what is representable in f32
+/// and logs an error so the impossible is visible if it ever occurs.
 #[inline]
 fn gl_f32(val: usize) -> f32 {
-    val.approx_as::<f32>().unwrap_or(0.0)
+    val.approx_as::<f32>().unwrap_or_else(|_| {
+        error!("gl_f32: usize {val} cannot be approximated as f32");
+        0.0
+    })
 }
 
 /// Convert a `u32` to `f32` for GPU cell-dimension math.
-/// Returns `0.0` on precision loss (u32 values fit in f32 for all sane sizes).
+/// Returns `0.0` on precision loss (u32 values fit in f32 for all sane sizes)
+/// and logs an error so the impossible is visible if it ever occurs.
 #[inline]
 fn gl_f32_u32(val: u32) -> f32 {
-    f32::approx_from(val).unwrap_or(0.0)
+    f32::approx_from(val).unwrap_or_else(|_| {
+        error!("gl_f32_u32: u32 {val} cannot be approximated as f32");
+        0.0
+    })
 }
 
 /// Convert an `i32` to `f32` for GPU viewport uniforms.
-/// Returns `0.0` on precision loss (viewport sizes are always small).
+/// Returns `0.0` on precision loss (viewport sizes are always small)
+/// and logs an error so the impossible is visible if it ever occurs.
 #[inline]
 fn gl_f32_i32(val: i32) -> f32 {
-    f32::approx_from(val).unwrap_or(0.0)
+    f32::approx_from(val).unwrap_or_else(|_| {
+        error!("gl_f32_i32: i32 {val} cannot be approximated as f32");
+        0.0
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -140,12 +140,6 @@ impl ShapingCache {
     /// hashes each line, and only re-shapes lines whose hash changed.
     ///
     /// Returns a `Vec<ShapedLine>` with one entry per visible line.
-    ///
-    /// # Panics
-    ///
-    /// This method cannot panic under normal use.  Internally it accesses a
-    /// cache entry that was verified to be `Some` immediately before the
-    /// access, so the `unwrap` is unreachable in practice.
     pub fn shape_visible(
         &mut self,
         visible_chars: &[TChar],
