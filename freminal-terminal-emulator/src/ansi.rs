@@ -191,6 +191,16 @@ impl FreminalAnsiParser {
             return Err(());
         }
 
+        // SI (0x0F) — Shift In: invoke G0 into GL.
+        // SO (0x0E) — Shift Out: invoke G1 into GL.
+        // Silently consumed as control characters.  Freminal uses a simplified
+        // single-slot charset model — G0 is always the active GL set, so SI is
+        // a no-op and SO has no visible effect until full G0/G1 support is added.
+        if b == 0x0F || b == 0x0E {
+            push_data_if_non_empty(data_output, output);
+            return Err(());
+        }
+
         // NUL (0x00) and DEL (0x7F) are silently ignored
         if b == 0x00 || b == 0x7F {
             return Err(());

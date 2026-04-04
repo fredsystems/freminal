@@ -14,8 +14,7 @@ use crate::error::ParserFailures;
 ///
 /// Ps = 0 → Clear character tab stop at current column (default)
 /// Ps = 1 → Clear line tab stop at current line — no-op (line tabulation not supported)
-/// Ps = 2 → Clear all character tab stops on current line — equivalent to Ps=0
-///           (Freminal uses a single tab stop vector, not per-line stops)
+/// Ps = 2 → Clear line tab stop at current line — no-op (line tabulation not supported)
 /// Ps = 3 → Clear all character tab stops
 /// Ps = 4 → Clear all line tab stops — no-op (line tabulation not supported)
 /// Ps = 5 → Clear all tab stops (character and line) — equivalent to Ps=3

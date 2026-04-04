@@ -12,7 +12,8 @@
 //!
 //! - **`ESC ( 0`** — designate DEC Special Graphics for G0
 //! - **`ESC ( B`** — designate US ASCII for G0 (restore default)
-//! - **SI / SO** — invoke G0 (SI) and G1 (SO; G1 is a no-op)
+//! - **SI / SO** — invoke G0 (SI) and G1 (SO); consumed as C0 control
+//!   characters (no-op — Freminal uses a simplified single-slot charset model)
 //! - **Complete DEC Special Graphics table** — all 32 mapped code points
 //!   (0x5F–0x7E → Unicode equivalents)
 //! - **Pass-through** — bytes outside 0x5F–0x7E are unaffected by G0 mode
@@ -63,32 +64,31 @@ fn dec_special_activate_and_deactivate() {
 }
 
 /// SI (0x0F) and SO (0x0E) are defined in the VT100 standard to invoke G0 and
-/// G1 respectively, but Freminal does not currently implement them as control
-/// characters — they are passed through as data. This test documents the
-/// current behavior: SI/SO do not switch character sets.
+/// G1 respectively. Freminal recognises them as C0 control characters and
+/// silently consumes them (no-op — Freminal uses a simplified single-slot
+/// charset model where G0 is always the active GL set). They must NOT appear
+/// as visible data in the terminal buffer.
 #[test]
-fn si_so_not_implemented_as_control() {
+fn si_so_consumed_as_control_characters() {
     let mut h = VtTestHelper::new_default();
 
     // With DEC Special Graphics active, write a known mapped char.
     h.feed(b"\x1b(0"); // designate DEC Special for G0
     h.feed(b"\x6a"); // 0x6a → '┘'
 
-    // SI (0x0F) is not handled as a control char — does not switch sets.
-    // SO (0x0E) is not handled as a control char — does not switch sets.
-    // The DEC Special Graphics mode remains active throughout.
-    h.feed(b"\x0e"); // SO — not implemented; passes through as data/ignored
+    // SO (0x0E) and SI (0x0F) are consumed as control characters.
+    // DEC Special Graphics mode remains active throughout.
+    h.feed(b"\x0e"); // SO — consumed; no visible output
     h.feed(b"\x6a"); // still in DEC Special mode → '┘'
-    h.feed(b"\x0f"); // SI — not implemented; passes through as data/ignored
+    h.feed(b"\x0f"); // SI — consumed; no visible output
     h.feed(b"\x6a"); // still in DEC Special mode → '┘'
 
-    // The row should contain the three '┘' glyphs (the SO/SI bytes may appear
-    // literally or be ignored — we only assert that the '┘' chars are present).
+    // The row should contain exactly three '┘' glyphs and no SI/SO artifacts.
     let row = h.screen_text()[0].clone();
     let box_count = row.chars().filter(|&c| c == '\u{2518}').count();
     assert_eq!(
         box_count, 3,
-        "All three 0x6a writes must produce ┘ regardless of SO/SI; got: {row:?}"
+        "All three 0x6a writes must produce ┘; SO/SI must be consumed silently; got: {row:?}"
     );
 }
 

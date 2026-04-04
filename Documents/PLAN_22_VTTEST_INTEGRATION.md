@@ -1,6 +1,6 @@
-# PLAN_22 — vttest Integration Testing
+# PLAN_22 — vttest Integration Testing & Compliance
 
-## Status: Complete
+## Status: In Progress — Phase B (Bug Fixes & Test Rewrites)
 
 ---
 
@@ -8,28 +8,50 @@
 
 vttest is the de facto compliance test suite for terminal emulators, covering cursor movement,
 screen features, character sets, double-sized characters, keyboard, device reports, VT52 mode,
-insert/delete operations, known VT100 bugs, and non-VT100 extensions. Freminal's vttest
-compliance is currently evaluated manually — there are no automated tests that exercise vttest
-scenarios.
+insert/delete operations, known VT100 bugs, and non-VT100 extensions.
 
-This task creates a two-tier automated test infrastructure:
+### Phase A (Complete): Initial Test Infrastructure
 
-1. **Individual escape sequence variant tests** — Unit-level tests for each escape sequence
-   exercised by vttest, verifying buffer state after specific operations. These are fast,
-   hermetic, and catch regressions precisely.
+The initial phase created 240 automated tests across 8 files plus a golden buffer comparison
+framework. However, these tests were written to pass against Freminal's **current behavior**,
+not against the **correct VT100/VT220 behavior** defined by the vttest source code. This means
+many tests document Freminal's bugs rather than catching them.
 
-2. **Full-screen buffer comparison tests** — Feed the same escape sequence payloads that vttest
-   sends, then compare the resulting buffer state against golden reference snapshots. These
-   catch rendering-level regressions that individual tests might miss.
+### Phase B (In Progress): Compliance-Correct Test Rewrite
 
-The vttest source is available at `vttest-20251205/` for reference but tests do NOT depend on
-running the vttest binary — they replay known escape sequences directly into
-`TerminalState`/`Buffer`.
+The current phase rewrites all vttest integration tests so they:
+
+1. **Reproduce exact byte sequences from the vttest source code** (`vttest-20251205/`), not
+   approximations or Freminal-specific workarounds.
+2. **Assert correct VT100/VT220 behavior** as defined by ECMA-48, DEC VT100/VT220 manuals,
+   and the vttest source code itself.
+3. **Fail when Freminal is non-compliant**, revealing real bugs that need fixing.
+
+The acceptance criteria for Phase B is a **compliance report**: an exact accounting of which
+vttest test scenarios pass and which fail, with specific descriptions of the failures. This
+report will be compared against the user's own manual vttest notes to validate completeness.
 
 **Dependencies:** None (independent; benefits from Task 20 DEC mode coverage being complete)
 **Dependents:** None
 **Primary crates:** `freminal-buffer`, `freminal-terminal-emulator`
-**Estimated scope:** Large (8 subtasks)
+**Estimated scope:** Large (8 original subtasks complete + Phase B subtasks)
+
+---
+
+## vttest Source Code Reference
+
+The vttest source at `vttest-20251205/` is the authoritative reference for building tests:
+
+- `main.c` — main menu structure, `tst_movements()` (cursor movement tests, autowrap at 436-496)
+- `esc.c` — escape sequence helpers: `cup()` (620), `brc2()` (555), `decstbm()` (1036),
+  `decom()` (857), `deccolm()` (721), `sm()`/`rm()` (1336/1271), `println()` (191),
+  `tprintf()` (364)
+- `esc.h` — constants: `BS=0x08`, `TAB=0x09`, `CR=0x0D`
+- `vt220.c` — VT220-specific tests including S8C1T/S7C1T
+- `charsets.c` — character set tests
+- `reports.c` — device report tests
+- `mouse.c` — mouse tracking tests
+- `nonvt100.c` — non-VT100 extension tests (ECMA-48 cursor, colors, alt screen, etc.)
 
 ---
 
@@ -161,263 +183,254 @@ This is a large submenu tree. Key subtests:
 
 ---
 
-## Subtasks
+## Phase A Subtasks (Complete)
+
+These subtasks built the initial test infrastructure and 240 tests. The tests pass but many
+assert Freminal's current (sometimes incorrect) behavior rather than correct VT100/VT220 behavior.
+
+| #    | Subtask                                  | Status   | Tests | File                      |
+| ---- | ---------------------------------------- | -------- | ----- | ------------------------- |
+| 22.1 | Golden buffer comparison framework       | Complete | —     | `vttest_common.rs`        |
+| 22.2 | Menu 1: Cursor movement tests            | Complete | 43    | `vttest_cursor.rs`        |
+| 22.3 | Menu 2: Screen feature tests             | Complete | 38    | `vttest_screen.rs`        |
+| 22.4 | Menu 6: Device report tests              | Complete | 25    | `vttest_reports.rs`       |
+| 22.5 | Menu 8: Insert/delete operation tests    | Complete | 32    | `vttest_insert_delete.rs` |
+| 22.6 | Menu 9: VT100 known bug regression tests | Complete | 10    | `vttest_bugs.rs`          |
+| 22.7 | Menu 11: Non-VT100 extension tests       | Complete | 38    | `vttest_extensions.rs`    |
+| 22.8 | Menu 3: Character set tests (G0/DEC SG)  | Complete | 39    | `vttest_charsets.rs`      |
+| —    | Self-test                                | Complete | 15    | `vttest_selftest.rs`      |
 
 ---
 
-### 22.1 — Test Infrastructure: Golden Buffer Comparison Framework
+## Phase B Subtasks (In Progress)
 
-- **Status:** Complete
+Phase B rewrites the tests to assert **correct VT100/VT220 behavior** derived from the vttest
+source code. Tests that currently pass against incorrect Freminal behavior will be updated to
+assert the correct output, causing them to fail. The corresponding Freminal bugs are then fixed.
+
+### Bugs Already Fixed in Phase B
+
+These bugs were discovered by building byte-exact test sequences from the vttest source and
+comparing Freminal's output against the expected VT100 behavior:
+
+| Bug # | Description                                           | Files Modified                                                                           |
+| ----- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 1     | TBC Ps=2 incorrectly clears character tab stop        | `terminal_handler.rs`, `tbc.rs`                                                          |
+| 2     | `handle_lf`/`handle_ri` don't clear pending-wrap      | `buffer.rs`                                                                              |
+| 4a    | `character_replace` not saved/restored by DECSC/DECRC | `terminal_handler.rs`                                                                    |
+| 4b    | `ESC ) B` (designate G1 as US-ASCII) produces Invalid | `standard.rs`                                                                            |
+| 4c    | SI/SO (0x0E/0x0F) not handled as C0 control chars     | `ansi.rs`                                                                                |
+| 5     | Autowrap doesn't respect DECSTBM scroll region        | `buffer.rs` (added `is_cursor_at_scroll_region_bottom()`, `scroll_region_up_for_wrap()`) |
+| 6     | BS from pending-wrap state lands at wrong column      | `buffer.rs` (`handle_backspace()`)                                                       |
+
+### New Tests Added in Phase B
+
+| Test                                                       | File               | Validates                                                      |
+| ---------------------------------------------------------- | ------------------ | -------------------------------------------------------------- |
+| `decawm_mixing_control_and_print_characters`               | `vttest_cursor.rs` | Full vttest Menu 1 autowrap (byte-exact from `main.c:436-496`) |
+| `autowrap_at_scroll_region_bottom_minimal`                 | `vttest_cursor.rs` | Minimal reproduction of Bug 5                                  |
+| `backspace_from_pending_wrap_state_lands_at_width_minus_2` | `vttest_cursor.rs` | Bug 6 regression test                                          |
+
+---
+
+### 22.B1 — Rewrite Menu 1 (Cursor Movement) Tests from vttest Source
+
+- **Status:** In Progress
 - **Priority:** 1 — High
-- **Scope:** `freminal-terminal-emulator/tests/vttest_common.rs` (new),
-  `freminal-terminal-emulator/tests/golden/` (new directory)
+- **Scope:** `freminal-terminal-emulator/tests/vttest_cursor.rs`
 - **Details:**
-  Create a test helper module that:
-  1. Constructs a `TerminalState` with a given size (default 80x24).
-  2. Feeds a byte sequence via `handle_incoming_data()`.
-  3. Extracts the visible buffer as a grid of characters (Vec of String, one per row).
-  4. Extracts format tags for the visible region.
-  5. Compares against a "golden" reference stored as a `.txt` file in `tests/golden/`.
-  6. On mismatch, prints a clear diff showing expected vs actual, row by row.
-  7. Provides a `UPDATE_GOLDEN=1` environment variable mode that writes actual output as the
-     new golden file (for initial creation and intentional changes).
+  Rewrite all 43 tests in `vttest_cursor.rs` to use exact byte sequences extracted from
+  `vttest-20251205/main.c` (`tst_movements()` function). Each test must:
+  1. Build the byte sequence exactly as vttest sends it (using `cup()`, `brc2()`, etc. helpers
+     translated to Rust).
+  2. Assert the correct final buffer state and cursor position per VT100 specification.
+  3. Include both 80-column (pass 0) and 132-column (pass 1) variants for tests that vttest
+     runs in both modes (e.g., autowrap via `deccolm()`).
 
-  The helper should handle:
-  - Trailing whitespace normalization (terminal rows are padded with spaces).
-  - Cursor position assertion (separate from content).
-  - Optional format tag assertion (for SGR-focused tests).
+  Three tests already rewritten as byte-exact from vttest source:
+  - `decawm_mixing_control_and_print_characters` (autowrap full test)
+  - `autowrap_at_scroll_region_bottom_minimal` (Bug 5 regression)
+  - `backspace_from_pending_wrap_state_lands_at_width_minus_2` (Bug 6 regression)
 
 - **Acceptance criteria:**
-  - `VtTestHelper::new(80, 24)` creates a usable test terminal.
-  - `helper.feed(bytes)` processes escape sequences.
-  - `helper.assert_screen("test_name")` compares against `tests/golden/test_name.txt`.
-  - `UPDATE_GOLDEN=1 cargo test` regenerates golden files.
-  - Clear, readable diff output on mismatch.
-- **Tests required:**
-  - Self-test: a trivial golden comparison (feed "Hello", compare).
-  - Self-test: a deliberate mismatch produces readable error.
+  - All cursor movement tests reproduce exact vttest byte sequences.
+  - Tests that reveal Freminal non-compliance are documented with `// BUG:` comments.
+  - 132-column mode variants added where vttest runs both passes.
 
 ---
 
-### 22.2 — Menu 1: Cursor Movement Tests
+### 22.B2 — Rewrite Menu 2 (Screen Features) Tests from vttest Source
 
-- **Status:** Complete
+- **Status:** Pending
 - **Priority:** 1 — High
-- **Scope:** `freminal-terminal-emulator/tests/vttest_cursor.rs` (new)
+- **Scope:** `freminal-terminal-emulator/tests/vttest_screen.rs`
 - **Details:**
-  Implement individual tests for each cursor movement operation as exercised by vttest Menu 1:
-  - CUF/CUB/CUU/CUD with various Ps values including 0 (default), 1, and large values.
-  - CUP/HVP with absolute positioning, including out-of-bounds clamping.
-  - ED Ps=0 (erase to end), Ps=1 (erase to beginning), Ps=2 (erase all).
-  - EL Ps=0/1/2.
-  - DECALN fills entire screen with 'E'.
-  - DECAWM wrap and no-wrap behavior.
-  - IND at bottom of screen (scrolls up), NEL (CR+LF), RI at top (scrolls down).
-  - DECSTBM scroll region: scroll within region, cursor clamping at boundaries.
-
-  Each test feeds the exact escape sequence and asserts buffer content and cursor position.
-  Also create golden buffer snapshots for the composite vttest screens.
-
-- **Acceptance criteria:**
-  - All cursor movement operations have individual unit tests.
-  - Golden buffer comparisons pass for vttest Menu 1 screens.
-  - At least 20 individual test cases.
-- **Tests required:** This subtask IS the tests.
+  Rewrite all 38 tests to use exact byte sequences from vttest source. Key areas:
+  - DECSTBM (scroll region): exact sequences from `tst_screen()` in vttest
+  - TBC + HTS: tab stop manipulation sequences
+  - DECCOLM: 80/132 column switching
+  - DECOM: origin mode with scroll regions
+  - SGR: character attributes
+  - DECSC/DECRC: save/restore cursor + attributes
 
 ---
 
-### 22.3 — Menu 2: Screen Feature Tests
+### 22.B3 — Rewrite Menu 6 (Device Reports) Tests + Fix Failures
 
-- **Status:** Complete
+- **Status:** Pending
 - **Priority:** 1 — High
-- **Scope:** `freminal-terminal-emulator/tests/vttest_screen.rs` (new)
+- **Scope:** `freminal-terminal-emulator/tests/vttest_reports.rs`
 - **Details:**
-  Test vttest Menu 2 scenarios:
-  - DECSTBM with various region sizes, including full-screen and single-line regions.
-  - TBC + HTS: set custom tab stops, clear specific/all, verify CHT advances correctly.
-  - DECCOLM: switch to 132 columns, verify buffer width changes.
-  - DECOM: origin mode cursor positioning relative to scroll region.
-  - DECAWM: auto-wrap at right margin, reverse wrap at left margin.
-  - SGR: bold, underline, inverse, strikethrough, colors — verify FormatTag fields.
-  - DECSC/DECRC: save cursor position + attributes, modify both, restore, verify.
+  Rewrite all 25 report tests to assert the **correct** response bytes as expected by vttest.
+  The user noted: "Half of the device attribute reports aren't right because they fail."
 
-  **Note on blinking text (2.10):** SGR 5 (slow blink) and SGR 6 (fast blink) are parsed but
-  silently discarded. The vttest screen for this will show all text as non-blinking. This is
-  a known gap addressed in Task 23 (PLAN_23_BLINKING_TEXT.md). The golden snapshot for this
-  screen should document the expected visual discrepancy.
+  Key areas to investigate from `vttest-20251205/reports.c`:
+  - DA1 (Primary Device Attributes): vttest expects specific attribute codes
+  - DA2 (Secondary Device Attributes): vttest expects specific version/firmware format
+  - DA3 (Tertiary Device Attributes): unit ID format
+  - DECREQTPARM: response format
+  - DSR Ps=5/6: standard status reports
 
-- **Acceptance criteria:**
-  - All screen feature operations have tests.
-  - Golden snapshots for vttest Menu 2 screens.
-  - At least 15 individual test cases.
-- **Tests required:** This subtask IS the tests.
+  Each test must capture the bytes written back to the PTY channel and assert they match
+  what vttest's `reports.c` expects to receive.
 
 ---
 
-### 22.4 — Menu 6: Device Report Tests
+### 22.B4 — Rewrite Menu 8 (Insert/Delete) Tests from vttest Source
 
-- **Status:** Complete
+- **Status:** Pending
 - **Priority:** 1 — High
-- **Scope:** `freminal-terminal-emulator/tests/vttest_reports.rs` (new)
+- **Scope:** `freminal-terminal-emulator/tests/vttest_insert_delete.rs`
 - **Details:**
-  Device reports are the most cleanly automatable vttest tests because they have deterministic
-  byte-level responses. Test:
-  - DSR Ps=5: response is `CSI 0 n` ("terminal OK").
-  - DSR Ps=6: response is `CSI Pr ; Pc R` with correct cursor position.
-  - DA1: response matches Freminal's device attributes string.
-  - DA2: response matches Freminal's secondary device attributes.
-  - DECRQM for all implemented modes: verify response byte pattern.
-
-  These tests feed the query sequence and capture the bytes written back to the PTY channel,
-  then assert the exact response.
-
-- **Acceptance criteria:**
-  - All report queries produce correct response bytes.
-  - Response bytes match the format expected by vttest.
-  - At least 10 test cases (DSR + DA + multiple DECRQM queries).
-- **Tests required:** This subtask IS the tests.
+  Rewrite all 32 insert/delete tests to use exact byte sequences from vttest source.
+  - ICH, DCH, IL, DL, IRM sequences from vttest Menu 8
+  - Edge cases: at margins, within scroll regions, count > available space
 
 ---
 
-### 22.5 — Menu 8: Insert/Delete Operation Tests
+### 22.B5 — Rewrite Menu 9 (Known Bugs) + Menu 3 (Charsets) + Menu 11 (Extensions)
 
-- **Status:** Complete
-- **Priority:** 1 — High
-- **Scope:** `freminal-terminal-emulator/tests/vttest_insert_delete.rs` (new)
-- **Details:**
-  Test vttest Menu 8 insert/delete operations:
-  - ICH: insert N characters at cursor, shifting existing content right.
-  - DCH: delete N characters at cursor, shifting remaining content left.
-  - IL: insert N blank lines at cursor row, shifting content down.
-  - DL: delete N lines at cursor row, shifting content up.
-  - IRM: toggle insert mode, verify character insertion vs replacement.
-
-  Each test creates specific buffer content, applies the operation, and verifies the resulting
-  buffer state character-by-character.
-
-- **Acceptance criteria:**
-  - All insert/delete operations have individual tests.
-  - Tests cover edge cases: at margins, within scroll regions, with count > available space.
-  - At least 15 test cases.
-- **Tests required:** This subtask IS the tests.
-
----
-
-### 22.6 — Menu 9: VT100 Known Bug Regression Tests
-
-- **Status:** Complete
+- **Status:** Pending
 - **Priority:** 2 — Medium
-- **Scope:** `freminal-terminal-emulator/tests/vttest_bugs.rs` (new)
+- **Scope:** `vttest_bugs.rs`, `vttest_charsets.rs`, `vttest_extensions.rs`
 - **Details:**
-  vttest Menu 9 contains regression tests for specific VT100 firmware bugs. Each test sends
-  a specific sequence that triggered a bug in the original VT100 hardware and verifies the
-  correct behavior. These are valuable regression tests because the same edge cases trip up
-  software terminal emulators.
-
-  Specific bugs tested:
-  - Wrap at column 80 (bug: cursor wraps to wrong position).
-  - Tab after wrap (bug: tab at right margin moves to wrong column).
-  - ED after wrap (bug: erase doesn't affect wrapped line correctly).
-  - Various scroll region + cursor movement interactions.
-
-  Each test sends the exact sequence and compares against the golden reference.
-
-- **Acceptance criteria:**
-  - All Menu 9 regression tests have automated equivalents.
-  - Tests document which VT100 bug they are testing.
-- **Tests required:** This subtask IS the tests.
+  Rewrite remaining test files:
+  - Menu 9 (10 tests): VT100 known bug regressions from vttest source
+  - Menu 3 (39 tests): Character set tests — G0/G1 designation, DEC Special Graphics
+  - Menu 11 (38 tests): Non-VT100 extensions (ECMA-48, colors, alt screen, etc.)
 
 ---
 
-### 22.7 — Menu 11: Non-VT100 Extension Tests
+### 22.B6 — Investigate and Fix Remaining Known Bugs
 
-- **Status:** Complete
-- **Priority:** 2 — Medium
-- **Scope:** `freminal-terminal-emulator/tests/vttest_extensions.rs` (new)
+- **Status:** Pending
+- **Priority:** 1 — High
+- **Scope:** Various files in `freminal-buffer` and `freminal-terminal-emulator`
 - **Details:**
-  Test non-VT100 extensions from vttest Menu 11:
-  - ECMA-48 cursor commands: CNL, CPL, HPA, VPA, CHA — verify absolute positioning.
-  - ECMA-48 misc: SU (scroll up), SD (scroll down), ECH, REP, CBT, CHT.
-  - DECSCUSR: all cursor styles (block, underline, bar, blinking/steady).
-  - DECTCEM: show/hide cursor flag.
-  - 256-color and RGB color: SGR 38;5;N, SGR 38;2;R;G;B, SGR 48 variants.
-  - BCE: erase operations inherit current background color.
-  - Alternate screen: enter/leave, content preserved, cursor saved/restored.
-  - Bracketed paste: mode flag set/reset correctly.
-
-- **Acceptance criteria:**
-  - Non-VT100 extensions exercised by vttest have automated tests.
-  - At least 20 test cases covering the breadth of Menu 11.
-- **Tests required:** This subtask IS the tests.
+  Fix bugs revealed by the test rewrite that have not yet been addressed:
+  - **Device attribute reports**: "Half of the device attribute reports aren't right"
+  - **Bug 3: Soft scroll region rendering** — not yet investigated
+  - **132-column mode (DECCOLM)**: autowrap test pass=1 not yet written/tested
+  - Any additional bugs revealed by rewritten tests
 
 ---
 
-### 22.8 — Character Set Tests (G0/DEC Special Graphics)
+### 22.B7 — Produce Final Compliance Report
 
-- **Status:** Complete
-- **Priority:** 2 — Medium
-- **Scope:** `freminal-terminal-emulator/tests/vttest_charsets.rs` (new)
+- **Status:** Pending
+- **Priority:** 1 — High
+- **Scope:** This document (update Section below)
 - **Details:**
-  Test vttest Menu 3 character set functionality (the subset Freminal implements):
-  - `ESC ( 0` activates DEC Special Graphics for G0. Verify that characters in the 0x60-0x7E
-    range render as line drawing characters (stored as Unicode equivalents in cells).
-  - `ESC ( B` restores US ASCII for G0.
-  - SI/SO invoke G0/G1 respectively (G1 rendering is currently a no-op).
-  - Verify the complete DEC Special Graphics mapping table (all 31 characters).
-  - Verify that characters outside the 0x60-0x7E range are unaffected by G0 designation.
+  After all test rewrites are complete, produce a definitive compliance report:
+  1. For each vttest menu, list which tests pass and which fail.
+  2. For each failure, describe the specific non-compliance.
+  3. Categorize failures: fixable bugs vs. unimplemented features vs. intentional deviations.
+  4. The user will compare this report against their own manual vttest notes.
 
 - **Acceptance criteria:**
-  - DEC Special Graphics character mapping is fully tested.
-  - G0 designation switching works correctly.
-  - All 31 line drawing characters map to correct Unicode code points.
-- **Tests required:** This subtask IS the tests.
+  - Every automatable vttest scenario (`[A]` classification) has a test.
+  - Every test asserts correct VT100/VT220 behavior.
+  - The compliance report is complete and accurate.
 
 ---
 
-## Implementation Notes
+## Compliance Report (To Be Completed in 22.B7)
 
-### Subtask Ordering
+### Bugs Fixed During Phase B
 
-22.1 (infrastructure) must be completed first — all other subtasks depend on it.
-22.2-22.8 are independent and can be done in any order or in parallel.
+| Bug # | vttest Menu | Description                                  | Status |
+| ----- | ----------- | -------------------------------------------- | ------ |
+| 1     | 2 (TBC)     | TBC Ps=2 incorrectly clears char tab stop    | Fixed  |
+| 2     | 1 (IND/RI)  | handle_lf/handle_ri don't clear pending-wrap | Fixed  |
+| 4a    | 3 (SCS)     | character_replace not saved by DECSC/DECRC   | Fixed  |
+| 4b    | 3 (SCS)     | ESC)B produces Invalid                       | Fixed  |
+| 4c    | 3 (SCS)     | SI/SO not handled as C0 control characters   | Fixed  |
+| 5     | 1 (DECAWM)  | Autowrap ignores DECSTBM scroll region       | Fixed  |
+| 6     | 1 (BS)      | BS from pending-wrap lands at wrong column   | Fixed  |
 
-**Recommended order:** 22.1 → 22.4 (reports, easiest) → 22.2 (cursor) → 22.5 (insert/delete)
-→ 22.3 (screen) → 22.8 (charsets) → 22.6 (bugs) → 22.7 (extensions)
+### Known Remaining Failures (To Be Filled In)
+
+| vttest Menu | Test               | Description                                     | Bug # | Status |
+| ----------- | ------------------ | ----------------------------------------------- | ----- | ------ |
+| 6           | DA reports         | "Half of device attribute reports aren't right" | TBD   | Open   |
+| 1/2         | Soft scroll region | Bug 3 — not yet investigated                    | 3     | Open   |
+| 1           | DECCOLM 132-col    | Autowrap pass=1 not tested                      | TBD   | Open   |
+
+---
+
+## Architecture Notes
+
+### Pending-Wrap Model
+
+Freminal encodes pending-wrap state **implicitly**: `cursor.pos.x == width` (e.g., `x == 80` in
+an 80-column terminal). There is NO explicit `pending_wrap` boolean flag. This means:
+
+- `set_cursor_pos` (CUP/HVP) clamps `x` to `width-1` — correctly clears pending wrap
+- `move_cursor_relative` (CUU/CUD/CUF/CUB) clamps to `width-1` — correct
+- `handle_backspace` clamps from pending wrap before subtracting — fixed in Bug 6
+- `handle_cr` sets `x=0` — correct
+- `handle_lf` and `handle_ri` now clamp x — fixed in Bug 2
+- `insert_text()` now respects scroll region bottom during autowrap — fixed in Bug 5
+
+### Terminal Dimensions
+
+- vttest assumes **80x24** (standard VT100 size) for all tests
+- vttest also tests **132-column mode** (DECCOLM): autowrap and other tests run two passes
+  (pass 0 at 80 columns, pass 1 at 132 columns)
+- VT220 tests in `vt220.c` include 8-bit C1 control sequence tests (S8C1T/S7C1T), orthogonal
+  to column width
 
 ### Test File Organization
 
 ```text
 freminal-terminal-emulator/
   tests/
-    vttest_common.rs          — shared test helpers
-    vttest_cursor.rs          — Menu 1 tests
-    vttest_screen.rs          — Menu 2 tests
-    vttest_charsets.rs        — Menu 3 tests
-    vttest_reports.rs         — Menu 6 tests
-    vttest_insert_delete.rs   — Menu 8 tests
-    vttest_bugs.rs            — Menu 9 tests
-    vttest_extensions.rs      — Menu 11 tests
+    vttest_common.rs          — shared test helpers (VtTestHelper)
+    vttest_cursor.rs          — Menu 1 tests (43 tests + 3 Phase B additions)
+    vttest_screen.rs          — Menu 2 tests (38 tests)
+    vttest_charsets.rs        — Menu 3 tests (39 tests)
+    vttest_reports.rs         — Menu 6 tests (25 tests)
+    vttest_insert_delete.rs   — Menu 8 tests (32 tests)
+    vttest_bugs.rs            — Menu 9 tests (10 tests)
+    vttest_extensions.rs      — Menu 11 tests (38 tests)
+    vttest_selftest.rs        — Self-tests (15 tests)
     golden/                   — golden reference files
-      cursor_movement_*.txt
-      screen_features_*.txt
-      ...
 ```
 
-### Tests That Are NOT Appropriate for Automation
+### Tests NOT Appropriate for Automation
 
-The following vttest tests are explicitly excluded from automation:
-
-- **Menu 4** (double-sized characters): DECDWL/DECDHL rendering is not implemented. Tests would
-  only verify that the escape sequences are parsed without error, which is already covered.
-- **Menu 5** (keyboard): Requires actual key input events, not escape sequence replay. Key
-  encoding is already tested in the input encoding test suite.
-- **Menu 7** (VT52 mode): VT52 mode is not implemented (Task 20.8). Tests would all fail.
-- **Menu 10.2** (DECTST self-test): Hardware diagnostic, not applicable.
+- **Menu 4** (double-sized characters): DECDWL/DECDHL rendering not implemented.
+- **Menu 5** (keyboard): Requires actual key input events, not escape sequence replay.
+- **Menu 7** (VT52 mode): VT52 mode implemented in Task 20.8 but vttest VT52 tests require
+  interactive mode switching.
+- **Menu 10.2** (DECTST self-test): Hardware diagnostic.
 - **Menu 11.9** (mouse tracking): Requires GUI mouse events.
 - **Menu 11.10** (window manipulation): Requires GUI window context.
-- **Any test requiring user visual confirmation of blinking**: Blink is not implemented (Task 23).
+- **Blinking text visual tests**: Blink rendering addressed in Task 23.
 
-### Verification
+---
+
+## Verification
 
 Each subtask must pass before proceeding:
 
@@ -429,8 +442,13 @@ Each subtask must pass before proceeding:
 
 ## References
 
-- `vttest-20251205/` — vttest source (reference for escape sequences used)
-- `vttest-20251205/main.c` — menu structure and test descriptions
-- `freminal-terminal-emulator/tests/` — existing test infrastructure
-- `freminal-buffer/tests/terminal_handler_integration.rs` — existing integration tests
+- `vttest-20251205/` — vttest source (authoritative reference for escape sequences)
+- `vttest-20251205/main.c` — menu structure, `tst_movements()`, autowrap test
+- `vttest-20251205/esc.c` — escape sequence helper functions
+- `vttest-20251205/reports.c` — device report test logic
+- `vttest-20251205/charsets.c` — character set test logic
+- `vttest-20251205/vt220.c` — VT220-specific test logic
+- `freminal-terminal-emulator/tests/` — test files
+- `freminal-buffer/tests/terminal_handler_integration.rs` — integration tests
+- `./test.bin` — FREC recording of vttest session (57511 bytes, 1066 frames)
 - <https://invisible-island.net/vttest/vttest.html> — vttest documentation

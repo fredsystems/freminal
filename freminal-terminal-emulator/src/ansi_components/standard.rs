@@ -238,11 +238,20 @@ impl StandardParser {
                     match value {
                         None => ParserOutcome::Invalid("No params".to_string()),
                         Some(value) => {
-                            if *value == b'C' {
-                                output.push(TerminalOutput::CharsetG1);
-                            } else {
-                                output.push(TerminalOutput::Invalid);
-                                return ParserOutcome::Invalid("Invalid param value".to_string());
+                            match *value {
+                                b'0' | b'B' | b'C' => {
+                                    // G1 designation: '0' = DEC Special, 'B' = US-ASCII,
+                                    // 'C' = Finnish NRC.  Freminal uses a simplified
+                                    // single-slot charset model — G1 designations are
+                                    // silently accepted but do not change state.
+                                    output.push(TerminalOutput::CharsetG1);
+                                }
+                                _ => {
+                                    output.push(TerminalOutput::Invalid);
+                                    return ParserOutcome::Invalid(
+                                        "Invalid param value".to_string(),
+                                    );
+                                }
                             }
 
                             ParserOutcome::Finished

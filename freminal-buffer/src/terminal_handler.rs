@@ -126,6 +126,12 @@ pub struct TerminalHandler {
     cursor_visual_style: CursorVisualStyle,
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
+    /// Saved `character_replace` state from the most recent DECSC.
+    ///
+    /// The VT100 spec requires DECSC to save the character set designators
+    /// (G0/G1) and GL invocation.  Freminal uses a simplified single-flag
+    /// model, so we save just `character_replace` here.
+    saved_character_replace: Option<DecSpecialGraphics>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
@@ -285,6 +291,7 @@ impl TerminalHandler {
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
             character_replace: DecSpecialGraphics::default(),
+            saved_character_replace: None,
             write_tx: None,
             window_commands: Vec::new(),
             last_graphic_char: None,
@@ -367,6 +374,7 @@ impl TerminalHandler {
         self.show_cursor = Dectcem::default();
         self.cursor_visual_style = CursorVisualStyle::default();
         self.character_replace = DecSpecialGraphics::default();
+        self.saved_character_replace = None;
         self.window_commands.clear();
         self.last_graphic_char = None;
         self.current_working_directory = None;
@@ -729,14 +737,18 @@ impl TerminalHandler {
         self.buffer.delete_chars(n);
     }
 
-    /// Handle DECSC — save the current cursor position and SGR state.
+    /// Handle DECSC — save the current cursor position, SGR state, and character set.
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
+        self.saved_character_replace = Some(self.character_replace.clone());
     }
 
-    /// Handle DECRC — restore the cursor position and SGR state saved by the most recent DECSC.
+    /// Handle DECRC — restore the cursor position, SGR state, and character set saved by the most recent DECSC.
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
+        if let Some(saved) = &self.saved_character_replace {
+            self.character_replace = saved.clone();
+        }
     }
 
     /// Handle ICH (Insert Characters) — insert `n` blank spaces at the cursor column, shifting existing characters right.
@@ -3361,11 +3373,12 @@ impl TerminalHandler {
                 self.buffer.set_tab_stop();
             }
             TerminalOutput::TabClear(ps) => match ps {
-                0 | 2 => self.buffer.clear_tab_stop_at_cursor(),
+                0 => self.buffer.clear_tab_stop_at_cursor(),
                 3 | 5 => self.buffer.clear_all_tab_stops(),
-                1 | 4 => {
-                    // Line tab stops (Ps=1: at cursor line, Ps=4: all).
-                    // No modern terminal implements line tabulation — silently accept.
+                1 | 2 | 4 => {
+                    // Line tab stops (Ps=1: at cursor line, Ps=2: at cursor line,
+                    // Ps=4: all). No modern terminal implements line tabulation —
+                    // silently accept as no-ops.
                 }
                 _ => {
                     tracing::warn!("TBC with unsupported Ps={ps} (ignored)");

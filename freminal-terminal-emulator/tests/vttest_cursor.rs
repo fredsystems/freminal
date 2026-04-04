@@ -557,3 +557,283 @@ fn decaln_then_ed_clears_screen() {
         h.assert_row(row, "");
     }
 }
+
+// ─── Minimal autowrap-at-region-bottom reproduction ──────────────────────────
+
+/// Minimal test: autowrap at the bottom of a DECSTBM scroll region.
+///
+/// Setup: 80x24, scroll region rows 3-5 (3-row region), DECOM on.
+/// Sequence: CUP to last row, col 80, write two chars.
+/// Expected: first char fills col 79, second char autowraps to next row at
+///           col 0 — since we're at the bottom margin, the region scrolls up.
+#[test]
+fn autowrap_at_scroll_region_bottom_minimal() {
+    let mut h = VtTestHelper::new_default();
+
+    // DECSTBM 3;5 → scroll region rows 3-5 (1-indexed screen coords)
+    h.feed(b"\x1b[3;5r");
+    // DECOM on → cursor homes to top of scroll region
+    h.feed(b"\x1b[?6h");
+
+    // Fill the 3 rows of the scroll region with identifiable content:
+    // Row 3 (region row 1): "AAAA..."
+    // Row 4 (region row 2): "BBBB..."
+    // Row 5 (region row 3): "CCCC..."
+    h.feed(b"\x1b[1;1H"); // CUP(1,1) relative to region = row 3 screen
+    h.feed(b"AAAAAAAAAA");
+    h.feed(b"\x1b[2;1H"); // CUP(2,1) relative to region = row 4 screen
+    h.feed(b"BBBBBBBBBB");
+    h.feed(b"\x1b[3;1H"); // CUP(3,1) relative to region = row 5 screen
+    h.feed(b"CCCCCCCCCC");
+
+    // Now: CUP to region row 3, col 80 (last column of bottom row)
+    h.feed(b"\x1b[3;80H");
+    // Write two characters: 'X' fills col 79, 'Y' triggers autowrap
+    h.feed(b"XY");
+
+    // Expected result:
+    // - Region scrolled up: row A scrolled off, B moved up, C moved up
+    // - The bottom row (region row 3 = screen row 5) was blanked by scroll,
+    //   then 'Y' was written at col 0 of that row.
+    // Screen row 3 (region 1): "BBBBBBBBBB"
+    // Screen row 4 (region 2): "CCCCCCCCC" + 'X' at col 79
+    // Screen row 5 (region 3): "Y" at col 0
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate() {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+    let cursor = h.cursor_pos();
+    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
+
+    // Row 2 (screen, 0-indexed) = scroll region row 1 → was "BBBB..."
+    let row2 = &screen[2];
+    assert!(
+        row2.starts_with("BBBBBBBBBB"),
+        "region row 1 should now have B's (scrolled up from row 2): got {:?}",
+        row2
+    );
+
+    // Row 3 (screen, 0-indexed) = scroll region row 2 → was "CCCC..." + X at col 79
+    let row3 = &screen[3];
+    assert!(
+        row3.starts_with("CCCCCCCCCC"),
+        "region row 2 should start with C's: got {:?}",
+        row3
+    );
+    // Col 79 should be 'X'
+    let row3_chars: Vec<char> = row3.chars().collect();
+    assert_eq!(
+        row3_chars.get(79).copied(),
+        Some('X'),
+        "col 79 of region row 2 should be 'X': row = {:?}",
+        row3
+    );
+
+    // Row 4 (screen, 0-indexed) = scroll region row 3 → blanked, then Y at col 0
+    let row4 = &screen[4];
+    assert!(
+        row4.starts_with('Y'),
+        "region row 3 should start with 'Y' (autowrapped): got {:?}",
+        row4
+    );
+
+    // Cursor should be at col 1 (just wrote Y at col 0), row 4 (screen)
+    assert_eq!(cursor.x, 1, "cursor x after writing Y");
+}
+
+// ─── DECAWM — Autowrap Mixing Control and Print Characters ──────────────────
+//
+// vttest Menu 1 "Test of autowrap, mixing control and print characters."
+//
+// This test reproduces the exact byte sequence from vttest main.c lines 436-496
+// (pass=0, 80 column mode). It exercises:
+// - Case 0: Direct write at left margin (col 1) and right margin (col 80)
+// - Case 1: Autowrap by writing at col 80 then printing one more char
+// - Case 2: TAB clamping at right margin, BS navigation
+// - Case 3: LF at right margin (scroll without character write)
+//
+// The expected result is letters in alphabetical order on both left and right
+// margins of the scroll region. With region=18, the 19-row scroll region
+// (rows 3-21) shows the last 18 letter pairs (I/i through Z/z) after all 26
+// iterations scroll through, plus one blank row at the bottom.
+
+/// Build the exact byte sequence vttest sends for the autowrap test (pass=0).
+fn build_autowrap_test_bytes() -> Vec<u8> {
+    let mut out = Vec::new();
+    let on_left = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let on_right = b"abcdefghijklmnopqrstuvwxyz";
+    let width: usize = 80;
+    let region: usize = 18; // max_lines(24) - 6
+
+    // deccolm(FALSE) → ESC[?3l  (resets to 80 cols, clears screen)
+    out.extend_from_slice(b"\x1b[?3l");
+
+    // println("Test of autowrap, mixing control and print characters.")
+    out.extend_from_slice(b"Test of autowrap, mixing control and print characters.\r\n");
+    // println("The left/right margins should have letters in order:")
+    out.extend_from_slice(b"The left/right margins should have letters in order:\r\n");
+
+    // decstbm(3, region+3) → ESC[3;21r
+    out.extend_from_slice(b"\x1b[3;21r");
+
+    // decom(TRUE) → ESC[?6h  (origin mode, homes cursor)
+    out.extend_from_slice(b"\x1b[?6h");
+
+    for i in 0..26usize {
+        match i % 4 {
+            0 => {
+                // case 0: draw characters as-is
+                // cup(region+1, 1) → ESC[19;1H  then on_left[i]
+                out.extend_from_slice(format!("\x1b[{};1H", region + 1).as_bytes());
+                out.push(on_left[i]);
+                // cup(region+1, width) → ESC[19;80H  then on_right[i]
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(on_right[i]);
+                // LF
+                out.push(b'\n');
+            }
+            1 => {
+                // case 1: simple wrapping
+                // cup(region, width) → ESC[18;80H  then on_right[i-1] on_left[i]
+                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.push(on_right[i - 1]);
+                out.push(on_left[i]);
+                // cup(region+1, width) → ESC[19;80H
+                // then on_left[i] BS SP on_right[i]
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(on_left[i]);
+                out.push(0x08); // BS
+                out.push(b' ');
+                out.push(on_right[i]);
+                // LF
+                out.push(b'\n');
+            }
+            2 => {
+                // case 2: tab to right margin
+                // cup(region+1, width) → ESC[19;80H
+                // then on_left[i] BS BS TAB TAB on_right[i]
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(on_left[i]);
+                out.push(0x08); // BS
+                out.push(0x08); // BS
+                out.push(0x09); // TAB
+                out.push(0x09); // TAB
+                out.push(on_right[i]);
+                // cup(region+1, 2) → ESC[19;2H
+                // then BS on_left[i] LF
+                out.extend_from_slice(format!("\x1b[{};2H", region + 1).as_bytes());
+                out.push(0x08); // BS
+                out.push(on_left[i]);
+                out.push(b'\n');
+            }
+            _ => {
+                // case 3: newline at right margin
+                // cup(region+1, width) → ESC[19;80H  then LF
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(b'\n');
+                // cup(region, 1) → ESC[18;1H  then on_left[i]
+                out.extend_from_slice(format!("\x1b[{};1H", region).as_bytes());
+                out.push(on_left[i]);
+                // cup(region, width) → ESC[18;80H  then on_right[i]
+                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.push(on_right[i]);
+            }
+        }
+    }
+
+    // decom(FALSE) → ESC[?6l
+    out.extend_from_slice(b"\x1b[?6l");
+    // decstbm(0,0) → ESC[r
+    out.extend_from_slice(b"\x1b[r");
+    // cup(max_lines-2, 1) → ESC[22;1H
+    out.extend_from_slice(b"\x1b[22;1H");
+
+    out
+}
+
+#[test]
+fn decawm_mixing_control_and_print_characters() {
+    let mut h = VtTestHelper::new_default();
+    let bytes = build_autowrap_test_bytes();
+    h.feed(&bytes);
+
+    // After the test, the screen should show:
+    // Row 0 (screen row 1): "Test of autowrap, mixing control and print characters."
+    // Row 1 (screen row 2): "The left/right margins should have letters in order:"
+    // Rows 2-20 (screen rows 3-21): scroll region content
+    //   After 26 iterations each scrolling the region, the first 8 letter pairs
+    //   (A/a through H/h) have scrolled off. The remaining visible content in
+    //   the 19-row scroll region (rows 2-20, 0-indexed) should be:
+    //
+    //   Row  2 (SR row 1):  I ... i    (i=8,  case 0)
+    //   Row  3 (SR row 2):  J ... j    (i=9,  case 1)
+    //   Row  4 (SR row 3):  K ... k    (i=10, case 2)
+    //   Row  5 (SR row 4):  L ... l    (i=11, case 3)
+    //   Row  6 (SR row 5):  M ... m    (i=12, case 0)
+    //   Row  7 (SR row 6):  N ... n    (i=13, case 1)
+    //   Row  8 (SR row 7):  O ... o    (i=14, case 2)
+    //   Row  9 (SR row 8):  P ... p    (i=15, case 3)
+    //   Row 10 (SR row 9):  Q ... q    (i=16, case 0)
+    //   Row 11 (SR row 10): R ... r    (i=17, case 1)
+    //   Row 12 (SR row 11): S ... s    (i=18, case 2)
+    //   Row 13 (SR row 12): T ... t    (i=19, case 3)
+    //   Row 14 (SR row 13): U ... u    (i=20, case 0)
+    //   Row 15 (SR row 14): V ... v    (i=21, case 1)
+    //   Row 16 (SR row 15): W ... w    (i=22, case 2)
+    //   Row 17 (SR row 16): X ... x    (i=23, case 3)
+    //   Row 18 (SR row 17): Y ... y    (i=24, case 0)
+    //   Row 19 (SR row 18): Z ... z    (i=25, case 1)
+    //   Row 20 (SR row 19): (blank — scrolled in by last LF)
+
+    // Debug: print the full screen
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate() {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+    let cursor = h.cursor_pos();
+    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
+
+    // Check the header lines survived (above scroll region)
+    h.assert_row(0, "Test of autowrap, mixing control and print characters.");
+    h.assert_row(1, "The left/right margins should have letters in order:");
+
+    // Check each letter pair in the scroll region.
+    // After 26 iterations through the scroll region, the expected visible
+    // content depends on exactly how many scroll-up operations occurred.
+    // The correct VT100 behavior produces letters I-Z on left margin and
+    // i-z on right margin (rows 2-19), with row 20 blank.
+    //
+    // For now, just verify the pattern is correct by checking that all
+    // case-1 letters appear on the left margin (this catches the autowrap bug).
+
+    // Collect left-margin and right-margin characters from the scroll region
+    let mut left_chars = Vec::new();
+    let mut right_chars = Vec::new();
+    for row_text in screen.iter().take(21).skip(2) {
+        if row_text.is_empty() {
+            left_chars.push(' ');
+            right_chars.push(' ');
+        } else {
+            left_chars.push(row_text.chars().next().unwrap_or(' '));
+            right_chars.push(row_text.chars().last().unwrap_or(' '));
+        }
+    }
+    let left_str: String = left_chars.iter().collect();
+    let right_str: String = right_chars.iter().collect();
+    eprintln!("left  margin chars: {:?}", left_str);
+    eprintln!("right margin chars: {:?}", right_str);
+
+    // The correct output has all letters in strict alphabetical order with
+    // no gaps. Every letter from the visible range must appear.
+    assert_eq!(
+        left_str.trim(),
+        "IJKLMNOPQRSTUVWXYZ",
+        "left margin letters should be I through Z in order (no gaps)",
+    );
+    assert_eq!(
+        right_str.trim(),
+        "ijklmnopqrstuvwxyz",
+        "right margin letters should be i through z in order (no gaps)",
+    );
+}
