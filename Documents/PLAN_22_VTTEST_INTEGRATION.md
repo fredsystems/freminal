@@ -167,7 +167,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.1 — Test Infrastructure: Golden Buffer Comparison Framework
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_common.rs` (new),
   `freminal-terminal-emulator/tests/golden/` (new directory)
