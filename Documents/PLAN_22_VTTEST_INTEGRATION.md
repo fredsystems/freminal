@@ -256,7 +256,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.4 — Menu 6: Device Report Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_reports.rs` (new)
 - **Details:**

@@ -31,6 +31,10 @@
 //! ...
 //! ```
 
+// This module is included via `mod vttest_common;` from multiple test binaries.
+// Each binary uses a different subset of helpers, so unused items are expected.
+#![allow(dead_code)]
+
 use freminal_common::{buffer_states::cursor::CursorPos, pty_write::PtyWrite};
 use freminal_terminal_emulator::state::internal::TerminalState;
 use std::{
@@ -86,7 +90,6 @@ impl VtTestHelper {
     }
 
     /// Feed a string as bytes through the terminal.
-    #[allow(dead_code)]
     pub fn feed_str(&mut self, s: &str) {
         self.feed(s.as_bytes());
     }
