@@ -317,17 +317,23 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
 ///    - `ReportWindowState` → `ESC [ 1 t` or `ESC [ 2 t`
 ///    - `ReportWindowPosition*` → `ESC [ 3 ; x ; y t`
 ///    - `ReportWindowSize*` and `ReportRootWindowSize*` → `ESC [ 4/5/6/7 ; h ; w t`
-///    - `ReportCharacterSizeInPixels` → `ESC [ 9 ; h ; w t`
-///    - `ReportTerminalSizeInCharacters` → uses `snap.term_width` / `term_height`
 ///    - `ReportIconLabel` and `ReportTitle` → `ESC ] 0 / 1 / 2 ; <title> ST`
+///
+///    **Not handled here** (no-ops in this function):
+///    - `ReportCharacterSizeInPixels`, `ReportTerminalSizeInCharacters`,
+///      `ReportRootWindowSizeInCharacters` — these are handled synchronously
+///      on the PTY thread by `TerminalHandler::handle_window_manipulation` so
+///      that responses arrive in the same batch as DA1.  They never reach the
+///      GUI's `window_cmd_rx` stream.
 ///
 /// 5. **Title stack** — `SaveWindowTitleToStack` and
 ///    `RestoreWindowTitleFromStack` push/pop from `title_stack`; `SetTitleBarText`
 ///    calls `ViewportCommand::Title`.
 ///
-/// 6. **OSC 52 clipboard** — `SetClipboard` and `QueryClipboard` are handled
-///    upstream (in `update()`) before this function is called; they will not
-///    appear in the `window_cmd_rx` stream.
+/// 6. **OSC 52 clipboard** — `SetClipboard` copies decoded text to the system
+///    clipboard via `ui.ctx().copy_text()`.  `QueryClipboard` responds with an
+///    empty OSC 52 payload because egui's public API does not support reading
+///    the clipboard; this is the safe/secure default adopted by many terminals.
 // Inherently large: handles all `WindowCommand` variants — viewport commands, Report* PTY
 // responses, title stack, clipboard. Each variant requires distinct context (ui, pty_write_tx,
 // title_stack). Splitting further would scatter a cohesive protocol handler.
