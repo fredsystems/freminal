@@ -46,7 +46,7 @@ and plan document maintenance rules.
 | 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`     | Pending  | None (separate repo) |
 | 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`              | Complete | None                 |
 | 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                      | Complete | None                 |
-| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Pending  | None                 |
+| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Complete | None                 |
 | 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Complete | None                 |
 | 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
@@ -418,7 +418,7 @@ Update this section as tasks complete:
 | 19   |            |            |                                                        |
 | 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage           |
 | 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                    |
-| 22   |            |            |                                                        |
+| 22   | 2026-04-04 | 2026-04-04 | All 8 subtasks complete on task-22/vttest-integration  |
 | 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text       |
 | 24   |            |            |                                                        |
 | 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality       |

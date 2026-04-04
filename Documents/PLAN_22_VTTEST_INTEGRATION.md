@@ -1,6 +1,6 @@
 # PLAN_22 — vttest Integration Testing
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -201,7 +201,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.2 — Menu 1: Cursor Movement Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_cursor.rs` (new)
 - **Details:**
@@ -228,7 +228,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.3 — Menu 2: Screen Feature Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_screen.rs` (new)
 - **Details:**
@@ -281,7 +281,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.5 — Menu 8: Insert/Delete Operation Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_insert_delete.rs` (new)
 - **Details:**
@@ -305,7 +305,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.6 — Menu 9: VT100 Known Bug Regression Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/tests/vttest_bugs.rs` (new)
 - **Details:**
@@ -331,7 +331,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.7 — Menu 11: Non-VT100 Extension Tests
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/tests/vttest_extensions.rs` (new)
 - **Details:**
@@ -354,7 +354,7 @@ This is a large submenu tree. Key subtests:
 
 ### 22.8 — Character Set Tests (G0/DEC Special Graphics)
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-terminal-emulator/tests/vttest_charsets.rs` (new)
 - **Details:**
