@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use conv2::ConvUtil;
+use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
@@ -115,6 +115,8 @@ struct FreminalGui {
 }
 
 impl FreminalGui {
+    // All parameters are required to construct the GUI: channels, snapshot handle, config, and
+    // font settings. Grouping into a builder struct would add complexity without reducing count.
     #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
@@ -315,17 +317,27 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
 ///    - `ReportWindowState` → `ESC [ 1 t` or `ESC [ 2 t`
 ///    - `ReportWindowPosition*` → `ESC [ 3 ; x ; y t`
 ///    - `ReportWindowSize*` and `ReportRootWindowSize*` → `ESC [ 4/5/6/7 ; h ; w t`
-///    - `ReportCharacterSizeInPixels` → `ESC [ 9 ; h ; w t`
-///    - `ReportTerminalSizeInCharacters` → uses `snap.term_width` / `term_height`
 ///    - `ReportIconLabel` and `ReportTitle` → `ESC ] 0 / 1 / 2 ; <title> ST`
+///
+///    **Not handled here** (no-ops in this function):
+///    - `ReportCharacterSizeInPixels`, `ReportTerminalSizeInCharacters`,
+///      `ReportRootWindowSizeInCharacters` — these are handled synchronously
+///      on the PTY thread by `TerminalHandler::handle_window_manipulation` so
+///      that responses arrive in the same batch as DA1.  They never reach the
+///      GUI's `window_cmd_rx` stream.
 ///
 /// 5. **Title stack** — `SaveWindowTitleToStack` and
 ///    `RestoreWindowTitleFromStack` push/pop from `title_stack`; `SetTitleBarText`
 ///    calls `ViewportCommand::Title`.
 ///
-/// 6. **OSC 52 clipboard** — `SetClipboard` and `QueryClipboard` are handled
-///    upstream (in `update()`) before this function is called; they will not
-///    appear in the `window_cmd_rx` stream.
+/// 6. **OSC 52 clipboard** — `SetClipboard` copies decoded text to the system
+///    clipboard via `ui.ctx().copy_text()`.  `QueryClipboard` responds with an
+///    empty OSC 52 payload because egui's public API does not support reading
+///    the clipboard; this is the safe/secure default adopted by many terminals.
+// Inherently large: handles all `WindowCommand` variants — viewport commands, Report* PTY
+// responses, title stack, clipboard. Each variant requires distinct context (ui, pty_write_tx,
+// title_stack). Splitting further would scatter a cohesive protocol handler.
+// All arguments are required context that cannot be easily grouped without obscuring intent.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn handle_window_manipulation(
     ui: &egui::Ui,
@@ -600,6 +612,9 @@ impl eframe::App for FreminalGui {
         }
     }
 
+    // Inherently large: the main per-frame UI function handles menu bar, settings modal, window
+    // manipulation drain, terminal widget layout, and resize detection — all in one pass over
+    // the shared snapshot. Artificial sub-functions would not reduce the coupling.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         debug!("Starting new frame");
@@ -635,14 +650,10 @@ impl eframe::App for FreminalGui {
             // font metrics.  egui's coordinate system uses logical points, so we
             // convert with `pixels_per_point` when doing layout math.
             let (cell_w_u, cell_height_u) = self.terminal_widget.cell_size();
-            #[allow(clippy::cast_possible_truncation)]
-            let font_width = cell_w_u as usize;
-            #[allow(clippy::cast_possible_truncation)]
-            let font_height = cell_height_u as usize;
-            #[allow(clippy::cast_precision_loss)]
-            let logical_char_w = cell_w_u as f32 / ppp;
-            #[allow(clippy::cast_precision_loss)]
-            let logical_char_h = cell_height_u as f32 / ppp;
+            let font_width = usize::value_from(cell_w_u).unwrap_or(0);
+            let font_height = usize::value_from(cell_height_u).unwrap_or(0);
+            let logical_char_w = f32::approx_from(cell_w_u).unwrap_or(0.0) / ppp;
+            let logical_char_h = f32::approx_from(cell_height_u).unwrap_or(0.0) / ppp;
 
             let available = ui.available_size();
             let width_chars = (available.x / logical_char_w)
@@ -714,8 +725,10 @@ impl eframe::App for FreminalGui {
                     style.visuals.window_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
                     // panel_fill: respects background_opacity (terminal area only).
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let alpha = (bg_opacity * 255.0).round() as u8;
+                    let alpha = (bg_opacity * 255.0)
+                        .round()
+                        .approx_as::<u8>()
+                        .unwrap_or(255);
                     style.visuals.panel_fill =
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
                 });
@@ -874,6 +887,8 @@ impl eframe::App for FreminalGui {
 ///
 /// # Errors
 /// Will return an error if the GUI fails to run
+// All parameters are required to wire the GUI to the PTY thread: snapshot handle, channels,
+// config, and font. Grouping into a struct would hide required coupling without reducing it.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,

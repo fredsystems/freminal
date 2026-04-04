@@ -64,13 +64,10 @@ const DIACRITICS: [u32; 297] = [
 /// diacritics table.
 #[must_use]
 pub(crate) fn diacritic_to_index(codepoint: u32) -> Option<u16> {
-    // Binary search — the table is sorted by codepoint value.
-    DIACRITICS.binary_search(&codepoint).ok().map(|i| {
-        // The table has at most 297 entries, which fits in u16.
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = i as u16;
-        idx
-    })
+    DIACRITICS
+        .binary_search(&codepoint)
+        .ok()
+        .and_then(|i| u16::try_from(i).ok())
 }
 
 /// Parsed data from a Kitty Unicode placeholder grapheme.

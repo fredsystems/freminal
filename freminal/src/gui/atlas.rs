@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+use conv2::{ApproxFrom, ValueFrom};
+
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
@@ -375,11 +377,10 @@ impl GlyphAtlas {
         key: GlyphKey,
         glyph: &RasterizedGlyph,
     ) -> Option<&AtlasEntry> {
-        #[allow(clippy::cast_possible_truncation)]
         let entry = AtlasEntry {
             uv_rect: [0.0, 0.0, 0.0, 0.0],
-            bearing_x: glyph.bearing_x as i16,
-            bearing_y: glyph.bearing_y as i16,
+            bearing_x: i16::value_from(glyph.bearing_x).unwrap_or(0),
+            bearing_y: i16::value_from(glyph.bearing_y).unwrap_or(0),
             width: 0,
             height: 0,
             is_color: glyph.is_color,
@@ -436,7 +437,6 @@ impl GlyphAtlas {
     }
 
     /// Place a glyph into a specific shelf and blit its pixels.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn place_in_shelf(
         &mut self,
         shelf_idx: usize,
@@ -465,18 +465,18 @@ impl GlyphAtlas {
         });
 
         // Compute UV coordinates.
-        let atlas_size_f = self.size as f32;
-        let u_min = place_x as f32 / atlas_size_f;
-        let v_min = place_y as f32 / atlas_size_f;
-        let u_max = (place_x + gw) as f32 / atlas_size_f;
-        let v_max = (place_y + gh) as f32 / atlas_size_f;
+        let atlas_size_f = f32::approx_from(self.size).unwrap_or(1.0);
+        let u_min = f32::approx_from(place_x).unwrap_or(0.0) / atlas_size_f;
+        let v_min = f32::approx_from(place_y).unwrap_or(0.0) / atlas_size_f;
+        let u_max = f32::approx_from(place_x + gw).unwrap_or(0.0) / atlas_size_f;
+        let v_max = f32::approx_from(place_y + gh).unwrap_or(0.0) / atlas_size_f;
 
         let entry = AtlasEntry {
             uv_rect: [u_min, v_min, u_max, v_max],
-            bearing_x: glyph.bearing_x as i16,
-            bearing_y: glyph.bearing_y as i16,
-            width: gw as u16,
-            height: gh as u16,
+            bearing_x: i16::value_from(glyph.bearing_x).unwrap_or(0),
+            bearing_y: i16::value_from(glyph.bearing_y).unwrap_or(0),
+            width: u16::value_from(gw).unwrap_or(0),
+            height: u16::value_from(gh).unwrap_or(0),
             is_color: glyph.is_color,
             shelf_idx,
         };
@@ -587,10 +587,8 @@ impl GlyphAtlas {
         self.pixels = new_pixels;
 
         // Recompute UV rects for all existing entries.
-        #[allow(clippy::cast_precision_loss)]
-        let new_size_f = new_size as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let old_size_f = self.size as f32;
+        let new_size_f = f32::approx_from(new_size).unwrap_or(1.0);
+        let old_size_f = f32::approx_from(self.size).unwrap_or(1.0);
         let scale = old_size_f / new_size_f;
 
         for entry in self.entries.values_mut() {

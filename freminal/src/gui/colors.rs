@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use conv2::ConvUtil;
 use eframe::egui::Color32;
 use freminal_common::colors::TerminalColor;
 use freminal_common::themes::ThemePalette;
@@ -123,8 +124,9 @@ pub fn internal_color_to_egui_with_alpha(
 ) -> Color32 {
     let base = internal_color_to_egui(color, make_faint, theme);
     let [r, g, b, _] = base.to_array();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    let a = (alpha.clamp(0.0, 1.0) * 255.0)
+        .approx_as::<u8>()
+        .unwrap_or(0);
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 

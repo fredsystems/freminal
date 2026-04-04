@@ -190,6 +190,8 @@ impl AnsiCsiParser {
     ///
     /// # Errors
     /// Will return an error if the parser encounters an invalid state
+    // Inherently large: CSI final-byte dispatch table (ECMA-48 §8.3). Each arm handles a
+    // distinct CSI sequence. Splitting would scatter a single coherent dispatch table.
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn ansiparser_inner_csi(

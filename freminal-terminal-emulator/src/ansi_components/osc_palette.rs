@@ -26,10 +26,7 @@ pub(super) fn handle_osc_palette_color(
                 tracing::warn!("OSC 4: index out of range: {v}");
                 return;
             }
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                *v as u8
-            }
+            u8::try_from(*v).unwrap_or(0)
         }
         Some(Some(AnsiOscToken::String(s))) => {
             let Ok(v) = s.parse::<u16>() else {
@@ -40,10 +37,7 @@ pub(super) fn handle_osc_palette_color(
                 tracing::warn!("OSC 4: index out of range: {v}");
                 return;
             }
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                v as u8
-            }
+            u8::try_from(v).unwrap_or(0)
         }
         _ => {
             tracing::warn!("OSC 4: missing index: recent='{}'", seq_trace.as_str());
@@ -91,9 +85,8 @@ pub(super) fn handle_osc_reset_palette(
         }
         Some(Some(AnsiOscToken::OscValue(v))) => {
             if *v <= 255 {
-                #[allow(clippy::cast_possible_truncation)]
                 output.push(TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(
-                    Some(*v as u8),
+                    Some(u8::try_from(*v).unwrap_or(0)),
                 )));
             } else {
                 tracing::warn!("OSC 104: index out of range: {v}");
@@ -102,9 +95,8 @@ pub(super) fn handle_osc_reset_palette(
         Some(Some(AnsiOscToken::String(s))) => {
             if let Ok(v) = s.parse::<u16>() {
                 if v <= 255 {
-                    #[allow(clippy::cast_possible_truncation)]
                     output.push(TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(
-                        Some(v as u8),
+                        Some(u8::try_from(v).unwrap_or(0)),
                     )));
                 } else {
                     tracing::warn!("OSC 104: index out of range: {v}");

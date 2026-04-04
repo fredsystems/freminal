@@ -159,6 +159,8 @@ pub enum TerminalInput {
 
 impl TerminalInput {
     #[must_use]
+    // Inherently large: exhaustive match over every `TerminalInput` variant mapping to escape
+    // byte sequences. Splitting into sub-functions adds indirection without improving clarity.
     #[allow(clippy::too_many_lines)]
     pub fn to_payload(
         &self,

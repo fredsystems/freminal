@@ -84,8 +84,7 @@ pub fn decode(input: &str) -> Result<Vec<u8>, String> {
         if bits >= 8 {
             bits -= 8;
             // buf >> bits is always <= 0xFF because we mask off consumed bits below.
-            #[allow(clippy::cast_possible_truncation)]
-            out.push((buf >> bits) as u8);
+            out.push(u8::try_from(buf >> bits).unwrap_or(0));
             buf &= (1 << bits) - 1;
         }
     }

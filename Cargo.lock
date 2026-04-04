@@ -1427,6 +1427,7 @@ dependencies = [
 name = "freminal-buffer"
 version = "0.1.4"
 dependencies = [
+ "conv2",
  "criterion",
  "crossbeam-channel",
  "freminal-common",

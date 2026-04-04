@@ -13,6 +13,7 @@
 //! The CPU-side instance/vertex builders (`build_background_instances` / `build_foreground_instances`)
 //! are pure functions and are fully testable without a GL context.
 
+use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use eframe::glow::{self, HasContext};
 use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::fonts::FontDecorations;
@@ -26,6 +27,74 @@ use super::shaping::{ShapedGlyph, ShapedLine};
 use freminal_common::buffer_states::fonts::BlinkState;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::{ImagePlacement, InlineImage};
+
+// ---------------------------------------------------------------------------
+//  GL numeric conversion helpers
+// ---------------------------------------------------------------------------
+//
+// The OpenGL API (`glow`) requires `i32` for vertex counts, strides, and byte
+// offsets, and `f32` for viewport dimensions, coordinate math, and uniforms.
+// These helpers centralise the checked conversions so call sites stay concise.
+//
+// Fallback rationale: terminal dimensions and buffer sizes cannot realistically
+// overflow `i32` (max ≈ 2 billion) or lose significant `f32` precision (24-bit
+// mantissa ≫ any terminal cell count), so the fallback paths are purely
+// defensive.
+
+/// Convert a `usize` to `i32` for OpenGL counts, strides, or byte offsets.
+/// Returns `0` on overflow (astronomically unlikely for terminal dimensions)
+/// and logs an error so the impossible is visible if it ever occurs.
+#[inline]
+fn gl_i32(val: usize) -> i32 {
+    i32::value_from(val).unwrap_or_else(|_| {
+        error!("gl_i32: usize {val} overflows i32");
+        0
+    })
+}
+
+/// Convert a `u32` to `i32` for OpenGL texture dimensions.
+/// Returns `0` on overflow (texture sizes are always well within `i32` range)
+/// and logs an error so the impossible is visible if it ever occurs.
+#[inline]
+fn gl_i32_u32(val: u32) -> i32 {
+    i32::value_from(val).unwrap_or_else(|_| {
+        error!("gl_i32_u32: u32 {val} overflows i32");
+        0
+    })
+}
+
+/// Convert a `usize` to `f32` for GPU coordinate math.
+/// Returns `0.0` on precision loss beyond what is representable in f32
+/// and logs an error so the impossible is visible if it ever occurs.
+#[inline]
+fn gl_f32(val: usize) -> f32 {
+    val.approx_as::<f32>().unwrap_or_else(|_| {
+        error!("gl_f32: usize {val} cannot be approximated as f32");
+        0.0
+    })
+}
+
+/// Convert a `u32` to `f32` for GPU cell-dimension math.
+/// Returns `0.0` on precision loss (u32 values fit in f32 for all sane sizes)
+/// and logs an error so the impossible is visible if it ever occurs.
+#[inline]
+fn gl_f32_u32(val: u32) -> f32 {
+    f32::approx_from(val).unwrap_or_else(|_| {
+        error!("gl_f32_u32: u32 {val} cannot be approximated as f32");
+        0.0
+    })
+}
+
+/// Convert an `i32` to `f32` for GPU viewport uniforms.
+/// Returns `0.0` on precision loss (viewport sizes are always small)
+/// and logs an error so the impossible is visible if it ever occurs.
+#[inline]
+fn gl_f32_i32(val: i32) -> f32 {
+    f32::approx_from(val).unwrap_or_else(|_| {
+        error!("gl_f32_i32: i32 {val} cannot be approximated as f32");
+        0.0
+    })
+}
 
 // ---------------------------------------------------------------------------
 //  GLSL shaders  (GL 3.3 core profile)
@@ -573,6 +642,8 @@ impl TerminalRenderer {
     ///
     /// This method calls `glow` functions which are marked `unsafe`.  The
     /// caller is responsible for ensuring a valid GL context exists.
+    // All parameters are required GPU render inputs: vertex data, uniforms, dimensions, and
+    // flags. Grouping into a struct would not reduce the OpenGL call complexity.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_verts(
         &mut self,
@@ -609,10 +680,8 @@ impl TerminalRenderer {
         self.upload_img_verts(gl, image_verts, buf_idx);
 
         // 3. Draw instanced backgrounds, decorations, foreground, images.
-        #[allow(clippy::cast_precision_loss)]
-        let vp_w = viewport_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let vp_h = viewport_height as f32;
+        let vp_w = gl_f32_i32(viewport_width);
+        let vp_h = gl_f32_i32(viewport_height);
 
         self.draw_background_instanced(
             gl,
@@ -653,6 +722,7 @@ impl TerminalRenderer {
     /// # Safety
     ///
     /// Caller must ensure a valid GL context exists.
+    // Same rationale as `draw_with_verts`: all parameters are required GPU render inputs.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_cursor_only_update(
         &mut self,
@@ -701,10 +771,8 @@ impl TerminalRenderer {
         // 3. Draw instanced backgrounds, decorations, foreground, images
         //    with the total float counts from the previously uploaded full
         //    frame.
-        #[allow(clippy::cast_precision_loss)]
-        let vp_w = viewport_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let vp_h = viewport_height as f32;
+        let vp_w = gl_f32_i32(viewport_width);
+        let vp_h = gl_f32_i32(viewport_height);
 
         self.draw_background_instanced(
             gl,
@@ -740,8 +808,7 @@ impl TerminalRenderer {
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         }
 
-        #[allow(clippy::cast_possible_wrap)]
-        let size = atlas.size() as i32;
+        let size = gl_i32_u32(atlas.size());
 
         if atlas.needs_full_reupload() {
             // Full upload — create or replace the entire texture.
@@ -761,14 +828,10 @@ impl TerminalRenderer {
         } else {
             // Delta upload — only upload modified regions.
             for rect in atlas.take_dirty_rects() {
-                #[allow(clippy::cast_possible_wrap)]
-                let rx = rect.x as i32;
-                #[allow(clippy::cast_possible_wrap)]
-                let ry = rect.y as i32;
-                #[allow(clippy::cast_possible_wrap)]
-                let rw = rect.width as i32;
-                #[allow(clippy::cast_possible_wrap)]
-                let rh = rect.height as i32;
+                let rx = gl_i32_u32(rect.x);
+                let ry = gl_i32_u32(rect.y);
+                let rw = gl_i32_u32(rect.width);
+                let rh = gl_i32_u32(rect.height);
 
                 // Build the sub-image pixel slice for this rect.
                 let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
@@ -863,10 +926,8 @@ impl TerminalRenderer {
                 }
             };
 
-            #[allow(clippy::cast_possible_wrap)]
-            let w = img.width_px as i32;
-            #[allow(clippy::cast_possible_wrap)]
-            let h = img.height_px as i32;
+            let w = gl_i32_u32(img.width_px);
+            let h = gl_i32_u32(img.height_px);
 
             unsafe {
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -915,6 +976,8 @@ impl TerminalRenderer {
     /// Iterates images in the order they appear (by ID from the map); each
     /// image is bound to `TEXTURE1` and drawn with the corresponding 6-vertex
     /// slab from `image_verts`.
+    // All parameters are required GPU context and data. Image rendering requires separate
+    // texture binding, program, and geometry inputs that cannot be sensibly grouped.
     #[allow(clippy::too_many_arguments)]
     fn draw_images(
         &self,
@@ -966,16 +1029,13 @@ impl TerminalRenderer {
                 quad_idx += 1;
                 continue;
             };
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            if quad_idx >= total_quads as i32 {
+            if quad_idx >= gl_i32(total_quads) {
                 break;
             }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let first_vertex = quad_idx * VERTS_PER_QUAD as i32;
+            let first_vertex = quad_idx * gl_i32(VERTS_PER_QUAD);
             unsafe {
                 gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                gl.draw_arrays(glow::TRIANGLES, first_vertex, VERTS_PER_QUAD as i32);
+                gl.draw_arrays(glow::TRIANGLES, first_vertex, gl_i32(VERTS_PER_QUAD));
             }
             quad_idx += 1;
         }
@@ -993,6 +1053,8 @@ impl TerminalRenderer {
     /// Each instance is one cell-sized quad; the instance buffer provides the
     /// grid position and resolved RGBA color.  `u_bg_opacity` is applied in the
     /// fragment shader.
+    // All parameters are required GPU render context: program, VAO, instance data, uniforms,
+    // and dimensions. No subset forms a coherent intermediate abstraction.
     #[allow(clippy::too_many_arguments)]
     fn draw_background_instanced(
         &self,
@@ -1036,8 +1098,7 @@ impl TerminalRenderer {
             gl.bind_vertex_array(Some(vao));
             // Re-bind both buffers into the VAO for this draw call.
             setup_bg_inst_attribs(gl, unit_vbo, inst_vbo);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, instance_count as i32);
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, gl_i32(instance_count));
             gl.bind_vertex_array(None);
             gl.use_program(None);
         }
@@ -1063,8 +1124,7 @@ impl TerminalRenderer {
             return;
         }
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let vertex_count = (vert_floats / DECO_VERTEX_FLOATS) as i32;
+        let vertex_count = gl_i32(vert_floats / DECO_VERTEX_FLOATS);
 
         unsafe {
             gl.use_program(Some(prog));
@@ -1117,8 +1177,7 @@ impl TerminalRenderer {
             gl.bind_vertex_array(Some(vao));
             // Re-bind both buffers into the VAO for this draw call.
             setup_fg_inst_attribs(gl, unit_vbo, inst_vbo);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, instance_count as i32);
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, gl_i32(instance_count));
             gl.bind_vertex_array(None);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
@@ -1214,10 +1273,8 @@ unsafe fn setup_bg_inst_attribs(
     unit_quad_vbo: glow::Buffer,
     instance_vbo: glow::Buffer,
 ) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let f = size_of::<f32>() as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let inst_stride = (BG_INSTANCE_FLOATS * size_of::<f32>()) as i32;
+    let f = gl_i32(size_of::<f32>());
+    let inst_stride = gl_i32(BG_INSTANCE_FLOATS * size_of::<f32>());
 
     unsafe {
         // Location 0: unit-quad vertex position (per-vertex).
@@ -1246,10 +1303,8 @@ unsafe fn setup_bg_inst_attribs(
 ///
 /// Used for underlines, strikethrough, cursor, and selection highlight quads.
 unsafe fn setup_deco_attribs(gl: &glow::Context) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let stride = (DECO_VERTEX_FLOATS * size_of::<f32>()) as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let offset_c2 = (2 * size_of::<f32>()) as i32;
+    let stride = gl_i32(DECO_VERTEX_FLOATS * size_of::<f32>());
+    let offset_c2 = gl_i32(2 * size_of::<f32>());
     unsafe {
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
@@ -1274,10 +1329,8 @@ unsafe fn setup_fg_inst_attribs(
     unit_quad_vbo: glow::Buffer,
     instance_vbo: glow::Buffer,
 ) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let f = size_of::<f32>() as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let inst_stride = (FG_INSTANCE_FLOATS * size_of::<f32>()) as i32;
+    let f = gl_i32(size_of::<f32>());
+    let inst_stride = gl_i32(FG_INSTANCE_FLOATS * size_of::<f32>());
 
     unsafe {
         // Location 0: unit-quad vertex position (per-vertex).
@@ -1316,10 +1369,8 @@ unsafe fn setup_fg_inst_attribs(
 /// Layout: `location 0 = vec2 pos, location 1 = vec2 uv`.
 /// Stride = `IMG_VERTEX_FLOATS * 4` bytes.
 unsafe fn setup_img_attribs(gl: &glow::Context) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let stride = (IMG_VERTEX_FLOATS * size_of::<f32>()) as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let f = size_of::<f32>() as i32;
+    let stride = gl_i32(IMG_VERTEX_FLOATS * size_of::<f32>());
+    let f = gl_i32(size_of::<f32>());
     unsafe {
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
@@ -1405,14 +1456,7 @@ fn upload_verts(gl: &glow::Context, vbo: glow::Buffer, verts: &[f32]) {
     unsafe {
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
         // Orphan the buffer first to avoid sync stalls.
-        gl.buffer_data_size(
-            glow::ARRAY_BUFFER,
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            {
-                bytes.len() as i32
-            },
-            glow::STREAM_DRAW,
-        );
+        gl.buffer_data_size(glow::ARRAY_BUFFER, gl_i32(bytes.len()), glow::STREAM_DRAW);
         gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
     }
@@ -1437,8 +1481,7 @@ fn upload_verts_sub(gl: &glow::Context, vbo: glow::Buffer, byte_offset: usize, v
 
     unsafe {
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, byte_offset as i32, bytes);
+        gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, gl_i32(byte_offset), bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
     }
 }
@@ -1498,6 +1541,8 @@ const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> b
 /// The cursor quad (if visible) is always appended **last** in `deco_verts`
 /// so that cursor-only partial updates can patch just the tail.
 #[must_use]
+// All parameters are required geometric and style inputs for GPU instance data generation.
+// Inherently large: iterates all shaped lines, resolving background color for every cell.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn build_background_instances(
     shaped_lines: &[ShapedLine],
@@ -1518,8 +1563,7 @@ pub fn build_background_instances(
     let mut deco: Vec<f32> = Vec::new();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let y_top = row_idx as f32 * cell_height as f32;
+        let y_top = gl_f32(row_idx) * gl_f32_u32(cell_height);
 
         // --- Per-cell background instances ---
         for run in &line.runs {
@@ -1541,11 +1585,8 @@ pub fn build_background_instances(
             let col_count = run_col_count(run);
             for c in 0..col_count {
                 let col = run.col_start + c;
-                #[allow(clippy::cast_precision_loss)]
-                {
-                    instances.push(col as f32);
-                    instances.push(row_idx as f32);
-                }
+                instances.push(gl_f32(col));
+                instances.push(gl_f32(row_idx));
                 instances.push(r);
                 instances.push(g);
                 instances.push(b);
@@ -1568,10 +1609,8 @@ pub fn build_background_instances(
             let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
             let col_end = run.col_start + run_col_count(run);
 
-            #[allow(clippy::cast_precision_loss)]
-            let x0 = run.col_start as f32 * cell_width as f32;
-            #[allow(clippy::cast_precision_loss)]
-            let x1 = col_end as f32 * cell_width as f32;
+            let x0 = gl_f32(run.col_start) * gl_f32_u32(cell_width);
+            let x1 = gl_f32(col_end) * gl_f32_u32(cell_width);
 
             if has_underline {
                 let ul_top = y_top + underline_offset;
@@ -1589,10 +1628,8 @@ pub fn build_background_instances(
 
     // --- Selection highlight quads (decoration pass) ---
     if let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection {
-        #[allow(clippy::cast_precision_loss)]
-        let cw = cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let ch = cell_height as f32;
+        let cw = gl_f32_u32(cell_width);
+        let ch = gl_f32_u32(cell_height);
 
         for (row, line) in shaped_lines
             .iter()
@@ -1618,12 +1655,9 @@ pub fn build_background_instances(
                 continue;
             }
 
-            #[allow(clippy::cast_precision_loss)]
-            let x0 = col_begin as f32 * cw;
-            #[allow(clippy::cast_precision_loss)]
-            let x1 = (col_end + 1) as f32 * cw;
-            #[allow(clippy::cast_precision_loss)]
-            let y0 = row as f32 * ch;
+            let x0 = gl_f32(col_begin) * cw;
+            let x1 = gl_f32(col_end + 1) * cw;
+            let y0 = gl_f32(row) * ch;
             let y1 = y0 + ch;
 
             push_quad(&mut deco, x0, y0, x1, y1, selection_bg_f(theme));
@@ -1632,14 +1666,10 @@ pub fn build_background_instances(
 
     // --- Cursor quad (always last in deco so cursor-only patches work) ---
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
-        #[allow(clippy::cast_precision_loss)]
-        let cx = cursor_pos.x as f32 * cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cy = cursor_pos.y as f32 * cell_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cw = cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let ch = cell_height as f32;
+        let cx = gl_f32(cursor_pos.x) * gl_f32_u32(cell_width);
+        let cy = gl_f32(cursor_pos.y) * gl_f32_u32(cell_height);
+        let cw = gl_f32_u32(cell_width);
+        let ch = gl_f32_u32(cell_height);
 
         let color = cursor_f(theme, cursor_color_override);
 
@@ -1671,6 +1701,8 @@ pub fn build_background_instances(
 /// rebuilding the entire background VBO, the caller patches only the cursor
 /// quad region in-place via `upload_verts_sub`.
 #[must_use]
+// All parameters are required for cursor geometry: cell dimensions, screen position, cursor
+// style, and color. No subset is independently reusable.
 #[allow(clippy::too_many_arguments)]
 pub fn build_cursor_verts_only(
     cell_width: u32,
@@ -1685,14 +1717,10 @@ pub fn build_cursor_verts_only(
     let mut verts = Vec::new();
 
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
-        #[allow(clippy::cast_precision_loss)]
-        let cx = cursor_pos.x as f32 * cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cy = cursor_pos.y as f32 * cell_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cw = cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let ch = cell_height as f32;
+        let cx = gl_f32(cursor_pos.x) * gl_f32_u32(cell_width);
+        let cy = gl_f32(cursor_pos.y) * gl_f32_u32(cell_height);
+        let cw = gl_f32_u32(cell_width);
+        let ch = gl_f32_u32(cell_height);
 
         let color = cursor_f(theme, cursor_color_override);
 
@@ -1764,10 +1792,8 @@ pub fn build_foreground_instances(
     let mut instances: Vec<f32> = Vec::new();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let row_f = row_idx as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let cell_h_f = cell_height as f32;
+        let row_f = gl_f32(row_idx);
+        let cell_h_f = gl_f32_u32(cell_height);
         let baseline_y = row_f.mul_add(cell_h_f, ascent);
 
         // Cell vertical extent for this row (used to clip oversized glyphs).
@@ -1849,6 +1875,9 @@ struct ImageBounds {
 }
 
 #[must_use]
+// All parameters are required for image vertex generation: placements, cell dimensions,
+// terminal size, and display area.
+// `implicit_hasher`: `build_image_verts` is an internal function; generic hasher adds no value.
 #[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub fn build_image_verts(
     placements: &[Option<ImagePlacement>],
@@ -1876,14 +1905,10 @@ pub fn build_image_verts(
             cell_idx / term_width
         };
 
-        #[allow(clippy::cast_precision_loss)]
-        let x0 = col as f32 * cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let y0 = row as f32 * cell_height as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let x1 = x0 + cell_width as f32;
-        #[allow(clippy::cast_precision_loss)]
-        let y1 = y0 + cell_height as f32;
+        let x0 = gl_f32(col) * gl_f32_u32(cell_width);
+        let y0 = gl_f32(row) * gl_f32_u32(cell_height);
+        let x1 = x0 + gl_f32_u32(cell_width);
+        let y1 = y0 + gl_f32_u32(cell_height);
 
         let id = p.image_id;
         let entry = bounds.entry(id).or_insert(ImageBounds {
@@ -1937,20 +1962,19 @@ pub fn build_image_verts(
 /// The quad pixel size is determined by the bounding box `b`, which is already
 /// computed in renderer cell pixels.  This means the image is scaled to fill
 /// exactly the declared cell grid — matching the Kitty protocol intent.
-#[allow(clippy::cast_precision_loss)]
 fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * VERTS_PER_QUAD] {
     let (u0, v0, u1, v1) = if let Some(img) = img
         && img.display_cols > 0
         && img.display_rows > 0
     {
-        let dc = img.display_cols as f32;
-        let dr = img.display_rows as f32;
+        let dc = gl_f32(img.display_cols);
+        let dr = gl_f32(img.display_rows);
 
         // Map the visible cell range to the corresponding UV sub-range.
-        let u0 = b.min_col_in_image as f32 / dc;
-        let v0 = b.min_row_in_image as f32 / dr;
-        let u1 = (b.max_col_in_image + 1) as f32 / dc;
-        let v1 = (b.max_row_in_image + 1) as f32 / dr;
+        let u0 = gl_f32(b.min_col_in_image) / dc;
+        let v0 = gl_f32(b.min_row_in_image) / dr;
+        let u1 = gl_f32(b.max_col_in_image + 1) / dc;
+        let v1 = gl_f32(b.max_row_in_image + 1) / dr;
 
         (u0, v0, u1, v1)
     } else {
@@ -1983,8 +2007,7 @@ fn emit_glyph_instance(
 ) {
     // Determine pixel size from the atlas key.
     // We use the font manager's cell height as the size_px for rasterisation.
-    #[allow(clippy::cast_possible_truncation)]
-    let size_px = font_manager.cell_height() as u16;
+    let size_px = u16::value_from(font_manager.cell_height()).unwrap_or(u16::MAX);
 
     let key = GlyphKey {
         glyph_id: glyph.glyph_id,
@@ -2008,7 +2031,6 @@ fn emit_glyph_instance(
     let x0 = glyph.x_px + f32::from(entry.bearing_x);
     let raw_y0 = baseline_y - f32::from(entry.bearing_y);
     let x1 = x0 + f32::from(entry.width);
-    #[allow(clippy::cast_precision_loss)]
     let raw_y1 = raw_y0 + f32::from(entry.height);
 
     // --- Cell-boundary clipping ---

@@ -54,7 +54,7 @@ and plan document maintenance rules.
 | 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Complete | None                 |
 | 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Complete | None                 |
 | 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
-| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Pending  | None                 |
+| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Complete | None                 |
 | 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Complete | None                 |
 | 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
@@ -103,9 +103,9 @@ Task 25 (Code Quality Refactoring) ── independent, can run any time
 
 Task 26 (Bool-to-Enum Mode Refactor) ── independent, can run any time
 
-Task 27 (FIXME/TODO Audit) ── independent, pending (audit complete, 9 subtasks defined)
+Task 27 (FIXME/TODO Audit) ── independent, complete
 
-Task 28 (Code Comment Audit) ── independent, pending (audit complete, 10 subtasks defined)
+Task 28 (Code Comment Audit) ── independent, complete
 
 Task 29 (God File Refactoring) ── depends on all other tasks (should be last)
 
@@ -212,11 +212,11 @@ enums already defined in `freminal-common/src/buffer_states/modes/`. Affects `Te
 `TerminalSnapshot` (6 fields each), and function signatures (`to_payload`, `send_terminal_inputs`).
 Removes 6 clippy bool-suppression attributes. Medium scope (6 subtasks).
 
-**Task 27:** Independent. Stub — requires a full codebase audit of all `FIXME`, `TODO`, `HACK`,
-and `XXX` comments to assess veracity, relevance, and required mitigations. Subtasks will be
-created after the audit determines scope.
+**Task 27:** Independent. Complete — all 9 subtasks done. Full audit of `FIXME`, `TODO`, `HACK`,
+and `XXX` comments: resolved stale items, promoted actionable items to plan subtasks, added
+missing context to retained markers.
 
-**Task 28:** Independent. Pending — audit complete, 10 subtasks defined. Fixes incorrect comments,
+**Task 28:** Independent. Complete — all 10 subtasks done. Fixes incorrect comments,
 removes stale/noise comments, adds missing doc comments to all public APIs across all crates, and
 adds depth/design comments to complex algorithms. See `PLAN_28_COMMENT_AUDIT.md` for the full
 subtask list.
@@ -426,7 +426,7 @@ Update this section as tasks complete:
 | 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit         |
 | 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit      |
 | 29   |            |            |                                                        |
-| 30   |            |            |                                                        |
+| 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit  |
 | 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)        |
 | 32   |            |            |                                                        |
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                |

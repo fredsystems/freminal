@@ -64,6 +64,8 @@ pub enum SelectGraphicRendition {
 }
 
 impl SelectGraphicRendition {
+    // Inherently large: exhaustive numeric-to-SGR mapping (ECMA-48 Table 43). Each arm is a
+    // single numeric code. Splitting would require an intermediate lookup table with no gain.
     #[allow(clippy::too_many_lines)]
     pub fn from_usize(val: usize) -> Self {
         match val {

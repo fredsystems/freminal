@@ -12,6 +12,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use conv2::{ConvUtil, ValueFrom};
+
 use freminal_common::buffer_states::{
     fonts::{BlinkState, FontDecorations, FontWeight},
     format_tag::FormatTag,
@@ -138,12 +140,6 @@ impl ShapingCache {
     /// hashes each line, and only re-shapes lines whose hash changed.
     ///
     /// Returns a `Vec<ShapedLine>` with one entry per visible line.
-    ///
-    /// # Panics
-    ///
-    /// This method cannot panic under normal use.  Internally it accesses a
-    /// cache entry that was verified to be `Some` immediately before the
-    /// access, so the `unwrap` is unreachable in practice.
     pub fn shape_visible(
         &mut self,
         visible_chars: &[TChar],
@@ -170,15 +166,14 @@ impl ShapingCache {
         for (line_idx, line_chars) in lines.iter().enumerate() {
             let line_hash = hash_line(line_chars, visible_tags, global_offset);
 
-            let shaped = if self
+            let shaped = if let Some((_h, shaped_line)) = self
                 .entries
                 .get(line_idx)
                 .and_then(|e| e.as_ref())
-                .is_some_and(|(h, _)| *h == line_hash)
+                .filter(|(h, _)| *h == line_hash)
             {
                 // Cache hit — reuse.
-                #[allow(clippy::unwrap_used)] // We just verified Some above.
-                self.entries[line_idx].as_ref().unwrap().1.clone()
+                shaped_line.clone()
             } else {
                 // Cache miss — segment and shape.
                 let runs = segment_line(
@@ -611,11 +606,9 @@ fn build_shaped_glyphs(
         // Cell-grid x position from the cumulative column offset.
         let col_for_glyph = col_start + cum_cols.get(char_idx).copied().unwrap_or(0);
 
-        #[allow(clippy::cast_precision_loss)]
-        let x_px = col_for_glyph as f32 * cell_width;
+        let x_px = col_for_glyph.approx_as::<f32>().unwrap_or(0.0) * cell_width;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let gid = info.glyph_id as u16;
+        let gid = u16::value_from(info.glyph_id).unwrap_or(0);
 
         glyphs.push(ShapedGlyph {
             glyph_id: gid,
@@ -641,8 +634,7 @@ fn build_tofu_glyphs(
     let mut col = col_start;
 
     for &cw in char_widths {
-        #[allow(clippy::cast_precision_loss)]
-        let x_px = col as f32 * cell_width;
+        let x_px = col.approx_as::<f32>().unwrap_or(0.0) * cell_width;
 
         glyphs.push(ShapedGlyph {
             glyph_id: 0,

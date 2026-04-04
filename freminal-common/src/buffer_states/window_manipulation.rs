@@ -16,17 +16,23 @@ use anyhow::Result;
 ///   enter/exit/toggle full-screen.
 /// - Title-bar set/save/restore stack.
 ///
-/// **Report queries** (implemented) — the GUI measures the viewport geometry
-/// and sends a formatted escape-sequence response directly to the PTY:
-/// - `ReportWindowState`, `ReportWindowPosition*`, `ReportWindowSize*`,
+/// **Report queries** (implemented) — routing is split between two sites:
+/// - **GUI-side** (`handle_window_manipulation`): `ReportWindowState`,
+///   `ReportWindowPosition*`, `ReportWindowSize*`, `ReportIconLabel`,
+///   `ReportTitle` — the GUI measures viewport geometry and sends a
+///   formatted escape-sequence response directly to the PTY.
+/// - **PTY-side** (`TerminalHandler::handle_window_manipulation`):
 ///   `ReportCharacterSizeInPixels`, `ReportTerminalSizeInCharacters`,
-///   `ReportRootWindowSizeInCharacters`, `ReportIconLabel`, `ReportTitle`.
+///   `ReportRootWindowSizeInCharacters` — handled synchronously on the PTY
+///   thread so that responses arrive in the same batch as DA1.
 ///
 /// **OSC 52 clipboard** (fully implemented) — handled in
 /// `handle_window_manipulation` via dedicated match arms:
-/// - `SetClipboard` writes text to the system clipboard.
-/// - `QueryClipboard` reads the clipboard and replies with base64-encoded
-///   content.
+/// - `SetClipboard` copies decoded text to the system clipboard via
+///   `ui.ctx().copy_text()`.
+/// - `QueryClipboard` responds with an empty OSC 52 payload because egui's
+///   public API does not support reading the clipboard.  This is the
+///   safe/secure default adopted by many terminals.
 ///
 /// **Intentional stubs / no-ops:**
 /// - `RaiseWindowToTopOfStackingOrder`, `LowerWindowToBottomOfStackingOrder`,

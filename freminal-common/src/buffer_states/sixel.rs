@@ -14,6 +14,8 @@
 //!
 //! Reference: <https://vt100.net/docs/vt3xx-gp/chapter14.html>
 
+use conv2::ValueFrom;
+
 /// Maximum number of palette entries supported.
 pub const MAX_PALETTE: usize = 256;
 
@@ -174,12 +176,19 @@ fn hls_to_rgb(hue: u32, lightness: u32, saturation: u32) -> (u8, u8, u8) {
 }
 
 /// Clamp and convert an `f64` to `u8`, saturating at 0 and 255.
+// SAFETY: `clamp(0.0, 255.0)` guarantees the value is in [0.0, 255.0] before
+// the cast, so neither truncation nor sign loss can occur.  `conv2` traits are
+// not available in `const fn`, so the `as` cast is the only option here.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 const fn f64_to_u8(val: f64) -> u8 {
     val.clamp(0.0, 255.0) as u8
 }
 
 /// Convert a `u32` to `usize` without truncation risk on 32/64-bit platforms.
+// SAFETY: Freminal targets 32-bit and 64-bit platforms only, where `usize` is
+// always at least 32 bits wide, so a `u32 → usize` cast is lossless.
+// `usize::from(u32)` is not available in stable Rust, and `conv2` traits cannot
+// be used in `const fn`, so the `as` cast is the only option here.
 #[allow(clippy::cast_possible_truncation)]
 const fn usize_from_u32(val: u32) -> usize {
     val as usize
@@ -188,9 +197,9 @@ const fn usize_from_u32(val: u32) -> usize {
 /// Convert RGB percentage values (0..=100) to byte values (0..=255).
 fn pct_to_rgb(rp: u32, gp: u32, bp: u32) -> (u8, u8, u8) {
     let convert = |pct: u32| -> u8 {
-        #[allow(clippy::cast_possible_truncation)]
-        let val = ((pct.min(100) * 255 + 50) / 100) as u8;
-        val
+        // pct.min(100) * 255 + 50 ≤ 100 * 255 + 50 = 25_550, which always fits in u8
+        // after dividing by 100 (≤ 255).
+        u8::value_from((pct.min(100) * 255 + 50) / 100).unwrap_or(0)
     };
     (convert(rp), convert(gp), convert(bp))
 }
@@ -540,11 +549,10 @@ impl SixelDecoder {
             self.width = new_width;
         }
 
-        #[allow(clippy::cast_possible_truncation)]
         Some(SixelImage {
             pixels: self.pixels,
-            width: self.width as u32,
-            height: self.height as u32,
+            width: u32::value_from(self.width).ok()?,
+            height: u32::value_from(self.height).ok()?,
         })
     }
 
@@ -580,11 +588,16 @@ impl SixelDecoder {
             self.width = new_width;
         }
 
-        #[allow(clippy::cast_possible_truncation)]
+        let Some(width) = u32::value_from(self.width).ok() else {
+            return (None, palette);
+        };
+        let Some(height) = u32::value_from(self.height).ok() else {
+            return (None, palette);
+        };
         let image = SixelImage {
             pixels: self.pixels,
-            width: self.width as u32,
-            height: self.height as u32,
+            width,
+            height,
         };
         (Some(image), palette)
     }

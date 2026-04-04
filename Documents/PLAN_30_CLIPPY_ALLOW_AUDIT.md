@@ -1,6 +1,6 @@
 # PLAN_30 — Clippy Allow Audit: Eliminate Lint Suppressions
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -111,7 +111,10 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.1 — Add `conv2` to `freminal-buffer` and Update `agents.md`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Added `conv2.workspace = true` to `freminal-buffer/Cargo.toml`.
+  Added "Numeric Conversions" subsection to `agents.md` under "Code Style". `cargo build --all`
+  passes.
 - **Priority:** 1 — High (unblocks all other subtasks)
 - **Scope:** `freminal-buffer/Cargo.toml`, `agents.md`
 - **Details:**
@@ -149,7 +152,13 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.2 — Replace Casting Suppressions in `freminal-buffer`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all 24 production `#[allow(clippy::cast_*)]` in
+  `terminal_handler.rs`. Cursor movement uses `i32::value_from().unwrap_or(i32::MAX)`.
+  Image dimension `u32->usize` uses `usize::value_from().unwrap_or(0)`. Aspect ratio
+  `usize->u64` and `u64->usize` use `ValueFrom`. Bit-extraction `u32->u8` uses
+  `u8::try_from((x >> N) & 0xFF).unwrap_or(0)`. Two test-only allows in `buffer.rs` kept
+  (acceptable per convention). Zero production casting suppression attributes remain.
 - **Priority:** 2 — High
 - **Scope:** `freminal-buffer/src/terminal_handler.rs` (~22 sites),
   `freminal-buffer/src/buffer.rs` (~2 test sites)
@@ -184,7 +193,13 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.3 — Replace Casting Suppressions in `freminal-common`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced 6 of 8 `#[allow(clippy::cast_*)]` in `freminal-common`.
+  `colors.rs`: `scale_hex_channel` uses `u8::try_from().ok()`. `sixel.rs`: `pct_to_rgb` uses
+  `u8::value_from().unwrap_or(0)`, `finish`/`finish_with_palette` use `u32::value_from().ok()?`.
+  `unicode_placeholder.rs`: `diacritic_to_index` uses `u16::try_from().ok()`. `base64.rs`:
+  `decode` uses `u8::try_from().unwrap_or(0)`. Two allows kept in const fns (`f64_to_u8`,
+  `usize_from_u32`) with justification comments — `conv2` traits not available in `const fn`.
 - **Priority:** 2 — High
 - **Scope:** `freminal-common/src/buffer_states/sixel.rs` (~8 sites),
   `freminal-common/src/colors.rs` (~6 sites)
@@ -213,7 +228,12 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.4 — Replace Casting Suppressions in `freminal-terminal-emulator`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all 8 `#[allow(clippy::cast_*)]` in
+  `freminal-terminal-emulator`. `osc_palette.rs` (4 sites): `u8::try_from().unwrap_or(0)`.
+  `sgr.rs` (1 site): `u8::try_from(lookup & 0xFF).unwrap_or(0)`. `modify_other_keys.rs`
+  (1 site): `u8::try_from(level).unwrap_or(0)`. `interface.rs` (2 sites):
+  `u32::value_from().unwrap_or(0)` for pixel dimensions. Zero casting suppressions remain.
 - **Priority:** 2 — High
 - **Scope:** `freminal-terminal-emulator/src/ansi_components/osc_palette.rs` (~4 sites),
   `freminal-terminal-emulator/src/ansi_components/csi_commands/sgr.rs` (~2 sites),
@@ -243,7 +263,10 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.5 — Replace Casting Suppressions in `freminal` (Non-Renderer)
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all production `#[allow(clippy::cast_*)]` in
+  `terminal.rs`, `mod.rs`, `font_manager.rs`, `atlas.rs`, `shaping.rs`, `view_state.rs`,
+  and `mouse.rs`. Committed as `33c6aaa`.
 - **Priority:** 2 — High
 - **Scope:** `freminal/src/gui/terminal.rs` (~8 sites),
   `freminal/src/gui/mod.rs` (~4 sites),
@@ -278,7 +301,14 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.6 — Replace Casting Suppressions in `renderer.rs`
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Replaced all ~60 production `#[allow(clippy::cast_*)]` in
+  `renderer.rs`. Added helper functions `gl_i32(usize)->i32`, `gl_i32_u32(u32)->i32`,
+  `gl_f32(usize)->f32`, `gl_f32_u32(u32)->f32`, `gl_f32_i32(i32)->f32` using `conv2`
+  traits. All OpenGL stride/offset/count casts use `gl_i32`; coordinate casts use `gl_f32`
+  variants. `emit_glyph_instance` narrowing `u32->u16` uses `u16::value_from().unwrap_or(u16::MAX)`.
+  Two `cast_precision_loss` allows in `#[cfg(test)]` retained (acceptable per convention).
+  Zero production casting suppression attributes remain.
 - **Priority:** 2 — High
 - **Scope:** `freminal/src/gui/renderer.rs` (~60+ sites)
 - **Details:**
@@ -325,7 +355,16 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.7 — Fix Remaining Non-Casting Suppressions
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Fixed the one genuinely fixable production allow: replaced the
+  `#[allow(clippy::unwrap_used)]` in `shaping.rs:182` with an `if let` pattern that avoids the
+  double-lookup entirely. The two `missing_const_for_fn`/`needless_pass_by_ref_mut` allows in
+  `internal.rs` and the `missing_const_for_fn`/`unnecessary_wraps` allow in `config.rs` are
+  legitimate and were annotated with justification comments (cannot be made `const` due to
+  `PathBuf::from()` / row-cache mutation; `&mut self` genuinely required). All 29
+  `too_many_lines` and 13 `too_many_arguments` sites were annotated with justification comments
+  explaining why splitting is not warranted. `significant_drop_tightening`, `implicit_hasher`,
+  and `module_name_repetitions` sites were also annotated.
 - **Priority:** 3 — Medium
 - **Scope:** Various files across all crates
 - **Details:**
@@ -380,7 +419,19 @@ Test-code allows (`unwrap_used`, `expect_used`) are acceptable where they make f
 
 ### 30.8 — Final Audit and Verification
 
-- **Status:** Pending
+- **Status:** Complete
+- **Completed:** 2026-04-03. Removed one stale leftover allow (`cast_possible_truncation` +
+  `cast_sign_loss` on `font_manager.rs:1104` — was superseded by 30.5's `approx_as` migration
+  but not removed). Final suppression count: **73 lines** across all production crates.
+  Breakdown: 18 casting (all in `#[cfg(test)]` or `const fn` with justification comments), 29
+  `too_many_lines`/`too_many_arguments` (all annotated with justification), 5
+  `module_name_repetitions` (legitimate re-exports), 2 `struct_excessive_bools` (pending Task 26),
+  2 `missing_const_for_fn`/`needless_pass_by_ref_mut` (justified, annotated), 1
+  `missing_const_for_fn`/`unnecessary_wraps` (justified, annotated), 1
+  `significant_drop_tightening` (false positive, annotated), 1 `implicit_hasher` (internal
+  function, annotated), and ~14 `unwrap_used`/`expect_used` in test modules. Zero unjustified
+  production casting suppressions remain. `cargo test --all`, `cargo clippy --all-targets
+--all-features -- -D warnings`, and `cargo-machete` all pass clean.
 - **Priority:** 3 — Medium
 - **Scope:** All crates
 - **Details:**

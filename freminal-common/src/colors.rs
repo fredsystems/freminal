@@ -327,6 +327,5 @@ pub fn scale_hex_channel(s: &str) -> Option<u8> {
         4 => v >> 8,
         _ => return None,
     };
-    #[allow(clippy::cast_possible_truncation)]
-    Some(scaled as u8)
+    u8::try_from(scaled).ok()
 }

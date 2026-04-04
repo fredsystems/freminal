@@ -116,6 +116,8 @@ impl StandardParser {
     ///
     /// # Errors
     /// Will return an error if the parser encounters an invalid state
+    // Inherently large: standard (non-CSI) escape sequence dispatch. Each arm handles a
+    // distinct two-character escape code. Splitting would break a coherent dispatch table.
     #[allow(clippy::too_many_lines)]
     pub fn standard_parser_inner(
         &mut self,

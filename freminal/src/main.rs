@@ -67,6 +67,8 @@ use freminal_common::{args::Args, config, config::load_config, themes};
 
 use clap::Parser;
 
+// Inherently large: application entry point that wires all subsystems (PTY reader, PTY
+// consumer thread, GUI). Each section is necessary; splitting would produce artificial helpers.
 #[allow(clippy::too_many_lines)]
 fn main() {
     // use env for filtering
