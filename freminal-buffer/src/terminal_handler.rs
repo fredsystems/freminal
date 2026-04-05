@@ -31,6 +31,7 @@ use freminal_common::{
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
         modes::irm::Irm,
+        modes::kitty_keyboard::KittyKeyboardFlags,
         modes::lnm::Lnm,
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::private_color_registers::PrivateColorRegisters,
@@ -293,6 +294,18 @@ pub struct TerminalHandler {
     /// `0x90` instead of `ESC P`, OSC uses `0x9D` instead of `ESC ]`, and ST
     /// uses `0x9C` instead of `ESC \`.  Default is `SevenBit`.
     s8c1t_mode: S8c1t,
+    /// Kitty keyboard protocol mode stack.
+    ///
+    /// Each entry is a `u32` bitmask.  Programs push on entry via `CSI > flags u`
+    /// and pop on exit via `CSI < number u`.  The active flags are
+    /// `kitty_keyboard_stack.last().copied().unwrap_or(0)`.
+    /// Bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`] (256) entries.
+    kitty_keyboard_stack: Vec<u32>,
+    /// Saved main-screen KKP stack when alternate screen is active.
+    ///
+    /// The spec requires main and alternate screens to maintain independent
+    /// keyboard mode stacks.
+    saved_kitty_keyboard_stack: Option<Vec<u32>>,
 }
 
 impl TerminalHandler {
@@ -339,6 +352,8 @@ impl TerminalHandler {
             insert_mode: Irm::Replace,
             sixel_shared_palette: None,
             s8c1t_mode: S8c1t::SevenBit,
+            kitty_keyboard_stack: Vec::new(),
+            saved_kitty_keyboard_stack: None,
         }
     }
 
@@ -452,6 +467,8 @@ impl TerminalHandler {
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
         self.application_escape_key = ApplicationEscapeKey::Reset;
+        self.kitty_keyboard_stack.clear();
+        self.saved_kitty_keyboard_stack = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -951,6 +968,9 @@ impl TerminalHandler {
         // scroll_offset is owned by ViewState on the GUI side; the PTY thread
         // always passes 0 when entering the alternate screen.
         self.buffer.enter_alternate(0);
+        // Save and reset the KKP stack — the spec requires main and alternate
+        // screens to maintain independent keyboard mode stacks.
+        self.saved_kitty_keyboard_stack = Some(std::mem::take(&mut self.kitty_keyboard_stack));
     }
 
     /// Handle leaving alternate screen
@@ -958,6 +978,10 @@ impl TerminalHandler {
         // Returns the saved scroll_offset from the primary screen; discarded here
         // because scroll_offset is owned by ViewState on the GUI side.
         let _restored_offset = self.buffer.leave_alternate();
+        // Restore the main-screen KKP stack.
+        if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
+            self.kitty_keyboard_stack = saved;
+        }
     }
 
     /// Handle DECAWM — enable or disable soft-wrapping.
@@ -1064,6 +1088,14 @@ impl TerminalHandler {
     #[must_use]
     pub const fn application_escape_key(&self) -> ApplicationEscapeKey {
         self.application_escape_key
+    }
+
+    /// Returns the currently active Kitty keyboard protocol flags.
+    ///
+    /// Returns `0` when the stack is empty (protocol not active).
+    #[must_use]
+    pub fn kitty_keyboard_flags(&self) -> u32 {
+        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
     }
 
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
@@ -1974,6 +2006,15 @@ impl TerminalHandler {
                 self.write_dcs_response(&format!("0+r{hex_name}"));
                 continue;
             };
+
+            // "u" — Kitty keyboard protocol flags.  This is instance state
+            // (not a static value), so handle it before the static lookup.
+            if cap_name == "u" {
+                let flags = self.kitty_keyboard_flags();
+                let hex_value = Self::hex_encode(&flags.to_string());
+                self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
+                continue;
+            }
 
             if let Some(value) = Self::lookup_termcap(&cap_name) {
                 let hex_value = Self::hex_encode(value);
@@ -4068,8 +4109,35 @@ impl TerminalHandler {
                 self.handle_secondary_device_attributes();
             }
             TerminalOutput::KittyKeyboardQuery => {
-                // Respond with CSI ? 0 u (Kitty keyboard protocol not active).
-                self.write_to_pty("\x1b[?0u");
+                let flags = self.kitty_keyboard_flags();
+                self.write_to_pty(&format!("\x1b[?{flags}u"));
+            }
+            TerminalOutput::KittyKeyboardPush(flags) => {
+                if self.kitty_keyboard_stack.len() >= KittyKeyboardFlags::MAX_STACK_DEPTH {
+                    // Evict the oldest entry (bottom of the stack) per the spec.
+                    self.kitty_keyboard_stack.remove(0);
+                }
+                self.kitty_keyboard_stack.push(*flags);
+            }
+            TerminalOutput::KittyKeyboardPop(n) => {
+                let n = (*n as usize).min(self.kitty_keyboard_stack.len());
+                let new_len = self.kitty_keyboard_stack.len() - n;
+                self.kitty_keyboard_stack.truncate(new_len);
+            }
+            TerminalOutput::KittyKeyboardSet { flags, mode } => {
+                let current = self.kitty_keyboard_flags();
+                let new_flags = match mode {
+                    1 => *flags,
+                    2 => current | *flags,
+                    3 => current & !*flags,
+                    _ => current,
+                };
+                if self.kitty_keyboard_stack.is_empty() {
+                    self.kitty_keyboard_stack.push(new_flags);
+                } else {
+                    let top = self.kitty_keyboard_stack.len() - 1;
+                    self.kitty_keyboard_stack[top] = new_flags;
+                }
             }
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
