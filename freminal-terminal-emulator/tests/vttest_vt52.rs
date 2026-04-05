@@ -906,3 +906,54 @@ fn vt52_comprehensive_box_drawing() {
         screen[11]
     );
 }
+
+// ─── VT52 to ANSI Transition: DECRQSS ────────────────────────────────────────
+
+/// Reproduce the vttest post-VT52 DECSCL test (`vt52.c:218-240`).
+///
+/// After the box test, vttest exits VT52 mode (`ESC <`) and immediately sends
+/// a DECRQSS query for DECSCL (`ESC P $ q " p ESC \`).  The terminal must
+/// parse the DCS as an ANSI Device Control String, not as literal text.
+///
+/// The expected response is `DCS 0 $ r ST` (request not recognized, since
+/// DECSCL is not implemented).  The key assertion here is that the DECRQSS
+/// payload (`$q"p`) does NOT appear in the visible screen text.
+#[test]
+fn vt52_exit_followed_by_decrqss_does_not_leak_to_display() {
+    let mut h = VtTestHelper::new_default();
+
+    // Enter VT52 mode.
+    h.feed(ENTER_VT52);
+
+    // Write some text so we can verify the screen is not corrupted.
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+    h.feed(b"VT52 test");
+
+    // Exit VT52 and immediately send DECRQSS for DECSCL — same buffer.
+    // This is what vttest does in vt52.c lines 218-234:
+    //   set_level(0)  → CSI ?2 l  (already in VT52)
+    //   esc("<")      → ESC <     (exit VT52)
+    //   decrqss("\"p") → ESC P $ q " p ESC \
+    h.feed(b"\x1b<\x1bP$q\"p\x1b\\");
+
+    // Verify: the DECRQSS payload must NOT appear on screen.
+    let screen = h.screen_text();
+    for (i, row) in screen.iter().enumerate() {
+        assert!(
+            !row.contains("$q"),
+            "Row {i} contains leaked DCS payload: {row:?}"
+        );
+        assert!(
+            !row.contains("\"p"),
+            "Row {i} contains leaked DCS payload: {row:?}"
+        );
+    }
+
+    // Row 0 should still show the VT52 test text.
+    assert!(
+        screen[0].starts_with("VT52 test"),
+        "Row 0 should show 'VT52 test': {:?}",
+        screen[0]
+    );
+}

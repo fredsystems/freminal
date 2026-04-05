@@ -592,7 +592,17 @@ impl FreminalAnsiParser {
                 self.inner = ParserInner::Empty;
             }
             // ESC < — Exit VT52 mode, return to ANSI mode
+            //
+            // The parser's `vt52_mode` flag must be flipped immediately — not
+            // deferred to `sync_mode_flags()` — because any bytes remaining in
+            // the current `push()` buffer must be routed through the ANSI
+            // parser, not the VT52 parser.  vttest issues `ESC <` followed by
+            // `ESC P … ESC \` (DECRQSS) in a single PTY read; without the
+            // immediate flip the `ESC P` would be routed to `handle_vt52_escape`
+            // which does not recognise `P` and the DCS payload would leak to the
+            // display as literal text.
             b'<' => {
+                self.vt52_mode = Decanm::Ansi;
                 output.push(TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)));
                 self.inner = ParserInner::Empty;
             }
@@ -1324,16 +1334,18 @@ mod tests {
             }]
         );
 
-        // ESC < should emit Mode::Decanm(Decanm::Ansi)
+        // ESC < should emit Mode::Decanm(Decanm::Ansi) and immediately
+        // flip the parser's vt52_mode flag (no external sync needed).
         let result = p.push(b"\x1b<");
         assert_eq!(
             result,
             vec![TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi))]
         );
-
-        // After sync_mode processes it, parser.vt52_mode would be set to false.
-        // Simulate that:
-        p.vt52_mode = Decanm::Ansi;
+        assert_eq!(
+            p.vt52_mode,
+            Decanm::Ansi,
+            "ESC < must immediately flip vt52_mode"
+        );
 
         // Now ANSI escape sequences should work again
         let result = p.push(b"\x1b[1A"); // CSI 1A = cursor up 1
@@ -1367,6 +1379,43 @@ mod tests {
                 TerminalOutput::Tab,
             ]
         );
+    }
+
+    /// Regression test: `ESC <` in VT52 mode must immediately flip the parser
+    /// to ANSI mode so that bytes following in the same `push()` call are
+    /// routed through the ANSI parser.
+    ///
+    /// Reproduces the vttest Menu 7 DECRQSS bug: vttest sends `ESC <` (exit
+    /// VT52) followed by `ESC P $ q " p ESC \` (DECRQSS for DECSCL) in a
+    /// single buffer.  Without the immediate flip the `ESC P` was routed to
+    /// `handle_vt52_escape` which doesn't recognise `P`, and the DCS payload
+    /// leaked to the display as literal text.
+    #[test]
+    fn vt52_exit_followed_by_dcs_in_same_buffer() {
+        let mut p = vt52_parser();
+
+        // ESC < (exit VT52) + ESC P $ q " p ESC \ (DECRQSS for DECSCL)
+        let result = p.push(b"\x1b<\x1bP$q\"p\x1b\\");
+
+        // First output: Mode change to ANSI
+        assert_eq!(
+            result[0],
+            TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+            "First output should be ANSI mode switch"
+        );
+
+        // Second output: the DCS should be parsed as DeviceControlString,
+        // NOT as Data (literal text).
+        let has_dcs = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::DeviceControlString(_)));
+        assert!(
+            has_dcs,
+            "DCS after ESC < must be parsed as DeviceControlString, not literal text: {result:?}"
+        );
+
+        // The parser should now be in ANSI mode
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
     }
 
     #[test]
