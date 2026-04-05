@@ -156,6 +156,7 @@
                 pkgs.typos
                 pkgs.vttest
                 pkgs.markdownlint-cli2
+                pkgs.cargo-flamegraph
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.cargo-llvm-cov
