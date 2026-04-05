@@ -1719,6 +1719,18 @@ impl TerminalHandler {
                 };
                 self.write_to_pty(&format!("\x1bP1$r{style_num} q\x1b\\"));
             }
+            // "p = DECSCL (Set Conformance Level) query.
+            //
+            // Response format: DCS 1 $ r Ps1 ; Ps2 " p ST
+            //   Ps1 = 6x where x is the conformance level (1–5)
+            //   Ps2 = C1 control mode (0 or 2 = 8-bit, 1 = 7-bit)
+            //
+            // Freminal advertises VT525 (DA1 first param = 65) and uses 7-bit
+            // controls, so we report level 5 with 7-bit C1 transmission.
+            // We do not track DECSCL changes, so this is always the default.
+            b"\"p" => {
+                self.write_to_pty("\x1bP1$r65;1\"p\x1b\\");
+            }
             _ => {
                 // Invalid / unrecognized query → DCS 0 $ r ST
                 self.write_to_pty("\x1bP0$r\x1b\\");
@@ -5599,6 +5611,22 @@ mod tests {
 
         let response = recv_pty_response(&rx);
         assert_eq!(response, "\x1bP1$r3 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscl_conformance_level() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "p = DECSCL (Set Conformance Level) query
+        let dcs = build_dcs_payload(b"$q\"p");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Freminal claims VT525 (level 5) with 7-bit C1 controls (Ps2=1)
+        // Response format: DCS 1 $ r 65 ; 1 " p ST
+        assert_eq!(response, "\x1bP1$r65;1\"p\x1b\\");
     }
 
     #[test]

@@ -957,3 +957,265 @@ fn vt52_exit_followed_by_decrqss_does_not_leak_to_display() {
         screen[0]
     );
 }
+
+// ─── Box Drawing Investigation ──────────────────────────────────────────────
+
+/// Replicate the exact vttest VT52 box-drawing sequence for the left side
+/// and top edge (vt52.c lines 86-107) and verify the resulting screen content.
+///
+/// Expected: 61 `*`s on screen row 0 (columns 9-69), 22 `*`s on column 9
+/// (rows 1-22), plus a `*` at (23, 9) from the left-side loop's first iteration
+/// that gets pushed down by the final RI scroll.
+#[test]
+fn vt52_box_left_side_and_top_edge() {
+    let mut h = VtTestHelper::new_default();
+
+    // Enter VT52 mode and clear screen.
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+
+    // === Left side of box (vt52.c lines 88-93) ===
+    // vt52cup(max_lines - 1, 10) = vt52cup(23, 10) — 1-indexed
+    h.feed(&vt52cup(23, 10));
+
+    // for (i = max_lines - 1; i >= 2; i--): print '*', BS, vt52ri()
+    // 22 iterations: i = 23 down to 2
+    for _i in (2..=23).rev() {
+        h.feed(b"*"); // print '*'
+        h.feed(b"\x08"); // BS
+        h.feed(VT52_RI); // ESC I — reverse index
+    }
+
+    // After the left-side loop, check cursor position.
+    // After 22 iterations of RI from screen row 22, cursor should be at row 0.
+    // The last RI (i=2) triggers scroll_region_down because cursor was at
+    // scroll_region_top. Cursor remains at screen row 0.
+    let after_left_cursor = h.cursor_pos();
+    eprintln!(
+        "After left-side loop: cursor at ({}, {})",
+        after_left_cursor.x, after_left_cursor.y
+    );
+
+    // Print the screen state after left-side for debugging.
+    let screen_after_left = h.screen_text();
+    eprintln!("Screen after left-side loop:");
+    for (i, row) in screen_after_left.iter().enumerate() {
+        if !row.is_empty() {
+            eprintln!("  row {i:2}: {row:?}");
+        }
+    }
+
+    // === Top edge of box (vt52.c lines 99-107) ===
+    // vt52cup(1, 70) — 1-indexed
+    h.feed(&vt52cup(1, 70));
+
+    let after_cup_cursor = h.cursor_pos();
+    eprintln!(
+        "After vt52cup(1,70): cursor at ({}, {})",
+        after_cup_cursor.x, after_cup_cursor.y
+    );
+
+    // for (i = 70; i >= 10; i--): 61 iterations
+    for i in (10..=70).rev() {
+        h.feed(b"*"); // print '*'
+        h.feed(VT52_CUB); // ESC D — cursor left
+        if i % 2 != 0 {
+            // odd i: vt52cup(max_lines + 3, i - 1) = vt52cup(27, i-1)
+            // row 27 > 24 → out-of-bounds → only column updated
+            h.feed(&vt52cup(27, (i - 1) as u8));
+        } else {
+            // even i: vt52cub1() — cursor left again
+            h.feed(VT52_CUB);
+        }
+    }
+
+    // Check screen state after top edge.
+    let screen = h.screen_text();
+    eprintln!("\nScreen after top-edge loop:");
+    for (i, row) in screen.iter().enumerate() {
+        if !row.is_empty() {
+            eprintln!("  row {i:2}: {row:?}");
+        }
+    }
+
+    // Row 0 should have 61 stars from column 9 to column 69.
+    let row0 = &screen[0];
+    let star_count_row0 = row0.chars().filter(|&c| c == '*').count();
+    eprintln!(
+        "\nRow 0 star count: {star_count_row0}, row content: {:?}",
+        row0
+    );
+
+    // The expected row 0 is: 9 spaces + 61 '*'s
+    let expected_top = format!("{}{}", " ".repeat(9), "*".repeat(61));
+    assert_eq!(
+        *row0, expected_top,
+        "Row 0 should have 61 stars from col 9 to col 69.\n\
+         Expected: {expected_top:?}\n\
+         Actual:   {row0:?}\n\
+         Star count: {star_count_row0}"
+    );
+}
+
+/// Full vttest VT52 box-drawing test (vt52.c lines 50-148).
+///
+/// This replicates the COMPLETE vttest VT52 box sequence including the
+/// "FooBar" fill, back-scroll test, `**Foobar` margin text, and the
+/// complete 4-sided box drawing + `!` columns + margin cleanup.
+/// This ensures no setup-dependent state corruption causes incorrect rendering.
+#[test]
+fn vt52_box_full_sequence() {
+    let mut h = VtTestHelper::new_default();
+    let max_lines: u8 = 24;
+    let box_r: u8 = 71;
+
+    // set_level(0) → CSI ? 2 l
+    h.feed(ENTER_VT52);
+
+    // vt52home + vt52ed (clear)
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+    h.feed(VT52_HOME);
+
+    // Fill screen with "FooBar " * 10 + "Bletch\r\n" on each of 24 lines
+    for _i in 0..max_lines {
+        for _j in 0..10 {
+            h.feed(b"FooBar ");
+        }
+        // println() outputs the string + CR LF
+        h.feed(b"Bletch\r\n");
+    }
+
+    // vt52home + vt52ed (clear all the FooBar text)
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+
+    // vt52cup(7, 47) + "nothing more." + 10x "THIS SHOULD GO AWAY! "
+    h.feed(&vt52cup(7, 47));
+    h.feed(b"nothing more.");
+    for _i in 0..10 {
+        h.feed(b"THIS SHOULD GO AWAY! ");
+    }
+
+    // 5x: vt52cup(1,1), "Back scroll (this should go away)", vt52ri()
+    for _i in 0..5 {
+        h.feed(&vt52cup(1, 1));
+        h.feed(b"Back scroll (this should go away)");
+        h.feed(VT52_RI);
+    }
+
+    // vt52cup(12, 60) + vt52ed (erase from cursor to end of screen)
+    h.feed(&vt52cup(12, 60));
+    h.feed(VT52_ED);
+
+    // Erase lines 2-6 at column 1
+    for i in 2..=6 {
+        h.feed(&vt52cup(i, 1));
+        h.feed(VT52_EL);
+    }
+
+    // Draw "**Foobar" at column 70 on rows 2 through max_lines-1
+    for i in 2..=max_lines - 1 {
+        h.feed(&vt52cup(i, 70));
+        h.feed(b"**Foobar");
+    }
+
+    // === Left side of box (vt52.c lines 88-93) ===
+    h.feed(&vt52cup(max_lines - 1, 10));
+    for _i in (2..=usize::from(max_lines) - 1).rev() {
+        h.feed(b"*");
+        h.feed(b"\x08");
+        h.feed(VT52_RI);
+    }
+
+    // === Top edge of box (vt52.c lines 99-107) ===
+    h.feed(&vt52cup(1, 70));
+    for i in (10..=70_u8).rev() {
+        h.feed(b"*");
+        h.feed(VT52_CUB);
+        if i % 2 != 0 {
+            h.feed(&vt52cup(max_lines + 3, i - 1));
+        } else {
+            h.feed(VT52_CUB);
+        }
+    }
+
+    // === Bottom edge of box (vt52.c lines 111-116) ===
+    h.feed(&vt52cup(max_lines, 10));
+    for _i in 10..=70 {
+        h.feed(b"*");
+        h.feed(b"\x08");
+        h.feed(VT52_CUF);
+    }
+
+    // === Left ! column (vt52.c lines 120-125) ===
+    h.feed(&vt52cup(2, 11));
+    for _i in 2..=usize::from(max_lines) - 1 {
+        h.feed(b"!");
+        h.feed(b"\x08");
+        h.feed(VT52_CUD);
+    }
+
+    // === Right ! column (vt52.c lines 129-134) ===
+    h.feed(&vt52cup(max_lines - 1, 69));
+    for _i in (2..=usize::from(max_lines) - 1).rev() {
+        h.feed(b"!");
+        h.feed(b"\x08");
+        h.feed(VT52_CUU);
+    }
+
+    // === Erase **Foobar from right side (vt52.c lines 138-148) ===
+    // After the right ! column loop, cursor is near (1, 69).
+    // vt52cuf1 twice, then erase each row's right margin.
+    h.feed(VT52_CUF);
+    h.feed(VT52_CUF);
+    let min_cols: u8 = 80;
+    for i in 2..=max_lines - 1 {
+        let adj = i % 3;
+        if adj != 0 {
+            h.feed(&vt52cup(i, min_cols + 1 + adj));
+        } else {
+            h.feed(&vt52cup(i, box_r));
+        }
+        h.feed(VT52_EL);
+    }
+
+    // === Verify the box ===
+    let screen = h.screen_text();
+
+    eprintln!("\nFull box screen:");
+    for (i, row) in screen.iter().enumerate() {
+        eprintln!("  row {i:2}: {row:?}");
+    }
+
+    // Row 0 (top edge): 9 spaces + 61 '*'s
+    let expected_top = format!("{}{}", " ".repeat(9), "*".repeat(61));
+    assert_eq!(
+        screen[0], expected_top,
+        "Row 0 (top edge) should have 61 stars.\n  Expected: {expected_top:?}\n  Actual:   {:?}",
+        screen[0]
+    );
+
+    // Row 23 (bottom edge): 9 spaces + 61 '*'s
+    assert_eq!(
+        screen[23], expected_top,
+        "Row 23 (bottom edge) should have 61 stars.\n  Expected: {expected_top:?}\n  Actual:   {:?}",
+        screen[23]
+    );
+
+    // Rows 1-22 (left edge `*`, `!` at col 10, `!` at col 68, `*` at col 69)
+    for (row_idx, row) in screen.iter().enumerate().take(23).skip(1) {
+        // col 9 should be '*'
+        let chars: Vec<char> = row.chars().collect();
+        assert!(
+            chars.len() > 9 && chars[9] == '*',
+            "Row {row_idx} col 9 should be '*': {row:?}"
+        );
+        // col 10 should be '!'
+        assert!(
+            chars.len() > 10 && chars[10] == '!',
+            "Row {row_idx} col 10 should be '!': {row:?}"
+        );
+    }
+}
