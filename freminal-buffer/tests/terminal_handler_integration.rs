@@ -1234,6 +1234,46 @@ fn da1_sends_response() {
 }
 
 #[test]
+fn xtversion_response_starts_with_xterm_prefix() {
+    // XTVERSION (ESC [ > 0 q) must respond with DCS >|XTerm(Freminal <version>) ST.
+    //
+    // The `XTerm(` prefix is required so that tmux's XDA handler recognises
+    // Freminal and enables the `extkeys` feature set (which causes tmux to
+    // send `modifyOtherKeys` ESC[>4;2m to Freminal on attach).
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::RequestDeviceNameAndVersion]);
+
+    let msg = rx
+        .try_recv()
+        .expect("RequestDeviceNameAndVersion must send a message to the channel");
+    let bytes = match msg {
+        PtyWrite::Write(b) => b,
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    };
+    let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
+
+    // Response must be DCS >|XTerm(...) ST in 7-bit form.
+    assert!(
+        response.starts_with("\x1bP>|XTerm("),
+        "XTVERSION response must start with DCS >|XTerm( — got: {response:?}"
+    );
+    assert!(
+        response.ends_with("\x1b\\"),
+        "XTVERSION response must end with ST (ESC \\) — got: {response:?}"
+    );
+    assert!(
+        response.contains("Freminal"),
+        "XTVERSION response must contain the terminal name — got: {response:?}"
+    );
+}
+
+#[test]
 fn window_manipulation_queued() {
     // WindowManipulation commands must be stored and returned by take_window_commands().
     use freminal_common::buffer_states::{

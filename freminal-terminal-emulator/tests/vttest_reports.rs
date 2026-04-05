@@ -472,6 +472,67 @@ fn da3_response_is_valid_dcs_unit_id() {
     );
 }
 
+// ─── XTVERSION — Extended Device Attributes ─────────────────────────────────
+//
+// tmux's `tty_keys_extended_device_attributes()` (tty-keys.c) matches the DCS
+// payload against five known prefixes: "iTerm2 ", "tmux ", "XTerm(", "mintty ",
+// "foot(".  Only terminals whose response matches are granted the `extkeys`
+// feature set, which causes tmux to send `modifyOtherKeys` (\033[>4;2m) to the
+// outer terminal on attach.  Freminal must prefix its response with `XTerm(` so
+// that tmux enables `extkeys` and forwards extended key sequences.
+
+#[test]
+fn xtversion_response_has_xterm_prefix() {
+    // CSI > 0 q  (XTVERSION query)
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[>0q");
+
+    let response = h.drain_pty_writes_concatenated();
+    // DCS >|XTerm(Freminal <version>) ST  in 7-bit form
+    assert!(
+        response.starts_with(b"\x1bP>|XTerm("),
+        "XTVERSION response must start with DCS >|XTerm( so tmux enables extkeys — got: {response:?}"
+    );
+    assert!(
+        response.ends_with(b"\x1b\\"),
+        "XTVERSION response must end with ST (ESC \\) — got: {response:?}"
+    );
+    assert!(
+        response
+            .windows(b"Freminal".len())
+            .any(|w| w == b"Freminal"),
+        "XTVERSION response must contain 'Freminal' — got: {response:?}"
+    );
+    assert!(
+        response.ends_with(b")\x1b\\"),
+        "XTVERSION response must close the XTerm(...) parenthesis before ST — got: {response:?}"
+    );
+}
+
+#[test]
+fn xtversion_tmux_extkeys_prefix_invariant() {
+    // Verify the structural invariant that tmux needs:
+    //   payload (between DCS introducer and ST) starts with ">|XTerm("
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[>0q");
+
+    let response = h.drain_pty_writes_concatenated();
+    // Strip 7-bit DCS introducer \x1bP (2 bytes) and ST \x1b\\ (2 bytes)
+    assert!(
+        response.len() > 4,
+        "XTVERSION response must be longer than 4 bytes"
+    );
+    let inner = &response[2..response.len() - 2];
+    assert!(
+        inner.starts_with(b">|XTerm("),
+        "DCS inner payload must start with '>|XTerm(' for tmux extkeys detection — got: {inner:?}"
+    );
+}
+
 // ─── DECREQTPARM — Request Terminal Parameters ───────────────────────────────
 //
 // From vttest reports.c tst_DECREQTPARM():

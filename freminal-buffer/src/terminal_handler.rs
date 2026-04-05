@@ -1181,6 +1181,7 @@ impl TerminalHandler {
     /// Handle DA2 — Secondary Device Attributes.
     /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
     pub fn handle_secondary_device_attributes(&mut self) {
+        tracing::info!("DA2 query received");
         self.write_csi_response(">65;0;0c");
     }
 
@@ -1213,10 +1214,21 @@ impl TerminalHandler {
     }
 
     /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
-    /// Responds with `DCS > | Freminal <version> ST`.
+    ///
+    /// Responds with `DCS >|XTerm(Freminal <version>) ST` (7-bit) or the 8-bit
+    /// equivalent when S8C1T is active.
+    ///
+    /// The `XTerm(` prefix is intentional: tmux's XDA handler
+    /// (`tty_keys_extended_device_attributes` in `tty-keys.c`) matches the
+    /// payload against a small set of known prefixes to decide which terminal
+    /// feature sets to enable.  Without a recognised prefix tmux skips
+    /// `extkeys`, which means `modifyOtherKeys` (`\033[>4;2m`) is never sent
+    /// to Freminal and extended key sequences are not forwarded to programs
+    /// running inside tmux.  Prefixing with `XTerm(` causes tmux to apply the
+    /// `XTerm` feature set (which includes `extkeys`), fixing the issue.
     pub fn handle_device_name_and_version(&mut self) {
         let version = env!("CARGO_PKG_VERSION");
-        self.write_dcs_response(&format!(">|Freminal {version}"));
+        self.write_dcs_response(&format!(">|XTerm(Freminal {version})"));
     }
 
     /// Handle a DCS (Device Control String) sequence.
@@ -1232,6 +1244,7 @@ impl TerminalHandler {
     ///
     /// Unknown or unsupported DCS sub-commands are logged at warn level.
     pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
+        tracing::info!("DCS received: {:?}", String::from_utf8_lossy(dcs));
         // Strip leading 'P' and trailing ESC '\' to get inner content.
         let inner = Self::strip_dcs_envelope(dcs);
 
@@ -1993,6 +2006,10 @@ impl TerminalHandler {
     /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
     ///           `DCS 0 + r <hex-name> ST` for unknown ones.
     fn handle_xtgettcap(&self, hex_payload: &[u8]) {
+        tracing::info!(
+            "XTGETTCAP query: {:?}",
+            String::from_utf8_lossy(hex_payload)
+        );
         let payload_str = String::from_utf8_lossy(hex_payload);
 
         // Split on ';' to support multiple capability queries in a single DCS.
@@ -2865,6 +2882,7 @@ impl TerminalHandler {
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
+        tracing::info!("DA1 query received");
         if self.vt52_mode == Decanm::Vt52 {
             // VT52 identify response: ESC / Z — not affected by S8C1T
             self.write_to_pty("\x1b/Z");
@@ -4110,6 +4128,7 @@ impl TerminalHandler {
             }
             TerminalOutput::KittyKeyboardQuery => {
                 let flags = self.kitty_keyboard_flags();
+                tracing::info!("KittyKeyboardQuery received, flags={flags}");
                 self.write_to_pty(&format!("\x1b[?{flags}u"));
             }
             TerminalOutput::KittyKeyboardPush(flags) => {
