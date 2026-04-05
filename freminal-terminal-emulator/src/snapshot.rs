@@ -221,6 +221,13 @@ pub struct TerminalSnapshot {
     /// consulting the emulator.
     pub line_feed_mode: Lnm,
 
+    /// Currently active Kitty keyboard protocol flags (stack top, 0 if empty).
+    ///
+    /// When non-zero, the GUI must encode key events using KKP format instead
+    /// of the legacy xterm encoding.  The specific flags determine which
+    /// extensions are active (disambiguation, event types, etc.).
+    pub kitty_keyboard_flags: u32,
+
     /// Alternate scroll mode (`?1007`).
     ///
     /// When enabled and the alternate screen is active, mouse scroll-wheel
@@ -318,6 +325,7 @@ impl TerminalSnapshot {
             application_escape_key: ApplicationEscapeKey::Reset,
             backarrow_sends_bs: Decbkm::BackarrowSendsBs,
             line_feed_mode: Lnm::LineFeed,
+            kitty_keyboard_flags: 0,
             alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
             ftcs_state: FtcsState::default(),
@@ -353,5 +361,10 @@ mod tests {
     #[test]
     fn empty_has_blinking_text_is_false() {
         assert!(!TerminalSnapshot::empty().has_blinking_text);
+    }
+
+    #[test]
+    fn empty_kitty_keyboard_flags_is_zero() {
+        assert_eq!(TerminalSnapshot::empty().kitty_keyboard_flags, 0);
     }
 }

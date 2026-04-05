@@ -68,6 +68,7 @@ struct SnapshotModeFields {
     backarrow_sends_bs: Decbkm,
     alternate_scroll: AlternateScroll,
     line_feed_mode: Lnm,
+    kitty_keyboard_flags: u32,
 }
 
 #[must_use]
@@ -575,6 +576,7 @@ impl TerminalEmulator {
             backarrow_sends_bs: mode_fields.backarrow_sends_bs,
             alternate_scroll: mode_fields.alternate_scroll,
             line_feed_mode: mode_fields.line_feed_mode,
+            kitty_keyboard_flags: mode_fields.kitty_keyboard_flags,
             cwd,
             ftcs_state,
             last_exit_code,
@@ -635,6 +637,7 @@ impl TerminalEmulator {
             backarrow_sends_bs: self.internal.modes.backarrow_key_mode,
             alternate_scroll: self.internal.modes.alternate_scroll,
             line_feed_mode: self.internal.modes.line_feed_mode,
+            kitty_keyboard_flags: self.internal.handler.kitty_keyboard_flags(),
         }
     }
 
