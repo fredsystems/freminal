@@ -696,3 +696,345 @@ fn sgr_attributes_survive_scroll() {
         "bold attribute must survive a scroll"
     );
 }
+
+// ─── Phase B: Byte-exact tests derived from vttest tst_screen() ──────────────
+
+/// Phase B — vttest `tst_screen()` lines 621–633: DECAWM three rows of stars.
+///
+/// vttest sends:
+///   1. `cup(1,1)` + `decawm(TRUE)` + 160 `*`s  → rows 0 and 1 fill with `*`
+///   2. `decawm(FALSE)` + `cup(3,1)` + 160 `*`s  → row 2 gets 80 `*`s (no wrap)
+///   3. `decawm(TRUE)`
+///
+/// All three rows must equal `"*".repeat(80)`.
+#[test]
+fn tst_screen_decawm_three_rows_of_stars() {
+    let mut h = VtTestHelper::new_default();
+
+    // cup(1,1) + decawm(TRUE) + 160 '*'s
+    let mut seq: Vec<u8> = b"\x1b[1;1H\x1b[?7h".to_vec();
+    seq.extend_from_slice(&b"*".repeat(160));
+    // decawm(FALSE) + cup(3,1) + 160 '*'s
+    seq.extend_from_slice(b"\x1b[?7l\x1b[3;1H");
+    seq.extend_from_slice(&b"*".repeat(160));
+    // decawm(TRUE)
+    seq.extend_from_slice(b"\x1b[?7h");
+
+    h.feed(&seq);
+
+    let stars80 = "*".repeat(80);
+    h.assert_row(0, &stars80);
+    h.assert_row(1, &stars80);
+    h.assert_row(2, &stars80);
+}
+
+/// Phase B — vttest `tst_screen()` lines 636–659: TBC/HTS tab stop test.
+///
+/// Reproduces the exact byte sequence from vttest. After the setup:
+///   - All default stops are cleared (`tbc(3)`).
+///   - Stops are set every 3 cols from col 3 to col 78 via `cuf(3)` + `hts()`.
+///   - The odd stops (3,9,15,...,75) are cleared via `tbc(0)` + `cuf(6)`.
+///   - `tbc(1)` at col 6 is a no-op (per VT100 spec), preserving the stop there.
+///   - `tbc(2)` is a no-op.
+///   - Remaining stops: 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78.
+///
+/// Row 0: `tab`+`*` × 13 from col 0 → `*` at each of the 13 stops.
+/// Row 1: `"     *"` × 13 from col 1 → `*` at each of the 13 stops.
+/// Both rows must be identical.
+#[test]
+fn tst_screen_tab_setting_resetting() {
+    let mut h = VtTestHelper::new_default();
+
+    // Build the exact vttest byte sequence.
+    let mut seq: Vec<u8> = Vec::new();
+
+    // ed(2); tbc(3); cup(1,1)
+    seq.extend_from_slice(b"\x1b[2J\x1b[3g\x1b[1;1H");
+
+    // for (col = 1; col <= 78; col += 3) { cuf(3); hts(); }
+    // Sets stops at 0-indexed cols 3, 6, 9, ..., 78 (26 stops).
+    for _ in 0..26_u8 {
+        seq.extend_from_slice(b"\x1b[3C\x1bH");
+    }
+
+    // cup(1, 4) — 1-indexed col 4 = 0-indexed col 3
+    seq.extend_from_slice(b"\x1b[1;4H");
+
+    // for (col = 4; col <= 78; col += 6) { tbc(0); cuf(6); }
+    // Clears stops at 0-indexed cols 3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75 (13 iters).
+    for _ in 0..13_u8 {
+        seq.extend_from_slice(b"\x1b[0g\x1b[6C");
+    }
+
+    // cup(1, 7) — 0-indexed col 6; tbc(1) — no-op; tbc(2) — no-op
+    seq.extend_from_slice(b"\x1b[1;7H\x1b[1g\x1b[2g");
+
+    // cup(1, 1); for (col = 1; col <= 78; col += 6) { TAB '*' }  — 13 iters
+    seq.extend_from_slice(b"\x1b[1;1H");
+    for _ in 0..13_u8 {
+        seq.push(b'\t');
+        seq.push(b'*');
+    }
+
+    // cup(2, 2); for (col = 2; col <= 78; col += 6) { "     *" }  — 13 iters
+    seq.extend_from_slice(b"\x1b[2;2H");
+    for _ in 0..13_u8 {
+        seq.extend_from_slice(b"     *");
+    }
+
+    h.feed(&seq);
+
+    // Both rows must be identical: spaces everywhere except '*' at cols
+    // 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78.
+    let mut expected = " ".repeat(6);
+    for i in 0..13_u8 {
+        expected.push('*');
+        if i < 12 {
+            expected.push_str(&" ".repeat(5));
+        }
+    }
+    // Trim trailing whitespace to match assert_row semantics.
+    let expected = expected.trim_end().to_owned();
+
+    h.assert_row(0, &expected);
+    h.assert_row(1, &expected);
+}
+
+/// Phase B — vttest `tst_screen()` lines 704–712: origin mode (absolute) test.
+///
+/// Uses the second origin-mode variant which starts with an explicit
+/// `decom(FALSE)` — making it self-contained (does not depend on `do_scrolling`
+/// leaving DECOM=TRUE).
+///
+/// After the sequence:
+///   - Row 23 (bottom) contains the "bottom" message.
+///   - Row 0  (top)    contains the "top" message.
+#[test]
+fn tst_screen_origin_mode_absolute() {
+    let mut h = VtTestHelper::new_default();
+
+    // ed(2); decom(FALSE); cup(24,1); write bottom text; cup(1,1); write top text
+    let mut seq: Vec<u8> = b"\x1b[2J\x1b[?6l\x1b[24;1H".to_vec();
+    seq.extend_from_slice(b"Origin mode test. This line should be at the bottom of the screen.");
+    seq.extend_from_slice(b"\x1b[1;1H");
+    seq.extend_from_slice(b"This line should be at the top of the screen. ");
+    // decstbm(1, 24) — reset scroll region
+    seq.extend_from_slice(b"\x1b[1;24r");
+
+    h.feed(&seq);
+
+    h.assert_row(
+        23,
+        "Origin mode test. This line should be at the bottom of the screen.",
+    );
+    h.assert_row(0, "This line should be at the top of the screen.");
+}
+
+/// Phase B — vttest `tst_screen()` lines 714–733: SGR graphic rendition pattern.
+///
+/// Reproduces the exact vttest text placement (byte-exact `cup` + `sgr` + text).
+/// Asserts that each labelled text string appears at the correct position in the
+/// correct row. Format-tag attributes (bold, underline, etc.) are not checked
+/// here — this test validates text *placement* only.
+#[test]
+fn tst_screen_sgr_rendition_pattern() {
+    let mut h = VtTestHelper::new_default();
+
+    // ed(2)
+    let mut seq: Vec<u8> = b"\x1b[2J".to_vec();
+
+    // cup( 1,20); tprintf("Graphic rendition test pattern:");
+    seq.extend_from_slice(b"\x1b[1;20H");
+    seq.extend_from_slice(b"Graphic rendition test pattern:");
+
+    // cup( 4, 1); sgr("0");         tprintf("vanilla");
+    seq.extend_from_slice(b"\x1b[4;1H\x1b[0mvanilla");
+    // cup( 4,40); sgr("0;1");       tprintf("bold");
+    seq.extend_from_slice(b"\x1b[4;40H\x1b[0;1mbold");
+    // cup( 6, 6); sgr(";4");        tprintf("underline");
+    seq.extend_from_slice(b"\x1b[6;6H\x1b[;4munderline");
+    // cup( 6,45); sgr(";1"); sgr("4"); tprintf("bold underline");
+    seq.extend_from_slice(b"\x1b[6;45H\x1b[;1m\x1b[4mbold underline");
+    // cup( 8, 1); sgr("0;5");       tprintf("blink");
+    seq.extend_from_slice(b"\x1b[8;1H\x1b[0;5mblink");
+    // cup( 8,40); sgr("0;5;1");     tprintf("bold blink");
+    seq.extend_from_slice(b"\x1b[8;40H\x1b[0;5;1mbold blink");
+    // cup(10, 6); sgr("0;4;5");     tprintf("underline blink");
+    seq.extend_from_slice(b"\x1b[10;6H\x1b[0;4;5munderline blink");
+    // cup(10,45); sgr("0;1;4;5");   tprintf("bold underline blink");
+    seq.extend_from_slice(b"\x1b[10;45H\x1b[0;1;4;5mbold underline blink");
+    // cup(12, 1); sgr("1;4;5;0;7"); tprintf("negative");
+    seq.extend_from_slice(b"\x1b[12;1H\x1b[1;4;5;0;7mnegative");
+    // cup(12,40); sgr("0;1;7");     tprintf("bold negative");
+    seq.extend_from_slice(b"\x1b[12;40H\x1b[0;1;7mbold negative");
+    // cup(14, 6); sgr("0;4;7");     tprintf("underline negative");
+    seq.extend_from_slice(b"\x1b[14;6H\x1b[0;4;7munderline negative");
+    // cup(14,45); sgr("0;1;4;7");   tprintf("bold underline negative");
+    seq.extend_from_slice(b"\x1b[14;45H\x1b[0;1;4;7mbold underline negative");
+    // cup(16, 1); sgr("1;4;;5;7");  tprintf("blink negative");
+    seq.extend_from_slice(b"\x1b[16;1H\x1b[1;4;;5;7mblink negative");
+    // cup(16,40); sgr("0;1;5;7");   tprintf("bold blink negative");
+    seq.extend_from_slice(b"\x1b[16;40H\x1b[0;1;5;7mbold blink negative");
+    // cup(18, 6); sgr("0;4;5;7");   tprintf("underline blink negative");
+    seq.extend_from_slice(b"\x1b[18;6H\x1b[0;4;5;7munderline blink negative");
+    // cup(18,45); sgr("0;1;4;5;7"); tprintf("bold underline blink negative");
+    seq.extend_from_slice(b"\x1b[18;45H\x1b[0;1;4;5;7mbold underline blink negative");
+
+    // sgr("")  — reset
+    seq.extend_from_slice(b"\x1b[m");
+
+    h.feed(&seq);
+
+    // Row 0 (cup 1,20): "Graphic rendition test pattern:" starting at col 19.
+    h.assert_row(0, &format!("{:19}Graphic rendition test pattern:", ""));
+
+    // Row 3 (cup 4,1 and cup 4,40): "vanilla" at col 0, "bold" at col 39.
+    h.assert_row(3, &format!("vanilla{}{}", " ".repeat(32), "bold"));
+
+    // Row 5 (cup 6,6 and cup 6,45): "underline" at col 5, "bold underline" at col 44.
+    h.assert_row(
+        5,
+        &format!("{:5}underline{}{}", "", " ".repeat(30), "bold underline"),
+    );
+
+    // Row 7 (cup 8,1 and cup 8,40): "blink" at col 0, "bold blink" at col 39.
+    h.assert_row(7, &format!("blink{}{}", " ".repeat(34), "bold blink"));
+
+    // Row 9 (cup 10,6 and cup 10,45): "underline blink" at col 5, "bold underline blink" at col 44.
+    h.assert_row(
+        9,
+        &format!(
+            "{:5}underline blink{}{}",
+            "",
+            " ".repeat(24),
+            "bold underline blink"
+        ),
+    );
+
+    // Row 11 (cup 12,1 and cup 12,40): "negative" at col 0, "bold negative" at col 39.
+    h.assert_row(
+        11,
+        &format!("negative{}{}", " ".repeat(31), "bold negative"),
+    );
+
+    // Row 13 (cup 14,6 and cup 14,45): "underline negative" at col 5, "bold underline negative" at col 44.
+    h.assert_row(
+        13,
+        &format!(
+            "{:5}underline negative{}{}",
+            "",
+            " ".repeat(21),
+            "bold underline negative"
+        ),
+    );
+
+    // Row 15 (cup 16,1 and cup 16,40): "blink negative" at col 0, "bold blink negative" at col 39.
+    h.assert_row(
+        15,
+        &format!("blink negative{}{}", " ".repeat(25), "bold blink negative"),
+    );
+
+    // Row 17 (cup 18,6 and cup 18,45): "underline blink negative" at col 5, "bold underline blink negative" at col 44.
+    h.assert_row(
+        17,
+        &format!(
+            "{:5}underline blink negative{}{}",
+            "",
+            " ".repeat(15),
+            "bold underline blink negative"
+        ),
+    );
+}
+
+/// Phase B — vttest `tst_screen()` lines 751–793: DECSC/DECRC with charset test.
+///
+/// The key verifiable outcome is "a rectangle of 5 × 4 A's filling the top left
+/// of the screen". For each of the 4 `cset` values (rows 0–3) and 5 `i` values
+/// (cols 0–4):
+///   1. `cup(10+2*cset, 12+12*i)` — move to body of screen
+///   2. `sgr(attr[i])` + charset setup + write 5 `tststr[cset]` chars
+///   3. `decsc()` — save cursor there
+///   4. `cup(cset+1, i+1)` — move to top-left block (1-indexed row/col)
+///   5. `sgr("")` + `scs_normal()` + write `"A"`
+///   6. `decrc()` — restore cursor back to body
+///   7. write 5 more `tststr[cset]` chars
+///
+/// Result: rows 0–3, cols 0–4 all contain `'A'`.
+#[test]
+fn tst_screen_decsc_decrc_five_by_four_block() {
+    let mut h = VtTestHelper::new_default();
+
+    // ed(2) to clear screen first (as vttest does before this block)
+    let mut seq: Vec<u8> = b"\x1b[2J".to_vec();
+
+    let tststr: &[u8; 4] = b"*qx`";
+    let attr: &[&[u8]; 5] = &[b";0", b";1", b";4", b";5", b";7"];
+
+    // scs_normal() = scs(0,'B') = ESC(B + ESC)B + SI
+    let scs_normal_bytes: &[u8] = b"\x1b(B\x1b)B\x0f";
+    // scs_graphics() = scs(0,'0') = ESC(0 + ESC)B + SI
+    let scs_graphics_bytes: &[u8] = b"\x1b(0\x1b)B\x0f";
+
+    for cset in 0_u8..4 {
+        for i in 0_u8..5 {
+            // cup(10 + 2*cset, 12 + 12*i) — 1-indexed
+            let row = 10 + 2 * cset as u16;
+            let col = 12 + 12 * i as u16;
+            seq.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
+
+            // sgr(attr[i])
+            seq.extend_from_slice(b"\x1b[");
+            seq.extend_from_slice(attr[i as usize]);
+            seq.push(b'm');
+
+            // charset setup
+            if cset == 0 || cset == 2 {
+                seq.extend_from_slice(scs_normal_bytes);
+            } else {
+                seq.extend_from_slice(scs_graphics_bytes);
+            }
+
+            // write 5 tststr[cset] chars
+            for _ in 0..5_u8 {
+                seq.push(tststr[cset as usize]);
+            }
+
+            // decsc()
+            seq.extend_from_slice(b"\x1b7");
+
+            // cup(cset+1, i+1) — 1-indexed
+            let top_row = cset as u16 + 1;
+            let top_col = i as u16 + 1;
+            seq.extend_from_slice(format!("\x1b[{top_row};{top_col}H").as_bytes());
+
+            // sgr("") + scs_normal() + "A"
+            seq.extend_from_slice(b"\x1b[m");
+            seq.extend_from_slice(scs_normal_bytes);
+            seq.push(b'A');
+
+            // decrc()
+            seq.extend_from_slice(b"\x1b8");
+
+            // write 5 more tststr[cset] chars
+            for _ in 0..5_u8 {
+                seq.push(tststr[cset as usize]);
+            }
+        }
+    }
+
+    // sgr("0"); scs_normal();
+    seq.extend_from_slice(b"\x1b[0m");
+    seq.extend_from_slice(scs_normal_bytes);
+
+    h.feed(&seq);
+
+    // Verify the 5×4 block of 'A's at rows 0–3, cols 0–4.
+    for row in 0..4_usize {
+        let screen = h.screen_text();
+        let actual_row = &screen[row];
+        assert!(
+            actual_row.starts_with("AAAAA"),
+            "row {row} must start with 'AAAAA' (5×4 A block), got: {actual_row:?}"
+        );
+    }
+}

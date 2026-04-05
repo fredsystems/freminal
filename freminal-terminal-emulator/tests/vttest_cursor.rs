@@ -642,6 +642,937 @@ fn autowrap_at_scroll_region_bottom_minimal() {
     assert_eq!(cursor.x, 1, "cursor x after writing Y");
 }
 
+// ─── vttest Section 3 — Cursor-Control Characters Inside ESC Sequences ──────
+//
+// vttest main.c lines 499-529.
+// Tests that BS, CR, and VT embedded inside CSI parameter strings are handled
+// correctly by the terminal. The expected output is four identical lines:
+//   "A B C D E F G H I"
+//
+// Line 1 (reference): plain text "A B C D E F G H I"
+// Line 2 (BS-in-CUF): Each char is printed, then CSI "2<BS>C" is sent.
+//     The BS inside the CSI is processed as a C0 control (moves cursor back),
+//     while the CSI parameter "2" followed by "C" moves forward by 2. Net
+//     effect: print char, BS moves back 1, CUF(2) moves forward 2 = advance 2.
+// Line 3 (CR-in-CUF): "A " then for each subsequent char, CSI with embedded CR
+//     resets column to 0, then CUF(2*i-2) positions correctly.
+// Line 4 (VT-in-CUU): Each "X " pair printed, then CSI "1<VT>A" — the VT
+//     inside the CSI moves cursor down one line (VT = vertical tab = line feed
+//     in most terminals), then CUU(1) moves back up. Net effect: no vertical
+//     movement, characters appear on the same line.
+
+/// Build the exact byte sequence for vttest cursor-control-inside-ESC test.
+fn build_cursor_control_in_esc_bytes() -> Vec<u8> {
+    let mut out = Vec::new();
+
+    // vt_clear(2) → ESC[2J
+    out.extend_from_slice(b"\x1b[2J");
+    // vt_move(1,1) → ESC[1;1H
+    out.extend_from_slice(b"\x1b[1;1H");
+
+    // println("Test of cursor-control characters inside ESC sequences.")
+    out.extend_from_slice(b"Test of cursor-control characters inside ESC sequences.\r\n");
+    // println("Below should be four identical lines:")
+    out.extend_from_slice(b"Below should be four identical lines:\r\n");
+    // println("")
+    out.extend_from_slice(b"\r\n");
+    // println("A B C D E F G H I")  — the reference line
+    out.extend_from_slice(b"A B C D E F G H I\r\n");
+
+    // Line 2: BS embedded in CUF
+    // for (i = 1; i < 10; i++) { tprintf("%c", '@'+i); do_csi("2%cC", BS); }
+    for i in 1..10u8 {
+        out.push(b'@' + i); // 'A', 'B', ..., 'I'
+        // do_csi("2%cC", BS) → ESC [ 2 BS C
+        out.extend_from_slice(b"\x1b[2");
+        out.push(0x08); // BS
+        out.push(b'C');
+    }
+    // println("")
+    out.extend_from_slice(b"\r\n");
+
+    // Line 3: CR embedded in CUF
+    // tprintf("A ");
+    out.extend_from_slice(b"A ");
+    // for (i = 2; i < 10; i++) {
+    //   cprintf("%s%c%dC", csi_output(), CR, 2*i-2);
+    //   tprintf("%c", '@'+i);
+    // }
+    for i in 2..10u8 {
+        // ESC [ CR <2*i-2> C
+        out.extend_from_slice(b"\x1b[");
+        out.push(0x0D); // CR
+        out.extend_from_slice(format!("{}C", 2 * u16::from(i) - 2).as_bytes());
+        out.push(b'@' + i); // 'B', 'C', ..., 'I'
+    }
+    // println("")
+    out.extend_from_slice(b"\r\n");
+
+    // Line 4: VT in CUU
+    // rm("20") → ESC [ 20l   (reset LNM — line feed/new line mode)
+    out.extend_from_slice(b"\x1b[20l");
+    // for (i = 1; i < 10; i++) {
+    //   tprintf("%c ", '@'+i);
+    //   do_csi("1\013A");   ← \013 = 0x0B = VT
+    // }
+    for i in 1..10u8 {
+        out.push(b'@' + i); // 'A', ..., 'I'
+        out.push(b' ');
+        // do_csi("1\013A") → ESC [ 1 VT A
+        out.extend_from_slice(b"\x1b[1");
+        out.push(0x0B); // VT
+        out.push(b'A');
+    }
+    // println("")
+    out.extend_from_slice(b"\r\n");
+    // println("")
+    out.extend_from_slice(b"\r\n");
+
+    out
+}
+
+#[test]
+fn cursor_control_characters_inside_esc_sequences() {
+    let mut h = VtTestHelper::new_default();
+    let bytes = build_cursor_control_in_esc_bytes();
+    h.feed(&bytes);
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate().take(10) {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+
+    // Row 0: header
+    h.assert_row(0, "Test of cursor-control characters inside ESC sequences.");
+    // Row 1: header
+    h.assert_row(1, "Below should be four identical lines:");
+    // Row 2: blank
+    h.assert_row(2, "");
+    // Rows 3-6: four identical lines "A B C D E F G H I"
+    let expected_line = "A B C D E F G H I";
+    h.assert_row(3, expected_line);
+    h.assert_row(4, expected_line);
+    h.assert_row(5, expected_line);
+    h.assert_row(6, expected_line);
+}
+
+// ─── vttest Section 4 — Leading Zeros in ESC Sequences ──────────────────────
+//
+// vttest main.c lines 533-546.
+// Tests that leading zeros in CSI numeric parameters are parsed correctly.
+// The sequence "ESC [ 00000000004 ; 00000000<col> H" should position the cursor
+// at row 4, column <col>, just as "ESC [ 4 ; <col> H" would.
+
+/// Build the exact byte sequence for vttest leading-zeros test.
+fn build_leading_zeros_test_bytes() -> Vec<u8> {
+    let mut out = Vec::new();
+    let ctext = b"This is a correct sentence";
+
+    // vt_clear(2) → ESC[2J
+    out.extend_from_slice(b"\x1b[2J");
+    // vt_move(1,1) → ESC[1;1H
+    out.extend_from_slice(b"\x1b[1;1H");
+
+    // println("Test of leading zeros in ESC sequences.")
+    out.extend_from_slice(b"Test of leading zeros in ESC sequences.\r\n");
+    // printxx("Two lines below you should see the sentence \"%s\".", ctext)
+    // Note: printxx does NOT append CR LF — it's like printf
+    out.extend_from_slice(
+        b"Two lines below you should see the sentence \"This is a correct sentence\".",
+    );
+
+    // for (col = 1; *ctext; col++) {
+    //   cprintf("%s00000000004;00000000%dH", csi_output(), col);
+    //   tprintf("%c", *ctext++);
+    // }
+    for (idx, &ch) in ctext.iter().enumerate() {
+        let col = idx + 1;
+        // ESC [ 00000000004 ; 00000000<col> H
+        out.extend_from_slice(format!("\x1b[00000000004;00000000{col}H").as_bytes());
+        out.push(ch);
+    }
+
+    // cup(20, 1) → ESC[20;1H
+    out.extend_from_slice(b"\x1b[20;1H");
+
+    out
+}
+
+#[test]
+fn leading_zeros_in_esc_sequences() {
+    let mut h = VtTestHelper::new_default();
+    let bytes = build_leading_zeros_test_bytes();
+    h.feed(&bytes);
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate().take(6) {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+    let cursor = h.cursor_pos();
+    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
+
+    // Row 0: header
+    h.assert_row(0, "Test of leading zeros in ESC sequences.");
+    // Row 1: description (printed with printxx, no CR LF at end — but the
+    // leading-zeros CUP sequences move cursor to row 4 before it wraps)
+    h.assert_row(
+        1,
+        "Two lines below you should see the sentence \"This is a correct sentence\".",
+    );
+    // Row 2: blank
+    h.assert_row(2, "");
+    // Row 3 (screen row 4, 1-indexed): the sentence written char-by-char
+    h.assert_row(3, "This is a correct sentence");
+    // Cursor should be at row 19 (0-indexed), col 0 — from cup(20, 1)
+    h.assert_cursor_pos(0, 19);
+}
+
+// ─── vttest Section 1 — Box-Drawing Test (80-col) ───────────────────────────
+//
+// vttest main.c lines 320-433, pass=0 (80 columns).
+// Draws a box made of '*' and '+' characters around the screen border, with a
+// frame of 'E's (from DECALN) in the middle. Exercises:
+// - DECALN (fill screen with 'E')
+// - ED Ps=0/1 (erase in display)
+// - EL Ps=0/1/2 (erase in line)
+// - HVP (horizontal and vertical position)
+// - CUP (cursor position)
+// - CUB/CUF/CUU/CUD (relative cursor movement)
+// - IND (index / scroll up)
+// - RI (reverse index / scroll down)
+// - NEL (next line)
+//
+// The expected result is a screen with:
+// - Row 1 and row 24: all '*' characters (80 wide)
+// - Rows 2-23: '*' at col 1 and col 80, '+' at col 2 and col 79
+// - Rows 9-16 inner area: mix of blanks and 'E's forming a frame
+// - Row 17: fully cleared by EL(2)
+// - Rows 10-15 inner area: descriptive text
+
+/// Build the exact byte sequence for vttest box test (pass=0, 80 columns).
+fn build_box_test_bytes_80col() -> Vec<u8> {
+    let mut out = Vec::new();
+    let width: usize = 80;
+    let max_lines: usize = 24;
+    let inner_l: usize = (width - 60) / 2; // = 10
+    let inner_r: usize = 61 + inner_l; // = 71
+    let hlfxtra: usize = (width - 80) / 2; // = 0
+
+    // deccolm(FALSE) → ESC[?3l (80 cols, clears screen)
+    out.extend_from_slice(b"\x1b[?3l");
+
+    // decaln() → ESC#8
+    out.extend_from_slice(b"\x1b#8");
+
+    // cup(9, inner_l) → ESC[9;10H
+    out.extend_from_slice(format!("\x1b[9;{inner_l}H").as_bytes());
+    // ed(1) → ESC[1J
+    out.extend_from_slice(b"\x1b[1J");
+
+    // cup(18, 60 + hlfxtra) → ESC[18;60H
+    out.extend_from_slice(format!("\x1b[18;{}H", 60 + hlfxtra).as_bytes());
+    // ed(0) → ESC[0J
+    out.extend_from_slice(b"\x1b[0J");
+    // el(1) → ESC[1K
+    out.extend_from_slice(b"\x1b[1K");
+
+    // cup(9, inner_r) → ESC[9;71H
+    out.extend_from_slice(format!("\x1b[9;{inner_r}H").as_bytes());
+    // el(0) → ESC[0K
+    out.extend_from_slice(b"\x1b[0K");
+
+    // for row = 10..16
+    for row in 10..=16 {
+        // cup(row, inner_l) → ESC[row;10H
+        out.extend_from_slice(format!("\x1b[{row};{inner_l}H").as_bytes());
+        // el(1) → ESC[1K
+        out.extend_from_slice(b"\x1b[1K");
+        // cup(row, inner_r) → ESC[row;71H
+        out.extend_from_slice(format!("\x1b[{row};{inner_r}H").as_bytes());
+        // el(0) → ESC[0K
+        out.extend_from_slice(b"\x1b[0K");
+    }
+
+    // cup(17, 30) → ESC[17;30H
+    out.extend_from_slice(b"\x1b[17;30H");
+    // el(2) → ESC[2K
+    out.extend_from_slice(b"\x1b[2K");
+
+    // Draw top and bottom rows of '*'
+    // for col = 1..width
+    for col in 1..=width {
+        // hvp(max_lines, col) → ESC[24;<col>f
+        out.extend_from_slice(format!("\x1b[{max_lines};{col}f").as_bytes());
+        out.push(b'*');
+        // hvp(1, col) → ESC[1;<col>f
+        out.extend_from_slice(format!("\x1b[1;{col}f").as_bytes());
+        out.push(b'*');
+    }
+
+    // Draw left border with '+' using IND
+    // cup(2, 2) → ESC[2;2H
+    out.extend_from_slice(b"\x1b[2;2H");
+    for _row in 2..=max_lines - 1 {
+        out.push(b'+');
+        // cub(1) → ESC[1D
+        out.extend_from_slice(b"\x1b[1D");
+        // ind() → ESC D
+        out.extend_from_slice(b"\x1bD");
+    }
+
+    // Draw right border with '+' using RI
+    // cup(max_lines-1, width-1) → ESC[23;79H
+    out.extend_from_slice(format!("\x1b[{};{}H", max_lines - 1, width - 1).as_bytes());
+    for _row in (2..=max_lines - 1).rev() {
+        out.push(b'+');
+        // cub(1) → ESC[1D
+        out.extend_from_slice(b"\x1b[1D");
+        // ri() → ESC M
+        out.extend_from_slice(b"\x1bM");
+    }
+
+    // Draw left/right '*' on each row and navigate down
+    // cup(2, 1) → ESC[2;1H
+    out.extend_from_slice(b"\x1b[2;1H");
+    for row in 2..=max_lines - 1 {
+        out.push(b'*');
+        // cup(row, width) → ESC[row;80H
+        out.extend_from_slice(format!("\x1b[{row};{width}H").as_bytes());
+        out.push(b'*');
+        // cub(10) → ESC[10D
+        out.extend_from_slice(b"\x1b[10D");
+        if row < 10 {
+            // nel() → ESC E
+            out.extend_from_slice(b"\x1bE");
+        } else {
+            // tprintf("\n") with set_tty_crmod(TRUE) → PTY line discipline
+            // converts LF to CR+LF. In raw byte tests we must emit CR+LF explicitly.
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+
+    // Draw top border '+' row
+    // cup(2, 10) → ESC[2;10H
+    out.extend_from_slice(b"\x1b[2;10H");
+    // cub(42 + hlfxtra) → ESC[42D
+    out.extend_from_slice(format!("\x1b[{}D", 42 + hlfxtra).as_bytes());
+    // cuf(2) → ESC[2C
+    out.extend_from_slice(b"\x1b[2C");
+    for _col in 3..=width - 2 {
+        out.push(b'+');
+        // cuf(0) → ESC[0C
+        out.extend_from_slice(b"\x1b[0C");
+        // cub(2) → ESC[2D
+        out.extend_from_slice(b"\x1b[2D");
+        // cuf(1) → ESC[1C
+        out.extend_from_slice(b"\x1b[1C");
+    }
+
+    // Draw bottom border '+' row
+    // cup(max_lines-1, inner_r-1) → ESC[23;70H
+    out.extend_from_slice(format!("\x1b[{};{}H", max_lines - 1, inner_r - 1).as_bytes());
+    // cuf(42 + hlfxtra) → ESC[42C
+    out.extend_from_slice(format!("\x1b[{}C", 42 + hlfxtra).as_bytes());
+    // cub(2) → ESC[2D
+    out.extend_from_slice(b"\x1b[2D");
+    for _col in (3..=width - 2).rev() {
+        out.push(b'+');
+        // cub(1) → ESC[1D
+        out.extend_from_slice(b"\x1b[1D");
+        // cuf(1) → ESC[1C
+        out.extend_from_slice(b"\x1b[1C");
+        // cub(0) → ESC[0D
+        out.extend_from_slice(b"\x1b[0D");
+        // BS → 0x08
+        out.push(0x08);
+    }
+
+    // CUU/CUD clamping tests
+    // cup(1, 1) → ESC[1;1H
+    out.extend_from_slice(b"\x1b[1;1H");
+    // cuu(10) → ESC[10A
+    out.extend_from_slice(b"\x1b[10A");
+    // cuu(1) → ESC[1A
+    out.extend_from_slice(b"\x1b[1A");
+    // cuu(0) → ESC[0A
+    out.extend_from_slice(b"\x1b[0A");
+    // cup(max_lines, width) → ESC[24;80H
+    out.extend_from_slice(format!("\x1b[{max_lines};{width}H").as_bytes());
+    // cud(10) → ESC[10B
+    out.extend_from_slice(b"\x1b[10B");
+    // cud(1) → ESC[1B
+    out.extend_from_slice(b"\x1b[1B");
+    // cud(0) → ESC[0B
+    out.extend_from_slice(b"\x1b[0B");
+
+    // Clear inner area and write descriptive text
+    // cup(10, 2 + inner_l) → ESC[10;12H
+    out.extend_from_slice(format!("\x1b[10;{}H", 2 + inner_l).as_bytes());
+    for _row in 10..=15 {
+        for _col in (2 + inner_l)..=(inner_r - 2) {
+            out.push(b' ');
+        }
+        // cud(1) → ESC[1B
+        out.extend_from_slice(b"\x1b[1B");
+        // cub(58) → ESC[58D
+        out.extend_from_slice(b"\x1b[58D");
+    }
+    // cuu(5) → ESC[5A
+    out.extend_from_slice(b"\x1b[5A");
+    // cuf(1) → ESC[1C
+    out.extend_from_slice(b"\x1b[1C");
+    // printxx("The screen should be cleared,  and have an unbroken bor-")
+    out.extend_from_slice(b"The screen should be cleared,  and have an unbroken bor-");
+    // cup(12, inner_l + 3) → ESC[12;13H
+    out.extend_from_slice(format!("\x1b[12;{}H", inner_l + 3).as_bytes());
+    out.extend_from_slice(b"der of *'s and +'s around the edge,   and exactly in the");
+    // cup(13, inner_l + 3) → ESC[13;13H
+    out.extend_from_slice(format!("\x1b[13;{}H", inner_l + 3).as_bytes());
+    out.extend_from_slice(b"middle  there should be a frame of E's around this  text");
+    // cup(14, inner_l + 3) → ESC[14;13H
+    out.extend_from_slice(format!("\x1b[14;{}H", inner_l + 3).as_bytes());
+    out.extend_from_slice(b"with  one (1) free position around it.    ");
+
+    out
+}
+
+#[test]
+#[allow(clippy::needless_range_loop)]
+fn box_drawing_test_80col() {
+    let mut h = VtTestHelper::new_default();
+    let bytes = build_box_test_bytes_80col();
+    h.feed(&bytes);
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate() {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+    let cursor = h.cursor_pos();
+    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
+
+    // Row 0 (screen row 1): all '*' — 80 characters
+    h.assert_row(0, &"*".repeat(80));
+    // Row 23 (screen row 24): all '*' — 80 characters
+    h.assert_row(23, &"*".repeat(80));
+
+    // Rows 1-22: first and last characters should be '*'
+    for row in 1..=22 {
+        let text = &screen[row];
+        let chars: Vec<char> = text.chars().collect();
+        assert!(!chars.is_empty(), "row {row} should not be empty");
+        assert_eq!(
+            chars[0], '*',
+            "row {row} col 0 should be '*', got {:?}",
+            chars[0]
+        );
+        // The last character (col 79) should be '*'
+        assert_eq!(
+            chars.len(),
+            80,
+            "row {row} should be exactly 80 chars, got {}",
+            chars.len()
+        );
+        assert_eq!(
+            chars[79], '*',
+            "row {row} col 79 should be '*', got {:?}",
+            chars[79]
+        );
+    }
+
+    // Rows 1-22: col 1 and col 78 should be '+'
+    for row in 1..=22 {
+        let text = &screen[row];
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(
+            chars[1], '+',
+            "row {row} col 1 should be '+', got {:?}",
+            chars[1]
+        );
+        assert_eq!(
+            chars[78], '+',
+            "row {row} col 78 should be '+', got {:?}",
+            chars[78]
+        );
+    }
+
+    // Row 1 (screen row 2): should be "*+...+*" with '+' border along the top
+    // Cols 2-77 should all be '+'
+    let row1_chars: Vec<char> = screen[1].chars().collect();
+    for col in 2..=77 {
+        assert_eq!(
+            row1_chars[col], '+',
+            "row 1 col {col} should be '+', got {:?}",
+            row1_chars[col]
+        );
+    }
+
+    // Row 22 (screen row 23): should be "*+...+*" with '+' border along bottom
+    let row22_chars: Vec<char> = screen[22].chars().collect();
+    for col in 2..=77 {
+        assert_eq!(
+            row22_chars[col], '+',
+            "row 22 col {col} should be '+', got {:?}",
+            row22_chars[col]
+        );
+    }
+
+    // After DECALN + erases, the E-frame structure (0-indexed) is:
+    //   Rows 0-7: fully erased by ED(1) at cup(9,10) — only border chars remain
+    //   Row 8: E's in cols 10-69 (inner_l..inner_r-1, 0-indexed 9..70)
+    //   Row 9: E at col 9 and col 70 only (inner clear wiped cols 11-68)
+    //   Rows 10-13: E at col 9 and col 70 (text written in middle)
+    //   Row 14: E at col 9 and col 70 only
+    //   Row 15: E's in cols 10-69 (bottom E-bar)
+    //   Row 16: fully erased by EL(2)
+    //   Rows 17-22: erased by ED(0) at cup(18,60)
+
+    // Rows 2-7 should be blank between borders (cleared by ED(1))
+    for row in 2..=7 {
+        let chars: Vec<char> = screen[row].chars().collect();
+        for col in 2..=77 {
+            assert_eq!(
+                chars[col], ' ',
+                "row {row} col {col} should be blank (cleared by ED(1)), got {:?}",
+                chars[col]
+            );
+        }
+    }
+
+    // Row 8: E-frame top bar — E's from col 9 to col 70 (0-indexed)
+    // inner_l=10 (1-indexed) = col 9 (0-indexed); inner_r=71 (1-indexed) = col 70 (0-indexed)
+    // ED(1) cleared cols 0-9 (0-indexed), EL(0) cleared cols 70-79 (0-indexed)
+    // So E's remain at 0-indexed cols 10..69
+    let row8_chars: Vec<char> = screen[8].chars().collect();
+    for col in 10..=69 {
+        assert_eq!(
+            row8_chars[col], 'E',
+            "row 8 col {col} should be 'E' (E-frame top), got {:?}",
+            row8_chars[col]
+        );
+    }
+
+    // Row 9: E-frame sides — E at col 10 and col 69 (0-indexed)
+    // ED(1) cleared 0-indexed cols 0-9; EL(0) cleared cols 70-79.
+    // Inner clear loop cleared cols 11-68. So E remains at cols 10 and 69.
+    let row9_chars: Vec<char> = screen[9].chars().collect();
+    assert_eq!(
+        row9_chars[10], 'E',
+        "row 9 col 10 should be 'E' (E-frame left)"
+    );
+    assert_eq!(
+        row9_chars[69], 'E',
+        "row 9 col 69 should be 'E' (E-frame right)"
+    );
+    // Verify inner area is blank
+    for col in 11..=68 {
+        assert_eq!(
+            row9_chars[col], ' ',
+            "row 9 col {col} should be blank (inner area cleared), got {:?}",
+            row9_chars[col]
+        );
+    }
+
+    // Row 15: E-frame bottom bar — E's from col 10 to col 69 (0-indexed)
+    // (Row 16 vttest = row 15 0-indexed; not cleared by inner loop which stops at row 15 vttest)
+    let row15_chars: Vec<char> = screen[15].chars().collect();
+    for col in 10..=69 {
+        assert_eq!(
+            row15_chars[col], 'E',
+            "row 15 col {col} should be 'E' (E-frame bottom), got {:?}",
+            row15_chars[col]
+        );
+    }
+
+    // Row 16 (screen row 17): fully blank except borders (EL(2))
+    let row16_chars: Vec<char> = screen[16].chars().collect();
+    assert_eq!(row16_chars[0], '*', "row 16 col 0 should be '*'");
+    assert_eq!(row16_chars[1], '+', "row 16 col 1 should be '+'");
+    for col in 2..=77 {
+        assert_eq!(
+            row16_chars[col], ' ',
+            "row 16 col {col} should be blank (EL(2)), got {:?}",
+            row16_chars[col]
+        );
+    }
+
+    // Rows 17-21: blank between borders (cleared by ED(0) at cup(18,60))
+    for row in 17..=21 {
+        let chars: Vec<char> = screen[row].chars().collect();
+        for col in 2..=77 {
+            assert_eq!(
+                chars[col], ' ',
+                "row {row} col {col} should be blank (cleared by ED(0)), got {:?}",
+                chars[col]
+            );
+        }
+    }
+
+    // Check the descriptive text in the middle
+    let row10 = &screen[10];
+    assert!(
+        row10.contains("The screen should be cleared"),
+        "row 10 should contain descriptive text, got: {:?}",
+        row10
+    );
+    let row11 = &screen[11];
+    assert!(
+        row11.contains("der of *'s and +'s around the edge"),
+        "row 11 should contain border description, got: {:?}",
+        row11
+    );
+    let row12 = &screen[12];
+    assert!(
+        row12.contains("middle  there should be a frame of E's"),
+        "row 12 should contain E-frame description, got: {:?}",
+        row12
+    );
+    let row13 = &screen[13];
+    assert!(
+        row13.contains("with  one (1) free position around it"),
+        "row 13 should contain position description, got: {:?}",
+        row13
+    );
+
+    // Cursor should be at the end of the last text line
+    // cup(14, inner_l + 3 = 13) → "with  one (1) free position around it.    " (42 chars)
+    // Cursor ends at 1-indexed col 13 + 42 = 55, 0-indexed col 54. Row 13 (0-indexed).
+    h.assert_cursor_pos(54, 13);
+}
+
+// ─── vttest Section 1 — Box-Drawing Test (132-col) ──────────────────────────
+//
+// vttest main.c lines 320-433, pass=1 (132 columns).
+// Same box-drawing test but at 132-column width.
+
+/// Build the exact byte sequence for vttest box test (pass=1, 132 columns).
+fn build_box_test_bytes_132col() -> Vec<u8> {
+    let mut out = Vec::new();
+    let width: usize = 132;
+    let max_lines: usize = 24;
+    let inner_l: usize = (width - 60) / 2; // = 36
+    let inner_r: usize = 61 + inner_l; // = 97
+    let hlfxtra: usize = (width - 80) / 2; // = 26
+
+    // deccolm(TRUE) → ESC[?3h (132 cols, clears screen)
+    out.extend_from_slice(b"\x1b[?3h");
+
+    // decaln() → ESC#8
+    out.extend_from_slice(b"\x1b#8");
+
+    // cup(9, inner_l) → ESC[9;36H
+    out.extend_from_slice(format!("\x1b[9;{inner_l}H").as_bytes());
+    // ed(1) → ESC[1J
+    out.extend_from_slice(b"\x1b[1J");
+
+    // cup(18, 60 + hlfxtra) → ESC[18;86H
+    out.extend_from_slice(format!("\x1b[18;{}H", 60 + hlfxtra).as_bytes());
+    // ed(0) → ESC[0J
+    out.extend_from_slice(b"\x1b[0J");
+    // el(1) → ESC[1K
+    out.extend_from_slice(b"\x1b[1K");
+
+    // cup(9, inner_r) → ESC[9;97H
+    out.extend_from_slice(format!("\x1b[9;{inner_r}H").as_bytes());
+    // el(0) → ESC[0K
+    out.extend_from_slice(b"\x1b[0K");
+
+    // for row = 10..16
+    for row in 10..=16 {
+        out.extend_from_slice(format!("\x1b[{row};{inner_l}H").as_bytes());
+        out.extend_from_slice(b"\x1b[1K");
+        out.extend_from_slice(format!("\x1b[{row};{inner_r}H").as_bytes());
+        out.extend_from_slice(b"\x1b[0K");
+    }
+
+    // cup(17, 30)
+    out.extend_from_slice(b"\x1b[17;30H");
+    // el(2) → ESC[2K
+    out.extend_from_slice(b"\x1b[2K");
+
+    // Draw top and bottom rows of '*'
+    for col in 1..=width {
+        out.extend_from_slice(format!("\x1b[{max_lines};{col}f").as_bytes());
+        out.push(b'*');
+        out.extend_from_slice(format!("\x1b[1;{col}f").as_bytes());
+        out.push(b'*');
+    }
+
+    // Draw left border with '+' using IND
+    out.extend_from_slice(b"\x1b[2;2H");
+    for _row in 2..=max_lines - 1 {
+        out.push(b'+');
+        out.extend_from_slice(b"\x1b[1D");
+        out.extend_from_slice(b"\x1bD");
+    }
+
+    // Draw right border with '+' using RI
+    out.extend_from_slice(format!("\x1b[{};{}H", max_lines - 1, width - 1).as_bytes());
+    for _row in (2..=max_lines - 1).rev() {
+        out.push(b'+');
+        out.extend_from_slice(b"\x1b[1D");
+        out.extend_from_slice(b"\x1bM");
+    }
+
+    // Draw left/right '*' on each row
+    out.extend_from_slice(b"\x1b[2;1H");
+    for row in 2..=max_lines - 1 {
+        out.push(b'*');
+        out.extend_from_slice(format!("\x1b[{row};{width}H").as_bytes());
+        out.push(b'*');
+        out.extend_from_slice(b"\x1b[10D");
+        if row < 10 {
+            out.extend_from_slice(b"\x1bE");
+        } else {
+            // tprintf("\n") with set_tty_crmod(TRUE) → PTY line discipline
+            // converts LF to CR+LF. In raw byte tests we must emit CR+LF explicitly.
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+
+    // Draw top border '+' row
+    out.extend_from_slice(b"\x1b[2;10H");
+    out.extend_from_slice(format!("\x1b[{}D", 42 + hlfxtra).as_bytes());
+    out.extend_from_slice(b"\x1b[2C");
+    for _col in 3..=width - 2 {
+        out.push(b'+');
+        out.extend_from_slice(b"\x1b[0C");
+        out.extend_from_slice(b"\x1b[2D");
+        out.extend_from_slice(b"\x1b[1C");
+    }
+
+    // Draw bottom border '+' row
+    out.extend_from_slice(format!("\x1b[{};{}H", max_lines - 1, inner_r - 1).as_bytes());
+    out.extend_from_slice(format!("\x1b[{}C", 42 + hlfxtra).as_bytes());
+    out.extend_from_slice(b"\x1b[2D");
+    for _col in (3..=width - 2).rev() {
+        out.push(b'+');
+        out.extend_from_slice(b"\x1b[1D");
+        out.extend_from_slice(b"\x1b[1C");
+        out.extend_from_slice(b"\x1b[0D");
+        out.push(0x08);
+    }
+
+    // CUU/CUD clamping
+    out.extend_from_slice(b"\x1b[1;1H");
+    out.extend_from_slice(b"\x1b[10A");
+    out.extend_from_slice(b"\x1b[1A");
+    out.extend_from_slice(b"\x1b[0A");
+    out.extend_from_slice(format!("\x1b[{max_lines};{width}H").as_bytes());
+    out.extend_from_slice(b"\x1b[10B");
+    out.extend_from_slice(b"\x1b[1B");
+    out.extend_from_slice(b"\x1b[0B");
+
+    // Clear inner area and write descriptive text
+    out.extend_from_slice(format!("\x1b[10;{}H", 2 + inner_l).as_bytes());
+    for _row in 10..=15 {
+        for _col in (2 + inner_l)..=(inner_r - 2) {
+            out.push(b' ');
+        }
+        out.extend_from_slice(b"\x1b[1B");
+        out.extend_from_slice(b"\x1b[58D");
+    }
+    out.extend_from_slice(b"\x1b[5A");
+    out.extend_from_slice(b"\x1b[1C");
+    out.extend_from_slice(b"The screen should be cleared,  and have an unbroken bor-");
+    out.extend_from_slice(format!("\x1b[12;{}H", inner_l + 3).as_bytes());
+    out.extend_from_slice(b"der of *'s and +'s around the edge,   and exactly in the");
+    out.extend_from_slice(format!("\x1b[13;{}H", inner_l + 3).as_bytes());
+    out.extend_from_slice(b"middle  there should be a frame of E's around this  text");
+    out.extend_from_slice(format!("\x1b[14;{}H", inner_l + 3).as_bytes());
+    out.extend_from_slice(b"with  one (1) free position around it.    ");
+
+    out
+}
+
+#[test]
+#[allow(clippy::needless_range_loop)]
+fn box_drawing_test_132col() {
+    // NOTE: Freminal must support DECCOLM (ESC[?3h) to switch to 132 columns.
+    // If DECCOLM is not supported, the terminal remains at 80 columns and
+    // this test will fail — document as a BUG.
+    let mut h = VtTestHelper::new(132, 24);
+    let bytes = build_box_test_bytes_132col();
+    h.feed(&bytes);
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate() {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+    let cursor = h.cursor_pos();
+    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
+
+    // Row 0: all '*' — 132 characters
+    h.assert_row(0, &"*".repeat(132));
+    // Row 23: all '*' — 132 characters
+    h.assert_row(23, &"*".repeat(132));
+
+    // Rows 1-22: first and last characters should be '*'
+    for row in 1..=22 {
+        let text = &screen[row];
+        let chars: Vec<char> = text.chars().collect();
+        assert!(
+            chars.len() >= 132,
+            "row {row} should be at least 132 chars, got {}",
+            chars.len()
+        );
+        assert_eq!(chars[0], '*', "row {row} col 0 should be '*'");
+        assert_eq!(chars[131], '*', "row {row} col 131 should be '*'");
+        assert_eq!(chars[1], '+', "row {row} col 1 should be '+'");
+        assert_eq!(chars[130], '+', "row {row} col 130 should be '+'");
+    }
+
+    // Row 1: all '+' between the borders
+    let row1_chars: Vec<char> = screen[1].chars().collect();
+    for col in 2..=129 {
+        assert_eq!(
+            row1_chars[col], '+',
+            "row 1 col {col} should be '+', got {:?}",
+            row1_chars[col]
+        );
+    }
+
+    // Check descriptive text
+    let row10 = &screen[10];
+    assert!(
+        row10.contains("The screen should be cleared"),
+        "row 10 should contain descriptive text, got: {:?}",
+        row10
+    );
+}
+
+// ─── DECAWM — Autowrap 132-col Variant ──────────────────────────────────────
+//
+// vttest main.c lines 436-496, pass=1 (132 columns).
+// Same autowrap test but at 132-column width.
+
+/// Build the exact byte sequence vttest sends for the autowrap test (pass=1, 132 cols).
+fn build_autowrap_test_bytes_132col() -> Vec<u8> {
+    let mut out = Vec::new();
+    let on_left = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let on_right = b"abcdefghijklmnopqrstuvwxyz";
+    let width: usize = 132;
+    let region: usize = 18; // max_lines(24) - 6
+
+    // deccolm(TRUE) → ESC[?3h  (sets to 132 cols, clears screen)
+    out.extend_from_slice(b"\x1b[?3h");
+
+    // println("Test of autowrap, mixing control and print characters.")
+    out.extend_from_slice(b"Test of autowrap, mixing control and print characters.\r\n");
+    // println("The left/right margins should have letters in order:")
+    out.extend_from_slice(b"The left/right margins should have letters in order:\r\n");
+
+    // decstbm(3, region+3) → ESC[3;21r
+    out.extend_from_slice(b"\x1b[3;21r");
+
+    // decom(TRUE) → ESC[?6h
+    out.extend_from_slice(b"\x1b[?6h");
+
+    for i in 0..26usize {
+        match i % 4 {
+            0 => {
+                out.extend_from_slice(format!("\x1b[{};1H", region + 1).as_bytes());
+                out.push(on_left[i]);
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(on_right[i]);
+                out.push(b'\n');
+            }
+            1 => {
+                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.push(on_right[i - 1]);
+                out.push(on_left[i]);
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(on_left[i]);
+                out.push(0x08); // BS
+                out.push(b' ');
+                out.push(on_right[i]);
+                out.push(b'\n');
+            }
+            2 => {
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(on_left[i]);
+                out.push(0x08); // BS
+                out.push(0x08); // BS
+                out.push(0x09); // TAB
+                out.push(0x09); // TAB
+                out.push(on_right[i]);
+                out.extend_from_slice(format!("\x1b[{};2H", region + 1).as_bytes());
+                out.push(0x08); // BS
+                out.push(on_left[i]);
+                out.push(b'\n');
+            }
+            _ => {
+                out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
+                out.push(b'\n');
+                out.extend_from_slice(format!("\x1b[{};1H", region).as_bytes());
+                out.push(on_left[i]);
+                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.push(on_right[i]);
+            }
+        }
+    }
+
+    // decom(FALSE) → ESC[?6l
+    out.extend_from_slice(b"\x1b[?6l");
+    // decstbm(0,0) → ESC[r
+    out.extend_from_slice(b"\x1b[r");
+    // cup(max_lines-2, 1) → ESC[22;1H
+    out.extend_from_slice(b"\x1b[22;1H");
+
+    out
+}
+
+#[test]
+#[allow(clippy::needless_range_loop)]
+fn decawm_mixing_control_and_print_characters_132col() {
+    let mut h = VtTestHelper::new(132, 24);
+    let bytes = build_autowrap_test_bytes_132col();
+    h.feed(&bytes);
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate() {
+        eprintln!("row {:2}: {:?}", i, line);
+    }
+
+    // Check header lines (above scroll region)
+    h.assert_row(0, "Test of autowrap, mixing control and print characters.");
+    h.assert_row(1, "The left/right margins should have letters in order:");
+
+    // Collect left and right margin characters from the scroll region (rows 2-20)
+    let mut left_chars = Vec::new();
+    let mut right_chars = Vec::new();
+    for row_idx in 2..21 {
+        let row_text = &screen[row_idx];
+        if row_text.is_empty() {
+            left_chars.push(' ');
+            right_chars.push(' ');
+        } else {
+            left_chars.push(row_text.chars().next().unwrap_or(' '));
+            // Right margin is at col 131 (132-col mode)
+            let chars: Vec<char> = row_text.chars().collect();
+            right_chars.push(if chars.len() >= 132 {
+                chars[131]
+            } else {
+                chars.last().copied().unwrap_or(' ')
+            });
+        }
+    }
+    let left_str: String = left_chars.iter().collect();
+    let right_str: String = right_chars.iter().collect();
+    eprintln!("left  margin chars: {:?}", left_str);
+    eprintln!("right margin chars: {:?}", right_str);
+
+    assert_eq!(
+        left_str.trim(),
+        "IJKLMNOPQRSTUVWXYZ",
+        "left margin letters should be I through Z in order (132-col)",
+    );
+    assert_eq!(
+        right_str.trim(),
+        "ijklmnopqrstuvwxyz",
+        "right margin letters should be i through z in order (132-col)",
+    );
+}
+
 // ─── DECAWM — Autowrap Mixing Control and Print Characters ──────────────────
 //
 // vttest Menu 1 "Test of autowrap, mixing control and print characters."

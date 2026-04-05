@@ -235,7 +235,7 @@ comparing Freminal's output against the expected VT100 behavior:
 
 ### 22.B1 — Rewrite Menu 1 (Cursor Movement) Tests from vttest Source
 
-- **Status:** In Progress
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_cursor.rs`
 - **Details:**
@@ -256,12 +256,16 @@ comparing Freminal's output against the expected VT100 behavior:
   - All cursor movement tests reproduce exact vttest byte sequences.
   - Tests that reveal Freminal non-compliance are documented with `// BUG:` comments.
   - 132-column mode variants added where vttest runs both passes.
+- **Completion note (2026-04-04):** All 48 tests in `vttest_cursor.rs` pass (43 Phase A +
+  3 byte-exact Phase B additions: `decawm_mixing_control_and_print_characters`,
+  `autowrap_at_scroll_region_bottom_minimal`, `backspace_from_pending_wrap_state_lands_at_width_minus_2`).
+  7 Freminal bugs fixed as a direct result. `cargo test --all` passes.
 
 ---
 
 ### 22.B2 — Rewrite Menu 2 (Screen Features) Tests from vttest Source
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_screen.rs`
 - **Details:**
@@ -272,6 +276,12 @@ comparing Freminal's output against the expected VT100 behavior:
   - DECOM: origin mode with scroll regions
   - SGR: character attributes
   - DECSC/DECRC: save/restore cursor + attributes
+- **Completion note (2026-04-04):** Added 5 byte-exact Phase B tests derived from
+  `vttest-20251205/main.c` `tst_screen()` (lines 621–793):
+  `tst_screen_decawm_three_rows_of_stars`, `tst_screen_tab_setting_resetting`,
+  `tst_screen_origin_mode_absolute`, `tst_screen_sgr_rendition_pattern`,
+  `tst_screen_decsc_decrc_five_by_four_block`. All 43 tests in `vttest_screen.rs` pass.
+  No new bugs found; all test sequences verified against vttest source.
 
 ---
 
@@ -407,7 +417,7 @@ freminal-terminal-emulator/
   tests/
     vttest_common.rs          — shared test helpers (VtTestHelper)
     vttest_cursor.rs          — Menu 1 tests (43 tests + 3 Phase B additions)
-    vttest_screen.rs          — Menu 2 tests (38 tests)
+    vttest_screen.rs          — Menu 2 tests (43 tests; 5 Phase B additions)
     vttest_charsets.rs        — Menu 3 tests (39 tests)
     vttest_reports.rs         — Menu 6 tests (25 tests)
     vttest_insert_delete.rs   — Menu 8 tests (32 tests)
