@@ -15,8 +15,8 @@
 //!   pushing existing lines down within the scroll region.
 //! - DL  (`CSI M`) — Delete Lines: deletes the cursor's row and shifts lines
 //!   below up within the scroll region (blanks appear at bottom of region).
-//! - IRM (`CSI 4 h/l`) — Insert/Replace Mode: not currently implemented;
-//!   tested to confirm the terminal remains in replace mode (default).
+//! - IRM (`CSI 4 h/l`) — Insert/Replace Mode: toggles between insert (characters
+//!   shift right on write) and replace (default, characters overwrite).
 //!
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row). CSI sequences use **1-indexed** row;col parameters.
@@ -401,11 +401,10 @@ fn dl_count_clamped_to_rows_remaining_in_region() {
 
 // ─── IRM — Insert/Replace Mode (CSI 4 h / CSI 4 l) ──────────────────────────
 //
-// IRM (ANSI mode 4) is not currently implemented; `CSI 4 h` is treated as an
-// unknown mode and silently ignored.  These tests confirm that:
-// - Normal text entry continues to overwrite (replace mode is the default).
-// - Sending `CSI 4 h` does not corrupt the terminal state.
-// - Sending `CSI 4 l` (reset) is also silently ignored without harm.
+// IRM (ANSI mode 4) toggles between insert mode (`CSI 4 h`) and replace mode
+// (`CSI 4 l`, the default).  In insert mode each written character is inserted
+// at the cursor position, shifting existing characters right (rightmost chars
+// lost off the end).  In replace mode characters overwrite.
 
 #[test]
 fn irm_default_mode_is_replace_overwrite() {
@@ -420,28 +419,29 @@ fn irm_default_mode_is_replace_overwrite() {
 }
 
 #[test]
-fn irm_set_mode_does_not_corrupt_terminal_state() {
-    // `CSI 4 h` is an unknown mode; the terminal should silently ignore it and
-    // remain functional.
+fn irm_set_mode_activates_insert_behavior() {
+    // `CSI 4 h` switches to insert mode: each character written is inserted at
+    // the cursor, shifting existing characters right.
     let mut h = VtTestHelper::new_default();
     h.feed_str("ABCDE");
-    h.feed(b"\x1b[4h"); // IRM set — silently ignored
-    h.feed(b"\x1b[1;3H"); // cursor → (x=2, y=0)
-    // Normal text entry still overwrites (replace mode unchanged).
+    h.feed(b"\x1b[4h"); // IRM set — enter insert mode
+    h.feed(b"\x1b[1;3H"); // cursor → (x=2, y=0) — at 'C'
+    // Write 'X' in insert mode: 'X' is inserted before 'C'; 'C','D','E' shift right.
     h.feed_str("X");
-    h.assert_row(0, "ABXDE");
+    h.assert_row(0, "ABXCDE");
     h.assert_cursor_pos(3, 0);
 }
 
 #[test]
-fn irm_reset_mode_is_silently_ignored() {
-    // `CSI 4 l` resets IRM — also unknown, also silently ignored.
+fn irm_reset_mode_restores_replace_behavior() {
+    // `CSI 4 l` resets to replace mode (the default).  Sending it when already
+    // in replace mode is a no-op.
     let mut h = VtTestHelper::new_default();
     h.feed_str("HELLO");
-    h.feed(b"\x1b[4l"); // IRM reset — silently ignored
+    h.feed(b"\x1b[4l"); // IRM reset — already in replace mode, no change
     h.feed(b"\x1b[1;3H"); // cursor → (x=2, y=0)
     h.feed_str("X");
-    // Still replace mode: 'L' (index 2, 'L') is overwritten by 'X'.
+    // Still replace mode: 'L' (index 2) is overwritten by 'X'.
     h.assert_row(0, "HEXLO");
     h.assert_cursor_pos(3, 0);
 }
@@ -712,14 +712,13 @@ fn tst_insdel_accordion_il_dl_loop() {
 ///   for col in 2..=sw-1: tprintf("*")
 ///   rm("4")   →  CSI 4 l   (IRM off)
 ///
-/// With IRM active, each `*` should be inserted (not overwritten), pushing 'B'
-/// rightward.  The expected result is `A*** ... ***B` on the top line.
-///
-/// BUG: IRM (Insert/Replace Mode, ANSI mode 4) is not implemented in Freminal.
-/// `CSI 4 h` is silently ignored.  In replace mode (the default), all `*` writes
-/// overwrite existing content, so the top line becomes `A*...*` (B is overwritten).
+/// With IRM active, each `*` is inserted at the cursor position, pushing 'B'
+/// rightward.  The expected result is `A*** ... ***B` on the top line:
+///   col 0: 'A' (written before IRM was activated, in replace mode)
+///   cols 1..sw-2: sw-2 stars (written in insert mode)
+///   col sw-1: 'B' (pushed to the rightmost column by the insertions)
 #[test]
-fn tst_insdel_irm_insert_mode_not_implemented() {
+fn tst_insdel_irm_insert_mode() {
     let mut h = VtTestHelper::new_default();
     let sw: usize = 80;
 
@@ -733,24 +732,273 @@ fn tst_insdel_irm_insert_mode_not_implemented() {
     h.feed(b"B"); // write 'B' at col 1 (overwrites second 'A')
     h.feed(b"\x1b[D"); // cub(1) — cursor back to col 1
 
-    // sm("4") — IRM on (not implemented: silently ignored)
+    // sm("4") — IRM on: subsequent writes insert rather than overwrite.
     h.feed(b"\x1b[4h");
 
     // write sw-2 stars (cols 2..=sw-1, 1-indexed = cols 1..=sw-2, 0-indexed)
     let stars: Vec<u8> = vec![b'*'; sw - 2];
     h.feed(&stars);
 
-    // rm("4") — IRM off (not implemented: silently ignored)
+    // rm("4") — IRM off: return to replace mode.
     h.feed(b"\x1b[4l");
 
-    // BUG: With IRM implemented, the expected line would be:
-    //   "A" + "*".repeat(sw-2) + "B"
-    // But since IRM is not implemented, all writes are replace-mode, producing:
-    //   "A" + "*".repeat(sw-2) + last char from the A row at col sw-1
-    // In this case: col 1 was 'B' but stars start at col 1 (cub moved back to 1),
-    // so the actual content is 'A' at col 0, then sw-2 stars at cols 1..sw-2,
-    // then 'A' at col sw-1 (the original rightmost A, never overwritten).
-    // BUG: IRM not implemented — see PLAN_22_VTTEST_INTEGRATION.md
-    let expected: String = format!("A{}A", "*".repeat(sw - 2));
+    // Each star was inserted, pushing 'B' right one position per star.
+    // After sw-2 insertions 'B' reaches col sw-1 (the rightmost column).
+    let expected: String = format!("A{}B", "*".repeat(sw - 2));
     h.assert_row(0, &expected);
+}
+
+// ─── Temporary reproduction test for vttest DCH "AB test" bug ───────────────
+
+/// Exact reproduction of the vttest `tst_insdel` DCH "AB test" sequence.
+///
+/// Sequence (from vttest main.c lines 961-1004, sw=80):
+/// 1. Fill screen: row 0 = "AAAA...A" (80 A's)
+/// 2. cup(2,1) + ed(0): erase rows 1..23
+/// 3. cup(1,2) + tprintf("B") + cub(1): place 'B' at col 1, cursor back to col 1
+/// 4. sm("4"): IRM insert mode ON
+/// 5. write 78 '*' in insert mode — pushes 'B' to col 79
+/// 6. rm("4"): IRM off  → row 0 = "A" + "*"×78 + "B"
+/// 7. cup(4,1): cursor to row 3
+/// 8. ri() = ESC M: cursor up to row 2
+/// 9. el(2) = CSI 2 K: erase row 2
+/// 10. cup(1,2): cursor to row 0, col 1
+/// 11. dch(78) = CSI 78 P: delete 78 chars at col 1
+///
+/// Expected: row 0 = "AB"
+#[test]
+fn dch_vttest_ab_test_exact_sequence() {
+    let sw: usize = 80;
+    let mut h = VtTestHelper::new_default();
+
+    // Fill row 0 with A's
+    h.feed(b"\x1b[2J");
+    h.feed(b"\x1b[1;1H");
+    h.feed(&vec![b'A'; sw]);
+
+    // Erase rows 1..23
+    h.feed(b"\x1b[2;1H");
+    h.feed(b"\x1b[J");
+
+    // Place 'B' at col 1, cursor back to col 1
+    h.feed(b"\x1b[1;2H");
+    h.feed(b"B");
+    h.feed(b"\x1b[D");
+
+    // IRM insert mode: write 78 stars → pushes 'B' to col 79
+    h.feed(b"\x1b[4h");
+    h.feed(&vec![b'*'; sw - 2]);
+    h.feed(b"\x1b[4l");
+
+    // Verify: row 0 should be "A" + "*"×78 + "B"
+    let expected_irm = format!("A{}B", "*".repeat(sw - 2));
+    let actual_irm = h.screen_text()[0].clone();
+    assert_eq!(
+        actual_irm, expected_irm,
+        "IRM intermediate state wrong:\n  expected: {expected_irm:?}\n  actual:   {actual_irm:?}"
+    );
+
+    // cup(4,1), ri(), el(2), cup(1,2)
+    h.feed(b"\x1b[4;1H");
+    h.feed(b"\x1bM");
+    h.feed(b"\x1b[2K");
+    h.feed(b"\x1b[1;2H");
+
+    // DCH(78): delete 78 chars at col 1
+    let dch_seq = format!("\x1b[{}P", sw - 2);
+    h.feed(dch_seq.as_bytes());
+
+    let actual_final = h.screen_text()[0].clone();
+    assert_eq!(
+        actual_final, "AB",
+        "vttest DCH 'AB test' failed:\n  expected: \"AB\"\n  actual:   {actual_final:?}"
+    );
+}
+
+#[test]
+fn dch_vttest_ab_debug_trace() {
+    let sw: usize = 80;
+    let mut h = VtTestHelper::new_default();
+
+    // Step 1: Fill row 0 with A's
+    h.feed(b"\x1b[2J");
+    h.feed(b"\x1b[1;1H");
+    h.feed(&vec![b'A'; sw]);
+
+    let s0 = h.screen_text();
+    eprintln!(
+        "After fill: row0={:?} (len {})",
+        &s0[0][..s0[0].len().min(10)],
+        s0[0].len()
+    );
+    eprintln!("  cursor={:?}", h.cursor_pos());
+
+    // Step 2: cup(2,1) + ed(0)
+    h.feed(b"\x1b[2;1H");
+    h.feed(b"\x1b[J");
+    eprintln!("After ed(0): cursor={:?}", h.cursor_pos());
+
+    // Step 3: cup(1,2)
+    h.feed(b"\x1b[1;2H");
+    eprintln!("After cup(1,2): cursor={:?}", h.cursor_pos());
+
+    // Step 4: write 'B'
+    h.feed(b"B");
+    eprintln!("After B: cursor={:?}", h.cursor_pos());
+
+    // Step 5: cub(1)
+    h.feed(b"\x1b[D");
+    eprintln!("After cub(1): cursor={:?}", h.cursor_pos());
+
+    // Step 6: sm("4") + write 78 stars + rm("4")
+    h.feed(b"\x1b[4h");
+    h.feed(&vec![b'*'; sw - 2]);
+    h.feed(b"\x1b[4l");
+
+    let s1 = h.screen_text();
+    eprintln!("After IRM stars: cursor={:?}", h.cursor_pos());
+    eprintln!(
+        "  row0 len={}, first 3 chars={:?}",
+        s1[0].len(),
+        &s1[0][..s1[0].len().min(3)]
+    );
+    // Check 'B' is at position 79
+    let bytes: Vec<u8> = s1[0].bytes().collect();
+    if bytes.len() > 79 {
+        eprintln!("  col79={:?}", char::from(bytes[79]));
+    } else {
+        eprintln!("  row0 len={} -- col79 doesn't exist!", bytes.len());
+    }
+
+    // Step 7: cup(4,1)
+    h.feed(b"\x1b[4;1H");
+    eprintln!("After cup(4,1): cursor={:?}", h.cursor_pos());
+
+    // Step 8: ri() = ESC M
+    h.feed(b"\x1bM");
+    eprintln!("After ri(): cursor={:?}", h.cursor_pos());
+
+    // Step 9: el(2) = CSI 2 K
+    h.feed(b"\x1b[2K");
+    eprintln!("After el(2): cursor={:?}", h.cursor_pos());
+
+    // Step 10: cup(1,2)
+    h.feed(b"\x1b[1;2H");
+    eprintln!("After cup(1,2): cursor={:?}", h.cursor_pos());
+
+    // What is on row 0 right now?
+    let s2 = h.screen_text();
+    eprintln!("Before DCH: row0 len={}", s2[0].len());
+    let bytes2: Vec<u8> = s2[0].bytes().collect();
+    eprintln!("  col0={:?}", bytes2.first().map(|&b| char::from(b)));
+    eprintln!("  col1={:?}", bytes2.get(1).map(|&b| char::from(b)));
+    if bytes2.len() > 79 {
+        eprintln!("  col79={:?}", char::from(bytes2[79]));
+    } else {
+        eprintln!("  row0 only has {} chars (no col79)", bytes2.len());
+    }
+
+    // Step 11: dch(78) = CSI 78 P
+    let dch_seq = format!("\x1b[{}P", sw - 2);
+    h.feed(dch_seq.as_bytes());
+
+    let s3 = h.screen_text();
+    eprintln!("After DCH(78): row0={:?}", s3[0]);
+}
+
+/// Full reproduction starting from the beginning of tst_insdel(), including the
+/// accordion test that precedes the DCH test.
+#[test]
+fn dch_vttest_ab_test_full_from_tst_insdel() {
+    let sw: usize = 80;
+    let max_lines: usize = 24;
+    let mut h = VtTestHelper::new_default();
+
+    // ── Phase 1: Initial fill (lines 961-967 of main.c) ──
+    h.feed(b"\x1b[2J"); // ed(2)
+    h.feed(b"\x1b[1;1H"); // cup(1,1)
+    for row in 1..=max_lines {
+        let cup = format!("\x1b[{};1H", row);
+        h.feed(cup.as_bytes());
+        let letter = b'A' - 1 + u8::try_from(row).unwrap();
+        h.feed(&vec![letter; sw]);
+    }
+    // cup(4,1) + [holdit skipped]
+    h.feed(b"\x1b[4;1H");
+
+    // ── Phase 2: Accordion test (lines 972-986 of main.c) ──
+    // ri() = ESC M
+    h.feed(b"\x1bM");
+    // el(2) = CSI 2 K (erase entire line)
+    h.feed(b"\x1b[2K");
+    // decstbm(2, max_lines-1) = CSI 2;23 r
+    h.feed(b"\x1b[2;23r");
+    // decom(TRUE) = CSI ?6 h
+    h.feed(b"\x1b[?6h");
+    // cup(1,1) — in DECOM mode, row 1 is relative to scroll region top
+    h.feed(b"\x1b[1;1H");
+    // il(row) and dl(row) for row=1..=max_lines
+    for row in 1..=max_lines {
+        let il = format!("\x1b[{}L", row);
+        let dl = format!("\x1b[{}M", row);
+        h.feed(il.as_bytes());
+        h.feed(dl.as_bytes());
+    }
+    // decom(FALSE) = CSI ?6 l
+    h.feed(b"\x1b[?6l");
+    // decstbm(0,0) = CSI r (reset scroll region)
+    h.feed(b"\x1b[r");
+    // cup(2,1) = row 1, col 0
+    h.feed(b"\x1b[2;1H");
+    // [holdit: prints "Top line: A's..." then waits - cursor moves after printxx]
+    // Simulate the holdit cursor movement - printxx prints text then tprintf("Push <RETURN>")
+    // For simplicity, just move the cursor as holdit would leave it (doesn't matter for DCH)
+
+    // ── Phase 3: Insert Mode test setup (lines 987-998) ──
+    // cup(2,1)
+    h.feed(b"\x1b[2;1H");
+    // ed(0)
+    h.feed(b"\x1b[J");
+    // cup(1,2)
+    h.feed(b"\x1b[1;2H");
+    // tprintf("B")
+    h.feed(b"B");
+    // cub(1) = CSI D
+    h.feed(b"\x1b[D");
+    // sm("4")
+    h.feed(b"\x1b[4h");
+    // write sw-2 stars
+    h.feed(&vec![b'*'; sw - 2]);
+    // rm("4")
+    h.feed(b"\x1b[4l");
+
+    // cup(4,1) + [holdit skipped]
+    h.feed(b"\x1b[4;1H");
+
+    // Check intermediate state
+    let s_irm = h.screen_text();
+    eprintln!(
+        "After IRM setup, row0 (full sequence): len={}, first5={:?}",
+        s_irm[0].len(),
+        &s_irm[0][..s_irm[0].len().min(5)]
+    );
+
+    // ── Phase 4: DCH test (lines 999-1005) ──
+    // ri() = ESC M
+    h.feed(b"\x1bM");
+    // el(2) = CSI 2 K
+    h.feed(b"\x1b[2K");
+    // cup(1,2)
+    h.feed(b"\x1b[1;2H");
+    // dch(sw-2) = CSI 78 P
+    let dch_seq = format!("\x1b[{}P", sw - 2);
+    h.feed(dch_seq.as_bytes());
+
+    let s_final = h.screen_text();
+    eprintln!("After DCH (full sequence), row0={:?}", s_final[0]);
+    assert_eq!(
+        s_final[0], "AB",
+        "vttest DCH AB test (full from tst_insdel):\n  expected \"AB\"\n  got {:?}",
+        s_final[0]
+    );
 }

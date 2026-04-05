@@ -685,3 +685,47 @@ fn da1_response_extension_codes_are_vttest_known() {
         );
     }
 }
+
+// ─── LNM (Line Feed / New Line Mode) — vttest Menu 6.2 ─────────────────────
+
+/// vttest 6.2 (`tst_NLM`): CSI 20 h enables LNM; CSI 20 l disables it.
+///
+/// When LNM is set, the terminal must send CR+LF for Enter. When reset
+/// (default), the terminal must send bare CR. This test verifies the mode
+/// set/reset via the `write()` method which calls `to_payload()` internally.
+#[test]
+fn lnm_mode_set_and_reset_via_write() {
+    use freminal_terminal_emulator::input::TerminalInput;
+
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    // Default state: LNM reset. Enter should produce bare CR.
+    h.write_terminal_input(&TerminalInput::Enter);
+    let response = h.drain_pty_writes_concatenated();
+    assert_eq!(
+        response, b"\x0d",
+        "Default LNM (reset): Enter must send bare CR"
+    );
+
+    // Set LNM: CSI 20 h
+    h.feed(b"\x1b[20h");
+    let _ = h.drain_pty_writes();
+
+    // Now Enter should produce CR+LF.
+    h.write_terminal_input(&TerminalInput::Enter);
+    let response = h.drain_pty_writes_concatenated();
+    assert_eq!(response, b"\x0d\x0a", "LNM set: Enter must send CR+LF");
+
+    // Reset LNM: CSI 20 l
+    h.feed(b"\x1b[20l");
+    let _ = h.drain_pty_writes();
+
+    // Enter should again produce bare CR.
+    h.write_terminal_input(&TerminalInput::Enter);
+    let response = h.drain_pty_writes_concatenated();
+    assert_eq!(
+        response, b"\x0d",
+        "LNM reset: Enter must send bare CR again"
+    );
+}

@@ -31,6 +31,7 @@ pub mod decscnm;
 pub mod decsdm;
 pub mod dectcem;
 pub mod grapheme;
+pub mod irm;
 pub mod keypad;
 pub mod lnm;
 pub mod modify_other_keys_mode;

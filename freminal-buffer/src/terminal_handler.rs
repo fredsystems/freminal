@@ -30,6 +30,7 @@ use freminal_common::{
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
+        modes::irm::Irm,
         modes::lnm::Lnm,
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::private_color_registers::PrivateColorRegisters,
@@ -273,6 +274,12 @@ pub struct TerminalHandler {
     /// When `Vt52`, the parser uses the reduced VT52 escape set.
     /// Default is `Ansi` mode.
     vt52_mode: Decanm,
+    /// Whether Insert Mode (IRM, ANSI mode 4) is active.
+    ///
+    /// When `Insert`, writing a character first shifts existing content one
+    /// cell to the right.  When `Replace` (the default), the character
+    /// overwrites the cell at the cursor.
+    insert_mode: Irm,
     /// The persistent Sixel palette used when `private_color_registers` is
     /// `false` (shared mode, `?1070 l`).  Palette changes in one image carry
     /// over to the next.  `None` when private mode is active; populated the
@@ -322,6 +329,7 @@ impl TerminalHandler {
             reverse_wrap: ReverseWrapAround::WrapAround,
             xt_rev_wrap2: XtRevWrap2::Disabled,
             vt52_mode: Decanm::Ansi,
+            insert_mode: Irm::Replace,
             sixel_shared_palette: None,
         }
     }
@@ -437,7 +445,7 @@ impl TerminalHandler {
                 self.last_graphic_char = Some(last.clone());
             }
             self.prev_placeholder = None;
-            self.buffer.insert_text(&text);
+            self.insert_text_irm_aware(&text);
             return;
         }
 
@@ -463,7 +471,7 @@ impl TerminalHandler {
                         self.last_graphic_char = Some(last.clone());
                     }
                     self.prev_placeholder = None;
-                    self.buffer.insert_text(batch);
+                    self.insert_text_irm_aware(batch);
                 }
                 batch_start = i + 1;
 
@@ -481,7 +489,23 @@ impl TerminalHandler {
                 self.last_graphic_char = Some(last.clone());
             }
             self.prev_placeholder = None;
-            self.buffer.insert_text(batch);
+            self.insert_text_irm_aware(batch);
+        }
+    }
+
+    /// Insert  into the buffer, honouring the current IRM state.
+    ///
+    /// In replace mode (the default) the characters are written in bulk via
+    /// .  In insert mode each character is preceded by a
+    ///  call that shifts existing content right.
+    fn insert_text_irm_aware(&mut self, text: &[TChar]) {
+        if self.insert_mode.is_insert() {
+            for ch in text {
+                self.buffer.insert_spaces(1);
+                self.buffer.insert_text(std::slice::from_ref(ch));
+            }
+        } else {
+            self.buffer.insert_text(text);
         }
     }
 
@@ -3760,6 +3784,11 @@ impl TerminalHandler {
                 // (permanently set). Set/Reset are in the catch-all above.
                 Mode::GraphemeClustering(GraphemeClustering::Query) => {
                     self.write_to_pty(&GraphemeClustering::Unicode.report(None));
+                }
+
+                // ── Insert/Replace Mode (IRM, ANSI mode 4) ───────────
+                Mode::Irm(irm) => {
+                    self.insert_mode = *irm;
                 }
 
                 // ── Modes parsed but not yet acted on ─────────────────

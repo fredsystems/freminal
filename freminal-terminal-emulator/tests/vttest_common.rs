@@ -36,7 +36,7 @@
 #![allow(dead_code)]
 
 use freminal_common::{buffer_states::cursor::CursorPos, pty_write::PtyWrite};
-use freminal_terminal_emulator::state::internal::TerminalState;
+use freminal_terminal_emulator::{input::TerminalInput, state::internal::TerminalState};
 use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
@@ -276,6 +276,18 @@ impl VtTestHelper {
     #[must_use]
     pub fn drain_pty_writes_concatenated(&self) -> Vec<u8> {
         self.drain_pty_writes().into_iter().flatten().collect()
+    }
+
+    /// Simulate a terminal input event (e.g. a keypress) through the full
+    /// `TerminalState::write()` pipeline.
+    ///
+    /// This calls `to_payload()` using the terminal's current mode flags
+    /// (DECCKM, LNM, etc.) and sends the resulting bytes to the PTY channel.
+    /// The bytes can then be read back with [`drain_pty_writes`].
+    pub fn write_terminal_input(&self, input: &TerminalInput) {
+        self.state
+            .write(input)
+            .expect("write_terminal_input: send to PTY channel failed");
     }
 }
 

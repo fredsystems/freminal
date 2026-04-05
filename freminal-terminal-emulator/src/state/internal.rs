@@ -321,6 +321,7 @@ impl TerminalState {
             | Mode::GraphemeClustering(_)
             | Mode::Decsdm(_)
             | Mode::Decnrcm(_)
+            | Mode::Irm(_)
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
@@ -618,12 +619,14 @@ impl TerminalState {
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
         let backarrow_sends_bs = self.modes.backarrow_key_mode;
+        let line_feed_mode = self.modes.line_feed_mode;
         match to_write.to_payload(
             decckm,
             keypad_app,
             modify_other_keys,
             application_escape_key,
             backarrow_sends_bs,
+            line_feed_mode,
         ) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;
