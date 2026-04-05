@@ -16,7 +16,7 @@ use crate::{
 use crate::ansi_components::tracer::SequenceTracer;
 use anyhow::Result;
 use freminal_common::buffer_states::{
-    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm,
+    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm, modes::s8c1t::S8c1t,
     terminal_output::TerminalOutput,
 };
 
@@ -115,6 +115,10 @@ pub struct FreminalAnsiParser {
     /// When set to `Decanm::Vt52`, the parser uses the reduced VT52 escape set
     /// instead of standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
     pub vt52_mode: Decanm,
+    /// When set to `S8c1t::EightBit`, the parser recognizes bytes 0x80–0x9F as
+    /// 8-bit C1 control introducers.  Toggled by `ESC SP G` (S8C1T) /
+    /// `ESC SP F` (S7C1T).
+    pub s8c1t_mode: S8c1t,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -142,6 +146,7 @@ impl FreminalAnsiParser {
             pending_data: Vec::new(),
             seq_trace: SequenceTracer::new(),
             vt52_mode: Decanm::Ansi,
+            s8c1t_mode: S8c1t::SevenBit,
         }
     }
 
@@ -210,6 +215,47 @@ impl FreminalAnsiParser {
 
         // NUL (0x00) and DEL (0x7F) are silently ignored
         if b == 0x00 || b == 0x7F {
+            return Err(());
+        }
+
+        // 8-bit C1 controls (0x80–0x9F) — recognized only when S8C1T is active
+        // and we are in ANSI mode (VT52 mode does not support 8-bit C1).
+        if self.s8c1t_mode == S8c1t::EightBit
+            && self.vt52_mode == Decanm::Ansi
+            && (0x80..=0x9F).contains(&b)
+        {
+            push_data_if_non_empty(data_output, output);
+            match b {
+                // IND (0x84) ≡ ESC D — Index (cursor down, scroll if at bottom)
+                0x84 => output.push(TerminalOutput::Index),
+                // NEL (0x85) ≡ ESC E — Next Line
+                0x85 => output.push(TerminalOutput::NextLine),
+                // HTS (0x88) ≡ ESC H — Horizontal Tab Set
+                0x88 => output.push(TerminalOutput::HorizontalTabSet),
+                // RI (0x8D) ≡ ESC M — Reverse Index
+                0x8D => output.push(TerminalOutput::ReverseIndex),
+                // DCS (0x90) ≡ ESC P — Device Control String
+                0x90 => {
+                    self.inner = ParserInner::Dcs(DcsParser::new());
+                }
+                // CSI (0x9B) ≡ ESC [ — Control Sequence Introducer
+                0x9B => {
+                    self.inner = ParserInner::Csi(AnsiCsiParser::new());
+                }
+                // OSC (0x9D) ≡ ESC ] — Operating System Command
+                0x9D => {
+                    self.inner = ParserInner::Osc(AnsiOscParser::new());
+                }
+                // APC (0x9F) ≡ ESC _ — Application Program Command
+                0x9F => {
+                    self.inner = ParserInner::Apc(ApcParser::new());
+                }
+                // SS2 (0x8E), SS3 (0x8F) — Single Shift G2/G3 (no-op for now)
+                // ST (0x9C) — String Terminator (no-op when no string is open)
+                // PM (0x9E) — Privacy Message (ignored, no handler)
+                // Other bytes in 0x80–0x9F without defined C1 meaning — silently ignored
+                _ => {}
+            }
             return Err(());
         }
 

@@ -35,6 +35,7 @@ use freminal_common::{
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::private_color_registers::PrivateColorRegisters,
         modes::reverse_wrap_around::ReverseWrapAround,
+        modes::s8c1t::S8c1t,
         modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
@@ -286,6 +287,12 @@ pub struct TerminalHandler {
     /// first time shared mode is used.
     sixel_shared_palette:
         Option<Box<[(u8, u8, u8); freminal_common::buffer_states::sixel::MAX_PALETTE]>>,
+    /// Whether 8-bit C1 controls should be used in PTY responses.
+    ///
+    /// When `EightBit`, CSI responses use `0x9B` instead of `ESC [`, DCS uses
+    /// `0x90` instead of `ESC P`, OSC uses `0x9D` instead of `ESC ]`, and ST
+    /// uses `0x9C` instead of `ESC \`.  Default is `SevenBit`.
+    s8c1t_mode: S8c1t,
 }
 
 impl TerminalHandler {
@@ -331,6 +338,7 @@ impl TerminalHandler {
             vt52_mode: Decanm::Ansi,
             insert_mode: Irm::Replace,
             sixel_shared_palette: None,
+            s8c1t_mode: S8c1t::SevenBit,
         }
     }
 
@@ -351,6 +359,53 @@ impl TerminalHandler {
     /// Set the active theme palette.
     pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
         self.theme = theme;
+    }
+
+    /// Get the current S8C1T mode.
+    #[must_use]
+    pub const fn s8c1t_mode(&self) -> &S8c1t {
+        &self.s8c1t_mode
+    }
+
+    /// Set the S8C1T mode (8-bit vs 7-bit C1 controls in responses).
+    pub const fn set_s8c1t_mode(&mut self, mode: S8c1t) {
+        self.s8c1t_mode = mode;
+    }
+
+    /// Return the CSI introducer for PTY responses: `0x9B` in 8-bit mode,
+    /// `ESC [` in 7-bit mode.
+    const fn csi_response(&self) -> &'static [u8] {
+        match self.s8c1t_mode {
+            S8c1t::EightBit => &[0x9B],
+            S8c1t::SevenBit => b"\x1b[",
+        }
+    }
+
+    /// Return the DCS introducer for PTY responses: `0x90` in 8-bit mode,
+    /// `ESC P` in 7-bit mode.
+    const fn dcs_response(&self) -> &'static [u8] {
+        match self.s8c1t_mode {
+            S8c1t::EightBit => &[0x90],
+            S8c1t::SevenBit => b"\x1bP",
+        }
+    }
+
+    /// Return the OSC introducer for PTY responses: `0x9D` in 8-bit mode,
+    /// `ESC ]` in 7-bit mode.
+    const fn osc_response(&self) -> &'static [u8] {
+        match self.s8c1t_mode {
+            S8c1t::EightBit => &[0x9D],
+            S8c1t::SevenBit => b"\x1b]",
+        }
+    }
+
+    /// Return the ST (String Terminator) for PTY responses: `0x9C` in 8-bit
+    /// mode, `ESC \` in 7-bit mode.
+    const fn st_response(&self) -> &'static [u8] {
+        match self.s8c1t_mode {
+            S8c1t::EightBit => &[0x9C],
+            S8c1t::SevenBit => b"\x1b\\",
+        }
     }
 
     /// Get the dynamic cursor color override (set via OSC 12).
@@ -1016,10 +1071,16 @@ impl TerminalHandler {
     /// a DCS tmux passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`)
     /// so that tmux can relay it back to the requesting client.
     fn write_to_pty(&self, text: &str) {
+        self.write_bytes_to_pty(text.as_bytes());
+    }
+
+    /// Write raw bytes back to the PTY, wrapping in a tmux passthrough
+    /// envelope if required.
+    fn write_bytes_to_pty(&self, data: &[u8]) {
         let bytes = if self.in_tmux_passthrough {
-            Self::wrap_tmux_passthrough(text.as_bytes())
+            Self::wrap_tmux_passthrough(data)
         } else {
-            text.as_bytes().to_vec()
+            data.to_vec()
         };
 
         if let Some(tx) = &self.write_tx
@@ -1027,6 +1088,41 @@ impl TerminalHandler {
         {
             tracing::error!("Failed to write to PTY: {e}");
         }
+    }
+
+    /// Write a CSI response to the PTY using the correct C1 encoding.
+    ///
+    /// Sends `CSI {body}` where CSI is `0x9B` (8-bit) or `ESC [` (7-bit)
+    /// depending on the current S8C1T mode.
+    fn write_csi_response(&self, body: &str) {
+        let mut buf = Vec::with_capacity(2 + body.len());
+        buf.extend_from_slice(self.csi_response());
+        buf.extend_from_slice(body.as_bytes());
+        self.write_bytes_to_pty(&buf);
+    }
+
+    /// Write a DCS response to the PTY using the correct C1 encoding.
+    ///
+    /// Sends `DCS {body} ST` where DCS and ST use 8-bit or 7-bit forms
+    /// depending on the current S8C1T mode.
+    fn write_dcs_response(&self, body: &str) {
+        let mut buf = Vec::with_capacity(4 + body.len());
+        buf.extend_from_slice(self.dcs_response());
+        buf.extend_from_slice(body.as_bytes());
+        buf.extend_from_slice(self.st_response());
+        self.write_bytes_to_pty(&buf);
+    }
+
+    /// Write an OSC response to the PTY using the correct C1 encoding.
+    ///
+    /// Sends `OSC {body} ST` where OSC and ST use 8-bit or 7-bit forms
+    /// depending on the current S8C1T mode.
+    fn write_osc_response(&self, body: &str) {
+        let mut buf = Vec::with_capacity(4 + body.len());
+        buf.extend_from_slice(self.osc_response());
+        buf.extend_from_slice(body.as_bytes());
+        buf.extend_from_slice(self.st_response());
+        self.write_bytes_to_pty(&buf);
     }
 
     /// Notify the PTY of a column-mode resize (DECCOLM).
@@ -1052,14 +1148,14 @@ impl TerminalHandler {
     /// Handle DA2 — Secondary Device Attributes.
     /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
     pub fn handle_secondary_device_attributes(&mut self) {
-        self.write_to_pty("\x1b[>65;0;0c");
+        self.write_csi_response(">65;0;0c");
     }
 
     /// Handle DA3 — Tertiary Device Attributes.
     /// Responds with `DCS ! | 00000000 ST`.
     /// This identifies Freminal with a fixed 8-digit hexadecimal unit ID.
     pub fn handle_tertiary_device_attributes(&mut self) {
-        self.write_to_pty("\x1bP!|00000000\x1b\\");
+        self.write_dcs_response("!|00000000");
     }
 
     /// Handle DECREQTPARM — Request Terminal Parameters.
@@ -1074,14 +1170,14 @@ impl TerminalHandler {
     /// - Flags: 0
     pub fn handle_request_terminal_parameters(&mut self, ps: u8) {
         let code = if ps == 0 { 2u8 } else { 3u8 };
-        self.write_to_pty(&format!("\x1b[{code};1;1;120;120;1;0x"));
+        self.write_csi_response(&format!("{code};1;1;120;120;1;0x"));
     }
 
     /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
     /// Responds with `DCS > | Freminal <version> ST`.
     pub fn handle_device_name_and_version(&mut self) {
         let version = env!("CARGO_PKG_VERSION");
-        self.write_to_pty(&format!("\x1bP>|Freminal {version}\x1b\\"));
+        self.write_dcs_response(&format!(">|Freminal {version}"));
     }
 
     /// Handle a DCS (Device Control String) sequence.
@@ -1698,14 +1794,14 @@ impl TerminalHandler {
         match pt {
             b"m" => {
                 let sgr = self.build_sgr_response();
-                self.write_to_pty(&format!("\x1bP1$r{sgr}m\x1b\\"));
+                self.write_dcs_response(&format!("1$r{sgr}m"));
             }
             b"r" => {
                 let (top, bottom) = self.buffer.scroll_region();
                 // Respond with 1-based row numbers.
                 let top_1 = top + 1;
                 let bottom_1 = bottom + 1;
-                self.write_to_pty(&format!("\x1bP1$r{top_1};{bottom_1}r\x1b\\"));
+                self.write_dcs_response(&format!("1$r{top_1};{bottom_1}r"));
             }
             // SP q = space (0x20) followed by 'q' (0x71)
             b" q" => {
@@ -1717,7 +1813,7 @@ impl TerminalHandler {
                     CursorVisualStyle::VerticalLineCursorBlink => 5,
                     CursorVisualStyle::VerticalLineCursorSteady => 6,
                 };
-                self.write_to_pty(&format!("\x1bP1$r{style_num} q\x1b\\"));
+                self.write_dcs_response(&format!("1$r{style_num} q"));
             }
             // "p = DECSCL (Set Conformance Level) query.
             //
@@ -1726,14 +1822,17 @@ impl TerminalHandler {
             //   Ps2 = C1 control mode (0 or 2 = 8-bit, 1 = 7-bit)
             //
             // Freminal advertises VT525 (DA1 first param = 65) and uses 7-bit
-            // controls, so we report level 5 with 7-bit C1 transmission.
-            // We do not track DECSCL changes, so this is always the default.
+            // controls by default; when S8C1T is active, report 8-bit.
             b"\"p" => {
-                self.write_to_pty("\x1bP1$r65;1\"p\x1b\\");
+                let c1_mode = match self.s8c1t_mode {
+                    S8c1t::EightBit => 0,
+                    S8c1t::SevenBit => 1,
+                };
+                self.write_dcs_response(&format!("1$r65;{c1_mode}\"p"));
             }
             _ => {
                 // Invalid / unrecognized query → DCS 0 $ r ST
-                self.write_to_pty("\x1bP0$r\x1b\\");
+                self.write_dcs_response("0$r");
                 tracing::warn!(
                     "DECRQSS: unrecognized setting query: {}",
                     String::from_utf8_lossy(pt)
@@ -1865,16 +1964,16 @@ impl TerminalHandler {
 
             let Some(cap_name) = Self::hex_decode(hex_name) else {
                 tracing::warn!("XTGETTCAP: invalid hex encoding: {hex_name}");
-                self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
+                self.write_dcs_response(&format!("0+r{hex_name}"));
                 continue;
             };
 
             if let Some(value) = Self::lookup_termcap(&cap_name) {
                 let hex_value = Self::hex_encode(value);
-                self.write_to_pty(&format!("\x1bP1+r{hex_name}={hex_value}\x1b\\"));
+                self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
             } else {
                 tracing::warn!("XTGETTCAP: unknown capability: {cap_name}");
-                self.write_to_pty(&format!("\x1bP0+r{hex_name}\x1b\\"));
+                self.write_dcs_response(&format!("0+r{hex_name}"));
             }
         }
     }
@@ -2683,7 +2782,7 @@ impl TerminalHandler {
     }
 
     /// Handle CPR — Cursor Position Report.
-    /// Responds with `ESC [ <row> ; <col> R` (1-indexed).
+    /// Responds with `CSI <row> ; <col> R` (1-indexed).
     ///
     /// Per DEC VT510: when DECOM is enabled, the reported row is relative to the
     /// scroll region top margin.  When DECOM is disabled, it is relative to the
@@ -2697,31 +2796,32 @@ impl TerminalHandler {
         } else {
             screen_pos.y + 1
         };
-        self.write_to_pty(&format!("\x1b[{y};{x}R"));
+        let body = format!("{y};{x}R");
+        self.write_csi_response(&body);
     }
 
     /// Handle DSR — Device Status Report (Ps=5).
-    /// Responds with `ESC [ 0 n` (device OK).
+    /// Responds with `CSI 0 n` (device OK).
     pub fn handle_device_status_report(&mut self) {
-        self.write_to_pty("\x1b[0n");
+        self.write_csi_response("0n");
     }
 
     /// Handle DSR ?996 — Color Theme Report.
-    /// Responds with `ESC [ ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
+    /// Responds with `CSI ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
     /// Freminal's default background is dark (#45475a), so we report dark (2).
     pub fn handle_color_theme_report(&mut self) {
         // 1 = light, 2 = dark
-        self.write_to_pty("\x1b[?997;2n");
+        self.write_csi_response("?997;2n");
     }
 
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
         if self.vt52_mode == Decanm::Vt52 {
-            // VT52 identify response: ESC / Z
+            // VT52 identify response: ESC / Z — not affected by S8C1T
             self.write_to_pty("\x1b/Z");
         } else {
-            self.write_to_pty("\x1b[?65;1;2;4;6;17;18;22c");
+            self.write_csi_response("?65;1;2;4;6;17;18;22c");
         }
     }
 
@@ -2741,15 +2841,15 @@ impl TerminalHandler {
             WindowManipulation::ReportCharacterSizeInPixels => {
                 let w = self.cell_pixel_width;
                 let h = self.cell_pixel_height;
-                self.write_to_pty(&format!("\x1b[6;{h};{w}t"));
+                self.write_csi_response(&format!("6;{h};{w}t"));
             }
             WindowManipulation::ReportTerminalSizeInCharacters => {
                 let (width, height) = self.get_win_size();
-                self.write_to_pty(&format!("\x1b[8;{height};{width}t"));
+                self.write_csi_response(&format!("8;{height};{width}t"));
             }
             WindowManipulation::ReportRootWindowSizeInCharacters => {
                 let (width, height) = self.get_win_size();
-                self.write_to_pty(&format!("\x1b[9;{height};{width}t"));
+                self.write_csi_response(&format!("9;{height};{width}t"));
             }
             other => {
                 self.window_commands.push(other.clone());
@@ -2857,13 +2957,13 @@ impl TerminalHandler {
             }
             AnsiOscType::QueryPaletteColor(idx) => {
                 let (r, g, b) = self.palette.get_rgb(*idx, self.theme);
-                let response = format!(
-                    "\x1b]4;{idx};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                let body = format!(
+                    "4;{idx};rgb:{:04x}/{:04x}/{:04x}",
                     u16::from(r) * 257,
                     u16::from(g) * 257,
                     u16::from(b) * 257,
                 );
-                self.write_to_pty(&response);
+                self.write_osc_response(&body);
             }
             AnsiOscType::ResetPaletteColor(Some(idx)) => {
                 self.palette.reset(*idx);
@@ -2893,17 +2993,17 @@ impl TerminalHandler {
             // OSC 11 query: respond with the effective background color.
             AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
                 let (r, g, b) = self.bg_color_override.unwrap_or(self.theme.background);
-                self.write_to_pty(&format!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+                self.write_osc_response(&format!("11;rgb:{r:02x}/{g:02x}/{b:02x}"));
             }
             // OSC 10 query: respond with the effective foreground color.
             AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
                 let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
-                self.write_to_pty(&format!("\x1b]10;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+                self.write_osc_response(&format!("10;rgb:{r:02x}/{g:02x}/{b:02x}"));
             }
             // OSC 12 query: respond with the effective cursor color.
             AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query) => {
                 let (r, g, b) = self.cursor_color_override.unwrap_or(self.theme.cursor);
-                self.write_to_pty(&format!("\x1b]12;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"));
+                self.write_osc_response(&format!("12;rgb:{r:02x}/{g:02x}/{b:02x}"));
             }
             // OSC 11 set: store a dynamic background color override.
             AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
@@ -3575,7 +3675,7 @@ impl TerminalHandler {
                     // Unknown mode — respond with Ps=0 (not recognized)
                     let digits: String = params.iter().map(|&x| x as char).collect();
                     tracing::warn!("DECRQM: unknown mode ?{digits}, responding not recognized");
-                    self.write_to_pty(&format!("\x1b[?{digits};0$y"));
+                    self.write_csi_response(&format!("?{digits};0$y"));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(Decawm::AutoWrap),
                 Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(Decawm::NoAutoWrap),
@@ -3866,10 +3966,10 @@ impl TerminalHandler {
                 self.handle_request_device_attributes();
             }
             TerminalOutput::EightBitControl => {
-                tracing::warn!("EightBitControl not yet implemented (ignored)");
+                tracing::debug!("EightBitControl (S8C1T) — mode sync handled by TerminalState");
             }
             TerminalOutput::SevenBitControl => {
-                tracing::warn!("SevenBitControl not yet implemented (ignored)");
+                tracing::debug!("SevenBitControl (S7C1T) — mode sync handled by TerminalState");
             }
             TerminalOutput::AnsiConformanceLevelOne => {
                 tracing::warn!("AnsiConformanceLevelOne not yet implemented (ignored)");

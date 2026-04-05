@@ -447,10 +447,12 @@ comparing Freminal's output against the expected VT100 behavior:
 | 5     | 1 (DECAWM)  | Autowrap doesn't respect DECSTBM scroll region             | Fixed  |
 | 6     | 1 (BS)      | BS from pending-wrap state lands at wrong column           | Fixed  |
 | 7     | 7 (VT52)    | VT52 `ESC Y` OOB row clamps col instead of col-only update | Fixed  |
+| 8     | 8 (IRM)     | IRM (Insert/Replace Mode) and LNM not implemented          | Fixed  |
+| 9     | VT220       | 8-bit C1 controls (S8C1T/S7C1T) not implemented            | Fixed  |
 
 ### Passing Tests — by Menu
 
-All 269 vttest integration tests pass (`cargo test --all` — 0 failed).
+All 289+ vttest integration tests pass (`cargo test --all` — 0 failed).
 
 **Menu 1 — Cursor Movement (48 tests):**
 CUF/CUB/CUU/CUD (basic and clamped), CUP/HVP (all corners, origin mode), ED 0/1/2 (erase
@@ -515,11 +517,23 @@ SGR reset (`CSI 0 m`). Alternate screen: `?1049`, `?47`, `?1047` switch and buff
 Bracketed paste: `?2004` mode flag set/cleared. **All pass.** BCE: `[SKIP]` — not implemented.
 Mouse tracking: `[SKIP]` — requires GUI. Window manipulation: `[SKIP]` — requires GUI.
 
+**VT220 — 8-bit C1 Controls / S8C1T (20 tests):**
+Parser-side dispatch: 0x9B (CSI), 0x90 (DCS), 0x9D (OSC), 0x84 (IND), 0x85 (NEL), 0x88 (HTS),
+0x8D (RI), 0x9F (APC) — all recognized as C1 equivalents when S8C1T mode is active. Response-side
+encoding: DA1, DA2, DSR, CPR, XTVERSION, DECRQSS, and OSC color queries all emit 8-bit C1
+introducers (0x9B, 0x90, 0x9D, 0x9C) when in 8-bit mode. Mode transitions: `ESC SP G` enables
+S8C1T, `ESC SP F` reverts to S7C1T, DECSCL level 1 forces 7-bit. VT52 mode gated out of 8-bit
+dispatch. **All pass.**
+
 ### Known Non-Compliance
 
-| vttest Menu | Test        | Description                                           | Status                       |
-| ----------- | ----------- | ----------------------------------------------------- | ---------------------------- |
-| 8 (IRM)     | `CSI 4 h/l` | Insert/Replace Mode not implemented; silently ignored | Open — unimplemented feature |
+No known non-compliance issues remain for automatable tests.
+
+Previously tracked:
+
+| vttest Menu | Test        | Description                                           | Status                   |
+| ----------- | ----------- | ----------------------------------------------------- | ------------------------ |
+| 8 (IRM)     | `CSI 4 h/l` | Insert/Replace Mode not implemented; silently ignored | Fixed (commit `cbb71e4`) |
 
 ### Skipped / Not Automatable
 
@@ -556,8 +570,8 @@ an 80-column terminal). There is NO explicit `pending_wrap` boolean flag. This m
 - vttest assumes **80x24** (standard VT100 size) for all tests
 - vttest also tests **132-column mode** (DECCOLM): autowrap and other tests run two passes
   (pass 0 at 80 columns, pass 1 at 132 columns)
-- VT220 tests in `vt220.c` include 8-bit C1 control sequence tests (S8C1T/S7C1T), orthogonal
-  to column width
+- VT220 tests in `vt220.c` include 8-bit C1 control sequence tests (S8C1T/S7C1T) — **implemented**
+  (20 tests in `vttest_s8c1t.rs`), orthogonal to column width
 
 ### Test File Organization
 
@@ -573,6 +587,8 @@ freminal-terminal-emulator/
     vttest_bugs.rs            — Menu 9 tests (10 tests)
     vttest_extensions.rs      — Menu 11 tests (38 tests)
     vttest_selftest.rs        — Self-tests (15 tests)
+    vttest_vt52.rs            — Menu 7 VT52 tests (29 tests)
+    vttest_s8c1t.rs           — 8-bit C1 / S8C1T tests (20 tests)
     golden/                   — golden reference files
 ```
 

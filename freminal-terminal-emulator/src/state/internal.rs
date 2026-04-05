@@ -21,6 +21,7 @@ use freminal_common::{
             keypad::KeypadMode,
             mouse::{MouseEncoding, MouseTrack},
             reverse_wrap_around::ReverseWrapAround,
+            s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
             xtmsewin::XtMseWin,
         },
@@ -258,6 +259,16 @@ impl TerminalState {
             }
             TerminalOutput::NormalKeypadMode => {
                 self.modes.keypad_mode = KeypadMode::Numeric;
+            }
+            // S8C1T (ESC SP G) / S7C1T (ESC SP F) — toggle 8-bit C1 control
+            // recognition in the parser and response encoding in the handler.
+            TerminalOutput::EightBitControl => {
+                self.parser.s8c1t_mode = S8c1t::EightBit;
+                self.handler.set_s8c1t_mode(S8c1t::EightBit);
+            }
+            TerminalOutput::SevenBitControl => {
+                self.parser.s8c1t_mode = S8c1t::SevenBit;
+                self.handler.set_s8c1t_mode(S8c1t::SevenBit);
             }
             _ => {}
         }

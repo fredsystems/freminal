@@ -39,6 +39,7 @@ pub mod mouse;
 pub mod private_color_registers;
 pub mod reverse_wrap_around;
 pub mod rl_bracket;
+pub mod s8c1t;
 pub mod sync_updates;
 pub mod theme;
 pub mod unknown;
