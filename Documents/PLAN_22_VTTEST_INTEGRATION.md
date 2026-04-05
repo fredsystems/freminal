@@ -140,7 +140,21 @@ content. The "interactive" aspect is visual verification — but the buffer stat
 
 ### Menu 7 — VT52 Mode
 
-All tests: `[SKIP]` — VT52 mode not implemented (planned in Task 20.8).
+| Test                            | Sequences Exercised              | Classification | Notes                                         |
+| ------------------------------- | -------------------------------- | -------------- | --------------------------------------------- |
+| 7.1 Enter/Exit VT52             | `CSI ? 2 l` / `ESC <`            | `[A]`          | Mode flag + ANSI restore verifiable           |
+| 7.2 Cursor home (`ESC H`)       | `ESC H`                          | `[A]`          | Cursor pos (0,0) verifiable                   |
+| 7.3 Direct cursor address       | `ESC Y <row+31> <col+31>`        | `[A]`          | Cursor pos verifiable for all valid coords    |
+| 7.4 OOB row → col-only update   | `ESC Y <row>` where row > height | `[A]`          | Bug fixed: row ignored, col applied           |
+| 7.5 Cursor up (`ESC A`)         | `ESC A`                          | `[A]`          | Clamped at top row                            |
+| 7.6 Cursor down (`ESC B`)       | `ESC B`                          | `[A]`          | Clamped at bottom row                         |
+| 7.7 Cursor right (`ESC C`)      | `ESC C`                          | `[A]`          | Clamped at rightmost column                   |
+| 7.8 Cursor left (`ESC D`)       | `ESC D`                          | `[A]`          | Clamped at column 0                           |
+| 7.9 Reverse line feed (`ESC I`) | `ESC I`                          | `[A]`          | Scrolls at top row; mid-screen moves cursor   |
+| 7.10 Erase to end of screen     | `ESC J`                          | `[A]`          | Cells below cursor cleared                    |
+| 7.11 Erase to end of line       | `ESC K`                          | `[A]`          | Cells right of cursor on current line cleared |
+| 7.12 Special graphics on/off    | `ESC F` / `ESC G`                | `[A]`          | `character_replace` mode flag verifiable      |
+| 7.13 Identify (`ESC Z`)         | `ESC Z` → `ESC / Z`              | `[A]`          | Response bytes verifiable via PTY channel     |
 
 ### Menu 8 — Insert/Delete Operations
 
@@ -213,15 +227,16 @@ assert the correct output, causing them to fail. The corresponding Freminal bugs
 These bugs were discovered by building byte-exact test sequences from the vttest source and
 comparing Freminal's output against the expected VT100 behavior:
 
-| Bug # | Description                                           | Files Modified                                                                           |
-| ----- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| 1     | TBC Ps=2 incorrectly clears character tab stop        | `terminal_handler.rs`, `tbc.rs`                                                          |
-| 2     | `handle_lf`/`handle_ri` don't clear pending-wrap      | `buffer.rs`                                                                              |
-| 4a    | `character_replace` not saved/restored by DECSC/DECRC | `terminal_handler.rs`                                                                    |
-| 4b    | `ESC ) B` (designate G1 as US-ASCII) produces Invalid | `standard.rs`                                                                            |
-| 4c    | SI/SO (0x0E/0x0F) not handled as C0 control chars     | `ansi.rs`                                                                                |
-| 5     | Autowrap doesn't respect DECSTBM scroll region        | `buffer.rs` (added `is_cursor_at_scroll_region_bottom()`, `scroll_region_up_for_wrap()`) |
-| 6     | BS from pending-wrap state lands at wrong column      | `buffer.rs` (`handle_backspace()`)                                                       |
+| Bug # | Description                                                  | Files Modified                                                                           |
+| ----- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| 1     | TBC Ps=2 incorrectly clears character tab stop               | `terminal_handler.rs`, `tbc.rs`                                                          |
+| 2     | `handle_lf`/`handle_ri` don't clear pending-wrap             | `buffer.rs`                                                                              |
+| 4a    | `character_replace` not saved/restored by DECSC/DECRC        | `terminal_handler.rs`                                                                    |
+| 4b    | `ESC ) B` (designate G1 as US-ASCII) produces Invalid        | `standard.rs`                                                                            |
+| 4c    | SI/SO (0x0E/0x0F) not handled as C0 control chars            | `ansi.rs`                                                                                |
+| 5     | Autowrap doesn't respect DECSTBM scroll region               | `buffer.rs` (added `is_cursor_at_scroll_region_bottom()`, `scroll_region_up_for_wrap()`) |
+| 6     | BS from pending-wrap state lands at wrong column             | `buffer.rs` (`handle_backspace()`)                                                       |
+| 7     | VT52 `ESC Y` OOB row clamps col instead of updating col-only | `terminal_handler.rs` (`handle_cursor_pos` — VT52 branch)                                |
 
 ### New Tests Added in Phase B
 
@@ -386,23 +401,56 @@ comparing Freminal's output against the expected VT100 behavior:
 
 ---
 
+### 22.B-VT52 — Menu 7: VT52 Mode Tests + OOB Row Bug Fix
+
+- **Status:** Complete
+- **Priority:** 1 — High
+- **Scope:** `freminal-terminal-emulator/tests/vttest_vt52.rs`, `freminal-buffer/src/terminal_handler.rs`
+- **Details:**
+  VT52 mode was previously `[SKIP]` (Task 20.8 implemented the VT52 parser, but no integration
+  tests existed). This subtask adds 21 integration tests covering all automatable VT52 behaviors
+  derived from `vttest-20251205/vt52.c` and `vttest-20251205/esc.c`, and fixes a correctness bug
+  discovered in the process.
+
+  **Bug fixed (Bug 7):** `handle_cursor_pos` in `terminal_handler.rs` always clamped an
+  out-of-bounds row to `height-1`. VT52 spec requires that when the row parameter to `ESC Y` is
+  out-of-bounds, **only the column is updated** (the row component is silently ignored). Fix:
+  added a VT52-mode check — when `self.vt52_mode == Decanm::Vt52` and
+  `row_1indexed > self.buffer.terminal_height()`, pass `y = None` to `buffer.set_cursor_pos`.
+
+  Reference: `vttest-20251205/vt52.c` lines 94–107 — explicitly calls `vt52cup(max_lines+3, i-1)`
+  (row 27 on a 24-row screen) with the comment: _"out of bounds vertically so that only the
+  column is updated"_.
+
+- **Tests added (21):** Mode entry/exit, cursor home, direct cursor address (top-left,
+  bottom-right, mid-screen, right-edge), OOB row column-only update (the bug), repeated OOB,
+  vttest box-drawing top-edge loop simulation, cursor movement clamping (all four directions),
+  reverse line feed mid-screen, reverse line feed scroll at top, 5× backscroll, erase to end of
+  screen, erase to end of line, special graphics on/off, identify response.
+- **Completion note (2026-04-04):** All 21 tests in `vttest_vt52.rs` pass. Bug 7 fixed.
+  `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
+  `cargo-machete` clean.
+
+---
+
 ## Compliance Report
 
 ### Bugs Fixed During Phase B
 
-| Bug # | vttest Menu | Description                                           | Status |
-| ----- | ----------- | ----------------------------------------------------- | ------ |
-| 1     | 2 (TBC)     | TBC Ps=2 incorrectly clears character tab stop        | Fixed  |
-| 2     | 1 (IND/RI)  | `handle_lf`/`handle_ri` don't clear pending-wrap      | Fixed  |
-| 4a    | 3 (SCS)     | `character_replace` not saved/restored by DECSC/DECRC | Fixed  |
-| 4b    | 3 (SCS)     | `ESC ) B` (designate G1 as US-ASCII) produces Invalid | Fixed  |
-| 4c    | 3 (SCS)     | SI/SO (0x0E/0x0F) not handled as C0 control chars     | Fixed  |
-| 5     | 1 (DECAWM)  | Autowrap doesn't respect DECSTBM scroll region        | Fixed  |
-| 6     | 1 (BS)      | BS from pending-wrap state lands at wrong column      | Fixed  |
+| Bug # | vttest Menu | Description                                                | Status |
+| ----- | ----------- | ---------------------------------------------------------- | ------ |
+| 1     | 2 (TBC)     | TBC Ps=2 incorrectly clears character tab stop             | Fixed  |
+| 2     | 1 (IND/RI)  | `handle_lf`/`handle_ri` don't clear pending-wrap           | Fixed  |
+| 4a    | 3 (SCS)     | `character_replace` not saved/restored by DECSC/DECRC      | Fixed  |
+| 4b    | 3 (SCS)     | `ESC ) B` (designate G1 as US-ASCII) produces Invalid      | Fixed  |
+| 4c    | 3 (SCS)     | SI/SO (0x0E/0x0F) not handled as C0 control chars          | Fixed  |
+| 5     | 1 (DECAWM)  | Autowrap doesn't respect DECSTBM scroll region             | Fixed  |
+| 6     | 1 (BS)      | BS from pending-wrap state lands at wrong column           | Fixed  |
+| 7     | 7 (VT52)    | VT52 `ESC Y` OOB row clamps col instead of col-only update | Fixed  |
 
 ### Passing Tests — by Menu
 
-All 248 vttest integration tests pass (`cargo test --all` — 0 failed).
+All 269 vttest integration tests pass (`cargo test --all` — 0 failed).
 
 **Menu 1 — Cursor Movement (48 tests):**
 CUF/CUB/CUU/CUD (basic and clamped), CUP/HVP (all corners, origin mode), ED 0/1/2 (erase
@@ -432,6 +480,15 @@ against vttest known list), DA2 (secondary attributes — `ESC [ > 1 ; 10 ; 0 c`
 unit ID — `ESC P ! | 00000000 ESC \`), DECREQTPARM Ps=0 (response code 2, correct body format),
 DECREQTPARM Ps=1 (response code 3, body matches Ps=0 modulo code), DECRQM (mode query for
 DECAWM, DECTCEM, ?2004). **All pass.**
+
+**Menu 7 — VT52 Mode (21 tests):**
+VT52 mode entry (`CSI ? 2 l`) and exit (`ESC <`), cursor home (`ESC H`), direct cursor address
+(`ESC Y`) for top-left/bottom-right/mid-screen/right-edge positions, out-of-bounds row with
+column-only update (Bug 7 fix — vttest `vt52.c` lines 94–107), vttest top-edge box-drawing loop
+simulation, cursor movement clamping in all four directions (`ESC A/B/C/D`), reverse line feed
+mid-screen (`ESC I`), reverse line feed scroll at top row, 5× backscroll, erase to end of screen
+(`ESC J`), erase to end of line (`ESC K`), special graphics charset on/off (`ESC F`/`ESC G`),
+identify response (`ESC Z` → `ESC / Z`). **All pass.**
 
 **Menu 8 — Insert/Delete Operations (36 tests):**
 ICH (insert characters — Z→A spaced alphabet vttest pattern), DCH (delete characters — per-row
@@ -471,7 +528,6 @@ Mouse tracking: `[SKIP]` — requires GUI. Window manipulation: `[SKIP]` — req
 | 3 (G1+)     | G1/G2/G3 charset designation, NRC sets, ISO Latin — not implemented            |
 | 4           | DECDWL/DECDHL double-width/height — renderer not implemented                   |
 | 5           | Keyboard tests require actual key input events, not escape sequence replay     |
-| 7           | VT52 mode — requires interactive mode switching                                |
 | 9 (Bug A)   | Smooth scroll — no buffer effect at modern frame rates                         |
 | 9 (Bug C–L) | Visual-only (DECCOLM visual, double-width cursor, DECSCNM, double-width erase) |
 | 10.2        | DECTST hardware diagnostic                                                     |
@@ -524,8 +580,7 @@ freminal-terminal-emulator/
 
 - **Menu 4** (double-sized characters): DECDWL/DECDHL rendering not implemented.
 - **Menu 5** (keyboard): Requires actual key input events, not escape sequence replay.
-- **Menu 7** (VT52 mode): VT52 mode implemented in Task 20.8 but vttest VT52 tests require
-  interactive mode switching.
+- **Menu 7** (VT52 mode): Fully automated — 21 tests in `vttest_vt52.rs`. All pass.
 - **Menu 10.2** (DECTST self-test): Hardware diagnostic.
 - **Menu 11.9** (mouse tracking): Requires GUI mouse events.
 - **Menu 11.10** (window manipulation): Requires GUI window context.

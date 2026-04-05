@@ -683,11 +683,34 @@ impl TerminalHandler {
         self.buffer.advance_to_next_tab_stop();
     }
 
-    /// Handle cursor position (CUP, HVP)
-    /// x and y are typically 1-indexed from the parser, so we subtract 1
+    /// Handle cursor position (CUP, HVP).
+    ///
+    /// `x` and `y` are 1-indexed (from the parser).  `None` means "leave this
+    /// axis unchanged" (e.g. CHA supplies only `x`).
+    ///
+    /// **VT52 out-of-bounds row rule** — When the terminal is in VT52
+    /// compatibility mode (`Decanm::Vt52`) and the supplied row index exceeds
+    /// the screen height, the row coordinate is silently ignored and only the
+    /// column is updated.  This matches the behaviour documented in the vttest
+    /// source (`vt52.c`, lines 94-107): `vt52cup(max_lines+3, i-1)` is used
+    /// deliberately to update only the column.
     pub fn handle_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
         let x_zero = x.map(|v| v.saturating_sub(1));
-        let y_zero = y.map(|v| v.saturating_sub(1));
+
+        // In VT52 mode, an out-of-bounds row means "column-only update".
+        let y_zero = if self.vt52_mode == Decanm::Vt52 {
+            y.and_then(|row_1indexed| {
+                // row_1indexed is 1-based; height is the number of rows.
+                if row_1indexed > self.buffer.terminal_height() {
+                    None // out-of-bounds — ignore the row, update column only
+                } else {
+                    Some(row_1indexed.saturating_sub(1))
+                }
+            })
+        } else {
+            y.map(|v| v.saturating_sub(1))
+        };
+
         self.buffer.set_cursor_pos(x_zero, y_zero);
     }
 
