@@ -105,23 +105,22 @@ impl VtTestHelper {
         let visible = buffer.visible_rows(0);
         let mut lines = Vec::with_capacity(self.height);
 
-        for (i, row) in visible.iter().enumerate().take(self.height) {
-            let cells = row.cells();
+        for row_index in 0..self.height {
             let mut line = String::new();
-            for cell in cells {
-                if cell.is_continuation() {
-                    continue;
+
+            if let Some(row) = visible.get(row_index) {
+                for col in 0..self.width {
+                    let cell = row.resolve_cell(col);
+                    if cell.is_continuation() {
+                        continue;
+                    }
+                    let _ = write!(line, "{}", cell.tchar());
                 }
-                let _ = write!(line, "{}", cell.tchar());
             }
+
             // Trim trailing whitespace (spaces that pad the row).
             let trimmed = line.trim_end().to_owned();
             lines.push(trimmed);
-
-            // Early exit if we've processed enough rows.
-            if i + 1 >= self.height {
-                break;
-            }
         }
 
         // Pad with empty strings if visible_rows returned fewer than height.

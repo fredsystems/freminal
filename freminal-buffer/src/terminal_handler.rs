@@ -548,11 +548,12 @@ impl TerminalHandler {
         }
     }
 
-    /// Insert  into the buffer, honouring the current IRM state.
+    /// Insert text into the buffer, honouring the current IRM state.
     ///
     /// In replace mode (the default) the characters are written in bulk via
-    /// .  In insert mode each character is preceded by a
-    ///  call that shifts existing content right.
+    /// `self.buffer.insert_text(text)`.  In insert mode each character is
+    /// preceded by a `self.buffer.insert_spaces(1)` call that shifts existing
+    /// content right.
     fn insert_text_irm_aware(&mut self, text: &[TChar]) {
         if self.insert_mode.is_insert() {
             for ch in text {
@@ -1169,7 +1170,13 @@ impl TerminalHandler {
     /// - Clock multiplier: 1
     /// - Flags: 0
     pub fn handle_request_terminal_parameters(&mut self, ps: u8) {
-        let code = if ps == 0 { 2u8 } else { 3u8 };
+        // DECREQTPARM only defines Ps=0 and Ps=1.  The parser should have
+        // already validated this, but we defend against unexpected values.
+        let code = match ps {
+            0 => 2u8,
+            1 => 3u8,
+            _ => return,
+        };
         self.write_csi_response(&format!("{code};1;1;120;120;1;0x"));
     }
 
