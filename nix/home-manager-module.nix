@@ -72,7 +72,7 @@ let
       };
 
       uiSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.ui) hide_menu_bar;
+        inherit (s.ui) hide_menu_bar background_opacity;
       };
 
       result = {
@@ -147,31 +147,35 @@ in
 
       theme = {
         name = mkOption {
+          # Sorted alphabetically by slug. Keep in sync with ALL_THEMES in
+          # freminal-common/src/themes.rs.
           type = types.enum [
-            "catppuccin-mocha"
-            "catppuccin-macchiato"
-            "catppuccin-frappe"
-            "catppuccin-latte"
-            "dracula"
-            "nord"
-            "solarized-dark"
-            "solarized-light"
-            "gruvbox-dark"
-            "gruvbox-light"
-            "one-dark"
-            "one-light"
-            "tokyo-night"
-            "tokyo-night-storm"
-            "kanagawa"
-            "rose-pine"
-            "rose-pine-moon"
-            "rose-pine-dawn"
-            "monokai-pro"
             "ayu-dark"
             "ayu-light"
+            "catppuccin-frappe"
+            "catppuccin-latte"
+            "catppuccin-macchiato"
+            "catppuccin-mocha"
+            "dracula"
             "everforest-dark"
             "everforest-light"
+            "ghostty-default"
+            "gruvbox-dark"
+            "gruvbox-light"
+            "kanagawa"
             "material-dark"
+            "monokai-pro"
+            "nord"
+            "one-dark"
+            "one-light"
+            "rose-pine"
+            "rose-pine-dawn"
+            "rose-pine-moon"
+            "solarized-dark"
+            "solarized-light"
+            "tokyo-night"
+            "tokyo-night-storm"
+            "wezterm-default"
             "xterm-default"
           ];
           default = "catppuccin-mocha";
@@ -224,6 +228,15 @@ in
           description = ''
             Hide the menu bar at the top of the window.
             Null uses the default (false).
+          '';
+        };
+
+        background_opacity = mkOption {
+          type = types.nullOr (types.addCheck types.float (x: x >= 0.0 && x <= 1.0));
+          default = null;
+          description = ''
+            Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+            Null uses the default (1.0).
           '';
         };
       };
