@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode,
+    keypad::KeypadMode, lnm::Lnm,
 };
 
 const fn char_to_ctrl_code(c: u8) -> u8 {
@@ -169,6 +169,7 @@ impl TerminalInput {
         modify_other_keys: u8,
         application_escape_key: ApplicationEscapeKey,
         backarrow_sends_bs: Decbkm,
+        line_feed_mode: Lnm,
     ) -> TerminalInputPayload {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
@@ -183,11 +184,25 @@ impl TerminalInput {
                     TerminalInputPayload::Single(char_to_ctrl_code(*c))
                 }
             }
-            // Sending bare '\n' causes misbehaviour in full-screen TUI programs (nvim,
-            // lazygit) which expect CR (0x0d) for the Enter key.  Interactive shells
-            // handle '\n' fine, but the POSIX tty layer translates CR→NL on input when
-            // ICRNL is set, so sending CR is correct for both cases.
-            Self::Enter => TerminalInputPayload::Single(char_to_ctrl_code(b'm')),
+            // When LNM (Line Feed / New Line Mode, CSI 20 h) is set, pressing
+            // Enter must send CR+LF (0x0D 0x0A).  When LNM is reset (the
+            // default), Enter sends bare CR (0x0D).
+            //
+            // Reference: VT100 User Guide §3.3.1 — "When the new line mode is
+            // set, it causes the RETURN key to transmit both a carriage return
+            // and a line feed."  vttest's `tst_NLM` in `reports.c` verifies
+            // this: with LNM set, RETURN must produce `\015\012`.
+            //
+            // Interactive shells handle `\n` fine because the POSIX tty layer
+            // translates CR→NL on input (ICRNL), so sending CR is correct for
+            // both TUI programs and shells.
+            Self::Enter => {
+                if line_feed_mode == Lnm::NewLine {
+                    TerminalInputPayload::Many(b"\x0d\x0a")
+                } else {
+                    TerminalInputPayload::Single(char_to_ctrl_code(b'm'))
+                }
+            }
             Self::LineFeed => TerminalInputPayload::Single(b'\n'),
             // DECBKM (?67): set → BS (0x08), reset → DEL (0x7F).
             Self::Backspace => {

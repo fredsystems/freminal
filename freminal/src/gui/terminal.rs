@@ -17,8 +17,8 @@ use freminal_common::{
     buffer_states::{
         modes::{
             alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
-            decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, mouse::MouseTrack,
-            rl_bracket::RlBracket,
+            decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
+            mouse::MouseTrack, rl_bracket::RlBracket,
         },
         tchar::TChar,
     },
@@ -211,11 +211,7 @@ fn handle_scroll_fallback(
             send_terminal_inputs(
                 std::slice::from_ref(&key),
                 input_tx,
-                snap.cursor_key_app_mode,
-                snap.keypad_app_mode,
-                snap.modify_other_keys,
-                snap.application_escape_key,
-                snap.backarrow_sends_bs,
+                &InputModes::from_snapshot(snap),
             );
         }
     } else {
@@ -244,6 +240,33 @@ fn handle_scroll_fallback(
     }
 }
 
+/// Bundle of terminal mode flags that affect how keyboard input is encoded.
+///
+/// Extracted from `TerminalSnapshot` once per frame and passed to
+/// [`send_terminal_inputs`] to keep the argument count manageable.
+struct InputModes {
+    cursor_key_app_mode: Decckm,
+    keypad_app_mode: KeypadMode,
+    modify_other_keys: u8,
+    application_escape_key: ApplicationEscapeKey,
+    backarrow_sends_bs: Decbkm,
+    line_feed_mode: Lnm,
+}
+
+impl InputModes {
+    /// Extract all input-encoding mode fields from a snapshot.
+    const fn from_snapshot(snap: &TerminalSnapshot) -> Self {
+        Self {
+            cursor_key_app_mode: snap.cursor_key_app_mode,
+            keypad_app_mode: snap.keypad_app_mode,
+            modify_other_keys: snap.modify_other_keys,
+            application_escape_key: snap.application_escape_key,
+            backarrow_sends_bs: snap.backarrow_sends_bs,
+            line_feed_mode: snap.line_feed_mode,
+        }
+    }
+}
+
 /// Collect all bytes from a slice of `TerminalInput` values into a single
 /// `Vec<u8>` and send them as one atomic `InputEvent::Key` to the PTY
 /// consumer thread.
@@ -251,38 +274,28 @@ fn handle_scroll_fallback(
 /// Sending all bytes in a single message is critical for multi-byte
 /// sequences such as mouse reports (`\x1b[<0;5;3M`) — if each byte were
 /// sent as a separate `InputEvent` the PTY application would receive them
-/// as individual characters rather than as one escape sequence, causing
-/// them to be interpreted as literal typed text.
+/// as individual characters rather than as literal typed text, causing
+/// them to be interpreted as individual typed characters.
 ///
-/// The mode states from the snapshot control key encoding:
-/// - `cursor_key_app_mode` (`Decckm`) — `DECCKM`-sensitive encoding for
-///   arrow keys, home, end.
-/// - `keypad_app_mode` (`KeypadMode`) — `DECPAM` / `DECPNM` encoding for
-///   keypad keys.
-/// - `modify_other_keys` — xterm `modifyOtherKeys` level (0/1/2) for
-///   extended Ctrl+letter encoding.
-/// - `application_escape_key` (`ApplicationEscapeKey`) — `?7727` escape key
-///   encoding.
-/// - `backarrow_sends_bs` (`Decbkm`) — DECBKM (`?67`) backspace key
-///   encoding.
+/// ## Mode parameters
+///
+/// The `modes` parameter bundles all terminal mode flags that affect input
+/// encoding. See [`InputModes`] for the individual fields.
 fn send_terminal_inputs(
     inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
-    cursor_key_app_mode: Decckm,
-    keypad_app_mode: KeypadMode,
-    modify_other_keys: u8,
-    application_escape_key: ApplicationEscapeKey,
-    backarrow_sends_bs: Decbkm,
+    modes: &InputModes,
 ) {
     let bytes: Vec<u8> = inputs
         .iter()
         .flat_map(|input| {
             match input.to_payload(
-                cursor_key_app_mode,
-                keypad_app_mode,
-                modify_other_keys,
-                application_escape_key,
-                backarrow_sends_bs,
+                modes.cursor_key_app_mode,
+                modes.keypad_app_mode,
+                modes.modify_other_keys,
+                modes.application_escape_key,
+                modes.backarrow_sends_bs,
+                modes.line_feed_mode,
             ) {
                 TerminalInputPayload::Single(b) => vec![b],
                 TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -925,11 +938,7 @@ fn write_input_to_terminal(
                                 send_terminal_inputs(
                                     response.as_ref(),
                                     input_tx,
-                                    snap.cursor_key_app_mode,
-                                    snap.keypad_app_mode,
-                                    snap.modify_other_keys,
-                                    snap.application_escape_key,
-                                    snap.backarrow_sends_bs,
+                                    &InputModes::from_snapshot(snap),
                                 );
                             }
                         }
@@ -955,15 +964,7 @@ fn write_input_to_terminal(
 
         if !inputs.is_empty() {
             state_changed = true;
-            send_terminal_inputs(
-                inputs.as_ref(),
-                input_tx,
-                snap.cursor_key_app_mode,
-                snap.keypad_app_mode,
-                snap.modify_other_keys,
-                snap.application_escape_key,
-                snap.backarrow_sends_bs,
-            );
+            send_terminal_inputs(inputs.as_ref(), input_tx, &InputModes::from_snapshot(snap));
         }
     }
 
@@ -1598,6 +1599,7 @@ impl FreminalTerminalWidget {
                     &shaped_lines,
                     cell_w,
                     cell_h,
+                    self.font_manager.ascent(),
                     self.font_manager.underline_offset(),
                     self.font_manager.strikeout_offset(),
                     self.font_manager.stroke_size(),

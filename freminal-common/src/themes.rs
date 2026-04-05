@@ -1045,41 +1045,45 @@ pub const GHOSTTY_DEFAULT: ThemePalette = ThemePalette {
 pub const DEFAULT_THEME: &ThemePalette = &CATPPUCCIN_MOCHA;
 
 // ---------------------------------------------------------------------------
-//  All embedded themes (ordered for display)
+//  All embedded themes (sorted alphabetically by name)
 // ---------------------------------------------------------------------------
 
-/// All embedded themes in display order.
+/// All embedded themes sorted alphabetically by display name.
+///
+/// **Maintainer note:** Keep this array sorted by the theme's `name` field
+/// (case-insensitive ASCII order). When adding a new theme, insert it in the
+/// correct alphabetical position.
 static ALL_THEMES: &[&ThemePalette] = &[
-    &CATPPUCCIN_MOCHA,
-    &CATPPUCCIN_MACCHIATO,
-    &CATPPUCCIN_FRAPPE,
-    &CATPPUCCIN_LATTE,
-    &DRACULA,
-    &NORD,
-    &SOLARIZED_DARK,
-    &SOLARIZED_LIGHT,
-    &GRUVBOX_DARK,
-    &GRUVBOX_LIGHT,
-    &ONE_DARK,
-    &ONE_LIGHT,
-    &TOKYO_NIGHT,
-    &TOKYO_NIGHT_STORM,
-    &KANAGAWA,
-    &ROSE_PINE,
-    &ROSE_PINE_MOON,
-    &ROSE_PINE_DAWN,
-    &MONOKAI_PRO,
     &AYU_DARK,
     &AYU_LIGHT,
+    &CATPPUCCIN_FRAPPE,
+    &CATPPUCCIN_LATTE,
+    &CATPPUCCIN_MACCHIATO,
+    &CATPPUCCIN_MOCHA,
+    &DRACULA,
     &EVERFOREST_DARK,
     &EVERFOREST_LIGHT,
-    &MATERIAL_DARK,
-    &XTERM_DEFAULT,
-    &WEZTERM_DEFAULT,
     &GHOSTTY_DEFAULT,
+    &GRUVBOX_DARK,
+    &GRUVBOX_LIGHT,
+    &KANAGAWA,
+    &MATERIAL_DARK,
+    &MONOKAI_PRO,
+    &NORD,
+    &ONE_DARK,
+    &ONE_LIGHT,
+    &ROSE_PINE,
+    &ROSE_PINE_DAWN,
+    &ROSE_PINE_MOON,
+    &SOLARIZED_DARK,
+    &SOLARIZED_LIGHT,
+    &TOKYO_NIGHT,
+    &TOKYO_NIGHT_STORM,
+    &WEZTERM_DEFAULT,
+    &XTERM_DEFAULT,
 ];
 
-/// Return all embedded themes in display order.
+/// Return all embedded themes sorted alphabetically by display name.
 #[must_use]
 pub fn all_themes() -> &'static [&'static ThemePalette] {
     ALL_THEMES
@@ -1236,6 +1240,22 @@ mod tests {
                 "theme {} has {} ANSI colors, expected 16",
                 theme.slug,
                 theme.ansi.len()
+            );
+        }
+    }
+
+    #[test]
+    fn all_themes_sorted_alphabetically_by_name() {
+        let themes = all_themes();
+        for window in themes.windows(2) {
+            let a = window[0].name.to_ascii_lowercase();
+            let b = window[1].name.to_ascii_lowercase();
+            assert!(
+                a <= b,
+                "ALL_THEMES is not sorted alphabetically by name: \
+                 {:?} should come after {:?}",
+                window[0].name,
+                window[1].name,
             );
         }
     }

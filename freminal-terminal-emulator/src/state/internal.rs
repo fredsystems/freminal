@@ -21,6 +21,7 @@ use freminal_common::{
             keypad::KeypadMode,
             mouse::{MouseEncoding, MouseTrack},
             reverse_wrap_around::ReverseWrapAround,
+            s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
             xtmsewin::XtMseWin,
         },
@@ -259,6 +260,16 @@ impl TerminalState {
             TerminalOutput::NormalKeypadMode => {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
+            // S8C1T (ESC SP G) / S7C1T (ESC SP F) — toggle 8-bit C1 control
+            // recognition in the parser and response encoding in the handler.
+            TerminalOutput::EightBitControl => {
+                self.parser.s8c1t_mode = S8c1t::EightBit;
+                self.handler.set_s8c1t_mode(S8c1t::EightBit);
+            }
+            TerminalOutput::SevenBitControl => {
+                self.parser.s8c1t_mode = S8c1t::SevenBit;
+                self.handler.set_s8c1t_mode(S8c1t::SevenBit);
+            }
             _ => {}
         }
     }
@@ -321,6 +332,7 @@ impl TerminalState {
             | Mode::GraphemeClustering(_)
             | Mode::Decsdm(_)
             | Mode::Decnrcm(_)
+            | Mode::Irm(_)
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
@@ -618,12 +630,14 @@ impl TerminalState {
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
         let backarrow_sends_bs = self.modes.backarrow_key_mode;
+        let line_feed_mode = self.modes.line_feed_mode;
         match to_write.to_payload(
             decckm,
             keypad_app,
             modify_other_keys,
             application_escape_key,
             backarrow_sends_bs,
+            line_feed_mode,
         ) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;

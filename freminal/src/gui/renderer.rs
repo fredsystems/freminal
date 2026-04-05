@@ -1548,6 +1548,7 @@ pub fn build_background_instances(
     shaped_lines: &[ShapedLine],
     cell_width: u32,
     cell_height: u32,
+    ascent: f32,
     underline_offset: f32,
     strikeout_offset: f32,
     stroke_size: f32,
@@ -1613,13 +1614,20 @@ pub fn build_background_instances(
             let x1 = gl_f32(col_end) * gl_f32_u32(cell_width);
 
             if has_underline {
-                let ul_top = y_top + underline_offset;
+                // underline_offset from swash is negative (below baseline in font
+                // coords).  In top-down pixel coords the baseline is at
+                // y_top + ascent, so subtracting the (negative) offset places the
+                // line below the baseline.
+                let ul_top = y_top + ascent - underline_offset;
                 let ul_bot = ul_top + stroke_size.max(1.0);
                 push_quad(&mut deco, x0, ul_top, x1, ul_bot, fg_color);
             }
 
             if has_strike {
-                let st_top = y_top + strikeout_offset;
+                // strikeout_offset from OS/2 is positive (above baseline in font
+                // coords).  In top-down pixel coords, subtracting it from the
+                // baseline places the line above the baseline (middle of cell).
+                let st_top = y_top + ascent - strikeout_offset;
                 let st_bot = st_top + stroke_size.max(1.0);
                 push_quad(&mut deco, x0, st_top, x1, st_bot, fg_color);
             }
@@ -2227,6 +2235,7 @@ mod tests {
             lines,
             cell_width,
             cell_height,
+            14.0, // ascent (approximate for test font)
             13.0,
             8.0,
             1.0,

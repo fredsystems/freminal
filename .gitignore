@@ -554,3 +554,6 @@ doc/
 !freminal.bin
 vttest-20251205
 config.toml
+
+flamegraph.svg
+perf.data

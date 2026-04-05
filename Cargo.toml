@@ -11,11 +11,11 @@ default-members = [
   "freminal",
   "freminal-buffer",
   "freminal-common",
-  "freminal-terminal-emulator"
+  "freminal-terminal-emulator",
 ]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92.0"
 description = "A terminal emulator written in Rust"
@@ -29,7 +29,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
-arc-swap = "1.9.0"
+arc-swap = "1.9.1"
 assert_cmd = "2.2.0"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.0", features = ["derive"] }
@@ -71,7 +71,7 @@ tar = "0.4.45"
 tempfile = "3.27.0"
 test-log = { version = "0.2.19", features = ["trace"] }
 thiserror = "2.0.18"
-toml = "1.1.0"
+toml = "1.1.2"
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-log = "0.2.0"

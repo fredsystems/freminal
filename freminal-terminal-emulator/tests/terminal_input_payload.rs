@@ -17,7 +17,7 @@
 
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode,
+    keypad::KeypadMode, lnm::Lnm,
 };
 use freminal_terminal_emulator::input::{KeyModifiers, TerminalInput, TerminalInputPayload};
 
@@ -30,6 +30,7 @@ fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -359,6 +360,7 @@ fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -563,6 +565,7 @@ fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
         2,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -608,6 +611,7 @@ fn ctrl_a_modify_other_keys_level_1() {
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
@@ -635,6 +639,7 @@ fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
         0,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -696,6 +701,7 @@ fn ctrl_b_modify_other_keys_level_1() {
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x02),
         other => panic!("Expected Single(0x02), got {other:?}"),
@@ -711,6 +717,7 @@ fn ctrl_z_modify_other_keys_level_1() {
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x1A),
         other => panic!("Expected Single(0x1A), got {other:?}"),
@@ -771,6 +778,7 @@ fn escape_with_both_mok2_and_aek() {
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;1;27~");
@@ -789,6 +797,7 @@ fn ctrl_c_with_both_mok2_and_aek() {
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;5;67~");
@@ -806,6 +815,7 @@ fn ctrl_a_with_aek_and_mok0() {
         0,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
@@ -825,6 +835,7 @@ fn backspace_decbkm_set_sends_bs() {
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x08, "DECBKM set: Backspace must send BS (0x08)")
@@ -842,10 +853,86 @@ fn backspace_decbkm_reset_sends_del() {
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
+        Lnm::LineFeed,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x7F, "DECBKM reset: Backspace must send DEL (0x7F)")
         }
         other => panic!("Expected Single(0x7F), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LNM (Line Feed / New Line Mode) — Enter key encoding
+// ---------------------------------------------------------------------------
+
+/// Enter with LNM reset (default): sends bare CR (0x0D).
+///
+/// This is the standard VT100 behavior.  The POSIX tty layer's ICRNL flag
+/// translates CR→NL on input for shells that need it.
+#[test]
+fn enter_lnm_reset_sends_cr() {
+    match TerminalInput::Enter.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+        Lnm::LineFeed,
+    ) {
+        TerminalInputPayload::Single(b) => {
+            assert_eq!(b, 0x0D, "LNM reset: Enter must send bare CR (0x0D)");
+        }
+        other => panic!("Expected Single(0x0D), got {other:?}"),
+    }
+}
+
+/// Enter with LNM set: sends CR+LF (0x0D 0x0A).
+///
+/// When the host sets LNM (CSI 20 h), the terminal must send CR+LF for the
+/// Enter key instead of bare CR.  vttest menu 6.2 (`tst_NLM`) tests this by
+/// enabling LNM, having the user press Enter, and verifying the host receives
+/// both CR and LF.
+#[test]
+fn enter_lnm_set_sends_cr_lf() {
+    match TerminalInput::Enter.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+        Lnm::NewLine,
+    ) {
+        TerminalInputPayload::Many(bs) => {
+            assert_eq!(
+                bs, b"\x0d\x0a",
+                "LNM set: Enter must send CR+LF (0x0D 0x0A)"
+            );
+        }
+        other => panic!("Expected Many(CR+LF), got {other:?}"),
+    }
+}
+
+/// LineFeed is unaffected by LNM — it always sends bare LF (0x0A).
+///
+/// LNM only affects the Enter key, not `TerminalInput::LineFeed` (which
+/// represents Ctrl+J mapped to the LF byte).
+#[test]
+fn linefeed_unaffected_by_lnm_set() {
+    match TerminalInput::LineFeed.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsBs,
+        Lnm::NewLine,
+    ) {
+        TerminalInputPayload::Single(b) => {
+            assert_eq!(
+                b, 0x0A,
+                "LineFeed must always send LF (0x0A) regardless of LNM"
+            );
+        }
+        other => panic!("Expected Single(0x0A), got {other:?}"),
     }
 }

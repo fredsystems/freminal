@@ -43,8 +43,8 @@ use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
-    decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, mouse::MouseEncoding,
-    mouse::MouseTrack, rl_bracket::RlBracket,
+    decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
+    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 
 use freminal_common::{
@@ -67,6 +67,7 @@ struct SnapshotModeFields {
     application_escape_key: ApplicationEscapeKey,
     backarrow_sends_bs: Decbkm,
     alternate_scroll: AlternateScroll,
+    line_feed_mode: Lnm,
 }
 
 #[must_use]
@@ -573,6 +574,7 @@ impl TerminalEmulator {
             application_escape_key: mode_fields.application_escape_key,
             backarrow_sends_bs: mode_fields.backarrow_sends_bs,
             alternate_scroll: mode_fields.alternate_scroll,
+            line_feed_mode: mode_fields.line_feed_mode,
             cwd,
             ftcs_state,
             last_exit_code,
@@ -632,6 +634,7 @@ impl TerminalEmulator {
             application_escape_key: self.internal.handler.application_escape_key(),
             backarrow_sends_bs: self.internal.modes.backarrow_key_mode,
             alternate_scroll: self.internal.modes.alternate_scroll,
+            line_feed_mode: self.internal.modes.line_feed_mode,
         }
     }
 

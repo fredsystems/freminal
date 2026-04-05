@@ -45,6 +45,12 @@ pub fn ansi_parser_inner_csi_finished_da(
     intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
+    // DA3: CSI = c — Tertiary Device Attributes
+    if intermediates.contains(&b'=') || (!params.is_empty() && params[0] == b'=') {
+        output.push(TerminalOutput::RequestTertiaryDeviceAttributes);
+        return ParserOutcome::Finished;
+    }
+
     let is_gt_prefix = intermediates.contains(&b'>') || (!params.is_empty() && params[0] == b'>');
 
     if is_gt_prefix {

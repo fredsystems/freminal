@@ -490,19 +490,32 @@ impl Buffer {
                     return; // nothing left to insert
                 }
 
-                row_idx += 1;
+                // Scroll-region-aware wrap: if the cursor is at the bottom
+                // margin of the DECSTBM scroll region, scroll the region up
+                // and keep the cursor on the (now-blanked) bottom row — do
+                // NOT advance past the region boundary.
+                let at_region_bottom = self.is_cursor_at_scroll_region_bottom();
+                if at_region_bottom {
+                    self.scroll_region_up_for_wrap();
+                    // row_idx stays the same — it now points to the freshly
+                    // blanked bottom row of the scroll region.
+                } else {
+                    row_idx += 1;
+                }
                 col = wrap_start_col;
 
-                if row_idx >= self.rows.len() {
-                    // brand new soft-wrap continuation row
-                    self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
-                } else {
-                    // reuse existing row as a soft-wrap continuation
-                    let row = &mut self.rows[row_idx];
-                    row.origin = RowOrigin::SoftWrap;
-                    row.join = RowJoin::ContinueLogicalLine;
-                    row.clear();
-                    self.row_cache[row_idx] = None;
+                if !at_region_bottom {
+                    if row_idx >= self.rows.len() {
+                        // brand new soft-wrap continuation row
+                        self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
+                    } else {
+                        // reuse existing row as a soft-wrap continuation
+                        let row = &mut self.rows[row_idx];
+                        row.origin = RowOrigin::SoftWrap;
+                        row.join = RowJoin::ContinueLogicalLine;
+                        row.clear();
+                        self.row_cache[row_idx] = None;
+                    }
                 }
 
                 self.cursor.pos.y = row_idx;
@@ -581,21 +594,28 @@ impl Buffer {
                     // `leftover_start` is relative to `&text[start..]`.
                     start += leftover_start;
 
-                    // Move to next row for continuation.
-                    row_idx += 1;
+                    // Scroll-region-aware wrap: same logic as PRE-WRAP.
+                    let at_region_bottom = self.is_cursor_at_scroll_region_bottom();
+                    if at_region_bottom {
+                        self.scroll_region_up_for_wrap();
+                    } else {
+                        row_idx += 1;
+                    }
                     col = wrap_start_col;
 
                     // POST-WRAP: we now know a wrap actually occurred.
-                    if row_idx >= self.rows.len() {
-                        // brand new continuation
-                        self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
-                    } else {
-                        // reuse existing row as continuation
-                        let row = &mut self.rows[row_idx];
-                        row.origin = RowOrigin::SoftWrap;
-                        row.join = RowJoin::ContinueLogicalLine;
-                        row.clear();
-                        self.row_cache[row_idx] = None;
+                    if !at_region_bottom {
+                        if row_idx >= self.rows.len() {
+                            // brand new continuation
+                            self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
+                        } else {
+                            // reuse existing row as continuation
+                            let row = &mut self.rows[row_idx];
+                            row.origin = RowOrigin::SoftWrap;
+                            row.join = RowJoin::ContinueLogicalLine;
+                            row.clear();
+                            self.row_cache[row_idx] = None;
+                        }
                     }
 
                     self.cursor.pos.y = row_idx;
@@ -1022,6 +1042,12 @@ impl Buffer {
     ///
     /// Semantics (ECMA-48, VT100):
     /// - Move cursor left by one cell.
+    /// - If the cursor is in the pending-wrap state (`cursor.pos.x == self.width`,
+    ///   i.e. just wrote into the last column), BS treats the cursor as if it were
+    ///   at `self.width - 1` (the last visible column) before subtracting, which
+    ///   places it at `self.width - 2`.  This matches real VT100 hardware, where
+    ///   the pending-wrap flag is separate from the reported column position and BS
+    ///   clears the flag and moves left from the reported column.
     /// - If the cell to the left is a continuation cell of a wide glyph,
     ///   skip left until the glyph head.
     /// - If cursor is at column 0 and `reverse_wrap` is false, do nothing.
@@ -1046,7 +1072,12 @@ impl Buffer {
 
         let row = &self.rows[row_idx];
 
-        let mut new_x = self.cursor.pos.x - 1;
+        // When in pending-wrap state the internal x equals self.width (one past
+        // the last column).  A real VT100 keeps the cursor at the last column with
+        // a separate pending-wrap bit; BS clears the bit and moves left from the
+        // reported column, landing at width-2 (0-based).  Clamp before subtracting.
+        let effective_x = self.cursor.pos.x.min(self.width.saturating_sub(1));
+        let mut new_x = effective_x - 1;
 
         // Skip left over continuation cells of a wide glyph
         while new_x > 0 {
@@ -1199,6 +1230,16 @@ impl Buffer {
     /// When the cursor is at the bottom margin the region scrolls up by one line.
     /// In `LNM` (new-line) mode an implicit CR is also applied.
     pub fn handle_lf(&mut self) {
+        // Clear the implicit pending-wrap state.  When the cursor is at
+        // `x == width` (one past the last column) it means a character was
+        // just written at the rightmost column and the next printable
+        // character should wrap.  LF must cancel that deferred wrap —
+        // the cursor stays at the last column of the current/new row
+        // rather than wrapping on the next character write.
+        if self.cursor.pos.x >= self.width {
+            self.cursor.pos.x = self.width.saturating_sub(1);
+        }
+
         match self.kind {
             BufferType::Primary => {
                 // LNM: CR implied
@@ -1343,6 +1384,11 @@ impl Buffer {
     /// Move the cursor up; at the top margin of DECSTBM region,
     /// scroll the region down by one line (blank line at top).
     pub fn handle_ri(&mut self) {
+        // Clear implicit pending-wrap state (same as handle_lf).
+        if self.cursor.pos.x >= self.width {
+            self.cursor.pos.x = self.width.saturating_sub(1);
+        }
+
         match self.kind {
             BufferType::Primary => {
                 let sy = self.cursor_screen_y();
@@ -1845,6 +1891,35 @@ impl Buffer {
         let (t, b) = self.scroll_region_rows();
         if t < b {
             self.scroll_slice_down(t, b);
+        }
+    }
+
+    /// Check whether the cursor is at the bottom margin of the DECSTBM
+    /// scroll region.  Used by `insert_text` to decide whether a right-margin
+    /// wrap should scroll the region instead of advancing past it.
+    fn is_cursor_at_scroll_region_bottom(&self) -> bool {
+        match self.kind {
+            BufferType::Primary => {
+                let sy = self.cursor_screen_y();
+                sy == self.scroll_region_bottom
+            }
+            BufferType::Alternate => self.cursor.pos.y == self.scroll_region_bottom,
+        }
+    }
+
+    /// Scroll the DECSTBM region up by one line during an autowrap at the
+    /// bottom margin.  Handles both Primary (with scrollback) and Alternate
+    /// (fixed grid) buffer types.
+    fn scroll_region_up_for_wrap(&mut self) {
+        match self.kind {
+            BufferType::Primary => {
+                self.scroll_region_up_primary();
+            }
+            BufferType::Alternate => {
+                if self.scroll_region_top < self.scroll_region_bottom {
+                    self.scroll_slice_up(self.scroll_region_top, self.scroll_region_bottom);
+                }
+            }
         }
     }
 
@@ -4333,6 +4408,36 @@ mod backspace_tests {
         buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Enabled);
         assert_eq!(buf.cursor.pos.y, 1);
         assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    #[test]
+    fn backspace_from_pending_wrap_state_lands_at_width_minus_2() {
+        // A real VT100 keeps the cursor at the last column with a separate
+        // pending-wrap bit; BS clears the bit and moves left from the reported
+        // column (width-1), landing at width-2.  Freminal encodes pending-wrap as
+        // cursor.pos.x == width, so BS must clamp before subtracting.
+        let mut buf = Buffer::new(10, 5);
+
+        // Write exactly 10 characters to fill row 0 and enter pending-wrap.
+        // After the 10th character insert_text sets cursor.pos.x = 10 (== width).
+        buf.insert_text(&"abcdefghij".chars().map(TChar::from).collect::<Vec<_>>());
+        assert_eq!(
+            buf.cursor.pos.x, 10,
+            "cursor should be in pending-wrap state"
+        );
+        assert_eq!(buf.cursor.pos.y, 0);
+
+        // BS from pending-wrap: should land at col 8 (width-2), not col 9 (width-1).
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
+        assert_eq!(buf.cursor.pos.y, 0);
+        assert_eq!(
+            buf.cursor.pos.x, 8,
+            "BS from pending-wrap must land at width-2"
+        );
+
+        // A second BS moves left normally: col 8 → col 7.
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
+        assert_eq!(buf.cursor.pos.x, 7);
     }
 }
 

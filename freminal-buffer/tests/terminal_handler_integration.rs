@@ -3059,21 +3059,22 @@ fn test_tbc_ps1_does_not_affect_character_stops() {
 }
 
 #[test]
-fn test_tbc_ps2_clears_at_cursor() {
+fn test_tbc_ps2_is_noop_for_character_stops() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Set custom stop at col 5
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
     handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
 
-    // TBC Ps=2 — should clear the stop at the cursor column (equiv to Ps=0)
+    // TBC Ps=2 — clears line tab stop at current line, NOT character tab stops.
+    // This should be a no-op; the character stop at col 5 must remain.
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
     handler.process_outputs(&[TerminalOutput::TabClear(2)]);
 
-    // Tab from col 0 should skip col 5 and hit col 8
+    // Tab from col 0 should still hit the custom stop at col 5
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
 }
 
 #[test]

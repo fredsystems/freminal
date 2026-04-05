@@ -26,6 +26,7 @@ use freminal_common::{
             decbkm::Decbkm,
             decckm::Decckm,
             keypad::KeypadMode,
+            lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
             rl_bracket::RlBracket,
         },
@@ -213,6 +214,13 @@ pub struct TerminalSnapshot {
     /// Controls whether the Backspace key sends BS (0x08) or DEL (0x7F).
     pub backarrow_sends_bs: Decbkm,
 
+    /// Line Feed / New Line mode (`LNM` / mode 20).
+    ///
+    /// When set to `Lnm::NewLine`, the Enter key sends CR+LF instead of bare
+    /// CR.  Needed by the GUI to encode the Enter key correctly without
+    /// consulting the emulator.
+    pub line_feed_mode: Lnm,
+
     /// Alternate scroll mode (`?1007`).
     ///
     /// When enabled and the alternate screen is active, mouse scroll-wheel
@@ -309,6 +317,7 @@ impl TerminalSnapshot {
             modify_other_keys: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
             backarrow_sends_bs: Decbkm::BackarrowSendsBs,
+            line_feed_mode: Lnm::LineFeed,
             alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
             ftcs_state: FtcsState::default(),

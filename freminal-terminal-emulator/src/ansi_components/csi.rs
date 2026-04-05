@@ -321,6 +321,46 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_scorc(&self.params, output);
                 push_result
             }
+            AnsiCsiParserState::Finished(b'x') => {
+                // DECREQTPARM — Request Terminal Parameters.
+                // Only plain CSI Ps x is valid (Ps=0 or Ps=1).
+                // Reject if '>' intermediate is present (that would be a
+                // malformed DA2/xtversion sequence, not DECREQTPARM).
+                let has_gt = self.intermediates.contains(&b'>')
+                    || self.params.first().copied() == Some(b'>');
+                if has_gt {
+                    output.push(TerminalOutput::Invalid);
+                    return push_result;
+                }
+                // Parse first `;`-separated parameter only.
+                // DECREQTPARM accepts Ps=0 (default) or Ps=1; reject anything else.
+                let mut params = self.params.split(|&b| b == b';');
+                let first_param = params.next().unwrap_or_default();
+                let has_extra_params = params.any(|param| !param.is_empty());
+
+                if has_extra_params {
+                    output.push(TerminalOutput::Invalid);
+                    return push_result;
+                }
+
+                let parsed_ps = if first_param.is_empty() {
+                    Some(0u8)
+                } else if first_param.iter().all(u8::is_ascii_digit) {
+                    first_param
+                        .iter()
+                        .try_fold(0u8, |acc, d| acc.checked_mul(10)?.checked_add(*d - b'0'))
+                } else {
+                    None
+                };
+
+                match parsed_ps {
+                    Some(ps @ 0..=1) => {
+                        output.push(TerminalOutput::RequestTerminalParameters(ps));
+                    }
+                    _ => output.push(TerminalOutput::Invalid),
+                }
+                push_result
+            }
             AnsiCsiParserState::Finished(_esc) => push_result,
 
             // Below should cover the invalid state(AnsiCsiParserState::Invalid) as well as any other finished states

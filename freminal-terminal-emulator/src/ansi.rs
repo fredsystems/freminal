@@ -16,7 +16,7 @@ use crate::{
 use crate::ansi_components::tracer::SequenceTracer;
 use anyhow::Result;
 use freminal_common::buffer_states::{
-    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm,
+    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm, modes::s8c1t::S8c1t,
     terminal_output::TerminalOutput,
 };
 
@@ -115,6 +115,10 @@ pub struct FreminalAnsiParser {
     /// When set to `Decanm::Vt52`, the parser uses the reduced VT52 escape set
     /// instead of standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
     pub vt52_mode: Decanm,
+    /// When set to `S8c1t::EightBit`, the parser recognizes bytes 0x80–0x9F as
+    /// 8-bit C1 control introducers.  Toggled by `ESC SP G` (S8C1T) /
+    /// `ESC SP F` (S7C1T).
+    pub s8c1t_mode: S8c1t,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -142,6 +146,7 @@ impl FreminalAnsiParser {
             pending_data: Vec::new(),
             seq_trace: SequenceTracer::new(),
             vt52_mode: Decanm::Ansi,
+            s8c1t_mode: S8c1t::SevenBit,
         }
     }
 
@@ -191,8 +196,66 @@ impl FreminalAnsiParser {
             return Err(());
         }
 
+        // SI (0x0F) — Shift In: invoke G0 into GL.
+        // SO (0x0E) — Shift Out: invoke G1 into GL.
+        // Silently consumed as control characters.  Freminal uses a simplified
+        // single-slot charset model — G0 is always the active GL set, so SI is
+        // a no-op and SO has no visible effect until full G0/G1 support is added.
+        if b == 0x0F || b == 0x0E {
+            push_data_if_non_empty(data_output, output);
+            return Err(());
+        }
+
+        // ENQ (0x05) — transmit answerback message
+        if b == 0x05 {
+            push_data_if_non_empty(data_output, output);
+            output.push(TerminalOutput::Enq);
+            return Err(());
+        }
+
         // NUL (0x00) and DEL (0x7F) are silently ignored
         if b == 0x00 || b == 0x7F {
+            return Err(());
+        }
+
+        // 8-bit C1 controls (0x80–0x9F) — recognized only when S8C1T is active
+        // and we are in ANSI mode (VT52 mode does not support 8-bit C1).
+        if self.s8c1t_mode == S8c1t::EightBit
+            && self.vt52_mode == Decanm::Ansi
+            && (0x80..=0x9F).contains(&b)
+        {
+            push_data_if_non_empty(data_output, output);
+            match b {
+                // IND (0x84) ≡ ESC D — Index (cursor down, scroll if at bottom)
+                0x84 => output.push(TerminalOutput::Index),
+                // NEL (0x85) ≡ ESC E — Next Line
+                0x85 => output.push(TerminalOutput::NextLine),
+                // HTS (0x88) ≡ ESC H — Horizontal Tab Set
+                0x88 => output.push(TerminalOutput::HorizontalTabSet),
+                // RI (0x8D) ≡ ESC M — Reverse Index
+                0x8D => output.push(TerminalOutput::ReverseIndex),
+                // DCS (0x90) ≡ ESC P — Device Control String
+                0x90 => {
+                    self.inner = ParserInner::Dcs(DcsParser::new());
+                }
+                // CSI (0x9B) ≡ ESC [ — Control Sequence Introducer
+                0x9B => {
+                    self.inner = ParserInner::Csi(AnsiCsiParser::new());
+                }
+                // OSC (0x9D) ≡ ESC ] — Operating System Command
+                0x9D => {
+                    self.inner = ParserInner::Osc(AnsiOscParser::new());
+                }
+                // APC (0x9F) ≡ ESC _ — Application Program Command
+                0x9F => {
+                    self.inner = ParserInner::Apc(ApcParser::new());
+                }
+                // SS2 (0x8E), SS3 (0x8F) — Single Shift G2/G3 (no-op for now)
+                // ST (0x9C) — String Terminator (no-op when no string is open)
+                // PM (0x9E) — Privacy Message (ignored, no handler)
+                // Other bytes in 0x80–0x9F without defined C1 meaning — silently ignored
+                _ => {}
+            }
             return Err(());
         }
 
@@ -582,7 +645,17 @@ impl FreminalAnsiParser {
                 self.inner = ParserInner::Empty;
             }
             // ESC < — Exit VT52 mode, return to ANSI mode
+            //
+            // The parser's `vt52_mode` flag must be flipped immediately — not
+            // deferred to `sync_mode_flags()` — because any bytes remaining in
+            // the current `push()` buffer must be routed through the ANSI
+            // parser, not the VT52 parser.  vttest issues `ESC <` followed by
+            // `ESC P … ESC \` (DECRQSS) in a single PTY read; without the
+            // immediate flip the `ESC P` would be routed to `handle_vt52_escape`
+            // which does not recognise `P` and the DCS payload would leak to the
+            // display as literal text.
             b'<' => {
+                self.vt52_mode = Decanm::Ansi;
                 output.push(TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)));
                 self.inner = ParserInner::Empty;
             }
@@ -1314,16 +1387,18 @@ mod tests {
             }]
         );
 
-        // ESC < should emit Mode::Decanm(Decanm::Ansi)
+        // ESC < should emit Mode::Decanm(Decanm::Ansi) and immediately
+        // flip the parser's vt52_mode flag (no external sync needed).
         let result = p.push(b"\x1b<");
         assert_eq!(
             result,
             vec![TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi))]
         );
-
-        // After sync_mode processes it, parser.vt52_mode would be set to false.
-        // Simulate that:
-        p.vt52_mode = Decanm::Ansi;
+        assert_eq!(
+            p.vt52_mode,
+            Decanm::Ansi,
+            "ESC < must immediately flip vt52_mode"
+        );
 
         // Now ANSI escape sequences should work again
         let result = p.push(b"\x1b[1A"); // CSI 1A = cursor up 1
@@ -1359,6 +1434,43 @@ mod tests {
         );
     }
 
+    /// Regression test: `ESC <` in VT52 mode must immediately flip the parser
+    /// to ANSI mode so that bytes following in the same `push()` call are
+    /// routed through the ANSI parser.
+    ///
+    /// Reproduces the vttest Menu 7 DECRQSS bug: vttest sends `ESC <` (exit
+    /// VT52) followed by `ESC P $ q " p ESC \` (DECRQSS for DECSCL) in a
+    /// single buffer.  Without the immediate flip the `ESC P` was routed to
+    /// `handle_vt52_escape` which doesn't recognise `P`, and the DCS payload
+    /// leaked to the display as literal text.
+    #[test]
+    fn vt52_exit_followed_by_dcs_in_same_buffer() {
+        let mut p = vt52_parser();
+
+        // ESC < (exit VT52) + ESC P $ q " p ESC \ (DECRQSS for DECSCL)
+        let result = p.push(b"\x1b<\x1bP$q\"p\x1b\\");
+
+        // First output: Mode change to ANSI
+        assert_eq!(
+            result[0],
+            TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+            "First output should be ANSI mode switch"
+        );
+
+        // Second output: the DCS should be parsed as DeviceControlString,
+        // NOT as Data (literal text).
+        let has_dcs = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::DeviceControlString(_)));
+        assert!(
+            has_dcs,
+            "DCS after ESC < must be parsed as DeviceControlString, not literal text: {result:?}"
+        );
+
+        // The parser should now be in ANSI mode
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+    }
+
     #[test]
     fn esc_plus_0_designates_g3_as_dec_special_graphics() {
         // ESC + 0 should designate the G3 character set as DEC Special Graphics,
@@ -1370,6 +1482,31 @@ mod tests {
             vec![TerminalOutput::DecSpecialGraphics(
                 freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
             )]
+        );
+    }
+
+    /// ENQ (0x05) must be recognised as a C0 control character and produce
+    /// `TerminalOutput::Enq` — not be treated as printable data.
+    #[test]
+    fn enq_produces_enq_output() {
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x05");
+        assert_eq!(result, vec![TerminalOutput::Enq]);
+    }
+
+    /// ENQ in the middle of text must flush the preceding data and produce
+    /// a separate `Enq` output.
+    #[test]
+    fn enq_flushes_data_and_emits_enq() {
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"AB\x05CD");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"AB".to_vec()),
+                TerminalOutput::Enq,
+                TerminalOutput::Data(b"CD".to_vec()),
+            ]
         );
     }
 }
