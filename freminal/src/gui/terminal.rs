@@ -1599,6 +1599,7 @@ impl FreminalTerminalWidget {
                     &shaped_lines,
                     cell_w,
                     cell_h,
+                    self.font_manager.ascent(),
                     self.font_manager.underline_offset(),
                     self.font_manager.strikeout_offset(),
                     self.font_manager.stroke_size(),

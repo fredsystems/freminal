@@ -424,6 +424,7 @@ fn bench_bg_instances(c: &mut Criterion) {
 
         let cell_width = fm.cell_width();
         let cell_height = fm.cell_height();
+        let ascent = fm.ascent();
         let underline_offset = fm.underline_offset();
         let strikeout_offset = fm.strikeout_offset();
         let stroke_size = fm.stroke_size();
@@ -439,6 +440,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                         &lines,
                         cell_width,
                         cell_height,
+                        ascent,
                         underline_offset,
                         strikeout_offset,
                         stroke_size,
