@@ -393,3 +393,295 @@ fn decrqm_decarm_default_set() {
         "DECARM default must be set (status=1)"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase B tests — byte-exact sequences derived from vttest-20251205/reports.c
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── DA3 — Tertiary Device Attributes ────────────────────────────────────────
+//
+// From vttest reports.c tst_DA_3():
+//   do_csi("=c");   →   CSI = c   →   \x1b[=c
+// vttest accepts: DCS ! | <8 hex digits> ST
+//   i.e. skip_dcs(report) yields "!|<hex8>" and strip_terminator succeeds.
+// Freminal responds: DCS ! | 00000000 ST  =  \x1bP!|00000000\x1b\
+
+#[test]
+fn da3_query_standard() {
+    // CSI = c  (intermediates = ['='], no param)
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[=c");
+
+    let response = h.drain_pty_writes_concatenated();
+    // DCS ! | 00000000 ST
+    assert_eq!(
+        response, b"\x1bP!|00000000\x1b\\",
+        "DA3 must respond with DCS !|<8 hex digits> ST"
+    );
+}
+
+#[test]
+fn da3_query_explicit_zero_param() {
+    // CSI = 0 c — same as CSI = c
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    // The '=' can also appear as a param prefix (older programs).
+    h.feed(b"\x1b[=0c");
+
+    let response = h.drain_pty_writes_concatenated();
+    assert_eq!(
+        response, b"\x1bP!|00000000\x1b\\",
+        "DA3 with explicit Ps=0 must produce the same response"
+    );
+}
+
+#[test]
+fn da3_response_is_valid_dcs_unit_id() {
+    // Verify the response matches vttest's structural check:
+    //   strip_dcs → starts with "!|" → 8 hex chars follow.
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[=c");
+
+    let response = h.drain_pty_writes_concatenated();
+    // Must start with DCS introducer ESC P
+    assert!(
+        response.starts_with(b"\x1bP"),
+        "DA3 response must start with DCS ESC P"
+    );
+    // Must end with ST = ESC \
+    assert!(
+        response.ends_with(b"\x1b\\"),
+        "DA3 response must end with ST (ESC \\)"
+    );
+    // Inner content (between \x1bP and \x1b\) must be "!|" + 8 hex chars
+    let inner = &response[2..response.len() - 2];
+    assert!(
+        inner.starts_with(b"!|"),
+        "DA3 inner content must start with '!|', got: {inner:?}"
+    );
+    let hex_part = &inner[2..];
+    assert_eq!(hex_part.len(), 8, "DA3 unit ID must be exactly 8 hex chars");
+    assert!(
+        hex_part.iter().all(|b| b.is_ascii_hexdigit()),
+        "DA3 unit ID must be 8 valid hex digits, got: {hex_part:?}"
+    );
+}
+
+// ─── DECREQTPARM — Request Terminal Parameters ───────────────────────────────
+//
+// From vttest reports.c tst_DECREQTPARM():
+//   decreqtparm(0) → brc(0, 'x') → do_csi("0x") → CSI 0 x
+//   decreqtparm(1) → brc(1, 'x') → do_csi("1x") → CSI 1 x
+//
+// vttest validation for Ps=0 response:
+//   - After skip_csi: must start with "2;"  (strlen >= 14)
+//   - Parse: "2;<parity>;<nbits>;<xspeed>;<rspeed>;<clkmul>;<flags>x"
+//   - parity > 0, nbits > 0, clkmul > 0
+//
+// vttest validation for Ps=1 response:
+//   - After skip_csi: must start with "3;"
+//   - Replace leading '3' with '2'; result must equal the Ps=0 response body
+
+#[test]
+fn decreqtparm_ps0_responds_with_code_2() {
+    // CSI 0 x — vttest sends this via decreqtparm(0).
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[0x");
+
+    let response = h.drain_pty_writes_concatenated();
+    // Must start with ESC [ 2 ;
+    assert!(
+        response.starts_with(b"\x1b[2;"),
+        "DECREQTPARM Ps=0 must respond CSI 2;<params>x, got: {:?}",
+        String::from_utf8_lossy(&response)
+    );
+    // Must end with 'x'
+    assert_eq!(
+        response.last().copied(),
+        Some(b'x'),
+        "DECREQTPARM response must end with 'x'"
+    );
+}
+
+#[test]
+fn decreqtparm_ps0_response_is_valid_format() {
+    // Full vttest structural validation for Ps=0:
+    //   After skip_csi → "2;<parity>;<nbits>;<xspeed>;<rspeed>;<clkmul>;<flags>x"
+    //   parity > 0, nbits > 0, clkmul > 0, length >= 14 chars (after CSI).
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[0x");
+
+    let response = h.drain_pty_writes_concatenated();
+
+    // Strip "ESC [" prefix
+    assert!(response.starts_with(b"\x1b["), "Must start with CSI");
+    let after_csi = &response[2..];
+
+    let s = std::str::from_utf8(after_csi).expect("Response must be ASCII");
+    // vttest checks strlen(report) >= 14 *after* skip_csi
+    assert!(
+        s.len() >= 14,
+        "DECREQTPARM response body must be >= 14 chars, got: {s:?}"
+    );
+    // Must start with "2;"
+    assert!(
+        s.starts_with("2;"),
+        "Ps=0 response must start with '2;', got: {s:?}"
+    );
+    // Must end with 'x'
+    assert!(
+        s.ends_with('x'),
+        "Ps=0 response must end with 'x', got: {s:?}"
+    );
+
+    // Parse fields: 2;<parity>;<nbits>;<xspeed>;<rspeed>;<clkmul>;<flags>x
+    let body = s.trim_end_matches('x');
+    let parts: Vec<u32> = body
+        .split(';')
+        .map(|p| p.parse::<u32>().expect("All fields must be integers"))
+        .collect();
+    assert_eq!(
+        parts.len(),
+        7,
+        "Must have 7 semicolon-separated fields, got: {parts:?}"
+    );
+    let (parity, nbits, _xspeed, _rspeed, clkmul, _flags) =
+        (parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
+    assert!(
+        parity > 0,
+        "Parity field must be > 0 (vttest requirement), got: {parity}"
+    );
+    assert!(
+        nbits > 0,
+        "Nbits field must be > 0 (vttest requirement), got: {nbits}"
+    );
+    assert!(
+        clkmul > 0,
+        "Clkmul field must be > 0 (vttest requirement), got: {clkmul}"
+    );
+}
+
+#[test]
+fn decreqtparm_ps1_responds_with_code_3() {
+    // CSI 1 x — vttest sends this via decreqtparm(1); expects "3;" prefix.
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[1x");
+
+    let response = h.drain_pty_writes_concatenated();
+    assert!(
+        response.starts_with(b"\x1b[3;"),
+        "DECREQTPARM Ps=1 must respond CSI 3;<params>x, got: {:?}",
+        String::from_utf8_lossy(&response)
+    );
+    assert_eq!(response.last().copied(), Some(b'x'), "Must end with 'x'");
+}
+
+#[test]
+fn decreqtparm_ps0_and_ps1_bodies_match() {
+    // vttest validation: replace leading '3' with '2' in Ps=1 response;
+    // result must equal the Ps=0 response body.
+    let mut h0 = VtTestHelper::new_default();
+    let _ = h0.drain_pty_writes();
+    h0.feed(b"\x1b[0x");
+    let resp0 = h0.drain_pty_writes_concatenated();
+
+    let mut h1 = VtTestHelper::new_default();
+    let _ = h1.drain_pty_writes();
+    h1.feed(b"\x1b[1x");
+    let resp1 = h1.drain_pty_writes_concatenated();
+
+    // Strip CSI prefix from both
+    let body0 = &resp0[2..]; // "2;<params>x"
+    let mut body1 = resp1[2..].to_vec(); // "3;<params>x"
+    // Replace leading '3' with '2' to match vttest logic
+    if body1.first() == Some(&b'3') {
+        body1[0] = b'2';
+    }
+    assert_eq!(
+        body0,
+        body1.as_slice(),
+        "DECREQTPARM Ps=0 and Ps=1 must have identical parameter bodies"
+    );
+}
+
+#[test]
+fn decreqtparm_no_param_treated_as_ps0() {
+    // CSI x (no param) — should default to Ps=0 → "2;" prefix.
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"\x1b[x");
+
+    let response = h.drain_pty_writes_concatenated();
+    assert!(
+        response.starts_with(b"\x1b[2;"),
+        "DECREQTPARM with no param must default to Ps=0 (code 2), got: {:?}",
+        String::from_utf8_lossy(&response)
+    );
+}
+
+// ─── DA1 extension code audit (vttest extensions[] table cross-reference) ────
+//
+// Freminal responds to DA1 with CSI ? 65 ; 1 ; 2 ; 4 ; 6 ; 17 ; 18 ; 22 c.
+// From vttest reports.c extensions[] table, these codes mean:
+//   1  = "132 columns"
+//   2  = "printer port"
+//   4  = "Sixel graphics"
+//   6  = "selective erase"
+//   17 = "terminal state reports"
+//   18 = "user windows"
+//   22 = "color"
+// All are listed in the extensions[] table so vttest will not print "BAD VALUE".
+// This test documents the expected response and validates each extension code
+// is known to vttest.
+
+#[test]
+fn da1_response_extension_codes_are_vttest_known() {
+    // Parse Freminal's DA1 response and verify every extension code is in the
+    // vttest-recognized set (extensions[] table from reports.c).
+    let vttest_known: std::collections::HashSet<u32> = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+        26, 27, 28, 29, 30, 32, 33, 34, 35, 36, 37, 38, 42, 44, 45, 46,
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+    h.feed(b"\x1b[c");
+    let response = h.drain_pty_writes_concatenated();
+
+    // Response: ESC [ ? 65 ; 1 ; 2 ; ... c
+    let s = std::str::from_utf8(&response).expect("DA1 response must be ASCII");
+    // Strip "ESC[?" prefix and trailing "c"
+    let body = s
+        .strip_prefix("\x1b[?")
+        .expect("Must start with CSI ?")
+        .strip_suffix('c')
+        .expect("Must end with 'c'");
+    let params: Vec<u32> = body
+        .split(';')
+        .map(|p| p.parse::<u32>().expect("Must be integers"))
+        .collect();
+    // First param is the terminal level (65 = VT500 family) — not an extension code.
+    // Remaining params are extension codes.
+    let extensions = &params[1..];
+    for &code in extensions {
+        assert!(
+            vttest_known.contains(&code),
+            "DA1 extension code {code} is not in vttest's known extensions[] table"
+        );
+    }
+}

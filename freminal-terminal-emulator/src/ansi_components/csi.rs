@@ -321,6 +321,29 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_scorc(&self.params, output);
                 push_result
             }
+            AnsiCsiParserState::Finished(b'x') => {
+                // DECREQTPARM — Request Terminal Parameters.
+                // Only plain CSI Ps x is valid (Ps=0 or Ps=1).
+                // Reject if '>' intermediate is present (that would be a
+                // malformed DA2/xtversion sequence, not DECREQTPARM).
+                let has_gt = self.intermediates.contains(&b'>')
+                    || self.params.first().copied() == Some(b'>');
+                if has_gt {
+                    output.push(TerminalOutput::Invalid);
+                    return push_result;
+                }
+                // Ps=0 → CSI 2;...x   Ps=1 → CSI 3;...x
+                let ps: u8 = self
+                    .params
+                    .iter()
+                    .copied()
+                    .filter(u8::is_ascii_digit)
+                    .fold(0u8, |acc, d| {
+                        acc.saturating_mul(10).saturating_add(d - b'0')
+                    });
+                output.push(TerminalOutput::RequestTerminalParameters(ps));
+                push_result
+            }
             AnsiCsiParserState::Finished(_esc) => push_result,
 
             // Below should cover the invalid state(AnsiCsiParserState::Invalid) as well as any other finished states

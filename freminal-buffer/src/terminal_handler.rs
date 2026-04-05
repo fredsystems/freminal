@@ -998,6 +998,28 @@ impl TerminalHandler {
         self.write_to_pty("\x1b[>65;0;0c");
     }
 
+    /// Handle DA3 — Tertiary Device Attributes.
+    /// Responds with `DCS ! | 00000000 ST`.
+    /// This identifies Freminal with a fixed 8-digit hexadecimal unit ID.
+    pub fn handle_tertiary_device_attributes(&mut self) {
+        self.write_to_pty("\x1bP!|00000000\x1b\\");
+    }
+
+    /// Handle DECREQTPARM — Request Terminal Parameters.
+    ///
+    /// Sends `CSI <code> ; 1 ; 1 ; 120 ; 120 ; 1 ; 0 x` where `<code>` is
+    /// `2` for Ps=0 and `3` for Ps=1. Values chosen to represent:
+    /// - Parity: 1 (NONE)
+    /// - Bits: 1 (8-bit)
+    /// - Transmit speed: 120 (38400 baud)
+    /// - Receive speed: 120 (38400 baud)
+    /// - Clock multiplier: 1
+    /// - Flags: 0
+    pub fn handle_request_terminal_parameters(&mut self, ps: u8) {
+        let code = if ps == 0 { 2u8 } else { 3u8 };
+        self.write_to_pty(&format!("\x1b[{code};1;1;120;120;1;0x"));
+    }
+
     /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
     /// Responds with `DCS > | Freminal <version> ST`.
     pub fn handle_device_name_and_version(&mut self) {
@@ -3851,6 +3873,12 @@ impl TerminalHandler {
             }
             TerminalOutput::ApplicationProgramCommand(apc) => {
                 self.handle_application_program_command(apc);
+            }
+            TerminalOutput::RequestTertiaryDeviceAttributes => {
+                self.handle_tertiary_device_attributes();
+            }
+            TerminalOutput::RequestTerminalParameters(ps) => {
+                self.handle_request_terminal_parameters(*ps);
             }
             TerminalOutput::RequestDeviceNameAndVersion => {
                 self.handle_device_name_and_version();

@@ -287,7 +287,7 @@ comparing Freminal's output against the expected VT100 behavior:
 
 ### 22.B3 — Rewrite Menu 6 (Device Reports) Tests + Fix Failures
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_reports.rs`
 - **Details:**
@@ -303,6 +303,16 @@ comparing Freminal's output against the expected VT100 behavior:
 
   Each test must capture the bytes written back to the PTY channel and assert they match
   what vttest's `reports.c` expects to receive.
+
+- **Completion note (2026-04-04):** Added 9 byte-exact Phase B tests derived from
+  `vttest-20251205/reports.c`: `da3_query_standard`, `da3_query_explicit_zero_param`,
+  `da3_response_is_valid_dcs_unit_id`, `decreqtparm_ps0_responds_with_code_2`,
+  `decreqtparm_ps0_response_is_valid_format`, `decreqtparm_ps1_responds_with_code_3`,
+  `decreqtparm_ps0_and_ps1_bodies_match`, `decreqtparm_no_param_treated_as_ps0`,
+  `da1_response_extension_codes_are_vttest_known`. DA3 (`CSI = c`) and DECREQTPARM
+  (`CSI Ps x`) implemented end-to-end. Fixed compile error in `csi.rs` (`has_gt` guard
+  used non-existent `ParserFailures::UnhandledSequence` variant — replaced with
+  `push_result`). All 34 tests in `vttest_reports.rs` pass. `cargo test --all` passes.
 
 ---
 
