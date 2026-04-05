@@ -201,6 +201,13 @@ impl FreminalAnsiParser {
             return Err(());
         }
 
+        // ENQ (0x05) — transmit answerback message
+        if b == 0x05 {
+            push_data_if_non_empty(data_output, output);
+            output.push(TerminalOutput::Enq);
+            return Err(());
+        }
+
         // NUL (0x00) and DEL (0x7F) are silently ignored
         if b == 0x00 || b == 0x7F {
             return Err(());
@@ -1429,6 +1436,31 @@ mod tests {
             vec![TerminalOutput::DecSpecialGraphics(
                 freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
             )]
+        );
+    }
+
+    /// ENQ (0x05) must be recognised as a C0 control character and produce
+    /// `TerminalOutput::Enq` — not be treated as printable data.
+    #[test]
+    fn enq_produces_enq_output() {
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"\x05");
+        assert_eq!(result, vec![TerminalOutput::Enq]);
+    }
+
+    /// ENQ in the middle of text must flush the preceding data and produce
+    /// a separate `Enq` output.
+    #[test]
+    fn enq_flushes_data_and_emits_enq() {
+        let mut parser = FreminalAnsiParser::new();
+        let result = parser.push(b"AB\x05CD");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"AB".to_vec()),
+                TerminalOutput::Enq,
+                TerminalOutput::Data(b"CD".to_vec()),
+            ]
         );
     }
 }

@@ -3955,6 +3955,11 @@ impl TerminalHandler {
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
             }
+            TerminalOutput::Enq => {
+                // ENQ — transmit answerback message.
+                // Most modern terminals send an empty string; we do the same.
+                self.write_to_pty("");
+            }
             // Silently ignore `Invalid`, `Skipped`, and any future variants.
             //
             // `Invalid` — a sequence the parser recognised as malformed; the

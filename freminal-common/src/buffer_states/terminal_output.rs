@@ -156,6 +156,12 @@ pub enum TerminalOutput {
     /// CSI Ps x — DECREQTPARM: Request Terminal Parameters.
     /// Ps=0 → respond with `CSI 2 ; ... x`; Ps=1 → respond with `CSI 3 ; ... x`.
     RequestTerminalParameters(u8),
+    /// ENQ (0x05) — transmit the answerback message back to the PTY.
+    ///
+    /// The VT100 spec requires the terminal to send its configured answerback
+    /// string when it receives ENQ.  Most modern terminals respond with an
+    /// empty string.
+    Enq,
 }
 
 // Inherently large: exhaustive `Display` impl for all `TerminalOutput` variants used in
@@ -291,6 +297,7 @@ impl std::fmt::Display for TerminalOutput {
             Self::ModifyOtherKeys(level) => write!(f, "ModifyOtherKeys({level})"),
             Self::RequestTertiaryDeviceAttributes => write!(f, "RequestTertiaryDeviceAttributes"),
             Self::RequestTerminalParameters(ps) => write!(f, "RequestTerminalParameters({ps})"),
+            Self::Enq => write!(f, "Enq"),
         }
     }
 }

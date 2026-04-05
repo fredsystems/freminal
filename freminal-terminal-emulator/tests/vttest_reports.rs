@@ -729,3 +729,50 @@ fn lnm_mode_set_and_reset_via_write() {
         "LNM reset: Enter must send bare CR again"
     );
 }
+
+// ─── ENQ — AnswerBack Message ───────────────────────────────────────────────
+
+/// vttest Menu 6.1: send ENQ (0x05) and verify the terminal responds with an
+/// empty answerback message (most modern terminals send nothing).  Critically,
+/// ENQ must NOT be treated as printable data — it must be consumed silently.
+#[test]
+fn enq_is_consumed_and_does_not_appear_on_screen() {
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    // Send ENQ (0x05)
+    h.feed(b"\x05");
+
+    // ENQ should trigger a write_to_pty("") — an empty answerback.
+    // drain_pty_writes returns the list of all writes; we expect exactly one
+    // empty write (or no writes if the handler optimises away empty writes).
+    let writes = h.drain_pty_writes();
+    for w in &writes {
+        assert!(w.is_empty(), "ENQ answerback should be empty, got: {w:?}");
+    }
+
+    // Most importantly: the visible buffer must NOT contain 0x05 as text.
+    // Check all rows for any control character leakage.
+    let screen = h.screen_text();
+    for (i, row) in screen.iter().enumerate() {
+        assert!(
+            !row.contains('\x05'),
+            "row {i} contains ENQ byte as visible text: {row:?}"
+        );
+    }
+}
+
+/// ENQ mixed with regular text: the text must appear on screen, ENQ must not.
+#[test]
+fn enq_in_text_stream_does_not_corrupt_display() {
+    let mut h = VtTestHelper::new_default();
+    let _ = h.drain_pty_writes();
+
+    h.feed(b"Hello\x05World");
+
+    let screen = h.screen_text();
+    assert_eq!(
+        screen[0], "HelloWorld",
+        "ENQ must not appear between Hello and World"
+    );
+}
