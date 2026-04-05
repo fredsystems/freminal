@@ -318,13 +318,22 @@ comparing Freminal's output against the expected VT100 behavior:
 
 ### 22.B4 — Rewrite Menu 8 (Insert/Delete) Tests from vttest Source
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-terminal-emulator/tests/vttest_insert_delete.rs`
 - **Details:**
   Rewrite all 32 insert/delete tests to use exact byte sequences from vttest source.
   - ICH, DCH, IL, DL, IRM sequences from vttest Menu 8
   - Edge cases: at margins, within scroll regions, count > available space
+- **Completion note (2026-04-04):** Added 4 byte-exact Phase B tests derived from
+  `vttest-20251205/main.c` `tst_insdel()` (lines 941-1039):
+  `tst_insdel_ich_alphabet_test` (Z→A with ICH(2) spacing, produces spaced alphabet),
+  `tst_insdel_dch_stagger_single_width` (per-row DCH stagger from vttest exact loop),
+  `tst_insdel_accordion_il_dl_loop` (fill + scroll region + DECOM + il/dl accordion),
+  `tst_insdel_irm_insert_mode_not_implemented` (IRM not implemented — documented with
+  `// BUG:` comment). All 36 tests in `vttest_insert_delete.rs` pass. No new Freminal
+  bugs found; all passing tests confirm correct ICH/DCH/IL/DL/DECOM behaviour.
+  Known non-compliance: IRM (ANSI mode 4) not implemented.
 
 ---
 

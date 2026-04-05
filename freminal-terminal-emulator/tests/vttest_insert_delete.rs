@@ -534,3 +534,223 @@ fn dl_param_zero_deletes_one_line() {
     h.assert_row(1, "Row 2");
     h.assert_row(2, "");
 }
+
+// ─── Phase B: vttest-exact sequences from tst_insdel() ───────────────────────
+//
+// The following tests reproduce exact byte sequences from the vttest source code
+// (`vttest-20251205/main.c`, `tst_insdel()`, lines 941-1039).  They assert correct
+// VT100/VT220 behaviour rather than Freminal-current behaviour.
+
+/// vttest `tst_insdel` — ICH alphabet test (lines 1020-1032 of main.c).
+///
+/// vttest writes the letters Z..A backwards, each followed by BS and then ICH(2).
+/// The result should be:
+///   `  A B C D E F G H I J K L M N O P Q R S T U V W X Y Z`
+/// (leading two spaces from the final ICH(2) on 'A', then one space between each letter).
+///
+/// Exact vttest loop (translated):
+///   for i in ('A'..='Z').rev():
+///     tprintf("%c%c", i, BS)  →  write letter, then BS (0x08)
+///     ich(2)                  →  CSI 2 @
+#[test]
+fn tst_insdel_ich_alphabet_test() {
+    let mut h = VtTestHelper::new_default();
+    // cup(1, 1) — position at row 1, col 1 (top-left)
+    h.feed(b"\x1b[1;1H");
+
+    // Replicate vttest: for i = 'Z' down to 'A': write char, BS, ICH(2)
+    let mut seq = Vec::new();
+    for letter in (b'A'..=b'Z').rev() {
+        seq.push(letter); // write letter
+        seq.push(0x08); // BS (cursor back one)
+        seq.extend_from_slice(b"\x1b[2@"); // ICH(2)
+    }
+    h.feed(&seq);
+
+    // vttest expects row 1 to read:
+    //   "  A B C D E F G H I J K L M N O P Q R S T U V W X Y Z"
+    // (leading two blanks, then letter-space pairs)
+    h.assert_row(0, "  A B C D E F G H I J K L M N O P Q R S T U V W X Y Z");
+}
+
+/// vttest `tst_insdel` — DCH stagger test (lines 1007-1019 of main.c), single-width pass.
+///
+/// For each row (1-indexed, 1..=max_lines):
+///   cup(row, 1)
+///   fill sw columns with the letter 'A'-1+row
+///   cup(row, sw/1 - row)          →  move to column (80 - row)
+///   dch(row)                       →  CSI row P
+///
+/// Expected result: each row has its rightmost `row` characters deleted, producing
+/// a staircase.  Row 1 is missing the last 1 char, row 2 the last 2, etc.
+/// Row N ends at column (80 - N - N) = 80 - 2*N chars of letter content.
+#[test]
+fn tst_insdel_dch_stagger_single_width() {
+    let mut h = VtTestHelper::new_default();
+    let sw: usize = 80;
+    let max_lines: usize = 24;
+
+    h.feed(b"\x1b[2J"); // ED(2) — clear screen
+    h.feed(b"\x1b[1;1H"); // cup(1,1)
+
+    for row in 1..=max_lines {
+        let letter = b'A' - 1 + u8::try_from(row).unwrap();
+        // cup(row, 1)
+        let cup = format!("\x1b[{};1H", row);
+        h.feed(cup.as_bytes());
+        // fill sw columns with the letter
+        let row_content: Vec<u8> = vec![letter; sw];
+        h.feed(&row_content);
+        // cup(row, sw - row)  → 1-indexed col = sw - row
+        let col = sw - row; // vttest: sw/dblchr - row where dblchr=1
+        let cup2 = format!("\x1b[{};{}H", row, col);
+        h.feed(cup2.as_bytes());
+        // dch(row)
+        let dch = format!("\x1b[{}P", row);
+        h.feed(dch.as_bytes());
+    }
+
+    // Verify the stagger for the first few rows.
+    //
+    // vttest: cup(row, sw - row) is 1-indexed col sw-row = 0-indexed col sw-row-1.
+    // dch(row) deletes  chars starting there.  The char at col sw-1 (rightmost)
+    // slides leftward to fill; result = sw - row visible letters.
+    //
+    // Row 0 (1-indexed row 1): cup(1,79) = 0-indexed col 78; dch(1) → sw-1 = 79 'A's.
+    let row0_expected: String = "A".repeat(sw - 1); // 79 'A's
+    h.assert_row(0, &row0_expected);
+
+    // Row 1 (1-indexed row 2): cup(2,78) = 0-indexed col 77; dch(2) → sw-2 = 78 'B's.
+    let row1_expected: String = "B".repeat(sw - 2); // 78 'B's
+    h.assert_row(1, &row1_expected);
+
+    // Row 2 (1-indexed row 3): cup(3,77) = 0-indexed col 76; dch(3) → sw-3 = 77 'C's.
+    let row2_expected: String = "C".repeat(sw - 3); // 77 'C's
+    h.assert_row(2, &row2_expected);
+}
+
+/// vttest `tst_insdel` — accordion test (lines 970-985 of main.c).
+///
+/// After filling the screen with rows of letters (row N = letter 'A'+N-1 repeated),
+/// vttest does:
+///   ri()                          →  ESC M  (reverse index — scroll row 1 up)
+///   el(2)                         →  CSI 2 K  (erase entire row 1)
+///   decstbm(2, max_lines - 1)     →  CSI 2;23 r  (scroll region rows 2-23)
+///   decom(TRUE)                   →  CSI ?6 h  (origin mode ON)
+///   cup(1, 1)                     →  CSI 1;1 H  (in DECOM: row 1 relative to top of region)
+///   for row in 1..=max_lines:
+///     il(row)                     →  CSI row L
+///     dl(row)                     →  CSI row M
+///   decom(FALSE)                  →  CSI ?6 l
+///   decstbm(0, 0)                 →  CSI r  (reset scroll region to full screen)
+///
+/// Expected final state (vttest message):
+///   "Top line: A's, bottom line: X's, this line, nothing more."
+///   Row 0: "AAAAAA..." (A's full width)
+///   Row 23: "XXXXXXX..." (X = 24th letter = 'X', full width)
+///   Rows 1-22: blank (accordion cleared the content)
+#[test]
+fn tst_insdel_accordion_il_dl_loop() {
+    let mut h = VtTestHelper::new_default();
+    let sw: usize = 80;
+    let max_lines: usize = 24;
+
+    // Fill screen: row N gets letter 'A'+N-1 repeated sw times.
+    h.feed(b"\x1b[2J");
+    h.feed(b"\x1b[1;1H");
+    for row in 1..=max_lines {
+        let letter = b'A' - 1 + u8::try_from(row).unwrap();
+        let cup = format!("\x1b[{};1H", row);
+        h.feed(cup.as_bytes());
+        let row_content: Vec<u8> = vec![letter; sw];
+        h.feed(&row_content);
+    }
+
+    // ri() — ESC M
+    h.feed(b"\x1bM");
+    // el(2) — CSI 2 K
+    h.feed(b"\x1b[2K");
+    // decstbm(2, 23) — CSI 2;23 r
+    h.feed(b"\x1b[2;23r");
+    // decom(TRUE) — CSI ?6 h
+    h.feed(b"\x1b[?6h");
+    // cup(1, 1) — CSI 1;1 H  (relative to scroll region top = absolute row 2)
+    h.feed(b"\x1b[1;1H");
+
+    // Accordion loop: il(row) + dl(row) for row in 1..=24
+    for row in 1..=max_lines {
+        let il = format!("\x1b[{}L", row);
+        h.feed(il.as_bytes());
+        let dl = format!("\x1b[{}M", row);
+        h.feed(dl.as_bytes());
+    }
+
+    // decom(FALSE) — CSI ?6 l
+    h.feed(b"\x1b[?6l");
+    // decstbm(0, 0) — CSI r  (reset scroll region)
+    h.feed(b"\x1b[r");
+
+    // Verify: row 0 = A's (unchanged, outside scroll region top)
+    let a_row: String = "A".repeat(sw);
+    h.assert_row(0, &a_row);
+
+    // Rows 1-21 (inside the scroll region) should be blank after accordion.
+    for row in 1..=21 {
+        h.assert_row(row, "");
+    }
+
+    // Row 23 = X's (24th letter, was outside scroll region bottom, unchanged).
+    let x_row: String = "X".repeat(sw);
+    h.assert_row(23, &x_row);
+}
+
+/// vttest `tst_insdel` — IRM insert mode test (lines 986-997 of main.c).
+///
+/// vttest does:
+///   cup(1, 2); tprintf("B"); cub(1)
+///   sm("4")   →  CSI 4 h   (IRM on)
+///   for col in 2..=sw-1: tprintf("*")
+///   rm("4")   →  CSI 4 l   (IRM off)
+///
+/// With IRM active, each `*` should be inserted (not overwritten), pushing 'B'
+/// rightward.  The expected result is `A*** ... ***B` on the top line.
+///
+/// BUG: IRM (Insert/Replace Mode, ANSI mode 4) is not implemented in Freminal.
+/// `CSI 4 h` is silently ignored.  In replace mode (the default), all `*` writes
+/// overwrite existing content, so the top line becomes `A*...*` (B is overwritten).
+#[test]
+fn tst_insdel_irm_insert_mode_not_implemented() {
+    let mut h = VtTestHelper::new_default();
+    let sw: usize = 80;
+
+    // Set up: row 0 = 'A' repeated sw times.
+    h.feed(b"\x1b[1;1H");
+    let a_row: Vec<u8> = vec![b'A'; sw];
+    h.feed(&a_row);
+
+    // cup(1, 2) → 0-indexed col 1; write 'B'; cub(1) → back to col 1.
+    h.feed(b"\x1b[1;2H"); // cup(1,2)
+    h.feed(b"B"); // write 'B' at col 1 (overwrites second 'A')
+    h.feed(b"\x1b[D"); // cub(1) — cursor back to col 1
+
+    // sm("4") — IRM on (not implemented: silently ignored)
+    h.feed(b"\x1b[4h");
+
+    // write sw-2 stars (cols 2..=sw-1, 1-indexed = cols 1..=sw-2, 0-indexed)
+    let stars: Vec<u8> = vec![b'*'; sw - 2];
+    h.feed(&stars);
+
+    // rm("4") — IRM off (not implemented: silently ignored)
+    h.feed(b"\x1b[4l");
+
+    // BUG: With IRM implemented, the expected line would be:
+    //   "A" + "*".repeat(sw-2) + "B"
+    // But since IRM is not implemented, all writes are replace-mode, producing:
+    //   "A" + "*".repeat(sw-2) + last char from the A row at col sw-1
+    // In this case: col 1 was 'B' but stars start at col 1 (cub moved back to 1),
+    // so the actual content is 'A' at col 0, then sw-2 stars at cols 1..sw-2,
+    // then 'A' at col sw-1 (the original rightmost A, never overwritten).
+    // BUG: IRM not implemented — see PLAN_22_VTTEST_INTEGRATION.md
+    let expected: String = format!("A{}A", "*".repeat(sw - 2));
+    h.assert_row(0, &expected);
+}
