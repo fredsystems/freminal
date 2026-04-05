@@ -200,7 +200,7 @@ fn vt52cup_repeated_oob_row_keeps_row_stable() {
 ///
 /// Note: VT52 ESC Y parameters are `l + 0x1F` and `c + 0x1F`. The largest
 /// printable-ASCII-safe column on an 80-col terminal is 80 (byte 0x6F).
-/// Columns beyond 80 are clamped to 79 (0-indexed).
+/// In VT52 mode, columns beyond 80 are **ignored** (not clamped).
 #[test]
 fn vt52cup_in_bounds_row_col_at_right_edge() {
     let mut h = VtTestHelper::new_default();
@@ -209,6 +209,147 @@ fn vt52cup_in_bounds_row_col_at_right_edge() {
     // Row 5, col 80 → 0-indexed (79, 4).  ESC Y encodes col as 80 + 0x1F = 0x6F ('o').
     h.feed(&vt52cup(5, 80));
     h.assert_cursor_pos(79, 4);
+}
+
+/// Out-of-bounds **column** in VT52 mode is ignored — cursor column stays
+/// unchanged.
+///
+/// vttest `vt52.c` lines 141-148: calls `vt52cup(i, min_cols + 1 + adj)`
+/// where `min_cols = 80` and `adj = 1 or 2`, placing the cursor at column
+/// 82 or 83 (1-indexed).  A VT100 emulating VT52 should **ignore** the
+/// out-of-bounds column entirely (not clamp it), leaving the cursor at its
+/// previous column position so that the subsequent `vt52el()` erases from
+/// the correct location.
+#[test]
+fn vt52cup_out_of_bounds_column_ignored() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+
+    // Position at row 5, col 71 (1-indexed) → 0-indexed (70, 4).
+    h.feed(&vt52cup(5, 71));
+    h.assert_cursor_pos(70, 4);
+
+    // OOB column: col 82 > 80 (terminal width).
+    // Row 5 is in-bounds, so row IS updated; column should be IGNORED.
+    h.feed(&vt52cup(10, 82));
+    // Row changed from 4 to 9 (0-indexed), column stays at 70.
+    h.assert_cursor_pos(70, 9);
+}
+
+/// Out-of-bounds column with an in-bounds row: only column is ignored.
+#[test]
+fn vt52cup_oob_column_in_bounds_row() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+
+    // Start at (col=30, row=10) — 0-indexed.
+    h.feed(&vt52cup(11, 31)); // 1-indexed
+    h.assert_cursor_pos(30, 10);
+
+    // Column 81 is OOB (> 80). Row 15 is in-bounds.
+    h.feed(&vt52cup(15, 81));
+    // Row updated to 14 (0-indexed), column stays at 30.
+    h.assert_cursor_pos(30, 14);
+}
+
+/// When **both** row and column are out of bounds in VT52 mode, the cursor
+/// position must be completely unchanged.
+#[test]
+fn vt52cup_both_row_and_col_oob() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+
+    h.feed(&vt52cup(5, 20)); // 1-indexed → 0-indexed (19, 4)
+    h.assert_cursor_pos(19, 4);
+
+    // Row 30 > 24, column 90 > 80: both OOB → entire cup is no-op.
+    h.feed(&vt52cup(30, 90));
+    h.assert_cursor_pos(19, 4);
+}
+
+/// vttest `**Foobar` erasure pattern (`vt52.c` lines 81-84, 139-148).
+///
+/// vttest writes `**Foobar` at column 70 on rows 2-23, then erases most of
+/// it using `vt52el()` after positioning with either `vt52cup(i, box_r)`
+/// (col 71 — in-bounds) or `vt52cup(i, 82/83)` (OOB column — ignored).
+/// The OOB-column rows should inherit the column position from the previous
+/// `vt52cuf1` calls (col 71), so `vt52el()` erases from col 71 onward.
+///
+/// After erasure, each row should have just `*` at col 69 (0-indexed)
+/// from the left-side box edge, and nothing beyond.
+#[test]
+fn vt52_foobar_erasure_with_oob_column() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+
+    // Write `**Foobar` at column 70 (1-indexed) on rows 2-23 (1-indexed).
+    // This matches vt52.c lines 81-84.
+    for i in 2u8..=23 {
+        h.feed(&vt52cup(i, 70));
+        h.feed(b"**Foobar");
+    }
+
+    // Verify the text was written correctly on a sample row.
+    let screen = h.screen_text();
+    // Row 1 (0-indexed) should have `**Foobar` starting at col 69 (0-indexed).
+    assert!(
+        screen[1].ends_with("**Foobar"),
+        "Row 1 should end with **Foobar: {:?}",
+        screen[1]
+    );
+
+    // Now simulate the erasure pattern from vt52.c lines 139-148.
+    // Before entering the loop, vttest does two vt52cuf1 calls after
+    // drawing the right-side "!" column.  For this test we simply
+    // position at (row=1, col=71) which is where the cursor would be.
+    h.feed(&vt52cup(1, 71)); // 0-indexed (70, 0)
+
+    let box_r: u8 = 71; // from vt52.c line 46
+
+    for i in 2u8..=23 {
+        let adj = i % 3;
+        if adj != 0 {
+            // OOB column: min_cols + 1 + adj = 80 + 1 + adj = 82 or 83.
+            // Column is > 80, so in VT52 mode it is IGNORED.
+            // Row is in-bounds, so row IS updated.
+            h.feed(&vt52cup(i, 80 + 1 + adj));
+        } else {
+            // In-bounds: position at (row i, col box_r = 71).
+            h.feed(&vt52cup(i, box_r));
+        }
+        h.feed(VT52_EL); // Erase to end of line.
+    }
+
+    // After erasure, check that **Foobar was erased on all rows.
+    let screen = h.screen_text();
+    for (row_idx, row) in screen.iter().enumerate().take(23).skip(1) {
+        // The row should NOT contain "Foobar" anymore.
+        assert!(
+            !row.contains("Foobar"),
+            "Row {row_idx} still contains Foobar after erasure: {row:?}"
+        );
+        // The row should have at most one `*` at col 69 (from the box edge
+        // drawn before the **Foobar — we didn't draw the box edge in this
+        // test, so the row should be completely empty or have just `*` at
+        // col 69 from the **Foobar's first character that was NOT erased).
+        //
+        // Since we erased from col 70 onward (vt52el at col 70), the first
+        // `*` at col 69 should remain.
+        let chars: Vec<char> = row.chars().collect();
+        if chars.len() > 69 {
+            assert_eq!(
+                chars[69], '*',
+                "Row {row_idx}: col 69 should still be '*' (first char of **Foobar): {row:?}"
+            );
+        }
+        // Nothing should exist beyond col 69 (all erased).
+        assert!(
+            row.len() <= 70,
+            "Row {row_idx} has content beyond col 69 after erasure: {row:?}"
+        );
+    }
 }
 
 // ─── Box-Drawing Simulation (vttest vt52.c top-edge loop) ────────────────────
@@ -526,4 +667,242 @@ fn vt52_exit_restores_ansi_mode() {
     // The cursor should stay at (0, 2).
     h.feed(b"\x1bH"); // ANSI ESC H = DECTABHTS, not cursor home
     h.assert_cursor_pos(0, 2);
+}
+
+// ─── Comprehensive Box Drawing (full vttest vt52.c lines 51-148) ─────────────
+
+/// Reproduce the complete vttest VT52 box-drawing sequence (`vt52.c:51-148`).
+///
+/// This exercises:
+/// - Cursor home + erase-to-end-of-screen
+/// - Direct cursor addressing with in-bounds and OOB coordinates
+/// - Reverse index (backscroll)
+/// - Cursor movement (up, down, left, right)
+/// - Backspace (BS = 0x08)
+/// - Erase to end of line
+/// - OOB row (column-only update)
+/// - OOB column (ignored)
+///
+/// Expected result: a rectangle of `*` from col 10 to col 70 (1-indexed),
+/// rows 1 to 24 (1-indexed = 0 to 23 in 0-indexed), with `!` columns
+/// inside the left and right edges at cols 11 and 69, and all `**Foobar`
+/// text erased leaving only the right-edge `*` at col 70.
+///
+/// The descriptive text at rows 10-13 is verified too.
+#[test]
+fn vt52_comprehensive_box_drawing() {
+    let mut h = VtTestHelper::new_default();
+    let max_lines: u8 = 24;
+    let min_cols: u8 = 80;
+    let box_r: u8 = 71;
+
+    // ── Step 1: Enter VT52 mode, clear screen ──
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+
+    // ── Step 2: Fill screen with "FooBar " x 10 + "Bletch\r\n" ──
+    // vttest vt52.c lines 55-59
+    h.feed(VT52_HOME);
+    for _i in 0..max_lines {
+        for _j in 0..10 {
+            h.feed(b"FooBar ");
+        }
+        // println in vttest outputs text + \r\n
+        h.feed(b"Bletch\r\n");
+    }
+
+    // ── Step 3: Clear everything ──
+    h.feed(VT52_HOME);
+    h.feed(VT52_ED);
+
+    // ── Step 4: Write "nothing more." at (7, 47) + overflow text ──
+    // vttest vt52.c lines 63-66
+    h.feed(&vt52cup(7, 47));
+    h.feed(b"nothing more.");
+    for _i in 0..10 {
+        h.feed(b"THIS SHOULD GO AWAY! ");
+    }
+
+    // ── Step 5: Back-scroll 5 times from row 1 ──
+    // vttest vt52.c lines 67-71
+    for _i in 0..5 {
+        h.feed(&vt52cup(1, 1));
+        h.feed(b"Back scroll (this should go away)");
+        h.feed(VT52_RI); // Reverse LineFeed
+    }
+
+    // ── Step 6: Erase from (12, 60) to end of screen ──
+    // vttest vt52.c lines 72-73
+    h.feed(&vt52cup(12, 60));
+    h.feed(VT52_ED);
+
+    // ── Step 7: Erase rows 2-6 ──
+    // vttest vt52.c lines 74-77
+    for i in 2u8..=6 {
+        h.feed(&vt52cup(i, 1));
+        h.feed(VT52_EL);
+    }
+
+    // ── Step 8: Draw **Foobar at col 70 on rows 2-23 ──
+    // vttest vt52.c lines 81-84
+    for i in 2u8..=max_lines - 1 {
+        h.feed(&vt52cup(i, 70));
+        h.feed(b"**Foobar");
+    }
+
+    // ── Step 9: Draw left side of box (bottom to top) ──
+    // vttest vt52.c lines 88-93
+    h.feed(&vt52cup(max_lines - 1, 10));
+    for _i in (2i16..=i16::from(max_lines) - 1).rev() {
+        h.feed(b"*");
+        h.feed(b"\x08"); // BS
+        h.feed(VT52_RI); // Reverse LineFeed
+    }
+
+    // ── Step 10: Draw top of box (right to left) ──
+    // vttest vt52.c lines 99-107
+    h.feed(&vt52cup(1, 70));
+    for i in (10u8..=70).rev() {
+        h.feed(b"*");
+        h.feed(VT52_CUB); // cursor left (back over the '*')
+        if i % 2 == 1 {
+            // Odd: OOB-row vt52cup → column-only update
+            h.feed(&vt52cup(max_lines + 3, i - 1));
+        } else {
+            // Even: cursor left
+            h.feed(VT52_CUB);
+        }
+    }
+
+    // ── Step 11: Draw bottom of box (left to right) ──
+    // vttest vt52.c lines 111-116
+    h.feed(&vt52cup(max_lines, 10));
+    for _i in 10u8..=70 {
+        h.feed(b"*");
+        h.feed(b"\x08"); // BS
+        h.feed(VT52_CUF); // cursor right
+    }
+
+    // ── Step 12: Draw left "!" column ──
+    // vttest vt52.c lines 120-125
+    h.feed(&vt52cup(2, 11));
+    for _i in 2u8..=max_lines - 1 {
+        h.feed(b"!");
+        h.feed(b"\x08"); // BS
+        h.feed(VT52_CUD); // cursor down
+    }
+
+    // ── Step 13: Draw right "!" column ──
+    // vttest vt52.c lines 129-134
+    h.feed(&vt52cup(max_lines - 1, 69));
+    for _i in (2i16..=i16::from(max_lines) - 1).rev() {
+        h.feed(b"!");
+        h.feed(b"\x08"); // BS
+        h.feed(VT52_CUU); // cursor up
+    }
+
+    // ── Step 14: Erase **Foobar using OOB-column pattern ──
+    // vttest vt52.c lines 139-148
+    h.feed(VT52_CUF); // cursor right
+    h.feed(VT52_CUF); // cursor right
+    for i in 2u8..=max_lines - 1 {
+        let adj = i % 3;
+        if adj != 0 {
+            h.feed(&vt52cup(i, min_cols + 1 + adj)); // OOB column
+        } else {
+            h.feed(&vt52cup(i, box_r)); // col 71 (in-bounds)
+        }
+        h.feed(VT52_EL); // erase to end of line
+    }
+
+    // ── Step 15: Write descriptive text ──
+    // vttest vt52.c lines 150-156
+    h.feed(&vt52cup(10, 16));
+    h.feed(b"The screen should be cleared, and have a centered");
+    h.feed(&vt52cup(11, 16));
+    h.feed(b"rectangle of \"*\"s with \"!\"s on the inside to the");
+    h.feed(&vt52cup(12, 16));
+    h.feed(b"left and right. Only this, and");
+
+    // ── Verify the result ──
+    let screen = h.screen_text();
+
+    // Row 0 (top of box): stars from col 9 to col 69 (0-indexed).
+    let row0_chars: Vec<char> = screen[0].chars().collect();
+    for col in 9..=69usize {
+        assert_eq!(
+            row0_chars.get(col).copied().unwrap_or(' '),
+            '*',
+            "Top edge: expected '*' at row 0 col {col}; got {:?}.\nRow 0: {:?}",
+            row0_chars.get(col),
+            screen[0]
+        );
+    }
+
+    // Row 23 (bottom of box): stars from col 9 to col 69.
+    let row23_chars: Vec<char> = screen[23].chars().collect();
+    for col in 9..=69usize {
+        assert_eq!(
+            row23_chars.get(col).copied().unwrap_or(' '),
+            '*',
+            "Bottom edge: expected '*' at row 23 col {col}; got {:?}.\nRow 23: {:?}",
+            row23_chars.get(col),
+            screen[23]
+        );
+    }
+
+    // Interior rows (1-22): left edge '*' at col 9, '!' at col 10,
+    // right '!' at col 68, right edge '*' at col 69.
+    // Everything from col 70 onward should be erased.
+    for (row_idx, row_str) in screen.iter().enumerate().take(23).skip(1) {
+        let chars: Vec<char> = row_str.chars().collect();
+
+        // Left edge
+        assert_eq!(
+            chars.get(9).copied().unwrap_or(' '),
+            '*',
+            "Row {row_idx} col 9: expected '*' (left edge); row: {row_str:?}",
+        );
+        // Left '!'
+        assert_eq!(
+            chars.get(10).copied().unwrap_or(' '),
+            '!',
+            "Row {row_idx} col 10: expected '!' (left interior); row: {row_str:?}",
+        );
+        // Right '!'
+        assert_eq!(
+            chars.get(68).copied().unwrap_or(' '),
+            '!',
+            "Row {row_idx} col 68: expected '!' (right interior); row: {row_str:?}",
+        );
+        // Right edge
+        assert_eq!(
+            chars.get(69).copied().unwrap_or(' '),
+            '*',
+            "Row {row_idx} col 69: expected '*' (right edge); row: {row_str:?}",
+        );
+        // Nothing beyond col 69 (Foobar erased).
+        assert!(
+            row_str.len() <= 70,
+            "Row {row_idx} has content beyond col 69: {row_str:?}",
+        );
+    }
+
+    // Descriptive text on rows 9-11 (0-indexed).
+    assert!(
+        screen[9].contains("The screen should be cleared"),
+        "Row 9 should contain descriptive text: {:?}",
+        screen[9]
+    );
+    assert!(
+        screen[10].contains("rectangle of"),
+        "Row 10 should contain descriptive text: {:?}",
+        screen[10]
+    );
+    assert!(
+        screen[11].contains("left and right"),
+        "Row 11 should contain descriptive text: {:?}",
+        screen[11]
+    );
 }

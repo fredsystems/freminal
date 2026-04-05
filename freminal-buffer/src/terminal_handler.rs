@@ -695,20 +695,30 @@ impl TerminalHandler {
     /// source (`vt52.c`, lines 94-107): `vt52cup(max_lines+3, i-1)` is used
     /// deliberately to update only the column.
     pub fn handle_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
-        let x_zero = x.map(|v| v.saturating_sub(1));
-
-        // In VT52 mode, an out-of-bounds row means "column-only update".
-        let y_zero = if self.vt52_mode == Decanm::Vt52 {
-            y.and_then(|row_1indexed| {
-                // row_1indexed is 1-based; height is the number of rows.
+        // In VT52 mode, out-of-bounds coordinates are ignored (the axis is
+        // left unchanged) rather than clamped.  This matches VT100-emulating-
+        // VT52 behaviour and is relied upon by vttest's box-drawing test.
+        let (x_zero, y_zero) = if self.vt52_mode == Decanm::Vt52 {
+            let x_z = x.and_then(|col_1indexed| {
+                if col_1indexed > self.buffer.terminal_width() {
+                    None // out-of-bounds — ignore column, keep current position
+                } else {
+                    Some(col_1indexed.saturating_sub(1))
+                }
+            });
+            let y_z = y.and_then(|row_1indexed| {
                 if row_1indexed > self.buffer.terminal_height() {
-                    None // out-of-bounds — ignore the row, update column only
+                    None // out-of-bounds — ignore row, keep current position
                 } else {
                     Some(row_1indexed.saturating_sub(1))
                 }
-            })
+            });
+            (x_z, y_z)
         } else {
-            y.map(|v| v.saturating_sub(1))
+            (
+                x.map(|v| v.saturating_sub(1)),
+                y.map(|v| v.saturating_sub(1)),
+            )
         };
 
         self.buffer.set_cursor_pos(x_zero, y_zero);
