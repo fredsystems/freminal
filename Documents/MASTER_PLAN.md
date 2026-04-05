@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document orchestrates thirty-four major development tasks for Freminal. Each task has a dedicated
+This document orchestrates thirty-five major development tasks for Freminal. Each task has a dedicated
 planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
 any of these tasks MUST read this document first for context on dependencies and ordering.
 
@@ -59,6 +59,7 @@ and plan document maintenance rules.
 | 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
+| 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
 
 ---
 
@@ -118,6 +119,8 @@ Task 32 (Playback Feature Flag) ── independent, can run any time
 Task 33 (WezTerm & Ghostty Palettes) ── independent, can run any time
 
 Task 34 (Window Background Opacity) ── independent, can run any time
+
+Task 35 (Kitty Keyboard Protocol) ── independent, can run any time
 ```
 
 ### Dependency Details
@@ -318,7 +321,7 @@ Must run after all other tasks are complete to avoid merge conflicts.
 - **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 31, 34
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 31, 34, 35
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
@@ -431,6 +434,7 @@ Update this section as tasks complete:
 | 32   |            |            |                                                                       |
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
+| 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |
 
 ---
 
@@ -464,4 +468,5 @@ Update this section as tasks complete:
 - `Documents/PLAN_32_PLAYBACK_FEATURE_FLAG.md` — Playback feature flag (stub)
 - `Documents/PLAN_33_WEZTERM_GHOSTTY_PALETTES.md` — WezTerm and Ghostty color palettes
 - `Documents/PLAN_34_BACKGROUND_OPACITY.md` — Window background opacity
+- `Documents/PLAN_35_KITTY_KEYBOARD_PROTOCOL.md` — Kitty Keyboard Protocol (KKP)
 - `config_example.toml` — Current config format

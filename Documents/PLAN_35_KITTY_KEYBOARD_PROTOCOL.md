@@ -1,6 +1,6 @@
 # PLAN 35 — Kitty Keyboard Protocol
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -289,7 +289,7 @@ No `ReportMode` trait needed — KKP uses a stack model, not a DECRQM mode.
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.1 complete
+- [x] Subtask 35.1 complete
 
 ---
 
@@ -330,7 +330,7 @@ Self::KittyKeyboardSet { flags, mode } => {
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.2 complete
+- [x] Subtask 35.2 complete
 
 ---
 
@@ -378,7 +378,7 @@ Update the module-level doc comment to reflect the new behaviour.
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.3 complete
+- [x] Subtask 35.3 complete
 
 ---
 
@@ -502,7 +502,7 @@ Update the module-level doc comment to reflect the new behaviour.
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean. `cargo-machete` clean.
 
-- [ ] Subtask 35.4 complete
+- [x] Subtask 35.4 complete
 
 ---
 
@@ -554,7 +554,7 @@ Update the module-level doc comment to reflect the new behaviour.
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.5 complete
+- [x] Subtask 35.5 complete
 
 ---
 
@@ -657,7 +657,7 @@ fn kkp_modifier(mods: KeyModifiers) -> u8 {
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.6 complete
+- [x] Subtask 35.6 complete
 
 ---
 
@@ -694,7 +694,7 @@ non-KKP tests.
 tests, which should all still pass since they will now pass `kitty_keyboard_flags: 0`).
 `cargo clippy --all-targets --all-features -- -D warnings` clean. `cargo-machete` clean.
 
-- [ ] Subtask 35.7 complete
+- [x] Subtask 35.7 complete
 
 ---
 
@@ -713,7 +713,7 @@ This subtask is a checkpoint only — no code changes expected if 35.5 was done 
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.8 complete
+- [x] Subtask 35.8 complete
 
 ---
 
@@ -738,7 +738,7 @@ Tests to write:
 
 **Verification:** `cargo test --all` passes. `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
-- [ ] Subtask 35.9 complete
+- [x] Subtask 35.9 complete
 
 ---
 
@@ -758,7 +758,7 @@ Tests to write:
 
 **Verification:** `cargo test --all` passes. No code changes in this subtask.
 
-- [ ] Subtask 35.10 complete
+- [x] Subtask 35.10 complete
 
 ---
 
