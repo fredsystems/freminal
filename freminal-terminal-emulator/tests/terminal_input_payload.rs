@@ -31,6 +31,7 @@ fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -361,6 +362,7 @@ fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -566,6 +568,7 @@ fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -612,6 +615,7 @@ fn ctrl_a_modify_other_keys_level_1() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
@@ -640,6 +644,7 @@ fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -702,6 +707,7 @@ fn ctrl_b_modify_other_keys_level_1() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x02),
         other => panic!("Expected Single(0x02), got {other:?}"),
@@ -718,6 +724,7 @@ fn ctrl_z_modify_other_keys_level_1() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x1A),
         other => panic!("Expected Single(0x1A), got {other:?}"),
@@ -779,6 +786,7 @@ fn escape_with_both_mok2_and_aek() {
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;1;27~");
@@ -798,6 +806,7 @@ fn ctrl_c_with_both_mok2_and_aek() {
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;5;67~");
@@ -816,6 +825,7 @@ fn ctrl_a_with_aek_and_mok0() {
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
@@ -836,6 +846,7 @@ fn backspace_decbkm_set_sends_bs() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x08, "DECBKM set: Backspace must send BS (0x08)")
@@ -854,6 +865,7 @@ fn backspace_decbkm_reset_sends_del() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x7F, "DECBKM reset: Backspace must send DEL (0x7F)")
@@ -879,6 +891,7 @@ fn enter_lnm_reset_sends_cr() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
+        0,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x0D, "LNM reset: Enter must send bare CR (0x0D)");
@@ -902,6 +915,7 @@ fn enter_lnm_set_sends_cr_lf() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
+        0,
     ) {
         TerminalInputPayload::Many(bs) => {
             assert_eq!(
@@ -926,6 +940,7 @@ fn linefeed_unaffected_by_lnm_set() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
+        0,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(
@@ -935,4 +950,166 @@ fn linefeed_unaffected_by_lnm_set() {
         }
         other => panic!("Expected Single(0x0A), got {other:?}"),
     }
+}
+
+// ===========================================================================
+// Kitty Keyboard Protocol (KKP) encoding tests
+// ===========================================================================
+
+/// Convenience: call `to_payload` with KKP flags active and default modes.
+fn payload_bytes_kkp(input: &TerminalInput, flags: u32) -> Vec<u8> {
+    match input.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsDel,
+        Lnm::LineFeed,
+        flags,
+    ) {
+        TerminalInputPayload::Single(b) => vec![b],
+        TerminalInputPayload::Many(bs) => bs.to_vec(),
+        TerminalInputPayload::Owned(bs) => bs,
+    }
+}
+
+/// KKP flags=0 must not change any behaviour: Ctrl+C still sends 0x03.
+#[test]
+fn kkp_flag0_no_change_to_ctrl_c() {
+    assert_eq!(payload_bytes(&TerminalInput::Ctrl(b'C')), vec![0x03]);
+}
+
+/// KKP flag 1 (DISAMBIGUATE): Ctrl+C → CSI 99;5u (lowercase c = 99).
+#[test]
+fn kkp_disambiguate_ctrl_c() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ctrl(b'C'), 1),
+        b"\x1b[99;5u"
+    );
+}
+
+/// KKP flag 1 (DISAMBIGUATE): Ctrl+A → CSI 97;5u (lowercase a = 97).
+#[test]
+fn kkp_disambiguate_ctrl_a() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 1),
+        b"\x1b[97;5u"
+    );
+}
+
+/// KKP flag 1 (DISAMBIGUATE): Escape → CSI 27u.
+#[test]
+fn kkp_disambiguate_escape() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Escape, 1), b"\x1b[27u");
+}
+
+/// KKP flag 1 exception: Enter still sends legacy CR (0x0D), NOT CSI u.
+#[test]
+fn kkp_disambiguate_enter_still_legacy() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Enter, 1), vec![0x0D]);
+}
+
+/// KKP flag 1 exception: Tab still sends legacy HT (0x09), NOT CSI u.
+#[test]
+fn kkp_disambiguate_tab_still_legacy() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Tab, 1), vec![0x09]);
+}
+
+/// KKP flag 1 exception: Backspace still sends legacy DEL (0x7F), NOT CSI u.
+/// Uses `BackarrowSendsDel` (the default for `payload_bytes_kkp`).
+#[test]
+fn kkp_disambiguate_backspace_still_legacy() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Backspace, 1), vec![0x7F]);
+}
+
+/// KKP flag 8 (REPORT_ALL_KEYS): Enter → CSI 13u.
+#[test]
+fn kkp_all_keys_enter() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Enter, 8), b"\x1b[13u");
+}
+
+/// KKP flag 8 (REPORT_ALL_KEYS): Tab → CSI 9u.
+#[test]
+fn kkp_all_keys_tab() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Tab, 8), b"\x1b[9u");
+}
+
+/// KKP flag 8 (REPORT_ALL_KEYS): Backspace → CSI 127u.
+#[test]
+fn kkp_all_keys_backspace() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Backspace, 8),
+        b"\x1b[127u"
+    );
+}
+
+/// KKP flag 8 (REPORT_ALL_KEYS): Ascii(b'a') → CSI 97u.
+#[test]
+fn kkp_all_keys_ascii_a() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b'a'), 8),
+        b"\x1b[97u"
+    );
+}
+
+/// KKP flag 8 (REPORT_ALL_KEYS): Ascii(b'A') → CSI 97;2u (lowercase + Shift).
+#[test]
+fn kkp_all_keys_ascii_shift_a() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b'A'), 8),
+        b"\x1b[97;2u"
+    );
+}
+
+/// KKP flag 1: ArrowLeft(NONE) → legacy `\x1b[D` (unchanged by KKP).
+#[test]
+fn kkp_arrow_left_no_mods() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::ArrowLeft(KeyModifiers::NONE), 1),
+        b"\x1b[D"
+    );
+}
+
+/// KKP flag 1: ArrowLeft(ctrl) → `\x1b[1;5D` (modifier encoding is unchanged).
+#[test]
+fn kkp_arrow_left_ctrl() {
+    let mods = KeyModifiers {
+        ctrl: true,
+        ..KeyModifiers::NONE
+    };
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::ArrowLeft(mods), 1),
+        b"\x1b[1;5D"
+    );
+}
+
+/// KKP flag 1: Home(NONE) → legacy `\x1b[H` (unchanged by KKP).
+#[test]
+fn kkp_home_no_mods() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Home(KeyModifiers::NONE), 1),
+        b"\x1b[H"
+    );
+}
+
+/// KKP flag 1: FunctionKey(1, NONE) → legacy `\x1bOP` (unchanged by KKP).
+#[test]
+fn kkp_f1_no_mods() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::FunctionKey(1, KeyModifiers::NONE), 1),
+        b"\x1bOP"
+    );
+}
+
+/// KKP flag 1: FunctionKey(5, shift) → `\x1b[15;2~` (legacy tilde encoding).
+#[test]
+fn kkp_f5_shift() {
+    let mods = KeyModifiers {
+        shift: true,
+        ..KeyModifiers::NONE
+    };
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::FunctionKey(5, mods), 1),
+        b"\x1b[15;2~"
+    );
 }

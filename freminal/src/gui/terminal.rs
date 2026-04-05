@@ -251,6 +251,7 @@ struct InputModes {
     application_escape_key: ApplicationEscapeKey,
     backarrow_sends_bs: Decbkm,
     line_feed_mode: Lnm,
+    kitty_keyboard_flags: u32,
 }
 
 impl InputModes {
@@ -263,6 +264,7 @@ impl InputModes {
             application_escape_key: snap.application_escape_key,
             backarrow_sends_bs: snap.backarrow_sends_bs,
             line_feed_mode: snap.line_feed_mode,
+            kitty_keyboard_flags: snap.kitty_keyboard_flags,
         }
     }
 }
@@ -296,6 +298,7 @@ fn send_terminal_inputs(
                 modes.application_escape_key,
                 modes.backarrow_sends_bs,
                 modes.line_feed_mode,
+                modes.kitty_keyboard_flags,
             ) {
                 TerminalInputPayload::Single(b) => vec![b],
                 TerminalInputPayload::Many(bs) => bs.to_vec(),

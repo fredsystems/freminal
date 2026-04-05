@@ -631,6 +631,7 @@ impl TerminalState {
         let application_escape_key = self.handler.application_escape_key();
         let backarrow_sends_bs = self.modes.backarrow_key_mode;
         let line_feed_mode = self.modes.line_feed_mode;
+        let kitty_keyboard_flags = self.handler.kitty_keyboard_flags();
         match to_write.to_payload(
             decckm,
             keypad_app,
@@ -638,6 +639,7 @@ impl TerminalState {
             application_escape_key,
             backarrow_sends_bs,
             line_feed_mode,
+            kitty_keyboard_flags,
         ) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;
