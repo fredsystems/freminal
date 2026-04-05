@@ -166,7 +166,7 @@ impl TerminalInput {
         &self,
         decckm_mode: Decckm,
         keypad_mode: KeypadMode,
-        modify_other_keys: u8,
+        _modify_other_keys: u8,
         application_escape_key: ApplicationEscapeKey,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
@@ -189,15 +189,23 @@ impl TerminalInput {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
             Self::Ctrl(c) => {
-                // modifyOtherKeys level 2: encode Ctrl+<letter> as
-                // CSI 27 ; 5 ; <ASCII code of letter> ~
-                // instead of the traditional C0 control code.
-                if modify_other_keys >= 2 {
-                    let code = u32::from(c.to_ascii_uppercase());
-                    TerminalInputPayload::Owned(format!("\x1b[27;5;{code}~").into_bytes())
-                } else {
-                    TerminalInputPayload::Single(char_to_ctrl_code(*c))
-                }
+                // Always send the legacy C0 control code for Ctrl
+                // combinations.
+                //
+                // The xterm `modifyOtherKeys` spec (level 2) technically
+                // calls for encoding Ctrl+key as CSI 27;5;<code>~ when
+                // the key would otherwise be ambiguous.  In practice,
+                // programs that request level 2 (notably tmux via
+                // `CSI > 4 ; 2 m`) still expect Ctrl+A to arrive as
+                // 0x01, Ctrl+C as 0x03, etc.  Modern terminals (xterm
+                // in practice, WezTerm, Alacritty) send legacy C0 bytes
+                // for Ctrl combinations regardless of the modifyOtherKeys
+                // level.  Encoding them as CSI sequences breaks tmux's
+                // prefix key (Ctrl+B) and all Ctrl+letter shortcuts.
+                //
+                // modifyOtherKeys level 2 is respected for non-Ctrl keys
+                // elsewhere in the input pipeline.
+                TerminalInputPayload::Single(char_to_ctrl_code(*c))
             }
             // When LNM (Line Feed / New Line Mode, CSI 20 h) is set, pressing
             // Enter must send CR+LF (0x0D 0x0A).  When LNM is reset (the

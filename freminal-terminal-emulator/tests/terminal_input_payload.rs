@@ -556,8 +556,13 @@ fn key_modifiers_all_combinations() {
 }
 
 // ---------------------------------------------------------------------------
-// modifyOtherKeys level 2 encoding: Ctrl+letter → CSI 27 ; 5 ; CODE ~
+// modifyOtherKeys level 2: Ctrl+letter still sends legacy C0 bytes
 // ---------------------------------------------------------------------------
+//
+// Programs like tmux send `CSI > 4 ; 2 m` (modifyOtherKeys level 2) but
+// still expect Ctrl+A to arrive as 0x01, Ctrl+C as 0x03, etc.  Modern
+// terminals (xterm in practice, WezTerm, Alacritty) do not re-encode
+// Ctrl combinations at any modifyOtherKeys level.
 
 /// Convenience: call `to_payload` with `modify_other_keys = 2`.
 fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
@@ -576,25 +581,25 @@ fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
     }
 }
 
-/// At modifyOtherKeys level 2, Ctrl+A should produce `ESC[27;5;65~`.
+/// At modifyOtherKeys level 2, Ctrl+A still sends legacy C0 byte 0x01.
 #[test]
 fn ctrl_a_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'a'));
-    assert_eq!(bytes, b"\x1b[27;5;65~");
+    assert_eq!(bytes, vec![0x01]);
 }
 
-/// At modifyOtherKeys level 2, Ctrl+C should produce `ESC[27;5;67~`.
+/// At modifyOtherKeys level 2, Ctrl+C still sends legacy C0 byte 0x03.
 #[test]
 fn ctrl_c_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'c'));
-    assert_eq!(bytes, b"\x1b[27;5;67~");
+    assert_eq!(bytes, vec![0x03]);
 }
 
-/// At modifyOtherKeys level 2, Ctrl+Z should produce `ESC[27;5;90~`.
+/// At modifyOtherKeys level 2, Ctrl+Z still sends legacy C0 byte 0x1A.
 #[test]
 fn ctrl_z_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'z'));
-    assert_eq!(bytes, b"\x1b[27;5;90~");
+    assert_eq!(bytes, vec![0x1A]);
 }
 
 /// At modifyOtherKeys level 0, Ctrl+A should still produce the control code 0x01.
@@ -732,42 +737,42 @@ fn ctrl_z_modify_other_keys_level_1() {
 }
 
 // ---------------------------------------------------------------------------
-// modifyOtherKeys level 2: additional Ctrl+letter boundary tests
+// modifyOtherKeys level 2: Ctrl combinations all send legacy C0 bytes
 // ---------------------------------------------------------------------------
 
-/// At level 2, Ctrl+B → `ESC[27;5;66~`
+/// At level 2, Ctrl+B still sends C0 byte 0x02.
 #[test]
 fn ctrl_b_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'b'));
-    assert_eq!(bytes, b"\x1b[27;5;66~");
+    assert_eq!(bytes, vec![0x02]);
 }
 
-/// At level 2, Ctrl+Y → `ESC[27;5;89~`
+/// At level 2, Ctrl+Y still sends C0 byte 0x19.
 #[test]
 fn ctrl_y_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'y'));
-    assert_eq!(bytes, b"\x1b[27;5;89~");
+    assert_eq!(bytes, vec![0x19]);
 }
 
-/// At level 2, Ctrl+M → `ESC[27;5;77~` (not bare CR)
+/// At level 2, Ctrl+M still sends C0 byte 0x0D (CR).
 #[test]
 fn ctrl_m_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'm'));
-    assert_eq!(bytes, b"\x1b[27;5;77~");
+    assert_eq!(bytes, vec![0x0D]);
 }
 
-/// At level 2, Ctrl+[ → `ESC[27;5;91~` (CODE = 91, uppercase of `[`)
+/// At level 2, Ctrl+[ still sends C0 byte 0x1B (ESC).
 #[test]
 fn ctrl_open_bracket_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b'['));
-    assert_eq!(bytes, b"\x1b[27;5;91~");
+    assert_eq!(bytes, vec![0x1B]);
 }
 
-/// At level 2, Ctrl+Space → `ESC[27;5;32~` (CODE = 32, uppercase of ` `)
+/// At level 2, Ctrl+Space still sends C0 byte 0x00 (NUL).
 #[test]
 fn ctrl_space_modify_other_keys_level_2() {
     let bytes = payload_bytes_mok2(&TerminalInput::Ctrl(b' '));
-    assert_eq!(bytes, b"\x1b[27;5;32~");
+    assert_eq!(bytes, vec![0x00]);
 }
 
 // ---------------------------------------------------------------------------
@@ -796,7 +801,8 @@ fn escape_with_both_mok2_and_aek() {
 }
 
 /// When both modifyOtherKeys >= 2 AND application_escape_key are active,
-/// Ctrl+C should use the MOK2 encoding (CSI 27;5;67~), not the AEK one.
+/// Ctrl+C still sends the legacy C0 byte 0x03 — neither MOK2 nor AEK
+/// affects Ctrl+letter encoding.
 #[test]
 fn ctrl_c_with_both_mok2_and_aek() {
     match TerminalInput::Ctrl(b'c').to_payload(
@@ -808,10 +814,10 @@ fn ctrl_c_with_both_mok2_and_aek() {
         Lnm::LineFeed,
         0,
     ) {
-        TerminalInputPayload::Owned(bs) => {
-            assert_eq!(bs, b"\x1b[27;5;67~");
+        TerminalInputPayload::Single(b) => {
+            assert_eq!(b, 0x03);
         }
-        other => panic!("Expected Owned(CSI 27;5;67~), got {other:?}"),
+        other => panic!("Expected Single(0x03), got {other:?}"),
     }
 }
 
