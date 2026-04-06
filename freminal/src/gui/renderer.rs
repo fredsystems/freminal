@@ -27,6 +27,7 @@ use super::shaping::{ShapedGlyph, ShapedLine};
 use freminal_common::buffer_states::fonts::BlinkState;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::{ImagePlacement, InlineImage};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 //  GL numeric conversion helpers
@@ -1545,7 +1546,7 @@ const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> b
 // Inherently large: iterates all shaped lines, resolving background color for every cell.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn build_background_instances(
-    shaped_lines: &[ShapedLine],
+    shaped_lines: &[Arc<ShapedLine>],
     cell_width: u32,
     cell_height: u32,
     ascent: f32,
@@ -1789,7 +1790,7 @@ impl FgRenderOptions {
 /// Returns a flat `Vec<f32>` with `FG_INSTANCE_FLOATS` floats per glyph instance.
 #[must_use]
 pub fn build_foreground_instances(
-    shaped_lines: &[ShapedLine],
+    shaped_lines: &[Arc<ShapedLine>],
     atlas: &mut GlyphAtlas,
     font_manager: &FontManager,
     cell_height: u32,
@@ -2174,7 +2175,7 @@ mod tests {
         cell_w: f32,
         colors: StateColors,
         decorations: FontDecorationFlags,
-    ) -> ShapedLine {
+    ) -> Arc<ShapedLine> {
         use crate::gui::font_manager::FaceId;
         let glyphs: Vec<ShapedGlyph> = (0..n_glyphs)
             .map(|i| ShapedGlyph {
@@ -2187,7 +2188,7 @@ mod tests {
                 cell_width: 1,
             })
             .collect();
-        ShapedLine {
+        Arc::new(ShapedLine {
             runs: vec![ShapedRun {
                 glyphs,
                 col_start: 0,
@@ -2198,7 +2199,7 @@ mod tests {
                 url: None,
                 blink: BlinkState::None,
             }],
-        }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -2224,7 +2225,7 @@ mod tests {
     /// Shorthand for calling `build_background_instances` with typical test
     /// defaults (no selection, `CATPPUCCIN_MOCHA`, no cursor color override).
     fn bg_instances_test(
-        lines: &[ShapedLine],
+        lines: &[Arc<ShapedLine>],
         cell_width: u32,
         cell_height: u32,
         show_cursor: bool,
@@ -2302,7 +2303,7 @@ mod tests {
         use crate::gui::font_manager::FaceId;
         let colors = StateColors::default().with_background_color(TerminalColor::Blue);
 
-        let line = ShapedLine {
+        let line = Arc::new(ShapedLine {
             runs: vec![
                 ShapedRun {
                     glyphs: vec![ShapedGlyph {
@@ -2339,7 +2340,7 @@ mod tests {
                     blink: BlinkState::None,
                 },
             ],
-        };
+        });
 
         let (bg, deco) = bg_instances_test(
             &[line],
@@ -2368,7 +2369,7 @@ mod tests {
         let colors_red = StateColors::default().with_background_color(TerminalColor::Red);
         let colors_blue = StateColors::default().with_background_color(TerminalColor::Blue);
 
-        let line = ShapedLine {
+        let line = Arc::new(ShapedLine {
             runs: vec![
                 ShapedRun {
                     glyphs: vec![ShapedGlyph {
@@ -2405,7 +2406,7 @@ mod tests {
                     blink: BlinkState::None,
                 },
             ],
-        };
+        });
 
         let (bg, _deco) = bg_instances_test(
             &[line],

@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Hash)]
 pub enum FontWeight {
     #[default]
     Normal,
@@ -125,7 +125,7 @@ impl Iterator for FontDecorationFlagsIter {
 /// - `None` — no blink (default).
 /// - `Slow` — SGR 5: ~1 Hz (500 ms on, 500 ms off).
 /// - `Fast` — SGR 6: ~3 Hz (~167 ms on, ~167 ms off).
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Hash)]
 pub enum BlinkState {
     #[default]
     None,

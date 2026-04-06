@@ -398,7 +398,10 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
 fn build_shaped_lines_for_size(
     width: usize,
     height: usize,
-) -> (Vec<freminal::gui::shaping::ShapedLine>, FontManager) {
+) -> (
+    Vec<std::sync::Arc<freminal::gui::shaping::ShapedLine>>,
+    FontManager,
+) {
     let (chars, tags) = ligature_heavy_visible_chars(width, height);
     let mut fm = FontManager::new(&Config::default(), 1.0);
     let mut cache = ShapingCache::new();

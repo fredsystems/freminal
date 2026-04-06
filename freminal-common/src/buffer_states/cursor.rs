@@ -18,7 +18,7 @@ use crate::{
 /// Whether reverse-video mode (DECSCNM / SGR 7) is currently active.
 ///
 /// When `On`, foreground and background colors are swapped when drawing text.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Hash)]
 pub enum ReverseVideo {
     /// Reverse-video is enabled — foreground and background are swapped.
     On,
@@ -32,7 +32,7 @@ pub enum ReverseVideo {
 ///
 /// All color lookups respect `reverse_video`: when `On`, `get_color` returns
 /// the background and `get_background_color` returns the foreground.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct StateColors {
     /// Active text foreground color.
     pub color: TerminalColor,

@@ -107,11 +107,12 @@ pub struct ShapedLine {
 
 /// Per-line shaping cache.
 ///
-/// Stores `(content_hash, ShapedLine)` per row index.  On each snapshot, only
-/// re-shape rows whose content hash changed.
+/// Stores `(content_hash, Arc<ShapedLine>)` per row index.  On each snapshot,
+/// only re-shape rows whose content hash changed.  Cache hits return an `Arc`
+/// clone (refcount bump) instead of a deep clone.
 pub struct ShapingCache {
     /// Per-line cache: `(hash, shaped_line)`.
-    entries: Vec<Option<(u64, ShapedLine)>>,
+    entries: Vec<Option<(u64, Arc<ShapedLine>)>>,
 }
 
 impl Default for ShapingCache {
@@ -140,7 +141,8 @@ impl ShapingCache {
     /// `TerminalSnapshot`.  The function splits them into per-line segments,
     /// hashes each line, and only re-shapes lines whose hash changed.
     ///
-    /// Returns a `Vec<ShapedLine>` with one entry per visible line.
+    /// Returns a `Vec<Arc<ShapedLine>>` with one entry per visible line.
+    /// Cache hits are cheap `Arc` refcount bumps — no deep clone.
     pub fn shape_visible(
         &mut self,
         visible_chars: &[TChar],
@@ -149,7 +151,7 @@ impl ShapingCache {
         font_manager: &mut FontManager,
         cell_width: f32,
         ligatures: bool,
-    ) -> Vec<ShapedLine> {
+    ) -> Vec<Arc<ShapedLine>> {
         let lines = split_into_lines(visible_chars);
         let line_count = lines.len();
 
@@ -173,8 +175,8 @@ impl ShapingCache {
                 .and_then(|e| e.as_ref())
                 .filter(|(h, _)| *h == line_hash)
             {
-                // Cache hit — reuse.
-                shaped_line.clone()
+                // Cache hit — reuse via Arc refcount bump.
+                Arc::clone(shaped_line)
             } else {
                 // Cache miss — segment and shape.
                 let runs = segment_line(
@@ -185,8 +187,8 @@ impl ShapingCache {
                     font_manager,
                 );
                 let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
-                let shaped_line = ShapedLine { runs: shaped_runs };
-                self.entries[line_idx] = Some((line_hash, shaped_line.clone()));
+                let shaped_line = Arc::new(ShapedLine { runs: shaped_runs });
+                self.entries[line_idx] = Some((line_hash, Arc::clone(&shaped_line)));
                 shaped_line
             };
 
@@ -264,12 +266,11 @@ fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> 
         // This tag overlaps our line — hash its properties.
         tag.start.hash(&mut hasher);
         tag.end.hash(&mut hasher);
-        // Hash colors via Debug repr (StateColors doesn't impl Hash).
-        format!("{:?}", tag.colors).hash(&mut hasher);
-        format!("{:?}", tag.font_weight).hash(&mut hasher);
-        format!("{:?}", tag.font_decorations).hash(&mut hasher);
-        format!("{:?}", tag.url).hash(&mut hasher);
-        format!("{:?}", tag.blink).hash(&mut hasher);
+        tag.colors.hash(&mut hasher);
+        tag.font_weight.hash(&mut hasher);
+        tag.font_decorations.hash(&mut hasher);
+        tag.url.hash(&mut hasher);
+        tag.blink.hash(&mut hasher);
     }
 
     hasher.finish()
