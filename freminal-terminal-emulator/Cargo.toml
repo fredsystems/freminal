@@ -2,15 +2,22 @@
 name = "freminal-terminal-emulator"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description.workspace = true
 documentation.workspace = true
+readme.workspace = true
 homepage.workspace = true
 repository.workspace = true
-readme.workspace = true
 license.workspace = true
-rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["arc-swap"]
+
+[[bench]]
+harness = false
+name = "buffer_benches"
 
 [dependencies]
 anyhow.workspace = true
@@ -19,7 +26,7 @@ conv2.workspace = true
 crossbeam-channel.workspace = true
 freminal-buffer = { path = "../freminal-buffer" }
 freminal-common = { path = "../freminal-common" }
-portable-pty.workspace = true
+portable-pty = { path = "../portable-pty" }
 sys-locale.workspace = true
 tar.workspace = true
 tempfile.workspace = true
@@ -36,14 +43,6 @@ test-log.workspace = true
 # assert_cmd.workspace = true
 # predicates.workspace = true
 
-
 [build-dependencies]
 tar.workspace = true
 vergen.workspace = true
-
-[[bench]]
-name = "buffer_benches"
-harness = false
-
-[package.metadata.cargo-machete]
-ignored = ["arc-swap"]
