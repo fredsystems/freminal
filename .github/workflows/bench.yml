@@ -5,6 +5,9 @@ on:
     - cron: "0 6 * * 1" # Monday 6am UTC
   workflow_dispatch: {} # Manual trigger
 
+permissions:
+  contents: read
+
 concurrency:
   group: benchmark
   cancel-in-progress: true

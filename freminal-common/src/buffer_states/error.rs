@@ -5,11 +5,12 @@
 
 use thiserror::Error;
 
+use super::tchar::TCHAR_MAX_UTF8_LEN;
+
 #[derive(Debug, Error, Eq, PartialEq, Clone)]
-#[error(transparent)]
 pub(crate) enum TCharError {
     #[error("Empty byte sequence cannot be a TChar")]
     EmptyTChar,
-    #[error("Byte sequence of length {0} exceeds TChar maximum of 16 bytes")]
+    #[error("Byte sequence of length {0} exceeds TChar maximum of {TCHAR_MAX_UTF8_LEN} bytes")]
     TooLong(usize),
 }

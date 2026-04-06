@@ -19,9 +19,8 @@ pub const TCHAR_MAX_UTF8_LEN: usize = 16;
 /// A single terminal character.
 ///
 /// This type is `Copy` — it stores UTF-8 bytes inline (no heap allocation)
-/// in a fixed-size `[u8; 16]` buffer with a length byte. The enum is 18
-/// bytes on all platforms and can be moved/copied via `memcpy` without any
-/// allocator interaction.
+/// in a fixed-size `[u8; 16]` buffer with a length byte. The enum can be
+/// moved/copied via `memcpy` without any allocator interaction.
 #[derive(Debug, Clone, Copy, Eq)]
 pub enum TChar {
     Ascii(u8),
@@ -248,3 +247,11 @@ impl fmt::Display for TChar {
         }
     }
 }
+
+// Compile-time assertion: TChar must remain 18 bytes (16-byte buffer + 1 length
+// byte + 1 discriminant, with alignment 1). If a code change causes the layout
+// to grow, this assertion will fail at compile time.
+const _: () = assert!(
+    core::mem::size_of::<TChar>() == 18,
+    "TChar size changed — expected 18 bytes"
+);

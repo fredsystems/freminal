@@ -156,6 +156,21 @@ pub struct SavedPrimaryState {
     pub image_cell_count: usize,
 }
 
+/// Compute the number of screen columns that `text` will occupy when
+/// inserted starting at column `col`, clamped so as not to exceed
+/// `wrap_col`.  Wide characters (`display_width` = 2) count for 2 columns.
+fn text_col_span(text: &[TChar], col: usize, wrap_col: usize) -> usize {
+    let mut span = 0usize;
+    for t in text {
+        let w = t.display_width().max(1);
+        if col + span + w > wrap_col {
+            break;
+        }
+        span += w;
+    }
+    span
+}
+
 impl Buffer {
     /// Generate default tab stops at every 8 columns for the given width.
     fn default_tab_stops(width: usize) -> Vec<bool> {
@@ -594,13 +609,20 @@ impl Buffer {
             // │ ALL cells of that image across the entire   │
             // │ buffer — images are atomic; overwriting any  │
             // │ part destroys the whole image.               │
+            // │                                              │
+            // │ We must compute the column span from display │
+            // │ widths, not TChar count, because wide chars  │
+            // │ (display_width=2) occupy 2 columns each.     │
+            // │ Clamp to wrap_col so we don't scan past the  │
+            // │ columns insert_text_with_limit will write.   │
             // └─────────────────────────────────────────────┘
-            self.clear_images_overwritten_by_text(row_idx, col, text.len() - start);
+            let col_span = text_col_span(&text[start..], col, wrap_col);
+            self.clear_images_overwritten_by_text(row_idx, col, col_span);
 
             // Count Kitty images that survived the sweep and will be
             // overwritten by the text insertion below.
             let kitty_images_in_range = if self.image_cell_count > 0 {
-                self.rows[row_idx].count_image_cells_in_range(col, col + (text.len() - start))
+                self.rows[row_idx].count_image_cells_in_range(col, col + col_span)
             } else {
                 0
             };
