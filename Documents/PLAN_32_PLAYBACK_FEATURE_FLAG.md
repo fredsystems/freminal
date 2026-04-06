@@ -1,6 +1,6 @@
 # PLAN_32 — Gate Playback and Recording Behind Feature Flags
 
-## Status: Stub
+## Status: In Progress
 
 ---
 
@@ -76,26 +76,127 @@ the codebase:
 | `freminal-terminal-emulator/src/io/pty.rs` | `recording_path` parameter, `recording`/`recording_start` locals, `write_header`/`write_frame` calls | ~20 lines in PTY reader thread |
 | `freminal-terminal-emulator/src/lib.rs`    | `pub mod recording;`                                                                                 | Module declaration             |
 
-## Design Questions to Resolve Before Subtask Creation
+## Design Decisions (Resolved)
 
-1. Single feature (`recording`) vs. two features (`recording` + `playback`)?
-2. How to handle `new_for_playback()` — rename to `new_headless()` or gate?
-3. CI strategy: always test with feature enabled, or test both configurations?
-4. Should the `--recording-path` and `--with-playback-file` CLI flags be hidden (not shown in
-   `--help`) when the feature is disabled, or should they produce a clear error message?
-5. Should the Nix flake / devshell enable the features by default for development?
+1. **Single `playback` flag.** One feature gates both recording and playback. Recording without
+   playback has no independent use case, and a single flag is simpler to maintain.
+
+2. **Rename `new_for_playback()` to `new_headless()`, keep unconditional.** The constructor has
+   no playback-specific logic — it just skips PTY setup. Tests and benchmarks use it as a
+   headless constructor. It stays available regardless of the feature flag.
+
+3. **Test both configurations in CI.** `cargo xtask ci` runs the full suite without the flag
+   AND with `--features playback`. This catches breakage in both the gated and ungated paths.
+
+4. **Hidden from `--help`, clap error when disabled.** The `--recording-path` and
+   `--with-playback-file` CLI fields are gated out entirely with `#[cfg(feature = "playback")]`.
+   Clap gives "unexpected argument" if a user tries to pass them in a build without the feature.
+
+5. **Nix devshell enables `playback` by default.** Developers get the full feature set in the
+   dev environment.
+
+---
 
 ## Subtasks
 
-To be created after the design questions above are resolved. Expected work:
+### 32.1 — Add `playback` feature flag to `Cargo.toml` files
 
-- Add `recording` and/or `playback` feature flags to relevant `Cargo.toml` files
-- Wrap dedicated modules (`recording.rs`, `playback.rs`) in `#[cfg(feature = "...")]`
-- Gate CLI args, enum variants, struct fields, and methods behind the feature
-- Update CI (`xtask`) to test both with and without the feature
-- Update the Nix flake / devshell if needed
-- Update `README.md` to document the feature flags
-- Ensure `cargo test --all` passes with and without the features enabled
+- [ ] Add `playback = []` to `freminal-common/Cargo.toml` under `[features]`.
+- [ ] Add `playback = ["freminal-common/playback"]` to
+      `freminal-terminal-emulator/Cargo.toml` under `[features]` (propagates to common).
+- [ ] Add `playback = ["freminal-terminal-emulator/playback"]` to `freminal/Cargo.toml`
+      under `[features]` (propagates through emulator to common).
+- [ ] Verify: `cargo build --all` passes. `cargo build --all --features playback` passes.
+      No behaviour change yet — the flag exists but nothing is gated.
+
+### 32.2 — Rename `new_for_playback()` to `new_headless()`
+
+- [ ] In `freminal-terminal-emulator/src/interface.rs`, rename `new_for_playback()` to
+      `new_headless()`. Update the doc comment to reflect its general-purpose nature.
+- [ ] Update all call sites:
+  - `freminal-terminal-emulator/tests/interface_tests.rs`
+  - `freminal-terminal-emulator/tests/snapshot_build.rs`
+  - `freminal/src/playback.rs`
+  - Any benchmarks that use the constructor.
+- [ ] Verify: `cargo test --all` passes. No behaviour change.
+
+### 32.3 — Gate dedicated modules (`recording.rs`, `playback.rs`)
+
+- [ ] In `freminal-terminal-emulator/src/lib.rs`, wrap `pub mod recording;` with
+      `#[cfg(feature = "playback")]`.
+- [ ] In `freminal/src/main.rs`, wrap `pub mod playback;` with
+      `#[cfg(feature = "playback")]`.
+- [ ] Verify: `cargo build --all` passes (without feature — modules are excluded).
+      `cargo build --all --features playback` passes (modules are included).
+
+### 32.4 — Gate playback/recording items in shared emulator files
+
+- [ ] `freminal-terminal-emulator/src/io/mod.rs`:
+  - Gate `PlaybackMode`, `PlaybackCommand` enums with `#[cfg(feature = "playback")]`.
+  - Gate `InputEvent::PlaybackControl(PlaybackCommand)` variant with
+    `#[cfg(feature = "playback")]`.
+- [ ] `freminal-terminal-emulator/src/snapshot.rs`:
+  - Gate `PlaybackInfo` struct with `#[cfg(feature = "playback")]`.
+  - Gate `TerminalSnapshot::playback_info` field with `#[cfg(feature = "playback")]`.
+  - Update `TerminalSnapshot::empty()` to only include `playback_info` when the feature
+    is enabled.
+- [ ] `freminal-terminal-emulator/src/interface.rs`:
+  - Gate `build_snapshot()`'s `playback_info` field population with
+    `#[cfg(feature = "playback")]`.
+  - Gate `new_for_playback()`… wait, this was renamed to `new_headless()` and stays
+    unconditional. Skip this.
+- [ ] `freminal-terminal-emulator/src/io/pty.rs`:
+  - Gate the `recording_path` parameter, `recording`/`recording_start` locals, and
+    `write_header`/`write_frame` calls with `#[cfg(feature = "playback")]`.
+  - When the feature is disabled, the `recording_path` parameter is removed from the
+    function signature. Update the call site in `main.rs` accordingly.
+- [ ] Verify: `cargo build --all` passes. `cargo build --all --features playback` passes.
+
+### 32.5 — Gate CLI args in `args.rs`
+
+- [ ] In `freminal-common/src/args.rs`, wrap `Args::recording` and `Args::playback` fields
+      with `#[cfg(feature = "playback")]`.
+- [ ] Verify: `cargo build --all` passes (fields hidden from CLI).
+      `cargo build --all --features playback` passes (fields visible).
+
+### 32.6 — Gate GUI playback controls and `main.rs` startup branch
+
+- [ ] `freminal/src/gui/mod.rs`:
+  - Gate `FreminalGui::is_playback` and `selected_playback_mode` fields with
+    `#[cfg(feature = "playback")]`.
+  - Gate `show_playback_controls()`, `playback_mode_label()`, and `send_playback_cmd()`
+    methods with `#[cfg(feature = "playback")]`.
+  - Gate any call sites of these methods/fields within `update()` and `new()`.
+- [ ] `freminal/src/main.rs`:
+  - Gate the playback startup branch (~80 lines) with `#[cfg(feature = "playback")]`.
+  - Gate `pub mod playback;` (already done in 32.3, verify).
+  - Gate references to `args.playback` and `args.recording` with
+    `#[cfg(feature = "playback")]`.
+- [ ] Verify: `cargo build --all` passes. `cargo build --all --features playback` passes.
+      `cargo test --all` passes both ways.
+
+### 32.7 — Update `xtask` CI to test both configurations
+
+- [ ] In `xtask/src/main.rs` (or wherever `ci` subcommand is defined), add a second test
+      pass that runs `cargo test --all --features playback` and
+      `cargo clippy --all-targets --features playback -- -D warnings` after the default pass.
+- [ ] Verify: `cargo xtask ci` passes and exercises both configurations.
+
+### 32.8 — Update Nix devshell to enable `playback` by default
+
+- [ ] In `flake.nix` (or the relevant Nix build expression), add `--features playback` to
+      the default `cargo build` / `cargo test` invocations in the devshell.
+- [ ] Verify: `nix develop` shell has playback enabled by default.
+
+### 32.9 — Final verification
+
+- [ ] `cargo test --all` passes (without feature).
+- [ ] `cargo test --all --features playback` passes.
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- [ ] `cargo-machete` passes.
+- [ ] `cargo xtask ci` passes.
+- [ ] Manual smoke test: build without feature, confirm `--recording-path` and
+      `--with-playback-file` are not in `--help`. Build with feature, confirm they work.
 
 ---
 
