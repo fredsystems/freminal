@@ -1122,6 +1122,77 @@ fn kkp_f5_shift() {
 }
 
 // ===========================================================================
+// KKP flags 2/4/16 alone: must NOT change encoding (legacy preserved)
+// ===========================================================================
+//
+// Flags 2 (REPORT_EVENT_TYPES), 4 (REPORT_ALTERNATE_KEYS), and 16
+// (REPORT_ASSOCIATED_TEXT) are additive metadata flags.  When set without
+// DISAMBIGUATE (1) or REPORT_ALL (8), they must not change the base encoding.
+
+/// KKP flag 2 alone: Ctrl+A sends legacy C0 byte 0x01, not CSI u.
+#[test]
+fn kkp_flag_2_only_ctrl_a_legacy() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 2), vec![0x01]);
+}
+
+/// KKP flag 4 alone: Ctrl+C sends legacy C0 byte 0x03, not CSI u.
+#[test]
+fn kkp_flag_4_only_ctrl_c_legacy() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Ctrl(b'C'), 4), vec![0x03]);
+}
+
+/// KKP flag 16 alone: Escape sends legacy bare ESC (0x1B), not CSI 27u.
+#[test]
+fn kkp_flag_16_only_escape_legacy() {
+    assert_eq!(payload_bytes_kkp(&TerminalInput::Escape, 16), vec![0x1B]);
+}
+
+/// KKP flags 2|4|16 combined (22): Ctrl+A still sends legacy C0 byte 0x01.
+#[test]
+fn kkp_flags_2_4_16_ctrl_a_legacy() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 2 | 4 | 16),
+        vec![0x01]
+    );
+}
+
+/// KKP flags 2|4|16 combined: Escape still sends legacy ESC (0x1B).
+#[test]
+fn kkp_flags_2_4_16_escape_legacy() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Escape, 2 | 4 | 16),
+        vec![0x1B]
+    );
+}
+
+/// KKP flags 2|4|16 combined: plain ASCII 'a' sends legacy byte.
+#[test]
+fn kkp_flags_2_4_16_ascii_legacy() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b'a'), 2 | 4 | 16),
+        vec![b'a']
+    );
+}
+
+/// KKP flag 2 + DISAMBIGUATE (3): Ctrl+A gets CSI u encoding (flag 1 wins).
+#[test]
+fn kkp_flag_2_plus_disambiguate_ctrl_a() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 1 | 2),
+        b"\x1b[97;5u"
+    );
+}
+
+/// KKP flag 4 + REPORT_ALL (12): plain ASCII gets CSI u encoding (flag 8 wins).
+#[test]
+fn kkp_flag_4_plus_report_all_ascii() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b'a'), 4 | 8),
+        b"\x1b[97u"
+    );
+}
+
+// ===========================================================================
 // modifyOtherKeys level 2: additional edge-case tests
 // ===========================================================================
 

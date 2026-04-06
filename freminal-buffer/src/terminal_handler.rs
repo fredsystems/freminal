@@ -1181,7 +1181,7 @@ impl TerminalHandler {
     /// Handle DA2 — Secondary Device Attributes.
     /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
     pub fn handle_secondary_device_attributes(&mut self) {
-        tracing::info!("DA2 query received");
+        tracing::debug!("DA2 query received");
         self.write_csi_response(">65;0;0c");
     }
 
@@ -1244,7 +1244,7 @@ impl TerminalHandler {
     ///
     /// Unknown or unsupported DCS sub-commands are logged at warn level.
     pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
-        tracing::info!("DCS received: {:?}", String::from_utf8_lossy(dcs));
+        tracing::debug!("DCS received: {:?}", String::from_utf8_lossy(dcs));
         // Strip leading 'P' and trailing ESC '\' to get inner content.
         let inner = Self::strip_dcs_envelope(dcs);
 
@@ -2006,7 +2006,7 @@ impl TerminalHandler {
     /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
     ///           `DCS 0 + r <hex-name> ST` for unknown ones.
     fn handle_xtgettcap(&self, hex_payload: &[u8]) {
-        tracing::info!(
+        tracing::debug!(
             "XTGETTCAP query: {:?}",
             String::from_utf8_lossy(hex_payload)
         );
@@ -2882,7 +2882,7 @@ impl TerminalHandler {
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
-        tracing::info!("DA1 query received");
+        tracing::debug!("DA1 query received");
         if self.vt52_mode == Decanm::Vt52 {
             // VT52 identify response: ESC / Z — not affected by S8C1T
             self.write_to_pty("\x1b/Z");
@@ -4128,7 +4128,7 @@ impl TerminalHandler {
             }
             TerminalOutput::KittyKeyboardQuery => {
                 let flags = self.kitty_keyboard_flags();
-                tracing::info!("KittyKeyboardQuery received, flags={flags}");
+                tracing::debug!("KittyKeyboardQuery received, flags={flags}");
                 self.write_to_pty(&format!("\x1b[?{flags}u"));
             }
             TerminalOutput::KittyKeyboardPush(flags) => {

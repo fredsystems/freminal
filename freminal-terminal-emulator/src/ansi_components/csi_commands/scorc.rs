@@ -65,22 +65,24 @@ pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<Term
     }
 }
 
-/// Parse a decimal integer from a byte slice.  Returns `None` for empty or
-/// non-digit input.
+/// Parse a decimal integer from a byte slice.  Returns `None` for empty input
+/// or when no leading digits are found.
 fn parse_decimal(bytes: &[u8]) -> Option<u32> {
     if bytes.is_empty() {
         return None;
     }
     let mut value: u32 = 0;
+    let mut consumed = false;
     for &b in bytes {
         if b.is_ascii_digit() {
             value = value.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+            consumed = true;
         } else {
             // Stop at the first non-digit (e.g. `;`).
             break;
         }
     }
-    Some(value)
+    if consumed { Some(value) } else { None }
 }
 
 /// Parse two semicolon-separated decimal parameters from a byte slice.

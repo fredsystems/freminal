@@ -184,11 +184,12 @@ impl TerminalInput {
         line_feed_mode: Lnm,
         kitty_keyboard_flags: u32,
     ) -> TerminalInputPayload {
-        // When Kitty Keyboard Protocol is active, use KKP encoding for
-        // keys that it covers.  Functional keys (arrows, Home/End, F-keys,
-        // Insert/Delete/PageUp/PageDown) retain their legacy encoding —
-        // KKP only changes the modifier format (which is the same formula).
-        if kitty_keyboard_flags != 0 {
+        // KKP encoding is only activated when the flags that actually change
+        // key encoding are set: DISAMBIGUATE (bit 0 = 1) or REPORT_ALL (bit
+        // 3 = 8).  Flags 2/4/16 add metadata fields to sequences that are
+        // already being generated but do not change base encoding — so when
+        // only those flags are set the legacy path is used.
+        if kitty_keyboard_flags & (1 | 8) != 0 {
             return self.to_payload_kkp(
                 kitty_keyboard_flags,
                 decckm_mode,
@@ -391,10 +392,11 @@ impl TerminalInput {
 
     /// Kitty Keyboard Protocol encoding path.
     ///
-    /// Called when `kitty_keyboard_flags != 0`.  Functional keys (arrows, Home,
-    /// End, F1–F12, Insert, Delete, `PageUp`, `PageDown`) retain their legacy
-    /// encoding — only the modifier bitmask formula is shared (and it already
-    /// matches KKP's `1 + shift + alt*2 + ctrl*4` convention).
+    /// Called when `DISAMBIGUATE` (bit 0) or `REPORT_ALL` (bit 3) is set in the
+    /// active KKP flags.  Functional keys (arrows, Home/End, F-keys,
+    /// Insert/Delete/PageUp/PageDown) retain their legacy encoding — only the
+    /// modifier bitmask formula is shared (and it already matches KKP's
+    /// `1 + shift + alt*2 + ctrl*4` convention).
     ///
     /// Text keys and certain C0-origin keys (Escape, Enter, Tab, Backspace)
     /// are re-encoded according to the active flag bits.
@@ -406,9 +408,10 @@ impl TerminalInput {
     ///   including Enter → `CSI 13u`, Tab → `CSI 9u`, Backspace → `CSI 127u`,
     ///   plain ASCII → `CSI codepoint u`.
     ///
-    /// Flags 2, 4, 16 are recognized but do not yet produce additional output
-    /// fields (event-type, alternate keys, associated text).  They require key
-    /// event metadata not currently threaded through `TerminalInput`.
+    /// Flags 2, 4, 16 are parsed and stored on the KKP stack but do not yet
+    /// produce additional output fields (event-type, alternate keys, associated
+    /// text).  They require key event metadata not currently threaded through
+    /// `TerminalInput`.
     // The KKP encoding path is inherently large: it must cover every variant
     // for a complete implementation.
     #[allow(clippy::too_many_lines)]
@@ -421,6 +424,7 @@ impl TerminalInput {
         line_feed_mode: Lnm,
     ) -> TerminalInputPayload {
         let report_all = flags & 8 != 0;
+        let disambiguate = flags & 1 != 0;
 
         match self {
             // ── Plain ASCII ─────────────────────────────────────────────
@@ -444,9 +448,14 @@ impl TerminalInput {
 
             // ── Ctrl+letter ─────────────────────────────────────────────
             Self::Ctrl(c) => {
-                // KKP: Ctrl+letter → CSI lowercase_code ; 5 u
-                let code = u32::from(c.to_ascii_lowercase());
-                TerminalInputPayload::Owned(format!("\x1b[{code};5u").into_bytes())
+                if disambiguate || report_all {
+                    // KKP: Ctrl+letter → CSI lowercase_code ; 5 u
+                    let code = u32::from(c.to_ascii_lowercase());
+                    TerminalInputPayload::Owned(format!("\x1b[{code};5u").into_bytes())
+                } else {
+                    // Flags 2/4/16 alone: legacy C0 encoding.
+                    TerminalInputPayload::Single(char_to_ctrl_code(*c))
+                }
             }
 
             // ── Enter ───────────────────────────────────────────────────
@@ -492,8 +501,13 @@ impl TerminalInput {
 
             // ── Escape ──────────────────────────────────────────────────
             Self::Escape => {
-                // Under KKP (any flag), Escape is disambiguated as CSI 27 u.
-                TerminalInputPayload::Owned(b"\x1b[27u".to_vec())
+                if disambiguate || report_all {
+                    // KKP: Escape is disambiguated as CSI 27 u.
+                    TerminalInputPayload::Owned(b"\x1b[27u".to_vec())
+                } else {
+                    // Flags 2/4/16 alone: legacy bare ESC byte.
+                    TerminalInputPayload::Single(b'\x1b')
+                }
             }
 
             // ── Functional keys: retain legacy encoding ─────────────────
