@@ -382,9 +382,21 @@ fn bench_compile() -> Result<()> {
 /// step ensures the workspace compiles and tests pass without it.
 fn test_default_features() -> Result<()> {
     tracing::info!("running default-features pass (no optional features)");
-    run_cargo(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
-    run_cargo(vec!["test", "--all-targets"])?;
-    run_cargo(vec!["test", "--doc"])?;
+    // Unset CARGO_BUILD_FEATURES so the Nix devshell's "playback" default
+    // doesn't leak into this pass — we need to verify the code compiles and
+    // passes tests with NO optional features enabled.
+    run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
+    run_cargo_no_features(vec!["test", "--all-targets"])?;
+    run_cargo_no_features(vec!["test", "--doc"])?;
+    Ok(())
+}
+
+/// Run a cargo subcommand with `CARGO_BUILD_FEATURES` removed from the
+/// environment, ensuring no optional features leak in from the devshell.
+fn run_cargo_no_features(args: Vec<&str>) -> Result<()> {
+    cmd("cargo", args)
+        .env_remove("CARGO_BUILD_FEATURES")
+        .run_with_trace()?;
     Ok(())
 }
 

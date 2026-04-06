@@ -131,9 +131,6 @@ pub fn run_terminal(
     shell: Option<String>,
     termcaps: Option<&Path>,
 ) -> Result<Receiver<()>> {
-    #[cfg(not(feature = "playback"))]
-    let _ = recording_path;
-
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
