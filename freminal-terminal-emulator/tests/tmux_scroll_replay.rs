@@ -14,6 +14,8 @@
 //!   3. Scroll via DL (delete lines), IL (insert lines), SU (scroll up)
 //!   4. Verify buffer state after each operation
 
+#![cfg(feature = "playback")]
+
 use crossbeam_channel::Receiver;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::recording::parse_recording;

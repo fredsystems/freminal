@@ -46,6 +46,7 @@ pub mod error;
 pub mod input;
 pub mod interface;
 pub mod io;
+#[cfg(feature = "playback")]
 pub mod recording;
 pub mod snapshot;
 pub mod state;
