@@ -301,7 +301,7 @@ fn is_valid_osc_param(b: u8) -> bool {
 }
 
 /// # Errors
-/// Will return an error if the parameter is not a valid number
+/// Will return an error if a parameter segment cannot be parsed as an `AnsiOscToken`.
 fn split_params_into_semicolon_delimited_tokens(
     params: &[u8],
 ) -> Result<Vec<Option<AnsiOscToken>>> {

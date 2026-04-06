@@ -47,7 +47,7 @@ pub(super) fn parse_osc7_uri(uri: &str) -> Option<String> {
 /// Only valid two-hex-digit sequences are decoded; malformed sequences are
 /// passed through verbatim.
 fn percent_decode(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
+    let mut output = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -55,14 +55,14 @@ fn percent_decode(input: &str) -> String {
             && i + 2 < bytes.len()
             && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
         {
-            output.push(char::from(hi << 4 | lo));
+            output.push(hi << 4 | lo);
             i += 3;
             continue;
         }
-        output.push(char::from(bytes[i]));
+        output.push(bytes[i]);
         i += 1;
     }
-    output
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 /// Convert an ASCII hex digit to its numeric value.
@@ -163,6 +163,16 @@ mod tests {
         // % at end of string with not enough chars
         assert_eq!(percent_decode("/path%2"), "/path%2");
         assert_eq!(percent_decode("/path%"), "/path%");
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // € is U+20AC, encoded as UTF-8 bytes E2 82 AC
+        assert_eq!(percent_decode("/cost%E2%82%AC100"), "/cost€100");
+        // ñ is U+00F1, encoded as UTF-8 bytes C3 B1
+        assert_eq!(percent_decode("/Espa%C3%B1a"), "/España");
+        // 日 is U+65E5, encoded as UTF-8 bytes E6 97 A5
+        assert_eq!(percent_decode("/%E6%97%A5"), "/日");
     }
 
     #[test]
