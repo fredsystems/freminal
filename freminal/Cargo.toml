@@ -2,13 +2,13 @@
 name = "freminal"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description.workspace = true
 documentation.workspace = true
+readme.workspace = true
 homepage.workspace = true
 repository.workspace = true
-readme.workspace = true
 license.workspace = true
-rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
@@ -25,11 +25,11 @@ deb_depends = ["libgl1-mesa-glx"]
 # osx_frameworks = ["SDL2"]
 # osx_url_schemes = ["io.github.fredclausen.freminal"]
 
-[[bin]]
-name = "freminal"
-path = "src/main.rs"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bench]]
+harness = false
+name = "render_loop_bench"
 
 [dependencies]
 anyhow.workspace = true
@@ -57,7 +57,3 @@ criterion.workspace = true
 [features]
 default = []
 validation = []
-
-[[bench]]
-name = "render_loop_bench"
-harness = false
