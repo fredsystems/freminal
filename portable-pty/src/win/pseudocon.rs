@@ -10,6 +10,7 @@ use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
@@ -24,10 +25,14 @@ use winapi::um::winnt::HANDLE;
 
 pub type HPCON = HANDLE;
 
-pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
+/// Flag to inherit the cursor position from the parent console.
+pub const PSEUDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
+
+/// Deprecated alias — the upstream WezTerm constant name had a typo.
+pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = PSEUDOCONSOLE_INHERIT_CURSOR;
+
 pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
-#[allow(dead_code)]
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
 
 shared_library!(ConPtyFuncs,
@@ -42,49 +47,65 @@ shared_library!(ConPtyFuncs,
     pub fn ClosePseudoConsole(hpc: HPCON),
 );
 
-fn load_conpty() -> ConPtyFuncs {
+fn load_conpty() -> anyhow::Result<ConPtyFuncs> {
     // If the kernel doesn't export these functions then their system is
     // too old and we cannot run.
-    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
-        "this system does not support conpty.  Windows 10 October 2018 or newer is required",
-    );
+    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).map_err(|_| {
+        anyhow::anyhow!(
+            "this system does not support conpty.  Windows 10 October 2018 or newer is required"
+        )
+    })?;
 
     // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
     // alongside the application.  We check for this after checking for kernel
     // support so that we don't try to proceed and do something crazy.
     if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
-        sideloaded
+        Ok(sideloaded)
     } else {
-        kernel
+        Ok(kernel)
     }
 }
 
 lazy_static! {
-    static ref CONPTY: ConPtyFuncs = load_conpty();
+    static ref CONPTY: anyhow::Result<ConPtyFuncs> = load_conpty();
+}
+
+/// Returns a reference to the loaded ConPty functions, or an error if conpty is unavailable.
+fn conpty() -> anyhow::Result<&'static ConPtyFuncs> {
+    CONPTY
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("conpty unavailable: {e}"))
 }
 
 pub struct PseudoCon {
     con: HPCON,
 }
 
+// SAFETY: `PseudoCon` wraps a Windows `HANDLE` (an opaque kernel object pointer).  Windows
+// console handles are process-global and may be used from any thread; the kernel serialises
+// access internally.  `PseudoCon` owns the handle and closes it in `Drop`, so there is no
+// double-free risk.
 unsafe impl Send for PseudoCon {}
 unsafe impl Sync for PseudoCon {}
 
 impl Drop for PseudoCon {
     fn drop(&mut self) {
-        unsafe { (CONPTY.ClosePseudoConsole)(self.con) };
+        if let Ok(funcs) = conpty() {
+            unsafe { (funcs.ClosePseudoConsole)(self.con) };
+        }
     }
 }
 
 impl PseudoCon {
     pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self, Error> {
+        let funcs = conpty()?;
         let mut con: HPCON = INVALID_HANDLE_VALUE;
         let result = unsafe {
-            (CONPTY.CreatePseudoConsole)(
+            (funcs.CreatePseudoConsole)(
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
-                PSUEDOCONSOLE_INHERIT_CURSOR
+                PSEUDOCONSOLE_INHERIT_CURSOR
                     | PSEUDOCONSOLE_RESIZE_QUIRK
                     | PSEUDOCONSOLE_WIN32_INPUT_MODE,
                 &mut con,
@@ -99,7 +120,8 @@ impl PseudoCon {
     }
 
     pub fn resize(&self, size: COORD) -> Result<(), Error> {
-        let result = unsafe { (CONPTY.ResizePseudoConsole)(self.con, size) };
+        let funcs = conpty()?;
+        let result = unsafe { (funcs.ResizePseudoConsole)(self.con, size) };
         ensure!(
             result == S_OK,
             "failed to resize console to {}x{}: HRESULT: {}",
@@ -170,6 +192,7 @@ impl PseudoCon {
 
         Ok(WinChild {
             proc: Mutex::new(proc),
+            waiter_spawned: AtomicBool::new(false),
         })
     }
 }

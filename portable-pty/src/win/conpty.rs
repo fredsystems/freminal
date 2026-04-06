@@ -72,6 +72,13 @@ impl Inner {
     }
 }
 
+/// Helper to lock the inner mutex, mapping a poisoned mutex to an anyhow error.
+fn lock_inner(inner: &Mutex<Inner>) -> anyhow::Result<std::sync::MutexGuard<'_, Inner>> {
+    inner
+        .lock()
+        .map_err(|e| anyhow::anyhow!("pty inner mutex poisoned: {e}"))
+}
+
 #[derive(Clone)]
 pub struct ConPtyMasterPty {
     inner: Arc<Mutex<Inner>>,
@@ -83,24 +90,22 @@ pub struct ConPtySlavePty {
 
 impl MasterPty for ConPtyMasterPty {
     fn resize(&self, size: PtySize) -> anyhow::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = lock_inner(&self.inner)?;
         inner.resize(size.rows, size.cols, size.pixel_width, size.pixel_height)
     }
 
     fn get_size(&self) -> Result<PtySize, Error> {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_inner(&self.inner)?;
         Ok(inner.size.clone())
     }
 
     fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
-        Ok(Box::new(self.inner.lock().unwrap().readable.try_clone()?))
+        Ok(Box::new(lock_inner(&self.inner)?.readable.try_clone()?))
     }
 
     fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
         Ok(Box::new(
-            self.inner
-                .lock()
-                .unwrap()
+            lock_inner(&self.inner)?
                 .writable
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("writer already taken"))?,
@@ -110,7 +115,7 @@ impl MasterPty for ConPtyMasterPty {
 
 impl SlavePty for ConPtySlavePty {
     fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = lock_inner(&self.inner)?;
         let child = inner.con.spawn_command(cmd)?;
         Ok(Box::new(child))
     }

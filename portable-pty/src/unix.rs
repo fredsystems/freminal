@@ -392,8 +392,12 @@ struct UnixMasterWriter {
 
 impl Drop for UnixMasterWriter {
     fn drop(&mut self) {
-        let mut t: libc::termios = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-        if unsafe { libc::tcgetattr(self.fd.0.as_raw_fd(), &mut t) } == 0 {
+        // Use MaybeUninit::uninit() rather than MaybeUninit::zeroed().assume_init()
+        // to avoid creating an invalid libc::termios value before tcgetattr succeeds.
+        let mut t = std::mem::MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(self.fd.0.as_raw_fd(), t.as_mut_ptr()) } == 0 {
+            // SAFETY: tcgetattr succeeded, so t is now fully initialised.
+            let t = unsafe { t.assume_init() };
             // EOF is only interpreted after a newline, so if it is set,
             // we send a newline followed by EOF.
             let eot = t.c_cc[libc::VEOF];

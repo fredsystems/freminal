@@ -142,7 +142,7 @@ pub fn run_terminal(
 
     let mut cmd = if let Some((prog, args)) = command {
         let mut c = CommandBuilder::new(prog);
-        c.args(args);
+        c.args(args)?;
         c
     } else {
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)

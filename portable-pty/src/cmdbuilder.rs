@@ -268,12 +268,14 @@ impl CommandBuilder {
     }
 
     /// Append an argument to the current command line.
-    /// Will panic if called on a builder created via `new_default_prog`.
-    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) {
-        if self.is_default_prog() {
-            panic!("attempted to add args to a default_prog builder");
-        }
+    /// Returns an error if called on a builder created via `new_default_prog`.
+    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.is_default_prog(),
+            "attempted to add args to a default_prog builder"
+        );
         self.args.push(arg.as_ref().to_owned());
+        Ok(())
     }
 
     /// If a builder is_default_prog, then this function can be used to
@@ -282,25 +284,32 @@ impl CommandBuilder {
     /// of the underlying default prog when merging together supplemental
     /// env and cwd information.
     /// You will not typically use this method in your own code.
-    pub fn replace_default_prog(&mut self, args: impl IntoIterator<Item = impl AsRef<OsStr>>) {
-        if !self.is_default_prog() {
-            panic!("attempted to replace_default_prog on a non-default_prog builder");
-        }
+    /// Returns an error if called on a non-default_prog builder.
+    pub fn replace_default_prog(
+        &mut self,
+        args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.is_default_prog(),
+            "attempted to replace_default_prog on a non-default_prog builder"
+        );
 
         for arg in args {
             self.args.push(arg.as_ref().to_owned());
         }
+        Ok(())
     }
 
     /// Append a sequence of arguments to the current command line
-    pub fn args<I, S>(&mut self, args: I)
+    pub fn args<I, S>(&mut self, args: I) -> anyhow::Result<()>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         for arg in args {
-            self.arg(arg);
+            self.arg(arg)?;
         }
+        Ok(())
     }
 
     pub fn get_argv(&self) -> &Vec<OsString> {
@@ -608,8 +617,10 @@ impl CommandBuilder {
                 // user specified path, so this is potentially wrong.
                 for ext in std::env::split_paths(&extensions) {
                     // PATHEXT includes the leading `.`, but `with_extension`
-                    // doesn't want that
-                    let ext = ext.to_str().expect("PATHEXT entries must be utf8");
+                    // doesn't want that.  Skip entries that aren't valid UTF-8.
+                    let Some(ext) = ext.to_str() else {
+                        continue;
+                    };
                     let path = path.join(&exe).with_extension(&ext[1..]);
                     if path.exists() {
                         return path.into_os_string();
