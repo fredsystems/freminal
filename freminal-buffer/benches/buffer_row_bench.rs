@@ -7,7 +7,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 
 use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::{
-    cursor::StateColors, fonts::FontWeight, format_tag::FormatTag, tchar::TChar,
+    cursor::StateColors,
+    fonts::{FontDecorationFlags, FontWeight},
+    format_tag::FormatTag,
+    tchar::TChar,
 };
 use freminal_common::colors::TerminalColor;
 
@@ -254,7 +257,7 @@ fn bench_insert_with_color_changes(c: &mut Criterion) {
                                 ..StateColors::default()
                             },
                             font_weight: FontWeight::Normal,
-                            font_decorations: Vec::new(),
+                            font_decorations: FontDecorationFlags::empty(),
                             url: None,
                             blink: freminal_common::buffer_states::fonts::BlinkState::None,
                         };

@@ -2758,9 +2758,9 @@ impl Buffer {
                     let rebased = FormatTag {
                         start: global_offset + row_tag.start,
                         end: global_offset + row_tag.end,
-                        colors: row_tag.colors.clone(),
-                        font_weight: row_tag.font_weight.clone(),
-                        font_decorations: row_tag.font_decorations.clone(),
+                        colors: row_tag.colors,
+                        font_weight: row_tag.font_weight,
+                        font_decorations: row_tag.font_decorations,
                         url: row_tag.url.clone(),
                         blink: row_tag.blink,
                     };
@@ -2850,9 +2850,9 @@ impl Buffer {
                     tags.push(FormatTag {
                         start: byte_pos,
                         end: byte_pos + 1,
-                        colors: cell_tag.colors.clone(),
-                        font_weight: cell_tag.font_weight.clone(),
-                        font_decorations: cell_tag.font_decorations.clone(),
+                        colors: cell_tag.colors,
+                        font_weight: cell_tag.font_weight,
+                        font_decorations: cell_tag.font_decorations,
                         url: cell_tag.url.clone(),
                         blink: cell_tag.blink,
                     });
@@ -2861,9 +2861,9 @@ impl Buffer {
                 tags.push(FormatTag {
                     start: byte_pos,
                     end: byte_pos + 1,
-                    colors: cell_tag.colors.clone(),
-                    font_weight: cell_tag.font_weight.clone(),
-                    font_decorations: cell_tag.font_decorations.clone(),
+                    colors: cell_tag.colors,
+                    font_weight: cell_tag.font_weight,
+                    font_decorations: cell_tag.font_decorations,
                     url: cell_tag.url.clone(),
                     blink: cell_tag.blink,
                 });

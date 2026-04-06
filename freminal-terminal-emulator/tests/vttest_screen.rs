@@ -363,7 +363,7 @@ fn sgr_underline_adds_decoration() {
             .handler
             .current_format()
             .font_decorations
-            .contains(&FontDecorations::Underline),
+            .contains(FontDecorations::Underline),
         "SGR 4 must add Underline to font_decorations"
     );
 }
@@ -378,7 +378,7 @@ fn sgr_italic_adds_decoration() {
             .handler
             .current_format()
             .font_decorations
-            .contains(&FontDecorations::Italic),
+            .contains(FontDecorations::Italic),
         "SGR 3 must add Italic to font_decorations"
     );
 }
@@ -393,7 +393,7 @@ fn sgr_strikethrough_adds_decoration() {
             .handler
             .current_format()
             .font_decorations
-            .contains(&FontDecorations::Strikethrough),
+            .contains(FontDecorations::Strikethrough),
         "SGR 9 must add Strikethrough to font_decorations"
     );
 }

@@ -4,10 +4,11 @@
 // https://opensource.org/licenses/MIT.
 
 use core::fmt;
+use std::sync::Arc;
 
 use crate::{
     buffer_states::{
-        fonts::{FontDecorations, FontWeight},
+        fonts::{FontDecorationFlags, FontWeight},
         line_wrap::LineWrap,
         url::Url,
     },
@@ -17,7 +18,7 @@ use crate::{
 /// Whether reverse-video mode (DECSCNM / SGR 7) is currently active.
 ///
 /// When `On`, foreground and background colors are swapped when drawing text.
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum ReverseVideo {
     /// Reverse-video is enabled — foreground and background are swapped.
     On,
@@ -31,7 +32,7 @@ pub enum ReverseVideo {
 ///
 /// All color lookups respect `reverse_video`: when `On`, `get_color` returns
 /// the background and `get_background_color` returns the foreground.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct StateColors {
     /// Active text foreground color.
     pub color: TerminalColor,
@@ -162,10 +163,10 @@ impl StateColors {
 pub struct CursorState {
     pub pos: CursorPos,
     pub font_weight: FontWeight,
-    pub font_decorations: Vec<FontDecorations>,
+    pub font_decorations: FontDecorationFlags,
     pub colors: StateColors,
     pub line_wrap_mode: LineWrap,
-    pub url: Option<Url>,
+    pub url: Option<Arc<Url>>,
 }
 
 impl CursorState {
@@ -193,7 +194,7 @@ impl CursorState {
     }
 
     #[must_use]
-    pub fn with_font_decorations(mut self, font_decorations: Vec<FontDecorations>) -> Self {
+    pub const fn with_font_decorations(mut self, font_decorations: FontDecorationFlags) -> Self {
         self.font_decorations = font_decorations;
         self
     }

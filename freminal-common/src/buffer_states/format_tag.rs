@@ -3,9 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::sync::Arc;
+
 use crate::buffer_states::{
     cursor::StateColors,
-    fonts::{BlinkState, FontDecorations, FontWeight},
+    fonts::{BlinkState, FontDecorationFlags, FontWeight},
     url::Url,
 };
 
@@ -31,9 +33,15 @@ pub struct FormatTag {
     /// Font weight (normal or bold) for this range.
     pub font_weight: FontWeight,
     /// Active font decorations (underline, strikethrough, etc.) for this range.
-    pub font_decorations: Vec<FontDecorations>,
+    ///
+    /// Stored as a compact bitfield — at most 4 decorations (italic, underline,
+    /// faint, strikethrough) — to avoid heap allocation on clone.
+    pub font_decorations: FontDecorationFlags,
     /// OSC 8 hyperlink URL active for this range, if any.
-    pub url: Option<Url>,
+    ///
+    /// Wrapped in `Arc` so that cloning a `FormatTag` never allocates for
+    /// the URL strings — it only bumps a reference count.
+    pub url: Option<Arc<Url>>,
     /// Text blink state (none, slow SGR 5, or fast SGR 6) for this range.
     pub blink: BlinkState,
 }
@@ -45,7 +53,7 @@ impl Default for FormatTag {
             end: usize::MAX,
             colors: StateColors::default(),
             font_weight: FontWeight::Normal,
-            font_decorations: Vec::new(),
+            font_decorations: FontDecorationFlags::empty(),
             url: None,
             blink: BlinkState::None,
         }

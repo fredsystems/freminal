@@ -1568,7 +1568,7 @@ pub fn build_background_instances(
 
         // --- Per-cell background instances ---
         for run in &line.runs {
-            let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
+            let is_faint = run.font_decorations.contains(FontDecorations::Faint);
             let bg_color_raw = run.colors.get_background_color();
 
             // Skip default backgrounds (transparent — the terminal base color
@@ -1597,11 +1597,11 @@ pub fn build_background_instances(
 
         // --- Underline and strikethrough decoration quads ---
         for run in &line.runs {
-            let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
-            let has_underline = run.font_decorations.contains(&FontDecorations::Underline);
+            let is_faint = run.font_decorations.contains(FontDecorations::Faint);
+            let has_underline = run.font_decorations.contains(FontDecorations::Underline);
             let has_strike = run
                 .font_decorations
-                .contains(&FontDecorations::Strikethrough);
+                .contains(FontDecorations::Strikethrough);
 
             if !has_underline && !has_strike {
                 continue;
@@ -1809,7 +1809,7 @@ pub fn build_foreground_instances(
         let cell_bottom = cell_top + cell_h_f;
 
         for run in &line.runs {
-            let is_faint = run.font_decorations.contains(&FontDecorations::Faint);
+            let is_faint = run.font_decorations.contains(FontDecorations::Faint);
             let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
 
             // Track the current column as we iterate glyphs within the run.
@@ -2152,6 +2152,7 @@ const fn is_cell_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::fonts::FontDecorationFlags;
     use freminal_common::config::Config;
     use freminal_common::themes;
 
@@ -2172,7 +2173,7 @@ mod tests {
         n_glyphs: usize,
         cell_w: f32,
         colors: StateColors,
-        decorations: Vec<FontDecorations>,
+        decorations: FontDecorationFlags,
     ) -> ShapedLine {
         use crate::gui::font_manager::FaceId;
         let glyphs: Vec<ShapedGlyph> = (0..n_glyphs)
@@ -2253,7 +2254,7 @@ mod tests {
     fn bg_instances_empty_on_default_background() {
         // A line whose cells all have `DefaultBackground` should produce no
         // instances and no decoration verts.
-        let line = make_line(5, 8.0, default_colors(), vec![]);
+        let line = make_line(5, 8.0, default_colors(), FontDecorationFlags::empty());
         let (bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2276,7 +2277,7 @@ mod tests {
         // A single run with 3 non-default-background cells should produce 3
         // instances (one per cell).
         let colors = StateColors::default().with_background_color(TerminalColor::Red);
-        let line = make_line(3, 8.0, colors, vec![]);
+        let line = make_line(3, 8.0, colors, FontDecorationFlags::empty());
         let (bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2315,8 +2316,8 @@ mod tests {
                     col_start: 0,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
                     font_weight: FontWeight::Normal,
-                    font_decorations: vec![],
-                    colors: colors.clone(),
+                    font_decorations: FontDecorationFlags::empty(),
+                    colors,
                     url: None,
                     blink: BlinkState::None,
                 },
@@ -2332,7 +2333,7 @@ mod tests {
                     col_start: 1,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
                     font_weight: FontWeight::Normal,
-                    font_decorations: vec![],
+                    font_decorations: FontDecorationFlags::empty(),
                     colors,
                     url: None,
                     blink: BlinkState::None,
@@ -2381,7 +2382,7 @@ mod tests {
                     col_start: 0,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
                     font_weight: FontWeight::Normal,
-                    font_decorations: vec![],
+                    font_decorations: FontDecorationFlags::empty(),
                     colors: colors_red,
                     url: None,
                     blink: BlinkState::None,
@@ -2398,7 +2399,7 @@ mod tests {
                     col_start: 1,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
                     font_weight: FontWeight::Normal,
-                    font_decorations: vec![],
+                    font_decorations: FontDecorationFlags::empty(),
                     colors: colors_blue,
                     url: None,
                     blink: BlinkState::None,
@@ -2426,7 +2427,7 @@ mod tests {
     fn bg_instances_cursor_block_adds_deco_quad() {
         // With `show_cursor = true` and a steady block cursor, one cursor quad
         // should appear in the decoration verts.
-        let line = make_line(3, 8.0, default_colors(), vec![]);
+        let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
         let (bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2446,7 +2447,7 @@ mod tests {
 
     #[test]
     fn bg_instances_cursor_blink_off_no_quad() {
-        let line = make_line(3, 8.0, default_colors(), vec![]);
+        let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
         let (bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2466,7 +2467,7 @@ mod tests {
 
     #[test]
     fn bg_instances_cursor_steady_ignores_blink_flag() {
-        let line = make_line(3, 8.0, default_colors(), vec![]);
+        let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
         let (_bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2485,7 +2486,9 @@ mod tests {
 
     #[test]
     fn bg_instances_underline_adds_deco_quad() {
-        let line = make_line(3, 8.0, default_colors(), vec![FontDecorations::Underline]);
+        let mut underline_flags = FontDecorationFlags::empty();
+        underline_flags.insert(FontDecorations::Underline);
+        let line = make_line(3, 8.0, default_colors(), underline_flags);
         let (bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2505,12 +2508,9 @@ mod tests {
 
     #[test]
     fn bg_instances_strikethrough_adds_deco_quad() {
-        let line = make_line(
-            3,
-            8.0,
-            default_colors(),
-            vec![FontDecorations::Strikethrough],
-        );
+        let mut strikethrough_flags = FontDecorationFlags::empty();
+        strikethrough_flags.insert(FontDecorations::Strikethrough);
+        let line = make_line(3, 8.0, default_colors(), strikethrough_flags);
         let (bg, deco) = bg_instances_test(
             &[line],
             8,
@@ -2533,8 +2533,8 @@ mod tests {
         // Block cursor at (col=2, row=1) with cell_width=10, cell_height=20.
         // Expected x0 = 2*10 = 20, y0 = 1*20 = 20.
         let lines = [
-            make_line(5, 10.0, default_colors(), vec![]),
-            make_line(5, 10.0, default_colors(), vec![]),
+            make_line(5, 10.0, default_colors(), FontDecorationFlags::empty()),
+            make_line(5, 10.0, default_colors(), FontDecorationFlags::empty()),
         ];
         let (_bg, deco) = bg_instances_test(
             &lines,
@@ -2785,7 +2785,7 @@ mod tests {
     #[test]
     fn partial_vbo_update_only_modifies_cursor_region() {
         // Build the full deco VBO for one line + a cursor at (col=0, row=0).
-        let line = make_line(3, 8.0, default_colors(), vec![]);
+        let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
         let (_bg, full_deco) = bg_instances_test(
             std::slice::from_ref(&line),
             8,

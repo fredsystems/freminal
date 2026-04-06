@@ -61,6 +61,7 @@ use freminal_common::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::buffer::Buffer;
 use crate::image_store::{ImagePlacement, ImageProtocol, InlineImage, next_image_id};
@@ -1909,7 +1910,7 @@ impl TerminalHandler {
         }
 
         // Font decorations
-        for dec in &fmt.font_decorations {
+        for dec in fmt.font_decorations.iter() {
             match dec {
                 FontDecorations::Faint => parts.push("2".to_string()),
                 FontDecorations::Italic => parts.push("3".to_string()),
@@ -2931,10 +2932,10 @@ impl TerminalHandler {
         match osc {
             // Hyperlink: OSC 8 ; params ; url ST  (start) / OSC 8 ; ; ST  (end)
             AnsiOscType::Url(UrlResponse::Url(url)) => {
-                self.current_format.url = Some(Url {
+                self.current_format.url = Some(Arc::new(Url {
                     id: url.id.clone(),
                     url: url.url.clone(),
-                });
+                }));
                 self.buffer.set_format(self.current_format.clone());
             }
             AnsiOscType::Url(UrlResponse::End) => {
@@ -4268,51 +4269,36 @@ fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
         // NormalIntensity resets both bold AND faint
         SelectGraphicRendition::NormalIntensity => {
             tag.font_weight = FontWeight::Normal;
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Faint);
+            tag.font_decorations.remove(FontDecorations::Faint);
         }
 
         // Italic
         SelectGraphicRendition::Italic => {
-            if !tag.font_decorations.contains(&FontDecorations::Italic) {
-                tag.font_decorations.push(FontDecorations::Italic);
-            }
+            tag.font_decorations.insert(FontDecorations::Italic);
         }
         SelectGraphicRendition::NotItalic => {
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Italic);
+            tag.font_decorations.remove(FontDecorations::Italic);
         }
 
         // Faint
         SelectGraphicRendition::Faint => {
-            if !tag.font_decorations.contains(&FontDecorations::Faint) {
-                tag.font_decorations.push(FontDecorations::Faint);
-            }
+            tag.font_decorations.insert(FontDecorations::Faint);
         }
 
         // Underline
         SelectGraphicRendition::Underline => {
-            if !tag.font_decorations.contains(&FontDecorations::Underline) {
-                tag.font_decorations.push(FontDecorations::Underline);
-            }
+            tag.font_decorations.insert(FontDecorations::Underline);
         }
         SelectGraphicRendition::NotUnderlined => {
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Underline);
+            tag.font_decorations.remove(FontDecorations::Underline);
         }
 
         // Strikethrough
         SelectGraphicRendition::Strikethrough => {
-            if !tag
-                .font_decorations
-                .contains(&FontDecorations::Strikethrough)
-            {
-                tag.font_decorations.push(FontDecorations::Strikethrough);
-            }
+            tag.font_decorations.insert(FontDecorations::Strikethrough);
         }
         SelectGraphicRendition::NotStrikethrough => {
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Strikethrough);
+            tag.font_decorations.remove(FontDecorations::Strikethrough);
         }
 
         // Reverse video
@@ -4485,16 +4471,16 @@ mod tests {
         apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
         apply_sgr(&mut tag, &SelectGraphicRendition::NormalIntensity);
         assert_eq!(tag.font_weight, FontWeight::Normal);
-        assert!(!tag.font_decorations.contains(&FontDecorations::Faint));
+        assert!(!tag.font_decorations.contains(FontDecorations::Faint));
     }
 
     #[test]
     fn sgr_italic_toggle() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Italic);
-        assert!(tag.font_decorations.contains(&FontDecorations::Italic));
+        assert!(tag.font_decorations.contains(FontDecorations::Italic));
         apply_sgr(&mut tag, &SelectGraphicRendition::NotItalic);
-        assert!(!tag.font_decorations.contains(&FontDecorations::Italic));
+        assert!(!tag.font_decorations.contains(FontDecorations::Italic));
     }
 
     #[test]
@@ -4505,7 +4491,7 @@ mod tests {
         assert_eq!(
             tag.font_decorations
                 .iter()
-                .filter(|d| **d == FontDecorations::Italic)
+                .filter(|d| *d == FontDecorations::Italic)
                 .count(),
             1
         );
@@ -4515,9 +4501,9 @@ mod tests {
     fn sgr_underline_toggle() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Underline);
-        assert!(tag.font_decorations.contains(&FontDecorations::Underline));
+        assert!(tag.font_decorations.contains(FontDecorations::Underline));
         apply_sgr(&mut tag, &SelectGraphicRendition::NotUnderlined);
-        assert!(!tag.font_decorations.contains(&FontDecorations::Underline));
+        assert!(!tag.font_decorations.contains(FontDecorations::Underline));
     }
 
     #[test]
@@ -4526,12 +4512,12 @@ mod tests {
         apply_sgr(&mut tag, &SelectGraphicRendition::Strikethrough);
         assert!(
             tag.font_decorations
-                .contains(&FontDecorations::Strikethrough)
+                .contains(FontDecorations::Strikethrough)
         );
         apply_sgr(&mut tag, &SelectGraphicRendition::NotStrikethrough);
         assert!(
             !tag.font_decorations
-                .contains(&FontDecorations::Strikethrough)
+                .contains(FontDecorations::Strikethrough)
         );
     }
 
@@ -4539,7 +4525,7 @@ mod tests {
     fn sgr_faint_adds_decoration() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
-        assert!(tag.font_decorations.contains(&FontDecorations::Faint));
+        assert!(tag.font_decorations.contains(FontDecorations::Faint));
     }
 
     #[test]
@@ -4614,7 +4600,7 @@ mod tests {
             &SelectGraphicRendition::Foreground(TerminalColor::Red),
         );
         assert_eq!(tag.font_weight, FontWeight::Bold);
-        assert!(tag.font_decorations.contains(&FontDecorations::Underline));
+        assert!(tag.font_decorations.contains(FontDecorations::Underline));
         assert_eq!(tag.colors.color, TerminalColor::Red);
     }
 

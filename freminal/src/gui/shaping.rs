@@ -11,11 +11,12 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use conv2::{ConvUtil, ValueFrom};
 
 use freminal_common::buffer_states::{
-    fonts::{BlinkState, FontDecorations, FontWeight},
+    fonts::{BlinkState, FontDecorationFlags, FontWeight},
     format_tag::FormatTag,
     tchar::TChar,
 };
@@ -43,11 +44,11 @@ pub struct TextRun {
     /// The font weight from the format tag.
     pub font_weight: FontWeight,
     /// Font decorations (underline, strikethrough, etc.) from the format tag.
-    pub font_decorations: Vec<FontDecorations>,
+    pub font_decorations: FontDecorationFlags,
     /// Foreground color index (as-is from the `FormatTag`).
     pub colors: freminal_common::buffer_states::cursor::StateColors,
     /// URL associated with this run, if any.
-    pub url: Option<freminal_common::buffer_states::url::Url>,
+    pub url: Option<Arc<freminal_common::buffer_states::url::Url>>,
     /// The UTF-8 text content of this run, concatenated.
     pub text: String,
     /// Per-character column widths (1 for normal, 2 for wide, 0 for continuation).
@@ -88,11 +89,11 @@ pub struct ShapedRun {
     /// Font weight for this run.
     pub font_weight: FontWeight,
     /// Font decorations for this run.
-    pub font_decorations: Vec<FontDecorations>,
+    pub font_decorations: FontDecorationFlags,
     /// Colors for this run.
     pub colors: freminal_common::buffer_states::cursor::StateColors,
     /// URL for this run.
-    pub url: Option<freminal_common::buffer_states::url::Url>,
+    pub url: Option<Arc<freminal_common::buffer_states::url::Url>>,
     /// Blink state for all glyphs in this run.
     pub blink: BlinkState,
 }
@@ -307,7 +308,7 @@ fn tag_at_position(tags: &[FormatTag], global_pos: usize) -> &FormatTag {
                 reverse_video: freminal_common::buffer_states::cursor::ReverseVideo::Off,
             },
             font_weight: FontWeight::Normal,
-            font_decorations: Vec::new(),
+            font_decorations: FontDecorationFlags::empty(),
             url: None,
             blink: freminal_common::buffer_states::fonts::BlinkState::None,
         };
@@ -345,7 +346,7 @@ fn segment_line(
     // Resolve first character.
     let first_char = tchar_to_char(&line_chars[0]);
     let first_tag = tag_at_position(tags, global_offset);
-    let first_style = GlyphStyle::from_format(&first_tag.font_weight, &first_tag.font_decorations);
+    let first_style = GlyphStyle::from_format(&first_tag.font_weight, first_tag.font_decorations);
     let (first_face, _) = font_manager.resolve_glyph(first_char, first_style);
     let first_width = line_chars[0].display_width();
 
@@ -362,7 +363,7 @@ fn segment_line(
         let ch = tchar_to_char(tch);
         let gpos = global_offset + i;
         let tag = tag_at_position(tags, gpos);
-        let style = GlyphStyle::from_format(&tag.font_weight, &tag.font_decorations);
+        let style = GlyphStyle::from_format(&tag.font_weight, tag.font_decorations);
         let (face, _) = font_manager.resolve_glyph(ch, style);
         let width = tch.display_width();
 
@@ -376,9 +377,9 @@ fn segment_line(
                 col_count: run_col_count,
                 face_id: current_face,
                 style: current_style,
-                font_weight: current_tag.font_weight.clone(),
-                font_decorations: current_tag.font_decorations.clone(),
-                colors: current_tag.colors.clone(),
+                font_weight: current_tag.font_weight,
+                font_decorations: current_tag.font_decorations,
+                colors: current_tag.colors,
                 url: current_tag.url.clone(),
                 text: std::mem::take(&mut run_text),
                 char_widths: std::mem::take(&mut run_char_widths),
@@ -405,9 +406,9 @@ fn segment_line(
             col_count: run_col_count,
             face_id: current_face,
             style: current_style,
-            font_weight: current_tag.font_weight.clone(),
-            font_decorations: current_tag.font_decorations.clone(),
-            colors: current_tag.colors.clone(),
+            font_weight: current_tag.font_weight,
+            font_decorations: current_tag.font_decorations,
+            colors: current_tag.colors,
             url: current_tag.url.clone(),
             text: run_text,
             char_widths: run_char_widths,
@@ -523,9 +524,9 @@ fn shape_single_run(
         glyphs,
         col_start: run.col_start,
         style: run.style,
-        font_weight: run.font_weight.clone(),
-        font_decorations: run.font_decorations.clone(),
-        colors: run.colors.clone(),
+        font_weight: run.font_weight,
+        font_decorations: run.font_decorations,
+        colors: run.colors,
         url: run.url.clone(),
         blink: run.blink,
     }
