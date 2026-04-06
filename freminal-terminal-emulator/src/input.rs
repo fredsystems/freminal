@@ -36,6 +36,18 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}~").into_bytes())
 }
 
+/// Build an xterm `modifyOtherKeys` level 2 sequence: `ESC [ 27 ; <mod> ; <code> ~`.
+///
+/// The format uses 27 as a fixed identifier (chosen because decimal 27 was
+/// unused in the VT function-key numbering).  The modifier parameter follows
+/// the standard formula: `1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)`.
+/// The code is the decimal ASCII/Unicode value of the key.
+///
+/// Reference: xterm ctlseqs §`modifyOtherKeys`.
+fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
+    TerminalInputPayload::Owned(format!("\x1b[27;{modifier};{code}~").into_bytes())
+}
+
 /// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
 #[must_use]
 pub fn collect_text(text: &String) -> Cow<'static, [TerminalInput]> {
@@ -166,7 +178,7 @@ impl TerminalInput {
         &self,
         decckm_mode: Decckm,
         keypad_mode: KeypadMode,
-        _modify_other_keys: u8,
+        modify_other_keys: u8,
         application_escape_key: ApplicationEscapeKey,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
@@ -189,23 +201,23 @@ impl TerminalInput {
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
             Self::Ctrl(c) => {
-                // Always send the legacy C0 control code for Ctrl
-                // combinations.
+                // modifyOtherKeys level 2: encode Ctrl+key as
+                // `CSI 27 ; modifier ; code ~` so tmux and programs
+                // that request extended keys can distinguish all
+                // Ctrl combinations unambiguously.
                 //
-                // The xterm `modifyOtherKeys` spec (level 2) technically
-                // calls for encoding Ctrl+key as CSI 27;5;<code>~ when
-                // the key would otherwise be ambiguous.  In practice,
-                // programs that request level 2 (notably tmux via
-                // `CSI > 4 ; 2 m`) still expect Ctrl+A to arrive as
-                // 0x01, Ctrl+C as 0x03, etc.  Modern terminals (xterm
-                // in practice, WezTerm, Alacritty) send legacy C0 bytes
-                // for Ctrl combinations regardless of the modifyOtherKeys
-                // level.  Encoding them as CSI sequences breaks tmux's
-                // prefix key (Ctrl+B) and all Ctrl+letter shortcuts.
+                // Level 0/1: send legacy C0 control codes (letter & 0x1F).
                 //
-                // modifyOtherKeys level 2 is respected for non-Ctrl keys
-                // elsewhere in the input pipeline.
-                TerminalInputPayload::Single(char_to_ctrl_code(*c))
+                // WezTerm sends the CSI 27;5;code~ form at level 2 — we
+                // match that behavior.  tmux handles this format correctly
+                // for its prefix key and all Ctrl shortcuts.
+                if modify_other_keys >= 2 {
+                    let code = u32::from(c.to_ascii_lowercase());
+                    // Ctrl modifier param = 5 (1 + 4)
+                    modify_other_keys_encoding(5, code)
+                } else {
+                    TerminalInputPayload::Single(char_to_ctrl_code(*c))
+                }
             }
             // When LNM (Line Feed / New Line Mode, CSI 20 h) is set, pressing
             // Enter must send CR+LF (0x0D 0x0A).  When LNM is reset (the
