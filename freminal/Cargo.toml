@@ -15,7 +15,7 @@ categories.workspace = true
 [package.metadata.bundle]
 name = "Freminal"
 identifier = "io.github.fredclausen.freminal"
-copyright = "Copyright (c) 2024-2025 Fred Clausen"
+copyright = "Copyright (c) 2024-2026 Fred Clausen"
 category = "Developer Tools"
 short_description = "A terminal emulator written in Rust"
 long_description = """
