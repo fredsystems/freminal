@@ -36,7 +36,7 @@ use freminal_common::{
         modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
-        osc::{AnsiOscInternalType, AnsiOscType, ITerm2InlineImageData, UrlResponse},
+        osc::{AnsiOscType, ITerm2InlineImageData, UrlResponse},
         tchar::TChar,
         terminal_output::TerminalOutput,
         terminal_sections::TerminalSections,
@@ -47,7 +47,7 @@ use freminal_common::{
         url::Url,
         window_manipulation::WindowManipulation,
     },
-    colors::{ColorPalette, TerminalColor, parse_color_spec},
+    colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
     pty_write::{FreminalTerminalSize, PtyWrite},
     themes::ThemePalette,
@@ -63,6 +63,7 @@ mod dcs;
 mod graphics_iterm2;
 mod graphics_kitty;
 mod graphics_sixel;
+mod osc_colors;
 mod pty_writer;
 mod sgr;
 
@@ -1324,76 +1325,6 @@ impl TerminalHandler {
             }
 
             AnsiOscType::NoOp => {}
-        }
-    }
-
-    /// Handle OSC 10/11/12 foreground/background/cursor color query, set,
-    /// and reset (OSC 110/111/112).
-    ///
-    /// Extracted from `handle_osc` to keep that function within the 100-line clippy limit.
-    ///
-    /// - `RequestColorQuery*(Query)`: respond with the effective color
-    ///   (override or theme default).
-    /// - `RequestColorQuery*(String(spec))`: parse the X11 color spec and
-    ///   store as an override.
-    /// - `ResetForegroundColor` / `ResetBackgroundColor` / `ResetCursorColor`:
-    ///   clear the corresponding override so subsequent queries return the
-    ///   theme color.
-    fn handle_osc_fg_bg_color(&mut self, osc: &AnsiOscType) {
-        match osc {
-            // OSC 11 query: respond with the effective background color.
-            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.bg_color_override.unwrap_or(self.theme.background);
-                self.write_osc_response(&format!("11;rgb:{r:02x}/{g:02x}/{b:02x}"));
-            }
-            // OSC 10 query: respond with the effective foreground color.
-            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
-                self.write_osc_response(&format!("10;rgb:{r:02x}/{g:02x}/{b:02x}"));
-            }
-            // OSC 12 query: respond with the effective cursor color.
-            AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.cursor_color_override.unwrap_or(self.theme.cursor);
-                self.write_osc_response(&format!("12;rgb:{r:02x}/{g:02x}/{b:02x}"));
-            }
-            // OSC 11 set: store a dynamic background color override.
-            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.bg_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 11: unrecognised color spec: {spec:?}");
-                }
-            }
-            // OSC 10 set: store a dynamic foreground color override.
-            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.fg_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 10: unrecognised color spec: {spec:?}");
-                }
-            }
-            // OSC 12 set: store a dynamic cursor color override.
-            AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.cursor_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 12: unrecognised color spec: {spec:?}");
-                }
-            }
-            // OSC 110: reset dynamic foreground color override.
-            AnsiOscType::ResetForegroundColor => {
-                self.fg_color_override = None;
-            }
-            // OSC 111: reset dynamic background color override.
-            AnsiOscType::ResetBackgroundColor => {
-                self.bg_color_override = None;
-            }
-            // OSC 112: reset dynamic cursor color override.
-            AnsiOscType::ResetCursorColor => {
-                self.cursor_color_override = None;
-            }
-            // Unknown internal-type variants and unreachable arms — silently ignore.
-            _ => {}
         }
     }
 
