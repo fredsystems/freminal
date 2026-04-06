@@ -28,7 +28,7 @@ use freminal_terminal_emulator::interface::TerminalEmulator;
 /// disconnected (a disconnected receiver would cause the handler to log errors
 /// on escape-sequence write-backs such as DA or CPR responses).
 fn make_emulator() -> (TerminalEmulator, crossbeam_channel::Receiver<PtyWrite>) {
-    TerminalEmulator::new_for_playback(None)
+    TerminalEmulator::new_headless(None)
 }
 
 /// Drain and discard all currently-pending messages on `rx`.

@@ -59,12 +59,14 @@ pub enum InputEvent {
     /// A playback control command (mode selection, play/pause, next frame).
     ///
     /// Only sent when the application is running in playback mode.
+    #[cfg(feature = "playback")]
     PlaybackControl(PlaybackCommand),
 }
 
 /// Playback mode selection.
 ///
 /// Controls how a recorded terminal session is replayed.
+#[cfg(feature = "playback")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackMode {
     /// Process the entire recording at once (no timing).
@@ -76,6 +78,7 @@ pub enum PlaybackMode {
 }
 
 /// Commands the GUI sends to control playback state.
+#[cfg(feature = "playback")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackCommand {
     /// Select a playback mode (always pauses playback; user must press Play).

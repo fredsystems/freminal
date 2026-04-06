@@ -56,7 +56,7 @@ and plan document maintenance rules.
 | 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
 | 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Complete | None                 |
 | 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Complete | None                 |
-| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Stub     | None                 |
+| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Complete | None                 |
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
@@ -321,7 +321,7 @@ Must run after all other tasks are complete to avoid merge conflicts.
 - **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 31, 34, 35
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 31, 32, 34, 35
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
@@ -431,7 +431,7 @@ Update this section as tasks complete:
 | 29   |            |            |                                                                       |
 | 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit                 |
 | 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)                       |
-| 32   |            |            |                                                                       |
+| 32   | 2026-04-06 | 2026-04-06 | All 9 subtasks complete on task-32/playback-feature-flag              |
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
 | 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |

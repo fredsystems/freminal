@@ -195,6 +195,10 @@ impl Command {
 /// 5. `test` — runs lib + doc tests only after the build is confirmed clean.
 /// 6. `bench_compile` — compiles all benchmarks without running them;
 ///    catches benchmark compilation failures before the next manual bench run.
+/// 7. `test_default_features` — runs clippy and tests again with **no** optional
+///    features enabled. This catches `#[cfg(feature = "…")]` gating errors
+///    where code behind a feature flag accidentally leaks into the default
+///    build. (The previous steps use `--all-features`.)
 fn ci() -> Result<()> {
     lint()?;
     deny()?;
@@ -202,6 +206,7 @@ fn ci() -> Result<()> {
     build()?;
     test()?;
     bench_compile()?;
+    test_default_features()?;
     Ok(())
 }
 
@@ -366,6 +371,33 @@ fn test_libs() -> Result<()> {
 /// are meaningless due to noisy neighbors, so only compilation is verified.
 fn bench_compile() -> Result<()> {
     run_cargo(vec!["bench", "--no-run", "--all"])
+}
+
+/// Run clippy and tests with **default features only** (no `--all-features`).
+///
+/// This is the complement to the main CI steps which use `--all-features`.
+/// It catches `#[cfg(feature = "…")]` gating errors where code behind an
+/// optional feature flag accidentally leaks into or breaks the default build.
+/// For example, the `playback` feature gates recording/playback code; this
+/// step ensures the workspace compiles and tests pass without it.
+fn test_default_features() -> Result<()> {
+    tracing::info!("running default-features pass (no optional features)");
+    // Unset CARGO_BUILD_FEATURES so the Nix devshell's "playback" default
+    // doesn't leak into this pass — we need to verify the code compiles and
+    // passes tests with NO optional features enabled.
+    run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
+    run_cargo_no_features(vec!["test", "--all-targets"])?;
+    run_cargo_no_features(vec!["test", "--doc"])?;
+    Ok(())
+}
+
+/// Run a cargo subcommand with `CARGO_BUILD_FEATURES` removed from the
+/// environment, ensuring no optional features leak in from the devshell.
+fn run_cargo_no_features(args: Vec<&str>) -> Result<()> {
+    cmd("cargo", args)
+        .env_remove("CARGO_BUILD_FEATURES")
+        .run_with_trace()?;
+    Ok(())
 }
 
 /// Run a cargo subcommand with the default toolchain

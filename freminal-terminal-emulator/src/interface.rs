@@ -183,14 +183,16 @@ impl TerminalEmulator {
         }
     }
 
-    /// Creates a headless terminal emulator for playback mode.
+    /// Creates a headless terminal emulator without a PTY.
     ///
     /// No PTY is spawned.  The returned `Receiver<PtyWrite>` drains any
     /// escape-sequence responses that the emulator's handler sends (DA, CPR,
-    /// etc.) so channels never block.  The caller feeds recorded data via
+    /// etc.) so channels never block.  The caller feeds data via
     /// `handle_incoming_data`.
+    ///
+    /// Used by playback mode, tests, and benchmarks.
     #[must_use]
-    pub fn new_for_playback(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
+    pub fn new_headless(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
         use crossbeam_channel::unbounded;
 
         let (write_tx, write_rx) = unbounded();
@@ -237,8 +239,16 @@ impl TerminalEmulator {
             args.shell.clone()
         };
 
-        let io =
-            FreminalPtyInputOutput::new(read_rx, pty_tx, args.recording.clone(), command, shell)?;
+        let io = FreminalPtyInputOutput::new(
+            read_rx,
+            pty_tx,
+            #[cfg(feature = "playback")]
+            args.recording.clone(),
+            #[cfg(not(feature = "playback"))]
+            None,
+            command,
+            shell,
+        )?;
 
         if let Err(e) = write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
             width: DEFAULT_WIDTH as usize,
@@ -557,6 +567,7 @@ impl TerminalEmulator {
             theme,
             images,
             visible_image_placements,
+            #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),
         }

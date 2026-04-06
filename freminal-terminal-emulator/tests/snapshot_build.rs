@@ -40,7 +40,7 @@ fn make_emulator() -> (
     TerminalEmulator,
     crossbeam_channel::Receiver<freminal_common::pty_write::PtyWrite>,
 ) {
-    TerminalEmulator::new_for_playback(None)
+    TerminalEmulator::new_headless(None)
 }
 
 /// Write `n` numbered lines into `emu` to create scrollback history.

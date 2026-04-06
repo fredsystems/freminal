@@ -21,6 +21,7 @@ fn parse_from<I: IntoIterator<Item = S>, S: Into<std::ffi::OsString> + Clone>(
 #[test]
 fn parses_empty_args_defaults() {
     let args = parse_from(["freminal"]).unwrap();
+    #[cfg(feature = "playback")]
     assert!(args.recording.is_none());
     assert!(args.shell.is_none());
     assert!(!args.show_all_debug);
@@ -31,12 +32,14 @@ fn parses_empty_args_defaults() {
     assert!(args.command.is_empty());
 }
 
+#[cfg(feature = "playback")]
 #[test]
 fn parses_recording_path() {
     let args = parse_from(["freminal", "--recording-path", "rec.log"]).unwrap();
     assert_eq!(args.recording.as_deref(), Some("rec.log"));
 }
 
+#[cfg(feature = "playback")]
 #[test]
 fn missing_recording_path_argument() {
     let result = parse_from(["freminal", "--recording-path"]);
@@ -127,6 +130,7 @@ fn version_flag_produces_version_error() {
     }
 }
 
+#[cfg(feature = "playback")]
 #[test]
 fn all_flags_combined() {
     let args = parse_from([
@@ -185,6 +189,7 @@ fn command_with_flags_uses_double_dash() {
     assert_eq!(args.command, vec!["htop", "-d", "10"]);
 }
 
+#[cfg(feature = "playback")]
 #[test]
 fn all_flags_combined_with_command() {
     let args = parse_from([
@@ -231,10 +236,9 @@ proptest! {
     /// Mixing valid and invalid flags: the first invalid should cause failure.
     #[test]
     fn mixed_valid_and_invalid_arguments_fail(
-        bad_arg in "--[a-z]{1,8}",
-        rec in "rec[0-9]+\\.log"
+        bad_arg in "--[a-z]{1,8}"
     ) {
-        let args = ["freminal", "--recording-path", &rec, &bad_arg];
+        let args = ["freminal", &bad_arg];
         let result = parse_from(args);
         // Note: some randomly generated flags might coincidentally match valid flags
         // (e.g., "--shell" without value, "--config" without value).
@@ -244,6 +248,7 @@ proptest! {
 
     /// Ensure `--recording-path` and `--shell` always propagate correctly
     /// for random filenames and shell names.
+    #[cfg(feature = "playback")]
     #[test]
     fn recording_and_shell_preserved(
         path in "[a-zA-Z0-9_/\\.]{1,20}",

@@ -3,9 +3,13 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::{io::Write, path::Path, path::PathBuf, time::Instant};
+use std::{io::Write, path::Path, path::PathBuf};
+
+#[cfg(feature = "playback")]
+use std::time::Instant;
 
 use super::{PtyRead, PtyWrite};
+#[cfg(feature = "playback")]
 use crate::recording;
 use anyhow::Result;
 use conv2::ValueFrom;
@@ -118,6 +122,7 @@ enum ExtractTerminfoError {
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
 #[allow(clippy::too_many_lines)]
+#[cfg_attr(not(feature = "playback"), allow(clippy::needless_pass_by_value))]
 pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,
     send_tx: Sender<PtyRead>,
@@ -267,10 +272,15 @@ pub fn run_terminal(
 
     std::thread::spawn(move || {
         let buf = &mut [0u8; 4096];
+        #[cfg(feature = "playback")]
         let mut recording = None;
+        #[cfg(feature = "playback")]
         let mut recording_start = None;
+        #[cfg(not(feature = "playback"))]
+        let _ = recording_path;
 
         // if recording path is some, open a file for writing
+        #[cfg(feature = "playback")]
         if let Some(path) = &recording_path {
             match std::fs::File::create(path) {
                 Ok(mut file) => {
@@ -305,6 +315,7 @@ pub fn run_terminal(
             let data = buf[..amount_read].to_vec();
 
             // Write framed data to recording file
+            #[cfg(feature = "playback")]
             if let Some(file) = &mut recording {
                 let elapsed = recording_start.map_or(0, |start| {
                     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
@@ -405,6 +416,9 @@ impl FreminalPtyInputOutput {
                 e
             })?)
         };
+
+        #[cfg(not(feature = "playback"))]
+        let _ = recording;
 
         let child_exit_rx = run_terminal(
             write_rx,

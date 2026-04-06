@@ -36,6 +36,7 @@ use freminal_common::{
     themes::ThemePalette,
 };
 
+#[cfg(feature = "playback")]
 use crate::io::PlaybackMode;
 
 /// Playback status information carried in each snapshot.
@@ -43,6 +44,7 @@ use crate::io::PlaybackMode;
 /// When the terminal is running in playback mode, the consumer thread
 /// populates this struct after building the emulator snapshot so the GUI
 /// can display progress and controls.
+#[cfg(feature = "playback")]
 #[derive(Debug, Clone)]
 pub struct PlaybackInfo {
     /// Index of the last processed frame (0-indexed).
@@ -288,6 +290,7 @@ pub struct TerminalSnapshot {
     ///
     /// The GUI uses this to render playback controls and frame progress.
     /// `None` in normal (live PTY) mode.
+    #[cfg(feature = "playback")]
     pub playback_info: Option<PlaybackInfo>,
 }
 
@@ -333,6 +336,7 @@ impl TerminalSnapshot {
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
+            #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: None,
         }

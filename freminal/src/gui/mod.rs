@@ -14,7 +14,9 @@ use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
 use freminal_common::pty_write::PtyWrite;
-use freminal_terminal_emulator::io::{InputEvent, PlaybackCommand, PlaybackMode, WindowCommand};
+use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+#[cfg(feature = "playback")]
+use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use settings::{SettingsAction, SettingsModal};
 use terminal::FreminalTerminalWidget;
@@ -107,10 +109,12 @@ struct FreminalGui {
     clipboard_rx: Receiver<String>,
 
     /// Whether this instance is running in playback mode.
+    #[cfg(feature = "playback")]
     is_playback: bool,
 
     /// The playback mode currently selected in the GUI dropdown.
     /// Only meaningful when `is_playback` is true.
+    #[cfg(feature = "playback")]
     selected_playback_mode: Option<PlaybackMode>,
 }
 
@@ -127,7 +131,7 @@ impl FreminalGui {
         pty_write_tx: Sender<PtyWrite>,
         window_cmd_rx: Receiver<WindowCommand>,
         clipboard_rx: Receiver<String>,
-        is_playback: bool,
+        #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
         set_egui_options(&cc.egui_ctx, config.ui.background_opacity);
 
@@ -142,7 +146,9 @@ impl FreminalGui {
             pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
+            #[cfg(feature = "playback")]
             is_playback,
+            #[cfg(feature = "playback")]
             selected_playback_mode: None,
         }
     }
@@ -151,6 +157,7 @@ impl FreminalGui {
     ///
     /// Contains a "Terminal" menu with Settings and Quit entries, plus
     /// playback controls when running in playback mode.
+    #[cfg_attr(not(feature = "playback"), allow(unused_variables))]
     fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Terminal", |ui| {
@@ -170,6 +177,7 @@ impl FreminalGui {
             });
 
             // Playback controls: only shown when running in playback mode.
+            #[cfg(feature = "playback")]
             if self.is_playback {
                 self.show_playback_controls(ui, snap);
             }
@@ -177,6 +185,7 @@ impl FreminalGui {
     }
 
     /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
+    #[cfg(feature = "playback")]
     fn show_playback_controls(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
         let info = snap.playback_info.as_ref();
 
@@ -264,6 +273,7 @@ impl FreminalGui {
     }
 
     /// Human-readable label for the current playback mode selector button.
+    #[cfg(feature = "playback")]
     const fn playback_mode_label(&self) -> &'static str {
         match self.selected_playback_mode {
             None => "Mode",
@@ -274,6 +284,7 @@ impl FreminalGui {
     }
 
     /// Send a playback command to the consumer thread via the input channel.
+    #[cfg(feature = "playback")]
     fn send_playback_cmd(&self, cmd: PlaybackCommand) {
         if let Err(e) = self.input_tx.send(InputEvent::PlaybackControl(cmd)) {
             error!("Failed to send playback command: {e}");
@@ -899,7 +910,7 @@ pub fn run(
     window_cmd_rx: Receiver<WindowCommand>,
     clipboard_rx: Receiver<String>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
-    is_playback: bool,
+    #[cfg(feature = "playback")] is_playback: bool,
 ) -> Result<()> {
     let icon = match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png")) {
         Ok(icon) => icon,
@@ -958,6 +969,7 @@ pub fn run(
                 pty_write_tx,
                 window_cmd_rx,
                 clipboard_rx,
+                #[cfg(feature = "playback")]
                 is_playback,
             )))
         }),
