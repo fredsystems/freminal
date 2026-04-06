@@ -33,6 +33,7 @@ pub mod dectcem;
 pub mod grapheme;
 pub mod irm;
 pub mod keypad;
+pub mod kitty_keyboard;
 pub mod lnm;
 pub mod modify_other_keys_mode;
 pub mod mouse;

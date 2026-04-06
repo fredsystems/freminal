@@ -15,11 +15,10 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// **Kitty keyboard protocol:**
 /// - `CSI ? u` — Query current keyboard mode flags.  Respond with
-///   `CSI ? 0 u` (mode 0 = protocol not active).
+///   `CSI ? <flags> u` where `<flags>` is the current stack-top value.
 /// - `CSI > flags u` — Push a new keyboard mode onto the stack.
-///   We do not support the Kitty keyboard protocol, so this is ignored.
 /// - `CSI < number u` — Pop keyboard mode(s) from the stack.
-///   We do not support the Kitty keyboard protocol, so this is ignored.
+/// - `CSI = flags ; mode u` — Set flags on the current stack entry.
 ///
 /// **Disambiguation:** The leading byte of `params` determines which
 /// protocol is in effect:
@@ -27,6 +26,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// - `?` prefix  → Kitty query
 /// - `>` prefix  → Kitty push
 /// - `<` prefix  → Kitty pop
+/// - `=` prefix  → Kitty set
 /// - Anything else with digits only → SCORC (numeric params are valid for
 ///   some SCORC implementations, though rarely used)
 pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<TerminalOutput>) {
@@ -37,18 +37,25 @@ pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<Term
         }
         Some(b'?') => {
             // CSI ? u — Kitty keyboard protocol query.
-            // Respond with CSI ? 0 u (protocol not active / mode flags = 0).
             output.push(TerminalOutput::KittyKeyboardQuery);
         }
         Some(b'>') => {
             // CSI > flags u — Kitty keyboard push.
-            // We do not implement the Kitty keyboard protocol; silently ignore.
-            trace!("Kitty keyboard push (CSI > u) ignored: params={params:?}");
+            let flags = parse_decimal(&params[1..]).unwrap_or(0);
+            output.push(TerminalOutput::KittyKeyboardPush(flags));
         }
         Some(b'<') => {
             // CSI < number u — Kitty keyboard pop.
-            // We do not implement the Kitty keyboard protocol; silently ignore.
-            trace!("Kitty keyboard pop (CSI < u) ignored: params={params:?}");
+            // Default to 1 per the spec; 0 also means 1.
+            let n = parse_decimal(&params[1..]).unwrap_or(1).max(1);
+            output.push(TerminalOutput::KittyKeyboardPop(n));
+        }
+        Some(b'=') => {
+            // CSI = flags ; mode u — Kitty keyboard set.
+            let (flags, mode) = parse_two_params(&params[1..]);
+            // mode defaults to 1 (replace) per the spec.
+            let mode = if mode == 0 { 1 } else { mode };
+            output.push(TerminalOutput::KittyKeyboardSet { flags, mode });
         }
         Some(_) => {
             // Numeric-only params: treat as SCORC (some terminals accept
@@ -58,9 +65,50 @@ pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<Term
     }
 }
 
+/// Parse a decimal integer from a byte slice.  Returns `None` for empty input
+/// or when no leading digits are found.
+fn parse_decimal(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value: u32 = 0;
+    let mut consumed = false;
+    for &b in bytes {
+        if b.is_ascii_digit() {
+            value = value.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+            consumed = true;
+        } else {
+            // Stop at the first non-digit (e.g. `;`).
+            break;
+        }
+    }
+    if consumed { Some(value) } else { None }
+}
+
+/// Parse two semicolon-separated decimal parameters from a byte slice.
+///
+/// Returns `(first, second)`.  Missing or non-parseable values default to 0.
+fn parse_two_params(bytes: &[u8]) -> (u32, u32) {
+    // Find the semicolon separator.
+    let mut split_pos = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b';' {
+            split_pos = Some(i);
+            break;
+        }
+    }
+
+    let first = parse_decimal(bytes).unwrap_or(0);
+    let second = split_pos.map_or(0, |pos| parse_decimal(&bytes[pos + 1..]).unwrap_or(0));
+
+    (first, second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SCORC tests ─────────────────────────────────────────────────
 
     #[test]
     fn plain_csi_u_is_scorc() {
@@ -70,30 +118,123 @@ mod tests {
     }
 
     #[test]
+    fn numeric_params_are_scorc() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"1", &mut output);
+        assert_eq!(output, vec![TerminalOutput::RestoreCursor]);
+    }
+
+    // ── Kitty query ─────────────────────────────────────────────────
+
+    #[test]
     fn csi_question_u_is_kitty_query() {
         let mut output = Vec::new();
         ansi_parser_inner_csi_finished_scorc(b"?", &mut output);
         assert_eq!(output, vec![TerminalOutput::KittyKeyboardQuery]);
     }
 
+    // ── Kitty push ──────────────────────────────────────────────────
+
     #[test]
-    fn csi_gt_u_is_kitty_push_ignored() {
+    fn csi_gt_u_push_flags_0() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_scorc(b">1", &mut output);
-        assert!(output.is_empty(), "Kitty push should be silently ignored");
+        ansi_parser_inner_csi_finished_scorc(b">0", &mut output);
+        assert_eq!(output, vec![TerminalOutput::KittyKeyboardPush(0)]);
     }
 
     #[test]
-    fn csi_lt_u_is_kitty_pop_ignored() {
+    fn csi_gt_u_push_flags_27() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_scorc(b"<1", &mut output);
-        assert!(output.is_empty(), "Kitty pop should be silently ignored");
+        ansi_parser_inner_csi_finished_scorc(b">27", &mut output);
+        assert_eq!(output, vec![TerminalOutput::KittyKeyboardPush(27)]);
     }
 
     #[test]
-    fn numeric_params_are_scorc() {
+    fn csi_gt_u_push_no_params_defaults_to_0() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_scorc(b"1", &mut output);
-        assert_eq!(output, vec![TerminalOutput::RestoreCursor]);
+        ansi_parser_inner_csi_finished_scorc(b">", &mut output);
+        assert_eq!(output, vec![TerminalOutput::KittyKeyboardPush(0)]);
+    }
+
+    // ── Kitty pop ───────────────────────────────────────────────────
+
+    #[test]
+    fn csi_lt_u_pop_default_1() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"<", &mut output);
+        assert_eq!(output, vec![TerminalOutput::KittyKeyboardPop(1)]);
+    }
+
+    #[test]
+    fn csi_lt_u_pop_explicit_3() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"<3", &mut output);
+        assert_eq!(output, vec![TerminalOutput::KittyKeyboardPop(3)]);
+    }
+
+    // ── Kitty set ───────────────────────────────────────────────────
+
+    #[test]
+    fn csi_eq_u_set_replace() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"=3", &mut output);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::KittyKeyboardSet { flags: 3, mode: 1 }]
+        );
+    }
+
+    #[test]
+    fn csi_eq_u_set_or() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"=3;2", &mut output);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::KittyKeyboardSet { flags: 3, mode: 2 }]
+        );
+    }
+
+    #[test]
+    fn csi_eq_u_set_clear() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"=3;3", &mut output);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::KittyKeyboardSet { flags: 3, mode: 3 }]
+        );
+    }
+
+    // ── parse_decimal helper ────────────────────────────────────────
+
+    #[test]
+    fn parse_decimal_empty_is_none() {
+        assert_eq!(parse_decimal(b""), None);
+    }
+
+    #[test]
+    fn parse_decimal_simple_number() {
+        assert_eq!(parse_decimal(b"42"), Some(42));
+    }
+
+    #[test]
+    fn parse_decimal_stops_at_semicolon() {
+        assert_eq!(parse_decimal(b"3;2"), Some(3));
+    }
+
+    // ── parse_two_params helper ─────────────────────────────────────
+
+    #[test]
+    fn parse_two_params_both_present() {
+        assert_eq!(parse_two_params(b"3;2"), (3, 2));
+    }
+
+    #[test]
+    fn parse_two_params_second_missing() {
+        assert_eq!(parse_two_params(b"3"), (3, 0));
+    }
+
+    #[test]
+    fn parse_two_params_empty() {
+        assert_eq!(parse_two_params(b""), (0, 0));
     }
 }

@@ -142,8 +142,24 @@ pub enum TerminalOutput {
     /// CSI Ps b — REP (Repeat): repeat the preceding graphic character Ps times
     RepeatCharacter(usize),
     /// CSI ? u — Kitty keyboard protocol query.
-    /// Respond with `CSI ? 0 u` (mode flags = 0, protocol not active).
+    /// Respond with `CSI ? flags u` where `flags` is the current stack-top value.
     KittyKeyboardQuery,
+    /// CSI > flags u — Push keyboard flags onto the Kitty keyboard protocol stack.
+    ///
+    /// `flags` is the raw bitmask from the CSI parameter.
+    KittyKeyboardPush(u32),
+    /// CSI < number u — Pop `number` entries from the Kitty keyboard protocol stack.
+    ///
+    /// If `number` is 0 or absent, defaults to 1.  Popping more entries than are
+    /// on the stack empties the stack and resets all flags (not an error per the spec).
+    KittyKeyboardPop(u32),
+    /// CSI = flags ; mode u — Set the current Kitty keyboard protocol flags.
+    ///
+    /// `flags` is the bitmask; `mode` is 1 (replace, default), 2 (OR), or 3 (AND-NOT / clear).
+    KittyKeyboardSet {
+        flags: u32,
+        mode: u32,
+    },
     /// CSI > 4 ; Pv m — xterm `modifyOtherKeys` resource.
     ///
     /// Level 0: disabled (default).
@@ -294,6 +310,11 @@ impl std::fmt::Display for TerminalOutput {
             Self::CursorBackwardTab(n) => write!(f, "CursorBackwardTab({n})"),
             Self::RepeatCharacter(n) => write!(f, "RepeatCharacter({n})"),
             Self::KittyKeyboardQuery => write!(f, "KittyKeyboardQuery"),
+            Self::KittyKeyboardPush(flags) => write!(f, "KittyKeyboardPush({flags})"),
+            Self::KittyKeyboardPop(n) => write!(f, "KittyKeyboardPop({n})"),
+            Self::KittyKeyboardSet { flags, mode } => {
+                write!(f, "KittyKeyboardSet(flags={flags}, mode={mode})")
+            }
             Self::ModifyOtherKeys(level) => write!(f, "ModifyOtherKeys({level})"),
             Self::RequestTertiaryDeviceAttributes => write!(f, "RequestTertiaryDeviceAttributes"),
             Self::RequestTerminalParameters(ps) => write!(f, "RequestTerminalParameters({ps})"),

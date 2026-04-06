@@ -31,6 +31,7 @@ use freminal_common::{
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
         modes::irm::Irm,
+        modes::kitty_keyboard::KittyKeyboardFlags,
         modes::lnm::Lnm,
         modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::private_color_registers::PrivateColorRegisters,
@@ -293,6 +294,18 @@ pub struct TerminalHandler {
     /// `0x90` instead of `ESC P`, OSC uses `0x9D` instead of `ESC ]`, and ST
     /// uses `0x9C` instead of `ESC \`.  Default is `SevenBit`.
     s8c1t_mode: S8c1t,
+    /// Kitty keyboard protocol mode stack.
+    ///
+    /// Each entry is a `u32` bitmask.  Programs push on entry via `CSI > flags u`
+    /// and pop on exit via `CSI < number u`.  The active flags are
+    /// `kitty_keyboard_stack.last().copied().unwrap_or(0)`.
+    /// Bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`] (256) entries.
+    kitty_keyboard_stack: Vec<u32>,
+    /// Saved main-screen KKP stack when alternate screen is active.
+    ///
+    /// The spec requires main and alternate screens to maintain independent
+    /// keyboard mode stacks.
+    saved_kitty_keyboard_stack: Option<Vec<u32>>,
 }
 
 impl TerminalHandler {
@@ -339,6 +352,8 @@ impl TerminalHandler {
             insert_mode: Irm::Replace,
             sixel_shared_palette: None,
             s8c1t_mode: S8c1t::SevenBit,
+            kitty_keyboard_stack: Vec::new(),
+            saved_kitty_keyboard_stack: None,
         }
     }
 
@@ -452,6 +467,8 @@ impl TerminalHandler {
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
         self.application_escape_key = ApplicationEscapeKey::Reset;
+        self.kitty_keyboard_stack.clear();
+        self.saved_kitty_keyboard_stack = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -951,6 +968,9 @@ impl TerminalHandler {
         // scroll_offset is owned by ViewState on the GUI side; the PTY thread
         // always passes 0 when entering the alternate screen.
         self.buffer.enter_alternate(0);
+        // Save and reset the KKP stack — the spec requires main and alternate
+        // screens to maintain independent keyboard mode stacks.
+        self.saved_kitty_keyboard_stack = Some(std::mem::take(&mut self.kitty_keyboard_stack));
     }
 
     /// Handle leaving alternate screen
@@ -958,6 +978,10 @@ impl TerminalHandler {
         // Returns the saved scroll_offset from the primary screen; discarded here
         // because scroll_offset is owned by ViewState on the GUI side.
         let _restored_offset = self.buffer.leave_alternate();
+        // Restore the main-screen KKP stack.
+        if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
+            self.kitty_keyboard_stack = saved;
+        }
     }
 
     /// Handle DECAWM — enable or disable soft-wrapping.
@@ -1066,6 +1090,14 @@ impl TerminalHandler {
         self.application_escape_key
     }
 
+    /// Returns the currently active Kitty keyboard protocol flags.
+    ///
+    /// Returns `0` when the stack is empty (protocol not active).
+    #[must_use]
+    pub fn kitty_keyboard_flags(&self) -> u32 {
+        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
+    }
+
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     ///
     /// When [`Self::in_tmux_passthrough`] is `true`, the response is wrapped in
@@ -1149,6 +1181,7 @@ impl TerminalHandler {
     /// Handle DA2 — Secondary Device Attributes.
     /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
     pub fn handle_secondary_device_attributes(&mut self) {
+        tracing::debug!("DA2 query received");
         self.write_csi_response(">65;0;0c");
     }
 
@@ -1181,10 +1214,21 @@ impl TerminalHandler {
     }
 
     /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
-    /// Responds with `DCS > | Freminal <version> ST`.
+    ///
+    /// Responds with `DCS >|XTerm(Freminal <version>) ST` (7-bit) or the 8-bit
+    /// equivalent when S8C1T is active.
+    ///
+    /// The `XTerm(` prefix is intentional: tmux's XDA handler
+    /// (`tty_keys_extended_device_attributes` in `tty-keys.c`) matches the
+    /// payload against a small set of known prefixes to decide which terminal
+    /// feature sets to enable.  Without a recognised prefix tmux skips
+    /// `extkeys`, which means `modifyOtherKeys` (`\033[>4;2m`) is never sent
+    /// to Freminal and extended key sequences are not forwarded to programs
+    /// running inside tmux.  Prefixing with `XTerm(` causes tmux to apply the
+    /// `XTerm` feature set (which includes `extkeys`), fixing the issue.
     pub fn handle_device_name_and_version(&mut self) {
         let version = env!("CARGO_PKG_VERSION");
-        self.write_dcs_response(&format!(">|Freminal {version}"));
+        self.write_dcs_response(&format!(">|XTerm(Freminal {version})"));
     }
 
     /// Handle a DCS (Device Control String) sequence.
@@ -1200,6 +1244,7 @@ impl TerminalHandler {
     ///
     /// Unknown or unsupported DCS sub-commands are logged at warn level.
     pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
+        tracing::debug!("DCS received: {:?}", String::from_utf8_lossy(dcs));
         // Strip leading 'P' and trailing ESC '\' to get inner content.
         let inner = Self::strip_dcs_envelope(dcs);
 
@@ -1961,6 +2006,10 @@ impl TerminalHandler {
     /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
     ///           `DCS 0 + r <hex-name> ST` for unknown ones.
     fn handle_xtgettcap(&self, hex_payload: &[u8]) {
+        tracing::debug!(
+            "XTGETTCAP query: {:?}",
+            String::from_utf8_lossy(hex_payload)
+        );
         let payload_str = String::from_utf8_lossy(hex_payload);
 
         // Split on ';' to support multiple capability queries in a single DCS.
@@ -1974,6 +2023,15 @@ impl TerminalHandler {
                 self.write_dcs_response(&format!("0+r{hex_name}"));
                 continue;
             };
+
+            // "u" — Kitty keyboard protocol flags.  This is instance state
+            // (not a static value), so handle it before the static lookup.
+            if cap_name == "u" {
+                let flags = self.kitty_keyboard_flags();
+                let hex_value = Self::hex_encode(&flags.to_string());
+                self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
+                continue;
+            }
 
             if let Some(value) = Self::lookup_termcap(&cap_name) {
                 let hex_value = Self::hex_encode(value);
@@ -2824,6 +2882,7 @@ impl TerminalHandler {
     /// Handle DA1 — Primary Device Attributes.
     /// Responds with the capability string used by the old buffer (iTerm2 DA set).
     pub fn handle_request_device_attributes(&mut self) {
+        tracing::debug!("DA1 query received");
         if self.vt52_mode == Decanm::Vt52 {
             // VT52 identify response: ESC / Z — not affected by S8C1T
             self.write_to_pty("\x1b/Z");
@@ -4068,8 +4127,36 @@ impl TerminalHandler {
                 self.handle_secondary_device_attributes();
             }
             TerminalOutput::KittyKeyboardQuery => {
-                // Respond with CSI ? 0 u (Kitty keyboard protocol not active).
-                self.write_to_pty("\x1b[?0u");
+                let flags = self.kitty_keyboard_flags();
+                tracing::debug!("KittyKeyboardQuery received, flags={flags}");
+                self.write_to_pty(&format!("\x1b[?{flags}u"));
+            }
+            TerminalOutput::KittyKeyboardPush(flags) => {
+                if self.kitty_keyboard_stack.len() >= KittyKeyboardFlags::MAX_STACK_DEPTH {
+                    // Evict the oldest entry (bottom of the stack) per the spec.
+                    self.kitty_keyboard_stack.remove(0);
+                }
+                self.kitty_keyboard_stack.push(*flags);
+            }
+            TerminalOutput::KittyKeyboardPop(n) => {
+                let n = (*n as usize).min(self.kitty_keyboard_stack.len());
+                let new_len = self.kitty_keyboard_stack.len() - n;
+                self.kitty_keyboard_stack.truncate(new_len);
+            }
+            TerminalOutput::KittyKeyboardSet { flags, mode } => {
+                let current = self.kitty_keyboard_flags();
+                let new_flags = match mode {
+                    1 => *flags,
+                    2 => current | *flags,
+                    3 => current & !*flags,
+                    _ => current,
+                };
+                if self.kitty_keyboard_stack.is_empty() {
+                    self.kitty_keyboard_stack.push(new_flags);
+                } else {
+                    let top = self.kitty_keyboard_stack.len() - 1;
+                    self.kitty_keyboard_stack[top] = new_flags;
+                }
             }
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
@@ -6368,6 +6455,96 @@ mod tests {
 
         let response = recv_pty_response(&rx);
         let expected_val_hex = TerminalHandler::hex_encode("\x1b[58;2;%p1%d;%p2%d;%p3%dm");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_khome() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "khome" → hex encode name, expect CSI H response (\x1b[H)
+        let hex_name = TerminalHandler::hex_encode("khome");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // SS3 H = \x1bOH — the sequence Freminal sends for Home in DECCKM Application mode
+        let expected_val_hex = TerminalHandler::hex_encode("\x1bOH");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_kend() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "kend" → hex encode name, expect SS3 F response (\x1bOF)
+        let hex_name = TerminalHandler::hex_encode("kend");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // SS3 F = \x1bOF — the sequence Freminal sends for End in DECCKM Application mode
+        let expected_val_hex = TerminalHandler::hex_encode("\x1bOF");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_khom_shift() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "kHOM" (Shift+Home) → expect \x1b[1;2H
+        let hex_name = TerminalHandler::hex_encode("kHOM");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[1;2H");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_kend_shift() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "kEND" (Shift+End) → expect \x1b[1;2F
+        let hex_name = TerminalHandler::hex_encode("kEND");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[1;2F");
         assert_eq!(
             response,
             format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")

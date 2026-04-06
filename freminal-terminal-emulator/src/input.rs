@@ -36,6 +36,18 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}~").into_bytes())
 }
 
+/// Build an xterm `modifyOtherKeys` level 2 sequence: `ESC [ 27 ; <mod> ; <code> ~`.
+///
+/// The format uses 27 as a fixed identifier (chosen because decimal 27 was
+/// unused in the VT function-key numbering).  The modifier parameter follows
+/// the standard formula: `1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)`.
+/// The code is the decimal ASCII/Unicode value of the key.
+///
+/// Reference: xterm ctlseqs §`modifyOtherKeys`.
+fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
+    TerminalInputPayload::Owned(format!("\x1b[27;{modifier};{code}~").into_bytes())
+}
+
 /// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
 #[must_use]
 pub fn collect_text(text: &String) -> Cow<'static, [TerminalInput]> {
@@ -161,7 +173,7 @@ impl TerminalInput {
     #[must_use]
     // Inherently large: exhaustive match over every `TerminalInput` variant mapping to escape
     // byte sequences. Splitting into sub-functions adds indirection without improving clarity.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn to_payload(
         &self,
         decckm_mode: Decckm,
@@ -170,16 +182,40 @@ impl TerminalInput {
         application_escape_key: ApplicationEscapeKey,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
+        kitty_keyboard_flags: u32,
     ) -> TerminalInputPayload {
+        // KKP encoding is only activated when the flags that actually change
+        // key encoding are set: DISAMBIGUATE (bit 0 = 1) or REPORT_ALL (bit
+        // 3 = 8).  Flags 2/4/16 add metadata fields to sequences that are
+        // already being generated but do not change base encoding — so when
+        // only those flags are set the legacy path is used.
+        if kitty_keyboard_flags & (1 | 8) != 0 {
+            return self.to_payload_kkp(
+                kitty_keyboard_flags,
+                decckm_mode,
+                keypad_mode,
+                backarrow_sends_bs,
+                line_feed_mode,
+            );
+        }
+
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
             Self::Ctrl(c) => {
-                // modifyOtherKeys level 2: encode Ctrl+<letter> as
-                // CSI 27 ; 5 ; <ASCII code of letter> ~
-                // instead of the traditional C0 control code.
+                // modifyOtherKeys level 2: encode Ctrl+key as
+                // `CSI 27 ; modifier ; code ~` so tmux and programs
+                // that request extended keys can distinguish all
+                // Ctrl combinations unambiguously.
+                //
+                // Level 0/1: send legacy C0 control codes (letter & 0x1F).
+                //
+                // WezTerm sends the CSI 27;5;code~ form at level 2 — we
+                // match that behavior.  tmux handles this format correctly
+                // for its prefix key and all Ctrl shortcuts.
                 if modify_other_keys >= 2 {
-                    let code = u32::from(c.to_ascii_uppercase());
-                    TerminalInputPayload::Owned(format!("\x1b[27;5;{code}~").into_bytes())
+                    let code = u32::from(c.to_ascii_lowercase());
+                    // Ctrl modifier param = 5 (1 + 4)
+                    modify_other_keys_encoding(5, code)
                 } else {
                     TerminalInputPayload::Single(char_to_ctrl_code(*c))
                 }
@@ -337,6 +373,246 @@ impl TerminalInput {
                     (11, Some(m)) => modified_csi_tilde(23, m),
                     (12, Some(m)) => modified_csi_tilde(24, m),
                     // F5–F12 without modifiers
+                    (5, None) => TerminalInputPayload::Many(b"\x1b[15~"),
+                    (6, None) => TerminalInputPayload::Many(b"\x1b[17~"),
+                    (7, None) => TerminalInputPayload::Many(b"\x1b[18~"),
+                    (8, None) => TerminalInputPayload::Many(b"\x1b[19~"),
+                    (9, None) => TerminalInputPayload::Many(b"\x1b[20~"),
+                    (10, None) => TerminalInputPayload::Many(b"\x1b[21~"),
+                    (11, None) => TerminalInputPayload::Many(b"\x1b[23~"),
+                    (12, None) => TerminalInputPayload::Many(b"\x1b[24~"),
+                    _ => {
+                        warn!("Unhandled function key: F{n}");
+                        TerminalInputPayload::Many(b"")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Kitty Keyboard Protocol encoding path.
+    ///
+    /// Called when `DISAMBIGUATE` (bit 0) or `REPORT_ALL` (bit 3) is set in the
+    /// active KKP flags.  Functional keys (arrows, Home/End, F-keys,
+    /// Insert/Delete/PageUp/PageDown) retain their legacy encoding — only the
+    /// modifier bitmask formula is shared (and it already matches KKP's
+    /// `1 + shift + alt*2 + ctrl*4` convention).
+    ///
+    /// Text keys and certain C0-origin keys (Escape, Enter, Tab, Backspace)
+    /// are re-encoded according to the active flag bits.
+    ///
+    /// Currently implemented flags:
+    /// - Flag 1 (`DISAMBIGUATE_ESCAPE_CODES`): Ctrl+letter → `CSI code;5u`,
+    ///   Escape → `CSI 27u`.  Enter/Tab/Backspace remain legacy.
+    /// - Flag 8 (`REPORT_ALL_KEYS_AS_ESCAPE_CODES`): Every key as CSI u,
+    ///   including Enter → `CSI 13u`, Tab → `CSI 9u`, Backspace → `CSI 127u`,
+    ///   plain ASCII → `CSI codepoint u`.
+    ///
+    /// Flags 2, 4, 16 are parsed and stored on the KKP stack but do not yet
+    /// produce additional output fields (event-type, alternate keys, associated
+    /// text).  They require key event metadata not currently threaded through
+    /// `TerminalInput`.
+    // The KKP encoding path is inherently large: it must cover every variant
+    // for a complete implementation.
+    #[allow(clippy::too_many_lines)]
+    fn to_payload_kkp(
+        &self,
+        flags: u32,
+        decckm_mode: Decckm,
+        keypad_mode: KeypadMode,
+        backarrow_sends_bs: Decbkm,
+        line_feed_mode: Lnm,
+    ) -> TerminalInputPayload {
+        let report_all = flags & 8 != 0;
+        let disambiguate = flags & 1 != 0;
+
+        match self {
+            // ── Plain ASCII ─────────────────────────────────────────────
+            Self::Ascii(c) => {
+                if report_all {
+                    // Flag 8: every printable key as CSI u.
+                    // Uppercase letters are sent as the lowercase codepoint
+                    // with Shift modifier.
+                    if c.is_ascii_uppercase() {
+                        let lower = u32::from(c.to_ascii_lowercase());
+                        TerminalInputPayload::Owned(format!("\x1b[{lower};2u").into_bytes())
+                    } else {
+                        let code = u32::from(*c);
+                        TerminalInputPayload::Owned(format!("\x1b[{code}u").into_bytes())
+                    }
+                } else {
+                    // Flags 1/2/4/16 alone don't affect plain ASCII.
+                    TerminalInputPayload::Single(*c)
+                }
+            }
+
+            // ── Ctrl+letter ─────────────────────────────────────────────
+            Self::Ctrl(c) => {
+                if disambiguate || report_all {
+                    // KKP: Ctrl+letter → CSI lowercase_code ; 5 u
+                    let code = u32::from(c.to_ascii_lowercase());
+                    TerminalInputPayload::Owned(format!("\x1b[{code};5u").into_bytes())
+                } else {
+                    // Flags 2/4/16 alone: legacy C0 encoding.
+                    TerminalInputPayload::Single(char_to_ctrl_code(*c))
+                }
+            }
+
+            // ── Enter ───────────────────────────────────────────────────
+            Self::Enter => {
+                if report_all {
+                    TerminalInputPayload::Owned(b"\x1b[13u".to_vec())
+                } else {
+                    // Flag 1 exception: Enter still sends legacy bytes.
+                    if line_feed_mode == Lnm::NewLine {
+                        TerminalInputPayload::Many(b"\x0d\x0a")
+                    } else {
+                        TerminalInputPayload::Single(char_to_ctrl_code(b'm'))
+                    }
+                }
+            }
+
+            // ── LineFeed ────────────────────────────────────────────────
+            Self::LineFeed => TerminalInputPayload::Single(b'\n'),
+
+            // ── Backspace ───────────────────────────────────────────────
+            Self::Backspace => {
+                if report_all {
+                    TerminalInputPayload::Owned(b"\x1b[127u".to_vec())
+                } else {
+                    // Flag 1 exception: Backspace still sends legacy bytes.
+                    if backarrow_sends_bs == Decbkm::BackarrowSendsBs {
+                        TerminalInputPayload::Single(char_to_ctrl_code(b'H'))
+                    } else {
+                        TerminalInputPayload::Single(0x7F)
+                    }
+                }
+            }
+
+            // ── Tab ─────────────────────────────────────────────────────
+            Self::Tab => {
+                if report_all {
+                    TerminalInputPayload::Owned(b"\x1b[9u".to_vec())
+                } else {
+                    // Flag 1 exception: Tab still sends legacy byte.
+                    TerminalInputPayload::Single(char_to_ctrl_code(b'i'))
+                }
+            }
+
+            // ── Escape ──────────────────────────────────────────────────
+            Self::Escape => {
+                if disambiguate || report_all {
+                    // KKP: Escape is disambiguated as CSI 27 u.
+                    TerminalInputPayload::Owned(b"\x1b[27u".to_vec())
+                } else {
+                    // Flags 2/4/16 alone: legacy bare ESC byte.
+                    TerminalInputPayload::Single(b'\x1b')
+                }
+            }
+
+            // ── Functional keys: retain legacy encoding ─────────────────
+            //
+            // Arrow keys, Home, End, F-keys, Insert, Delete, PageUp,
+            // PageDown all keep their legacy xterm encoding.  The modifier
+            // parameter formula (1 + shift + alt*2 + ctrl*4) is identical
+            // between xterm and KKP, so no change is needed.
+            Self::ArrowRight(mods) => match mods.modifier_param() {
+                Some(m) => modified_csi_final(m, b'C'),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOC"),
+                None => TerminalInputPayload::Many(b"\x1b[C"),
+            },
+            Self::ArrowLeft(mods) => match mods.modifier_param() {
+                Some(m) => modified_csi_final(m, b'D'),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOD"),
+                None => TerminalInputPayload::Many(b"\x1b[D"),
+            },
+            Self::ArrowUp(mods) => match mods.modifier_param() {
+                Some(m) => modified_csi_final(m, b'A'),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOA"),
+                None => TerminalInputPayload::Many(b"\x1b[A"),
+            },
+            Self::ArrowDown(mods) => match mods.modifier_param() {
+                Some(m) => modified_csi_final(m, b'B'),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOB"),
+                None => TerminalInputPayload::Many(b"\x1b[B"),
+            },
+            Self::Home(mods) => match mods.modifier_param() {
+                Some(m) => modified_csi_final(m, b'H'),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOH"),
+                None => TerminalInputPayload::Many(b"\x1b[H"),
+            },
+            Self::End(mods) => match mods.modifier_param() {
+                Some(m) => modified_csi_final(m, b'F'),
+                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOF"),
+                None => TerminalInputPayload::Many(b"\x1b[F"),
+            },
+            Self::Delete(mods) => mods
+                .modifier_param()
+                .map_or(TerminalInputPayload::Many(b"\x1b[3~"), |m| {
+                    modified_csi_tilde(3, m)
+                }),
+            Self::Insert(mods) => mods
+                .modifier_param()
+                .map_or(TerminalInputPayload::Many(b"\x1b[2~"), |m| {
+                    modified_csi_tilde(2, m)
+                }),
+            Self::PageUp(mods) => mods
+                .modifier_param()
+                .map_or(TerminalInputPayload::Many(b"\x1b[5~"), |m| {
+                    modified_csi_tilde(5, m)
+                }),
+            Self::PageDown(mods) => mods
+                .modifier_param()
+                .map_or(TerminalInputPayload::Many(b"\x1b[6~"), |m| {
+                    modified_csi_tilde(6, m)
+                }),
+            Self::KeyPad(c) => {
+                if keypad_mode == KeypadMode::Numeric {
+                    TerminalInputPayload::Single(*c)
+                } else {
+                    match c {
+                        0 => TerminalInputPayload::Many(b"\x1b[Op"),
+                        1 => TerminalInputPayload::Many(b"\x1b[Oq"),
+                        2 => TerminalInputPayload::Many(b"\x1b[Or"),
+                        3 => TerminalInputPayload::Many(b"\x1b[Os"),
+                        4 => TerminalInputPayload::Many(b"\x1b[Ot"),
+                        5 => TerminalInputPayload::Many(b"\x1b[Ou"),
+                        6 => TerminalInputPayload::Many(b"\x1b[Ov"),
+                        7 => TerminalInputPayload::Many(b"\x1b[Ow"),
+                        8 => TerminalInputPayload::Many(b"\x1b[Ox"),
+                        9 => TerminalInputPayload::Many(b"\x1b[Oy"),
+                        b'-' => TerminalInputPayload::Many(b"\x1b[Om"),
+                        b',' => TerminalInputPayload::Many(b"\x1b[Ol"),
+                        b'.' => TerminalInputPayload::Many(b"\x1b[On"),
+                        b'\n' => TerminalInputPayload::Many(b"\x1b[OM"),
+                        _ => {
+                            warn!("Unknown keypad key: {c}");
+                            TerminalInputPayload::Single(*c)
+                        }
+                    }
+                }
+            }
+            Self::LostFocus => TerminalInputPayload::Many(b"\x1b[O"),
+            Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
+            Self::FunctionKey(n, mods) => {
+                let mod_param = mods.modifier_param();
+                match (n, mod_param) {
+                    (1, Some(m)) => modified_csi_final(m, b'P'),
+                    (2, Some(m)) => modified_csi_final(m, b'Q'),
+                    (3, Some(m)) => modified_csi_final(m, b'R'),
+                    (4, Some(m)) => modified_csi_final(m, b'S'),
+                    (1, None) => TerminalInputPayload::Many(b"\x1bOP"),
+                    (2, None) => TerminalInputPayload::Many(b"\x1bOQ"),
+                    (3, None) => TerminalInputPayload::Many(b"\x1bOR"),
+                    (4, None) => TerminalInputPayload::Many(b"\x1bOS"),
+                    (5, Some(m)) => modified_csi_tilde(15, m),
+                    (6, Some(m)) => modified_csi_tilde(17, m),
+                    (7, Some(m)) => modified_csi_tilde(18, m),
+                    (8, Some(m)) => modified_csi_tilde(19, m),
+                    (9, Some(m)) => modified_csi_tilde(20, m),
+                    (10, Some(m)) => modified_csi_tilde(21, m),
+                    (11, Some(m)) => modified_csi_tilde(23, m),
+                    (12, Some(m)) => modified_csi_tilde(24, m),
                     (5, None) => TerminalInputPayload::Many(b"\x1b[15~"),
                     (6, None) => TerminalInputPayload::Many(b"\x1b[17~"),
                     (7, None) => TerminalInputPayload::Many(b"\x1b[18~"),
