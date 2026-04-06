@@ -48,7 +48,7 @@ and plan document maintenance rules.
 | 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                      | Complete | None                 |
 | 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`             | Complete | None                 |
 | 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                  | Complete | None                 |
-| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Pending  | None                 |
+| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`         | Complete | None                 |
 | 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                   | Complete | None                 |
 | 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Complete | None                 |
 | 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Complete | None                 |
@@ -423,7 +423,7 @@ Update this section as tasks complete:
 | 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                                   |
 | 22   | 2026-04-04 | 2026-04-04 | Phase B complete — 248 tests, 7 bugs fixed, compliance report written |
 | 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text                      |
-| 24   |            |            |                                                                       |
+| 24   | 2026-04-05 | 2026-04-05 | All 7 subtasks complete on task-24/benchmark-improvements             |
 | 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality                      |
 | 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                                |
 | 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit                        |
