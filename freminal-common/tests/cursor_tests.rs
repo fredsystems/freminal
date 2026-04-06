@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used)]
 
 use freminal_common::buffer_states::cursor::{CursorPos, CursorState, ReverseVideo, StateColors};
-use freminal_common::buffer_states::fonts::{FontDecorations, FontWeight};
+use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
 use freminal_common::buffer_states::line_wrap::LineWrap;
 use freminal_common::colors::TerminalColor;
 
@@ -277,21 +277,23 @@ fn test_cursor_state_new_equals_default() {
 
 #[test]
 fn test_cursor_state_builders() {
+    let mut decs = FontDecorationFlags::empty();
+    decs.insert(FontDecorations::Underline);
+    decs.insert(FontDecorations::Italic);
+
     let cs = CursorState::new()
         .with_color(TerminalColor::Green)
         .with_background_color(TerminalColor::BrightBlack)
         .with_pos(CursorPos { x: 4, y: 9 })
         .with_font_weight(FontWeight::Bold)
-        .with_font_decorations(vec![FontDecorations::Underline, FontDecorations::Italic]);
+        .with_font_decorations(decs);
 
     assert_eq!(cs.colors.color, TerminalColor::Green);
     assert_eq!(cs.colors.background_color, TerminalColor::BrightBlack);
     assert_eq!(cs.pos, CursorPos { x: 4, y: 9 });
     assert_eq!(cs.font_weight, FontWeight::Bold);
-    assert_eq!(
-        cs.font_decorations,
-        vec![FontDecorations::Underline, FontDecorations::Italic]
-    );
+    assert!(cs.font_decorations.contains(FontDecorations::Underline));
+    assert!(cs.font_decorations.contains(FontDecorations::Italic));
 }
 
 #[test]
@@ -303,19 +305,18 @@ fn test_cursor_state_builder_pos_zero() {
 
 #[test]
 fn test_cursor_state_builder_font_decorations_empty() {
-    let cs = CursorState::new().with_font_decorations(vec![]);
+    let cs = CursorState::new().with_font_decorations(FontDecorationFlags::empty());
     assert!(cs.font_decorations.is_empty());
 }
 
 #[test]
 fn test_cursor_state_builder_all_font_decorations() {
-    let all_decorations = vec![
-        FontDecorations::Italic,
-        FontDecorations::Underline,
-        FontDecorations::Faint,
-        FontDecorations::Strikethrough,
-    ];
-    let cs = CursorState::new().with_font_decorations(all_decorations.clone());
+    let mut all_decorations = FontDecorationFlags::empty();
+    all_decorations.insert(FontDecorations::Italic);
+    all_decorations.insert(FontDecorations::Underline);
+    all_decorations.insert(FontDecorations::Faint);
+    all_decorations.insert(FontDecorations::Strikethrough);
+    let cs = CursorState::new().with_font_decorations(all_decorations);
     assert_eq!(cs.font_decorations, all_decorations);
 }
 

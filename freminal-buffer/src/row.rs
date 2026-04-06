@@ -100,6 +100,31 @@ impl Row {
         self.dirty = false;
     }
 
+    /// Count the number of cells in this row that carry an image placement.
+    ///
+    /// Used by `Buffer` to maintain its `image_cell_count` counter when rows
+    /// are cleared or drained.
+    #[must_use]
+    pub fn count_image_cells(&self) -> usize {
+        self.cells.iter().filter(|c| c.has_image()).count()
+    }
+
+    /// Count image cells in columns `[from..to)`.
+    ///
+    /// Columns beyond the stored cell count are treated as blank (no image).
+    #[must_use]
+    pub fn count_image_cells_in_range(&self, from: usize, to: usize) -> usize {
+        let start = from.min(self.cells.len());
+        let end = to.min(self.cells.len());
+        if start >= end {
+            return 0;
+        }
+        self.cells[start..end]
+            .iter()
+            .filter(|c| c.has_image())
+            .count()
+    }
+
     /// Logical row width (number of *columns*), not number of occupied cells.
     #[must_use]
     pub const fn max_width(&self) -> usize {
@@ -337,7 +362,7 @@ impl Row {
             // -----------------------------------------------------------
             // Insert head cell
             // -----------------------------------------------------------
-            self.cells[col] = Cell::new(tchar.clone(), tag.clone());
+            self.cells[col] = Cell::new(*tchar, tag.clone());
 
             // -----------------------------------------------------------
             // Insert continuation cells within bounds

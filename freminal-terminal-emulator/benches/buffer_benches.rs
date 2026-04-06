@@ -304,6 +304,60 @@ fn bench_build_snapshot(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_build_snapshot_with_scrollback — snapshot cost with large scrollback
+//
+// Pre-populates 10,000 rows of scrollback, then measures snapshot building.
+// The visible window is 80×24 at the bottom, but Arc<Vec<Row>> wraps all rows.
+// ---------------------------------------------------------------
+fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_build_snapshot_with_scrollback");
+    group.throughput(Throughput::Elements((80 * 24) as u64));
+
+    // Build a payload that produces ~10,000 scrollback rows.
+    // Each line: 80 chars + \n = ~81 bytes. 10024 lines → 10000 scrollback + 24 visible.
+    let mut payload = Vec::with_capacity(10_024 * 81);
+    for row in 0..10_024 {
+        for col in 0..80 {
+            payload.push(b'a' + ((row + col) % 26) as u8);
+        }
+        payload.push(b'\n');
+    }
+
+    // ── Dirty path (first snapshot after full data feed) ────────────────────
+    group.bench_function("snapshot_10k_scrollback_dirty", |b| {
+        b.iter_batched(
+            || {
+                let mut emulator = TerminalEmulator::dummy_for_bench();
+                emulator.internal.set_win_size(80, 24, 8, 16);
+                emulator.internal.handle_incoming_data(&payload);
+                emulator
+            },
+            |mut emulator| {
+                std::hint::black_box(emulator.build_snapshot());
+            },
+            criterion::BatchSize::LargeInput,
+        );
+    });
+
+    // ── Clean path (snapshot already built, no changes) ─────────────────────
+    {
+        let mut emulator = TerminalEmulator::dummy_for_bench();
+        emulator.internal.set_win_size(80, 24, 8, 16);
+        emulator.internal.handle_incoming_data(&payload);
+        // Warm cache
+        let _ = emulator.build_snapshot();
+
+        group.bench_function("snapshot_10k_scrollback_clean", |b| {
+            b.iter(|| {
+                std::hint::black_box(emulator.build_snapshot());
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -317,6 +371,7 @@ criterion_group!(
         bench_handle_incoming_data,
         bench_data_and_format_for_gui,
         bench_build_snapshot,
+        bench_build_snapshot_with_scrollback,
 );
 
 criterion_main!(benches);

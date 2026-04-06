@@ -61,6 +61,7 @@ use freminal_common::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::buffer::Buffer;
 use crate::image_store::{ImagePlacement, ImageProtocol, InlineImage, next_image_id};
@@ -514,7 +515,7 @@ impl TerminalHandler {
         // Fast path: if no virtual placements exist, no placeholder can resolve.
         if self.virtual_placements.is_empty() {
             if let Some(last) = text.last() {
-                self.last_graphic_char = Some(last.clone());
+                self.last_graphic_char = Some(*last);
             }
             self.prev_placeholder = None;
             self.insert_text_irm_aware(&text);
@@ -533,14 +534,15 @@ impl TerminalHandler {
         let mut batch_start: usize = 0;
 
         for (i, tch) in text.iter().enumerate() {
-            let is_ph = matches!(tch, TChar::Utf8(b) if is_placeholder(b));
+            let is_ph =
+                matches!(tch, TChar::Utf8(buf, len) if is_placeholder(&buf[..*len as usize]));
 
             if is_ph {
                 // Flush any pending normal text batch.
                 if batch_start < i {
                     let batch = &text[batch_start..i];
                     if let Some(last) = batch.last() {
-                        self.last_graphic_char = Some(last.clone());
+                        self.last_graphic_char = Some(*last);
                     }
                     self.prev_placeholder = None;
                     self.insert_text_irm_aware(batch);
@@ -548,8 +550,8 @@ impl TerminalHandler {
                 batch_start = i + 1;
 
                 // Process the placeholder character.
-                if let TChar::Utf8(bytes) = tch {
-                    self.handle_placeholder_char(bytes);
+                if let TChar::Utf8(buf, len) = tch {
+                    self.handle_placeholder_char(&buf[..*len as usize]);
                 }
             }
         }
@@ -558,7 +560,7 @@ impl TerminalHandler {
         if batch_start < text.len() {
             let batch = &text[batch_start..];
             if let Some(last) = batch.last() {
-                self.last_graphic_char = Some(last.clone());
+                self.last_graphic_char = Some(*last);
             }
             self.prev_placeholder = None;
             self.insert_text_irm_aware(batch);
@@ -730,7 +732,7 @@ impl TerminalHandler {
     /// Handle REP (CSI Ps b) — repeat the last graphic character Ps times.
     fn handle_repeat_character(&mut self, count: usize) {
         if let Some(ref ch) = self.last_graphic_char {
-            let repeated = vec![ch.clone(); count];
+            let repeated = vec![*ch; count];
             self.buffer.insert_text(&repeated);
         }
     }
@@ -1908,7 +1910,7 @@ impl TerminalHandler {
         }
 
         // Font decorations
-        for dec in &fmt.font_decorations {
+        for dec in fmt.font_decorations.iter() {
             match dec {
                 FontDecorations::Faint => parts.push("2".to_string()),
                 FontDecorations::Italic => parts.push("3".to_string()),
@@ -2930,10 +2932,10 @@ impl TerminalHandler {
         match osc {
             // Hyperlink: OSC 8 ; params ; url ST  (start) / OSC 8 ; ; ST  (end)
             AnsiOscType::Url(UrlResponse::Url(url)) => {
-                self.current_format.url = Some(Url {
+                self.current_format.url = Some(Arc::new(Url {
                     id: url.id.clone(),
                     url: url.url.clone(),
-                });
+                }));
                 self.buffer.set_format(self.current_format.clone());
             }
             AnsiOscType::Url(UrlResponse::End) => {
@@ -4267,51 +4269,36 @@ fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
         // NormalIntensity resets both bold AND faint
         SelectGraphicRendition::NormalIntensity => {
             tag.font_weight = FontWeight::Normal;
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Faint);
+            tag.font_decorations.remove(FontDecorations::Faint);
         }
 
         // Italic
         SelectGraphicRendition::Italic => {
-            if !tag.font_decorations.contains(&FontDecorations::Italic) {
-                tag.font_decorations.push(FontDecorations::Italic);
-            }
+            tag.font_decorations.insert(FontDecorations::Italic);
         }
         SelectGraphicRendition::NotItalic => {
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Italic);
+            tag.font_decorations.remove(FontDecorations::Italic);
         }
 
         // Faint
         SelectGraphicRendition::Faint => {
-            if !tag.font_decorations.contains(&FontDecorations::Faint) {
-                tag.font_decorations.push(FontDecorations::Faint);
-            }
+            tag.font_decorations.insert(FontDecorations::Faint);
         }
 
         // Underline
         SelectGraphicRendition::Underline => {
-            if !tag.font_decorations.contains(&FontDecorations::Underline) {
-                tag.font_decorations.push(FontDecorations::Underline);
-            }
+            tag.font_decorations.insert(FontDecorations::Underline);
         }
         SelectGraphicRendition::NotUnderlined => {
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Underline);
+            tag.font_decorations.remove(FontDecorations::Underline);
         }
 
         // Strikethrough
         SelectGraphicRendition::Strikethrough => {
-            if !tag
-                .font_decorations
-                .contains(&FontDecorations::Strikethrough)
-            {
-                tag.font_decorations.push(FontDecorations::Strikethrough);
-            }
+            tag.font_decorations.insert(FontDecorations::Strikethrough);
         }
         SelectGraphicRendition::NotStrikethrough => {
-            tag.font_decorations
-                .retain(|d| *d != FontDecorations::Strikethrough);
+            tag.font_decorations.remove(FontDecorations::Strikethrough);
         }
 
         // Reverse video
@@ -4484,16 +4471,16 @@ mod tests {
         apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
         apply_sgr(&mut tag, &SelectGraphicRendition::NormalIntensity);
         assert_eq!(tag.font_weight, FontWeight::Normal);
-        assert!(!tag.font_decorations.contains(&FontDecorations::Faint));
+        assert!(!tag.font_decorations.contains(FontDecorations::Faint));
     }
 
     #[test]
     fn sgr_italic_toggle() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Italic);
-        assert!(tag.font_decorations.contains(&FontDecorations::Italic));
+        assert!(tag.font_decorations.contains(FontDecorations::Italic));
         apply_sgr(&mut tag, &SelectGraphicRendition::NotItalic);
-        assert!(!tag.font_decorations.contains(&FontDecorations::Italic));
+        assert!(!tag.font_decorations.contains(FontDecorations::Italic));
     }
 
     #[test]
@@ -4504,7 +4491,7 @@ mod tests {
         assert_eq!(
             tag.font_decorations
                 .iter()
-                .filter(|d| **d == FontDecorations::Italic)
+                .filter(|d| *d == FontDecorations::Italic)
                 .count(),
             1
         );
@@ -4514,9 +4501,9 @@ mod tests {
     fn sgr_underline_toggle() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Underline);
-        assert!(tag.font_decorations.contains(&FontDecorations::Underline));
+        assert!(tag.font_decorations.contains(FontDecorations::Underline));
         apply_sgr(&mut tag, &SelectGraphicRendition::NotUnderlined);
-        assert!(!tag.font_decorations.contains(&FontDecorations::Underline));
+        assert!(!tag.font_decorations.contains(FontDecorations::Underline));
     }
 
     #[test]
@@ -4525,12 +4512,12 @@ mod tests {
         apply_sgr(&mut tag, &SelectGraphicRendition::Strikethrough);
         assert!(
             tag.font_decorations
-                .contains(&FontDecorations::Strikethrough)
+                .contains(FontDecorations::Strikethrough)
         );
         apply_sgr(&mut tag, &SelectGraphicRendition::NotStrikethrough);
         assert!(
             !tag.font_decorations
-                .contains(&FontDecorations::Strikethrough)
+                .contains(FontDecorations::Strikethrough)
         );
     }
 
@@ -4538,7 +4525,7 @@ mod tests {
     fn sgr_faint_adds_decoration() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
-        assert!(tag.font_decorations.contains(&FontDecorations::Faint));
+        assert!(tag.font_decorations.contains(FontDecorations::Faint));
     }
 
     #[test]
@@ -4613,7 +4600,7 @@ mod tests {
             &SelectGraphicRendition::Foreground(TerminalColor::Red),
         );
         assert_eq!(tag.font_weight, FontWeight::Bold);
-        assert!(tag.font_decorations.contains(&FontDecorations::Underline));
+        assert!(tag.font_decorations.contains(FontDecorations::Underline));
         assert_eq!(tag.colors.color, TerminalColor::Red);
     }
 
@@ -5078,8 +5065,8 @@ mod tests {
                 freminal_common::buffer_states::tchar::TChar::Ascii(b) => (*b as char).to_string(),
                 freminal_common::buffer_states::tchar::TChar::Space => " ".to_string(),
                 freminal_common::buffer_states::tchar::TChar::NewLine => "\n".to_string(),
-                freminal_common::buffer_states::tchar::TChar::Utf8(v) => {
-                    String::from_utf8_lossy(v).to_string()
+                freminal_common::buffer_states::tchar::TChar::Utf8(buf, len) => {
+                    String::from_utf8_lossy(&buf[..*len as usize]).to_string()
                 }
             })
             .collect();

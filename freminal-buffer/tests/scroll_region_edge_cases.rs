@@ -588,7 +588,7 @@ fn wide_character_at_scroll_boundary() {
     buf.set_scroll_region(2, 4);
 
     // Insert wide character
-    let wide = TChar::Utf8("🙂".as_bytes().to_vec());
+    let wide = TChar::from('🙂');
     buf.insert_text(std::slice::from_ref(&wide));
 
     // Should handle wide character correctly even with scroll region active

@@ -13,7 +13,7 @@ fn ascii(c: char) -> TChar {
 }
 
 fn emoji(s: &str) -> TChar {
-    TChar::Utf8(s.as_bytes().to_vec())
+    TChar::new_from_many_chars(s.as_bytes()).unwrap()
 }
 
 #[test]

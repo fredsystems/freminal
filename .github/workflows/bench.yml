@@ -1,0 +1,59 @@
+name: Benchmark Regression Check
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 6am UTC
+  workflow_dispatch: {} # Manual trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Download previous benchmark results
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: target/criterion
+          key: bench-criterion-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            bench-criterion-${{ runner.os }}-
+
+      - name: Run benchmarks
+        run: cargo bench --all -- --save-baseline current
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: target/criterion
+          retention-days: 90
+
+      # Note: Criterion stores comparison data in target/criterion when a
+      # previous baseline exists. The cache step above restores it so each
+      # run can compare against the prior week. Regressions are visible in
+      # the Criterion HTML reports (uploaded as artifacts) and in the raw
+      # terminal output above.
+      #
+      # The 20% regression threshold is enforced by human review of the
+      # Criterion output, not by an automated gate. CI runner noise makes
+      # automated gating unreliable. If a future Criterion-based comparison
+      # tool is adopted, it can be added here.

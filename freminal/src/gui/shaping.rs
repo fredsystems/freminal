@@ -11,11 +11,12 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use conv2::{ConvUtil, ValueFrom};
 
 use freminal_common::buffer_states::{
-    fonts::{BlinkState, FontDecorations, FontWeight},
+    fonts::{BlinkState, FontDecorationFlags, FontWeight},
     format_tag::FormatTag,
     tchar::TChar,
 };
@@ -43,11 +44,11 @@ pub struct TextRun {
     /// The font weight from the format tag.
     pub font_weight: FontWeight,
     /// Font decorations (underline, strikethrough, etc.) from the format tag.
-    pub font_decorations: Vec<FontDecorations>,
+    pub font_decorations: FontDecorationFlags,
     /// Foreground color index (as-is from the `FormatTag`).
     pub colors: freminal_common::buffer_states::cursor::StateColors,
     /// URL associated with this run, if any.
-    pub url: Option<freminal_common::buffer_states::url::Url>,
+    pub url: Option<Arc<freminal_common::buffer_states::url::Url>>,
     /// The UTF-8 text content of this run, concatenated.
     pub text: String,
     /// Per-character column widths (1 for normal, 2 for wide, 0 for continuation).
@@ -88,11 +89,11 @@ pub struct ShapedRun {
     /// Font weight for this run.
     pub font_weight: FontWeight,
     /// Font decorations for this run.
-    pub font_decorations: Vec<FontDecorations>,
+    pub font_decorations: FontDecorationFlags,
     /// Colors for this run.
     pub colors: freminal_common::buffer_states::cursor::StateColors,
     /// URL for this run.
-    pub url: Option<freminal_common::buffer_states::url::Url>,
+    pub url: Option<Arc<freminal_common::buffer_states::url::Url>>,
     /// Blink state for all glyphs in this run.
     pub blink: BlinkState,
 }
@@ -106,11 +107,12 @@ pub struct ShapedLine {
 
 /// Per-line shaping cache.
 ///
-/// Stores `(content_hash, ShapedLine)` per row index.  On each snapshot, only
-/// re-shape rows whose content hash changed.
+/// Stores `(content_hash, Arc<ShapedLine>)` per row index.  On each snapshot,
+/// only re-shape rows whose content hash changed.  Cache hits return an `Arc`
+/// clone (refcount bump) instead of a deep clone.
 pub struct ShapingCache {
     /// Per-line cache: `(hash, shaped_line)`.
-    entries: Vec<Option<(u64, ShapedLine)>>,
+    entries: Vec<Option<(u64, Arc<ShapedLine>)>>,
 }
 
 impl Default for ShapingCache {
@@ -139,7 +141,8 @@ impl ShapingCache {
     /// `TerminalSnapshot`.  The function splits them into per-line segments,
     /// hashes each line, and only re-shapes lines whose hash changed.
     ///
-    /// Returns a `Vec<ShapedLine>` with one entry per visible line.
+    /// Returns a `Vec<Arc<ShapedLine>>` with one entry per visible line.
+    /// Cache hits are cheap `Arc` refcount bumps — no deep clone.
     pub fn shape_visible(
         &mut self,
         visible_chars: &[TChar],
@@ -148,7 +151,7 @@ impl ShapingCache {
         font_manager: &mut FontManager,
         cell_width: f32,
         ligatures: bool,
-    ) -> Vec<ShapedLine> {
+    ) -> Vec<Arc<ShapedLine>> {
         let lines = split_into_lines(visible_chars);
         let line_count = lines.len();
 
@@ -172,8 +175,8 @@ impl ShapingCache {
                 .and_then(|e| e.as_ref())
                 .filter(|(h, _)| *h == line_hash)
             {
-                // Cache hit — reuse.
-                shaped_line.clone()
+                // Cache hit — reuse via Arc refcount bump.
+                Arc::clone(shaped_line)
             } else {
                 // Cache miss — segment and shape.
                 let runs = segment_line(
@@ -184,8 +187,8 @@ impl ShapingCache {
                     font_manager,
                 );
                 let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
-                let shaped_line = ShapedLine { runs: shaped_runs };
-                self.entries[line_idx] = Some((line_hash, shaped_line.clone()));
+                let shaped_line = Arc::new(ShapedLine { runs: shaped_runs });
+                self.entries[line_idx] = Some((line_hash, Arc::clone(&shaped_line)));
                 shaped_line
             };
 
@@ -242,9 +245,9 @@ fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> 
                 0u8.hash(&mut hasher); // discriminant
                 b.hash(&mut hasher);
             }
-            TChar::Utf8(v) => {
+            TChar::Utf8(buf, len) => {
                 1u8.hash(&mut hasher);
-                v.hash(&mut hasher);
+                buf[..*len as usize].hash(&mut hasher);
             }
             TChar::Space => 2u8.hash(&mut hasher),
             TChar::NewLine => 3u8.hash(&mut hasher),
@@ -263,12 +266,11 @@ fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> 
         // This tag overlaps our line — hash its properties.
         tag.start.hash(&mut hasher);
         tag.end.hash(&mut hasher);
-        // Hash colors via Debug repr (StateColors doesn't impl Hash).
-        format!("{:?}", tag.colors).hash(&mut hasher);
-        format!("{:?}", tag.font_weight).hash(&mut hasher);
-        format!("{:?}", tag.font_decorations).hash(&mut hasher);
-        format!("{:?}", tag.url).hash(&mut hasher);
-        format!("{:?}", tag.blink).hash(&mut hasher);
+        tag.colors.hash(&mut hasher);
+        tag.font_weight.hash(&mut hasher);
+        tag.font_decorations.hash(&mut hasher);
+        tag.url.hash(&mut hasher);
+        tag.blink.hash(&mut hasher);
     }
 
     hasher.finish()
@@ -307,7 +309,7 @@ fn tag_at_position(tags: &[FormatTag], global_pos: usize) -> &FormatTag {
                 reverse_video: freminal_common::buffer_states::cursor::ReverseVideo::Off,
             },
             font_weight: FontWeight::Normal,
-            font_decorations: Vec::new(),
+            font_decorations: FontDecorationFlags::empty(),
             url: None,
             blink: freminal_common::buffer_states::fonts::BlinkState::None,
         };
@@ -345,7 +347,7 @@ fn segment_line(
     // Resolve first character.
     let first_char = tchar_to_char(&line_chars[0]);
     let first_tag = tag_at_position(tags, global_offset);
-    let first_style = GlyphStyle::from_format(&first_tag.font_weight, &first_tag.font_decorations);
+    let first_style = GlyphStyle::from_format(&first_tag.font_weight, first_tag.font_decorations);
     let (first_face, _) = font_manager.resolve_glyph(first_char, first_style);
     let first_width = line_chars[0].display_width();
 
@@ -362,7 +364,7 @@ fn segment_line(
         let ch = tchar_to_char(tch);
         let gpos = global_offset + i;
         let tag = tag_at_position(tags, gpos);
-        let style = GlyphStyle::from_format(&tag.font_weight, &tag.font_decorations);
+        let style = GlyphStyle::from_format(&tag.font_weight, tag.font_decorations);
         let (face, _) = font_manager.resolve_glyph(ch, style);
         let width = tch.display_width();
 
@@ -376,9 +378,9 @@ fn segment_line(
                 col_count: run_col_count,
                 face_id: current_face,
                 style: current_style,
-                font_weight: current_tag.font_weight.clone(),
-                font_decorations: current_tag.font_decorations.clone(),
-                colors: current_tag.colors.clone(),
+                font_weight: current_tag.font_weight,
+                font_decorations: current_tag.font_decorations,
+                colors: current_tag.colors,
                 url: current_tag.url.clone(),
                 text: std::mem::take(&mut run_text),
                 char_widths: std::mem::take(&mut run_char_widths),
@@ -405,9 +407,9 @@ fn segment_line(
             col_count: run_col_count,
             face_id: current_face,
             style: current_style,
-            font_weight: current_tag.font_weight.clone(),
-            font_decorations: current_tag.font_decorations.clone(),
-            colors: current_tag.colors.clone(),
+            font_weight: current_tag.font_weight,
+            font_decorations: current_tag.font_decorations,
+            colors: current_tag.colors,
             url: current_tag.url.clone(),
             text: run_text,
             char_widths: run_char_widths,
@@ -424,8 +426,8 @@ fn tchar_to_char(tch: &TChar) -> char {
         TChar::Ascii(b) => char::from(*b),
         TChar::Space => ' ',
         TChar::NewLine => '\n',
-        TChar::Utf8(v) => {
-            std::str::from_utf8(v)
+        TChar::Utf8(buf, len) => {
+            std::str::from_utf8(&buf[..*len as usize])
                 .ok()
                 .and_then(|s| s.chars().next())
                 .unwrap_or('\u{FFFD}') // replacement character
@@ -523,9 +525,9 @@ fn shape_single_run(
         glyphs,
         col_start: run.col_start,
         style: run.style,
-        font_weight: run.font_weight.clone(),
-        font_decorations: run.font_decorations.clone(),
-        colors: run.colors.clone(),
+        font_weight: run.font_weight,
+        font_decorations: run.font_decorations,
+        colors: run.colors,
         url: run.url.clone(),
         blink: run.blink,
     }

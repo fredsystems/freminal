@@ -2097,7 +2097,7 @@ mod flat_index_for_cell_tests {
         // Simulate a row with a wide character (display_width=2) followed by
         // a narrow character.  In the flat vec, the wide char is one TChar
         // entry but occupies 2 display columns.
-        let wide = TChar::Utf8("Ｗ".as_bytes().to_vec()); // fullwidth W, width=2
+        let wide = TChar::from('Ｗ'); // fullwidth W, width=2
         let chars = vec![wide, ascii('x')];
 
         // Display columns: 0-1 = 'Ｗ', 2 = 'x'
@@ -2115,8 +2115,8 @@ mod flat_index_for_cell_tests {
 
     #[test]
     fn multiple_wide_chars() {
-        let w1 = TChar::Utf8("Ｗ".as_bytes().to_vec()); // width 2
-        let w2 = TChar::Utf8("Ｘ".as_bytes().to_vec()); // width 2
+        let w1 = TChar::from('Ｗ'); // width 2
+        let w2 = TChar::from('Ｘ'); // width 2
         let chars = vec![w1, w2, ascii('z')];
 
         // Display layout: cols 0-1 = Ｗ, cols 2-3 = Ｘ, col 4 = z

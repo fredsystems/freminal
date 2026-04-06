@@ -118,6 +118,13 @@ pub struct Buffer {
     /// Cells reference images by ID via `ImagePlacement`; the actual pixel
     /// data lives here behind `Arc`s so snapshots can share it cheaply.
     image_store: ImageStore,
+
+    /// Total number of cells across all rows that carry an image placement.
+    ///
+    /// Maintained incrementally so `has_visible_images` / `has_any_image_cell`
+    /// can short-circuit in O(1) when no images are present (the overwhelmingly
+    /// common case).
+    image_cell_count: usize,
 }
 
 /// Snapshot of the primary buffer state saved when entering the alternate screen.
@@ -145,6 +152,23 @@ pub struct SavedPrimaryState {
     pub saved_cursor: Option<CursorState>,
     /// Saved image store from the primary buffer.
     pub image_store: ImageStore,
+    /// Saved image cell count from the primary buffer.
+    pub image_cell_count: usize,
+}
+
+/// Compute the number of screen columns that `text` will occupy when
+/// inserted starting at column `col`, clamped so as not to exceed
+/// `wrap_col`.  Wide characters (`display_width` = 2) count for 2 columns.
+fn text_col_span(text: &[TChar], col: usize, wrap_col: usize) -> usize {
+    let mut span = 0usize;
+    for t in text {
+        let w = t.display_width().max(1);
+        if col + span + w > wrap_col {
+            break;
+        }
+        span += w;
+    }
+    span
 }
 
 impl Buffer {
@@ -190,6 +214,7 @@ impl Buffer {
             tab_stops: Self::default_tab_stops(width),
             decom_enabled: Decom::NormalCursor,
             image_store: ImageStore::new(),
+            image_cell_count: 0,
         }
     }
 
@@ -233,6 +258,7 @@ impl Buffer {
         self.tab_stops = Self::default_tab_stops(self.width);
         self.decom_enabled = Decom::NormalCursor;
         self.image_store.clear();
+        self.image_cell_count = 0;
     }
 
     /// The maximum number of off-screen rows retained above the visible area.
@@ -327,6 +353,15 @@ impl Buffer {
             self.row_cache.len(),
             self.rows.len()
         );
+
+        // Image cell count must match the actual number of image cells across
+        // all rows.  This is O(rows × cols) but only runs in debug builds.
+        let actual_image_cells: usize = self.rows.iter().map(Row::count_image_cells).sum();
+        debug_assert_eq!(
+            self.image_cell_count, actual_image_cells,
+            "image_cell_count {} != actual image cells {}",
+            self.image_cell_count, actual_image_cells
+        );
     }
 
     // In release builds this is a no-op, so we can call it freely.
@@ -389,7 +424,15 @@ impl Buffer {
         tag: FormatTag,
     ) {
         if row_idx < self.rows.len() {
+            // Check if the old cell already had an image (avoid double-counting).
+            let had_image = self.rows[row_idx]
+                .cells()
+                .get(col_idx)
+                .is_some_and(Cell::has_image);
             self.rows[row_idx].set_image_cell(col_idx, placement, tag);
+            if !had_image {
+                self.image_cell_count += 1;
+            }
             if row_idx < self.row_cache.len() {
                 self.row_cache[row_idx] = None;
             }
@@ -442,6 +485,20 @@ impl Buffer {
         let end = start + h;
 
         &self.rows[start.min(total)..end.min(total)]
+    }
+
+    /// Reset an existing row at `row_idx` to a soft-wrap continuation and update
+    /// `image_cell_count` for the cells being discarded.
+    ///
+    /// Called from `insert_text` whenever a new wrap causes an already-populated
+    /// row to be recycled as a continuation line.
+    fn reuse_row_as_softwrap(&mut self, row_idx: usize) {
+        let row = &mut self.rows[row_idx];
+        self.image_cell_count -= row.count_image_cells();
+        row.origin = RowOrigin::SoftWrap;
+        row.join = RowJoin::ContinueLogicalLine;
+        row.clear();
+        self.row_cache[row_idx] = None;
     }
 
     /// Insert `text` at the current cursor position, soft-wrapping as needed.
@@ -510,11 +567,7 @@ impl Buffer {
                         self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
                     } else {
                         // reuse existing row as a soft-wrap continuation
-                        let row = &mut self.rows[row_idx];
-                        row.origin = RowOrigin::SoftWrap;
-                        row.join = RowJoin::ContinueLogicalLine;
-                        row.clear();
-                        self.row_cache[row_idx] = None;
+                        self.reuse_row_as_softwrap(row_idx);
                     }
                 }
 
@@ -556,12 +609,28 @@ impl Buffer {
             // │ ALL cells of that image across the entire   │
             // │ buffer — images are atomic; overwriting any  │
             // │ part destroys the whole image.               │
+            // │                                              │
+            // │ We must compute the column span from display │
+            // │ widths, not TChar count, because wide chars  │
+            // │ (display_width=2) occupy 2 columns each.     │
+            // │ Clamp to wrap_col so we don't scan past the  │
+            // │ columns insert_text_with_limit will write.   │
             // └─────────────────────────────────────────────┘
-            self.clear_images_overwritten_by_text(row_idx, col, text.len() - start);
+            let col_span = text_col_span(&text[start..], col, wrap_col);
+            self.clear_images_overwritten_by_text(row_idx, col, col_span);
+
+            // Count Kitty images that survived the sweep and will be
+            // overwritten by the text insertion below.
+            let kitty_images_in_range = if self.image_cell_count > 0 {
+                self.rows[row_idx].count_image_cells_in_range(col, col + col_span)
+            } else {
+                0
+            };
 
             // ┌─────────────────────────────────────────────┐
             // │ Try to insert into this row (up to wrap_col)│
             // └─────────────────────────────────────────────┘
+            self.image_cell_count -= kitty_images_in_range;
             match self.rows[row_idx].insert_text_with_limit(col, &text[start..], &tag, wrap_col) {
                 InsertResponse::Consumed(final_col) => {
                     // All text fit on this row.
@@ -610,11 +679,7 @@ impl Buffer {
                             self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
                         } else {
                             // reuse existing row as continuation
-                            let row = &mut self.rows[row_idx];
-                            row.origin = RowOrigin::SoftWrap;
-                            row.join = RowJoin::ContinueLogicalLine;
-                            row.clear();
-                            self.row_cache[row_idx] = None;
+                            self.reuse_row_as_softwrap(row_idx);
                         }
                     }
 
@@ -896,6 +961,10 @@ impl Buffer {
         // the entire cache is invalid.  Reset it to match the new row count.
         self.row_cache = vec![None; self.rows.len()];
         self.width = new_width;
+        // Reflow rebuilds all rows from scratch; recount image cells so the
+        // counter stays accurate regardless of how reflow may have clipped or
+        // merged cells.
+        self.image_cell_count = self.rows.iter().map(Row::count_image_cells).sum();
 
         // 4) Ensure cursor is in bounds (scroll_offset is always reset to 0 by the
         //    caller after a reflow — returned from set_size).
@@ -936,6 +1005,12 @@ impl Buffer {
                 // scroll_region_top/bottom directly without an offset).
                 let excess = self.rows.len().saturating_sub(new_height);
                 if excess > 0 {
+                    // Account for image cells in the drained rows.
+                    if self.image_cell_count > 0 {
+                        let drained_images: usize =
+                            self.rows[..excess].iter().map(Row::count_image_cells).sum();
+                        self.image_cell_count -= drained_images;
+                    }
                     self.rows.drain(0..excess);
                     self.row_cache.drain(0..excess);
                     // Adjust cursor Y for the removed rows.
@@ -1010,6 +1085,14 @@ impl Buffer {
         let adjusted_offset = scroll_offset.saturating_sub(overflow);
 
         // --- Drop the oldest rows (and their cache entries) ---
+        // First, account for any image cells in the rows being drained.
+        if self.image_cell_count > 0 {
+            let drained_images: usize = self.rows[..overflow]
+                .iter()
+                .map(Row::count_image_cells)
+                .sum();
+            self.image_cell_count -= drained_images;
+        }
         self.rows.drain(0..overflow);
         self.row_cache.drain(0..overflow);
 
@@ -1207,6 +1290,7 @@ impl Buffer {
         let default_tag = FormatTag::default();
         let e_chars: Vec<TChar> = vec![TChar::Ascii(b'E'); self.width];
         for i in visible_start..visible_end.min(self.rows.len()) {
+            self.image_cell_count -= self.rows[i].count_image_cells();
             self.rows[i].clear();
             self.rows[i].insert_text(0, &e_chars, &default_tag);
             // Invalidate row cache
@@ -1284,6 +1368,7 @@ impl Buffer {
                             // Cursor was at the bottom of the visible window and the
                             // next slot already has content from old scrollback — this
                             // is the newly-scrolled-in line, so wipe it.
+                            self.image_cell_count -= row.count_image_cells();
                             row.origin = RowOrigin::HardBreak;
                             row.join = RowJoin::NewLogicalLine;
                             row.clear();
@@ -1583,6 +1668,24 @@ impl Buffer {
             return;
         }
 
+        // Sweep any image cells in the range that will be shifted off the right
+        // edge before the insert happens.  Cells shifted past the right margin
+        // are discarded, so we must update image_cell_count now.
+        let remaining_images = if self.image_cell_count > 0 {
+            let right = if self.declrmm_enabled == Declrmm::Enabled {
+                self.scroll_region_right + 1
+            } else {
+                self.width
+            };
+            self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(right));
+            // Count Kitty images that survived the sweep in the cells that
+            // will overflow past the right edge when we insert `n` blanks.
+            let overflow_start = right.saturating_sub(n).max(col);
+            self.rows[row].count_image_cells_in_range(overflow_start, right)
+        } else {
+            0
+        };
+
         let tag = self.current_tag.clone();
         if self.declrmm_enabled == Declrmm::Enabled {
             // ICH: shift only within [col, scroll_region_right]; cells that
@@ -1597,6 +1700,7 @@ impl Buffer {
             self.rows[row].insert_spaces_at(col, n, &tag);
         }
 
+        self.image_cell_count -= remaining_images;
         // Cursor does NOT move for ICH
     }
 
@@ -1621,6 +1725,21 @@ impl Buffer {
             return;
         }
 
+        // Sweep image cells in the range being deleted before the row-level
+        // operation removes them without updating image_cell_count.
+        let remaining_images = if self.image_cell_count > 0 {
+            let end_col = if self.declrmm_enabled == Declrmm::Enabled {
+                (col + n).min(self.scroll_region_right + 1)
+            } else {
+                col + n
+            };
+            self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(end_col));
+            // Count Kitty images that survived the sweep in the deleted range.
+            self.rows[row].count_image_cells_in_range(col, end_col)
+        } else {
+            0
+        };
+
         if self.declrmm_enabled == Declrmm::Enabled {
             self.rows[row].delete_cells_at_with_right_limit(
                 col,
@@ -1632,6 +1751,7 @@ impl Buffer {
             self.rows[row].delete_cells_at(col, n);
         }
 
+        self.image_cell_count -= remaining_images;
         self.debug_assert_invariants();
     }
 
@@ -1662,11 +1782,19 @@ impl Buffer {
             n
         };
 
-        // Sweep image cells that are about to be erased.
+        // Sweep image cells that are about to be erased (non-Kitty images).
         self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(col + effective_n));
+
+        // Count remaining image cells (e.g. Kitty) in the range being erased.
+        let remaining = if self.image_cell_count > 0 {
+            self.rows[row].count_image_cells_in_range(col, col + effective_n)
+        } else {
+            0
+        };
 
         let tag = self.current_tag.clone();
         self.rows[row].erase_cells_at(col, effective_n, &tag);
+        self.image_cell_count -= remaining;
 
         self.debug_assert_invariants();
     }
@@ -1836,8 +1964,16 @@ impl Buffer {
     /// Returns `true` if any cell in the visible window carries an image
     /// placement.  Used by `build_snapshot` to cheaply decide whether to
     /// include image data in the snapshot.
+    ///
+    /// Short-circuits in O(1) when the buffer has no image cells at all
+    /// (the overwhelmingly common case).
     #[must_use]
     pub fn has_visible_images(&self, scroll_offset: usize) -> bool {
+        // Fast path: no image cells anywhere in the buffer.
+        if self.image_cell_count == 0 {
+            return false;
+        }
+
         if self.rows.is_empty() || self.height == 0 {
             return false;
         }
@@ -1973,6 +2109,10 @@ impl Buffer {
             self.row_cache[row_idx] = self.row_cache[row_idx + 1].take();
         }
 
+        // The original rows[last] was not shifted (the loop only copies
+        // rows[row_idx+1] into rows[row_idx] for row_idx in first..last).
+        // It is now replaced with a blank row; deduct any image cells it held.
+        self.image_cell_count -= self.rows[last].count_image_cells();
         self.rows[last] = Row::new(self.width);
         // New blank row at `last` — no cached representation yet.
         self.row_cache[last] = None;
@@ -1995,6 +2135,10 @@ impl Buffer {
             self.row_cache[row_idx] = self.row_cache[row_idx - 1].take();
         }
 
+        // The original rows[first] was not shifted (the loop only copies
+        // rows[row_idx-1] into rows[row_idx] for row_idx in first+1..=last).
+        // It is now replaced with a blank row; deduct any image cells it held.
+        self.image_cell_count -= self.rows[first].count_image_cells();
         self.rows[first] = Row::new(self.width);
         // New blank row at `first` — no cached representation yet.
         self.row_cache[first] = None;
@@ -2014,6 +2158,27 @@ impl Buffer {
         if first >= last || last >= self.rows.len() || left_col > right_col {
             return;
         }
+        // Sweep image cells in the destination columns [left_col, right_col] across
+        // all rows [first, last] before any cells are overwritten or erased.
+        // This covers both the copy-overwrite path (rows first..last) and the
+        // final erase on rows[last].
+        //
+        // After the sweep, count remaining image cells (e.g. Kitty) in the
+        // affected range before the copy/erase so we can compute the net
+        // change after the operation.
+        let images_before = if self.image_cell_count > 0 {
+            self.collect_and_clear_image_ids_in_rows(
+                first,
+                last + 1,
+                Some(left_col),
+                Some(right_col + 1),
+            );
+            (first..=last)
+                .map(|i| self.rows[i].count_image_cells_in_range(left_col, right_col + 1))
+                .sum::<usize>()
+        } else {
+            0
+        };
         let tag = self.current_tag.clone();
         for row_idx in first..last {
             // Copy cells [left_col, right_col] from row_idx+1 into row_idx.
@@ -2043,6 +2208,14 @@ impl Buffer {
         let row = &mut self.rows[last];
         row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
         self.row_cache[last] = None;
+
+        // Adjust image_cell_count for any images lost during the shift/erase.
+        if images_before > 0 {
+            let images_after: usize = (first..=last)
+                .map(|i| self.rows[i].count_image_cells_in_range(left_col, right_col + 1))
+                .sum();
+            self.image_cell_count -= images_before.saturating_sub(images_after);
+        }
     }
 
     /// Column-selective scroll-down: shifts cells within `[left_col, right_col]`
@@ -2059,6 +2232,23 @@ impl Buffer {
         if first >= last || last >= self.rows.len() || left_col > right_col {
             return;
         }
+        // Sweep image cells in the destination columns [left_col, right_col] across
+        // all rows [first, last] before any cells are overwritten or erased.
+        // This covers both the copy-overwrite path (rows first+1..=last) and the
+        // final erase on rows[first].
+        let images_before = if self.image_cell_count > 0 {
+            self.collect_and_clear_image_ids_in_rows(
+                first,
+                last + 1,
+                Some(left_col),
+                Some(right_col + 1),
+            );
+            (first..=last)
+                .map(|i| self.rows[i].count_image_cells_in_range(left_col, right_col + 1))
+                .sum::<usize>()
+        } else {
+            0
+        };
         let tag = self.current_tag.clone();
         for row_idx in (first + 1..=last).rev() {
             // Copy cells [left_col, right_col] from row_idx-1 into row_idx.
@@ -2087,6 +2277,14 @@ impl Buffer {
         let row = &mut self.rows[first];
         row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
         self.row_cache[first] = None;
+
+        // Adjust image_cell_count for any images lost during the shift/erase.
+        if images_before > 0 {
+            let images_after: usize = (first..=last)
+                .map(|i| self.rows[i].count_image_cells_in_range(left_col, right_col + 1))
+                .sum();
+            self.image_cell_count -= images_before.saturating_sub(images_after);
+        }
     }
 
     // ----------------------------------------------------------
@@ -2146,6 +2344,8 @@ impl Buffer {
     ///
     /// In the primary buffer the cursor row index is also decremented to follow the visible window.
     pub fn scroll_up(&mut self) {
+        // Deduct any image cells in the row about to be removed.
+        self.image_cell_count -= self.rows[0].count_image_cells();
         // remove topmost row (and its cache entry)
         self.rows.remove(0);
         self.row_cache.remove(0);
@@ -2271,8 +2471,22 @@ impl Buffer {
         let visible_start = self.visible_window_start(0);
         let visible_end = visible_start + self.height;
 
-        // Sweep image cells that are about to be erased.
+        // Sweep image cells that are about to be erased (clears non-Kitty
+        // images buffer-wide and decrements image_cell_count for them).
         self.collect_and_clear_image_ids_in_rows(cursor_y, visible_end, Some(cursor_x), None);
+
+        // Count any remaining image cells (e.g. Kitty images) that survived the
+        // sweep but will be destroyed by the row-level clear operations below.
+        let mut remaining_images = 0usize;
+        if self.image_cell_count > 0 {
+            if cursor_y < self.rows.len() {
+                remaining_images +=
+                    self.rows[cursor_y].count_image_cells_in_range(cursor_x, self.width);
+            }
+            for i in (cursor_y + 1)..visible_end.min(self.rows.len()) {
+                remaining_images += self.rows[i].count_image_cells();
+            }
+        }
 
         // Clear from cursor to end of current row
         if cursor_y < self.rows.len() {
@@ -2286,6 +2500,7 @@ impl Buffer {
             self.rows[i].clear_with_tag(&tag);
         }
 
+        self.image_cell_count -= remaining_images;
         self.debug_assert_invariants();
     }
 
@@ -2297,10 +2512,23 @@ impl Buffer {
         // PTY always operates at live bottom (scroll_offset = 0)
         let visible_start = self.visible_window_start(0);
 
-        // Sweep image cells that are about to be erased.
+        // Sweep image cells that are about to be erased (clears non-Kitty
+        // images buffer-wide and decrements image_cell_count for them).
         // First row being erased starts at col 0; the cursor row is erased
         // from col 0..=cursor_x.  For simplicity, sweep the entire row range.
         self.collect_and_clear_image_ids_in_rows(visible_start, cursor_y + 1, None, None);
+
+        // Count any remaining image cells (e.g. Kitty images) that survived the
+        // sweep but will be destroyed by the row-level clear operations below.
+        let mut remaining_images = 0usize;
+        if self.image_cell_count > 0 {
+            for i in visible_start..cursor_y.min(self.rows.len()) {
+                remaining_images += self.rows[i].count_image_cells();
+            }
+            if cursor_y < self.rows.len() {
+                remaining_images += self.rows[cursor_y].count_image_cells_in_range(0, cursor_x + 1);
+            }
+        }
 
         // Clear all rows above cursor in the visible window
         for i in visible_start..cursor_y.min(self.rows.len()) {
@@ -2314,6 +2542,7 @@ impl Buffer {
             self.rows[cursor_y].clear_to(cursor_x + 1, &tag);
         }
 
+        self.image_cell_count -= remaining_images;
         self.debug_assert_invariants();
     }
 
@@ -2323,14 +2552,25 @@ impl Buffer {
         let visible_start = self.visible_window_start(0);
         let visible_end = visible_start + self.height;
 
-        // Sweep image cells that are about to be erased.
+        // Sweep image cells that are about to be erased (clears non-Kitty
+        // images buffer-wide and decrements image_cell_count for them).
         self.collect_and_clear_image_ids_in_rows(visible_start, visible_end, None, None);
+
+        // Count any remaining image cells (e.g. Kitty images) that survived
+        // the sweep but will be destroyed by the row-level clear below.
+        let mut remaining_images = 0usize;
+        if self.image_cell_count > 0 {
+            for i in visible_start..visible_end.min(self.rows.len()) {
+                remaining_images += self.rows[i].count_image_cells();
+            }
+        }
 
         for i in visible_start..visible_end.min(self.rows.len()) {
             let tag = self.current_tag.clone();
             self.rows[i].clear_with_tag(&tag);
         }
 
+        self.image_cell_count -= remaining_images;
         self.debug_assert_invariants();
     }
 
@@ -2345,6 +2585,14 @@ impl Buffer {
 
         // Remove all scrollback rows (everything before visible window)
         if visible_start > 0 {
+            // Account for image cells in the drained scrollback rows.
+            if self.image_cell_count > 0 {
+                let drained_images: usize = self.rows[..visible_start]
+                    .iter()
+                    .map(Row::count_image_cells)
+                    .sum();
+                self.image_cell_count -= drained_images;
+            }
             self.rows.drain(0..visible_start);
             self.row_cache.drain(0..visible_start);
 
@@ -2369,11 +2617,19 @@ impl Buffer {
         let cursor_x = self.cursor.pos.x;
 
         if cursor_y < self.rows.len() {
-            // Sweep image cells that are about to be erased.
+            // Sweep image cells that are about to be erased (non-Kitty images).
             self.collect_and_clear_image_ids_in_rows(cursor_y, cursor_y + 1, Some(cursor_x), None);
+
+            // Count remaining image cells (e.g. Kitty) in the range being cleared.
+            let remaining = if self.image_cell_count > 0 {
+                self.rows[cursor_y].count_image_cells_in_range(cursor_x, self.width)
+            } else {
+                0
+            };
 
             let tag = self.current_tag.clone();
             self.rows[cursor_y].clear_from(cursor_x, &tag);
+            self.image_cell_count -= remaining;
         }
 
         self.debug_assert_invariants();
@@ -2385,11 +2641,19 @@ impl Buffer {
         let cursor_x = self.cursor.pos.x;
 
         if cursor_y < self.rows.len() {
-            // Sweep image cells that are about to be erased.
+            // Sweep image cells that are about to be erased (non-Kitty images).
             self.collect_and_clear_image_ids_in_rows(cursor_y, cursor_y + 1, None, None);
+
+            // Count remaining image cells (e.g. Kitty) in the range being cleared.
+            let remaining = if self.image_cell_count > 0 {
+                self.rows[cursor_y].count_image_cells_in_range(0, cursor_x + 1)
+            } else {
+                0
+            };
 
             let tag = self.current_tag.clone();
             self.rows[cursor_y].clear_to(cursor_x + 1, &tag);
+            self.image_cell_count -= remaining;
         }
 
         self.debug_assert_invariants();
@@ -2400,11 +2664,19 @@ impl Buffer {
         let cursor_y = self.cursor.pos.y;
 
         if cursor_y < self.rows.len() {
-            // Sweep image cells that are about to be erased.
+            // Sweep image cells that are about to be erased (non-Kitty images).
             self.collect_and_clear_image_ids_in_rows(cursor_y, cursor_y + 1, None, None);
+
+            // Count remaining image cells (e.g. Kitty) in the row.
+            let remaining = if self.image_cell_count > 0 {
+                self.rows[cursor_y].count_image_cells()
+            } else {
+                0
+            };
 
             let tag = self.current_tag.clone();
             self.rows[cursor_y].clear_with_tag(&tag);
+            self.image_cell_count -= remaining;
         }
 
         self.debug_assert_invariants();
@@ -2508,9 +2780,9 @@ impl Buffer {
                     let rebased = FormatTag {
                         start: global_offset + row_tag.start,
                         end: global_offset + row_tag.end,
-                        colors: row_tag.colors.clone(),
-                        font_weight: row_tag.font_weight.clone(),
-                        font_decorations: row_tag.font_decorations.clone(),
+                        colors: row_tag.colors,
+                        font_weight: row_tag.font_weight,
+                        font_decorations: row_tag.font_decorations,
                         url: row_tag.url.clone(),
                         blink: row_tag.blink,
                     };
@@ -2590,7 +2862,7 @@ impl Buffer {
             }
 
             let byte_pos = chars.len();
-            chars.push(cell.tchar().clone());
+            chars.push(*cell.tchar());
 
             let cell_tag = cell.tag();
             if let Some(last) = tags.last_mut() {
@@ -2600,9 +2872,9 @@ impl Buffer {
                     tags.push(FormatTag {
                         start: byte_pos,
                         end: byte_pos + 1,
-                        colors: cell_tag.colors.clone(),
-                        font_weight: cell_tag.font_weight.clone(),
-                        font_decorations: cell_tag.font_decorations.clone(),
+                        colors: cell_tag.colors,
+                        font_weight: cell_tag.font_weight,
+                        font_decorations: cell_tag.font_decorations,
                         url: cell_tag.url.clone(),
                         blink: cell_tag.blink,
                     });
@@ -2611,9 +2883,9 @@ impl Buffer {
                 tags.push(FormatTag {
                     start: byte_pos,
                     end: byte_pos + 1,
-                    colors: cell_tag.colors.clone(),
-                    font_weight: cell_tag.font_weight.clone(),
-                    font_decorations: cell_tag.font_decorations.clone(),
+                    colors: cell_tag.colors,
+                    font_weight: cell_tag.font_weight,
+                    font_decorations: cell_tag.font_decorations,
                     url: cell_tag.url.clone(),
                     blink: cell_tag.blink,
                 });
@@ -2838,6 +3110,7 @@ impl Buffer {
             scroll_region_right: self.scroll_region_right,
             saved_cursor: self.saved_cursor.clone(),
             image_store: self.image_store.clone(),
+            image_cell_count: self.image_cell_count,
         };
         self.saved_primary = Some(saved);
 
@@ -2850,6 +3123,7 @@ impl Buffer {
 
         // Alternate screen has no images.
         self.image_store.clear();
+        self.image_cell_count = 0;
 
         // Reset cursor for the alternate screen.
         self.cursor = CursorState::default();
@@ -2890,6 +3164,7 @@ impl Buffer {
             self.scroll_region_right = saved.scroll_region_right;
             self.saved_cursor = saved.saved_cursor;
             self.image_store = saved.image_store;
+            self.image_cell_count = saved.image_cell_count;
 
             self.debug_assert_invariants();
             restored_offset
@@ -2916,11 +3191,13 @@ impl Buffer {
 
     /// Clear all image placements from every cell in the buffer.
     pub fn clear_all_image_placements(&mut self) {
+        let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell.has_image() {
                     cell.clear_image();
+                    cleared += 1;
                     changed = true;
                 }
             }
@@ -2931,10 +3208,12 @@ impl Buffer {
                 }
             }
         }
+        self.image_cell_count -= cleared;
     }
 
     /// Clear all image placements for a specific image ID from every cell.
     pub fn clear_image_placements_by_id(&mut self, image_id: u64) {
+        let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
             let mut changed = false;
             for cell in row.cells_mut() {
@@ -2943,6 +3222,7 @@ impl Buffer {
                     .is_some_and(|p| p.image_id == image_id)
                 {
                     cell.clear_image();
+                    cleared += 1;
                     changed = true;
                 }
             }
@@ -2953,6 +3233,7 @@ impl Buffer {
                 }
             }
         }
+        self.image_cell_count -= cleared;
     }
 
     /// Clear image placements at the current cursor row and all rows after.
@@ -2962,12 +3243,14 @@ impl Buffer {
     /// the buffer.
     pub fn clear_image_placements_at_cursor_and_after(&mut self) {
         let start_row = self.cursor.pos.y;
+        let mut cleared = 0usize;
         for i in start_row..self.rows.len() {
             let row = &mut self.rows[i];
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell.has_image() {
                     cell.clear_image();
+                    cleared += 1;
                     changed = true;
                 }
             }
@@ -2978,6 +3261,7 @@ impl Buffer {
                 }
             }
         }
+        self.image_cell_count -= cleared;
     }
 
     /// Clear image placements at the current cursor position only (single row).
@@ -2987,31 +3271,33 @@ impl Buffer {
             return;
         }
         let row = &mut self.rows[row_idx];
-        let mut changed = false;
+        let mut cleared = 0usize;
         for cell in row.cells_mut() {
             if cell.has_image() {
                 cell.clear_image();
-                changed = true;
+                cleared += 1;
             }
         }
-        if changed {
+        if cleared > 0 {
             row.dirty = true;
             if row_idx < self.row_cache.len() {
                 self.row_cache[row_idx] = None;
             }
+            self.image_cell_count -= cleared;
         }
     }
 
     /// Returns `true` if any cell in the buffer has an image placement.
+    ///
+    /// O(1) — backed by the `image_cell_count` counter.
     #[must_use]
-    pub fn has_any_image_cell(&self) -> bool {
-        self.rows
-            .iter()
-            .any(|row| row.cells().iter().any(Cell::has_image))
+    pub const fn has_any_image_cell(&self) -> bool {
+        self.image_cell_count > 0
     }
 
     /// Clear all image placements whose Kitty image number matches `number`.
     pub fn clear_image_placements_by_number(&mut self, number: u32) {
+        let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
             let mut changed = false;
             for cell in row.cells_mut() {
@@ -3020,6 +3306,7 @@ impl Buffer {
                     .is_some_and(|p| p.image_number == Some(number))
                 {
                     cell.clear_image();
+                    cleared += 1;
                     changed = true;
                 }
             }
@@ -3030,6 +3317,7 @@ impl Buffer {
                 }
             }
         }
+        self.image_cell_count -= cleared;
     }
 
     /// Clear image placements at a specific cell position.
@@ -3111,11 +3399,13 @@ impl Buffer {
 
     /// Clear all image placements with the given z-index.
     pub fn clear_image_placements_by_z_index(&mut self, z: i32) {
+        let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell.image_placement().is_some_and(|p| p.z_index == z) {
                     cell.clear_image();
+                    cleared += 1;
                     changed = true;
                 }
             }
@@ -3126,6 +3416,7 @@ impl Buffer {
                 }
             }
         }
+        self.image_cell_count -= cleared;
     }
     /// would overwrite any image cells.  If so, clear **all** cells of each
     /// affected image across the entire buffer.
@@ -3257,6 +3548,7 @@ impl Buffer {
                     && cell.has_image()
                 {
                     cell.clear_image();
+                    self.image_cell_count -= 1;
                     changed = true;
                 }
             }
@@ -3296,6 +3588,7 @@ impl Buffer {
                 self.row_cache[target_row] = None;
             }
 
+            let mut placed_count = 0usize;
             for img_col in 0..effective_cols {
                 let col = start_col + img_col;
                 if col >= self.width {
@@ -3311,7 +3604,9 @@ impl Buffer {
                     z_index,
                 };
                 row.set_image_cell(col, placement, self.current_tag.clone());
+                placed_count += 1;
             }
+            self.image_cell_count += placed_count;
         }
 
         // Enforce scrollback limit — this may drain rows from the top.
@@ -4456,8 +4751,8 @@ mod insert_space_tests {
                     TChar::Ascii(b) => *b as char,
                     TChar::Space => ' ',
                     TChar::NewLine => '⏎',
-                    TChar::Utf8(v) => {
-                        let s = String::from_utf8_lossy(&v[..]);
+                    TChar::Utf8(buf, len) => {
+                        let s = String::from_utf8_lossy(&buf[..*len as usize]);
                         s.chars().next().unwrap_or('�')
                     }
                 }
@@ -4579,7 +4874,10 @@ mod dch_tests {
                     TChar::Ascii(b) => *b as char,
                     TChar::Space => ' ',
                     TChar::NewLine => '\n',
-                    TChar::Utf8(v) => String::from_utf8_lossy(v).chars().next().unwrap_or('?'),
+                    TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize])
+                        .chars()
+                        .next()
+                        .unwrap_or('?'),
                 }
             })
             .collect()
@@ -4653,7 +4951,7 @@ mod dch_tests {
     fn dch_wide_head() {
         // Width 10; insert the wide char "あ" (display width 2) followed by "BC".
         // Cursor at col 0, delete 1 → head + continuation gone, "BC" shifts left.
-        let wide = TChar::Utf8("あ".as_bytes().to_vec());
+        let wide = TChar::from('あ');
         let mut buf = Buffer::new(10, 5);
         buf.insert_text(&[wide, a('B'), a('C')]);
         buf.cursor.pos.x = 0;
@@ -4688,7 +4986,10 @@ mod ech_tests {
                     TChar::Ascii(b) => *b as char,
                     TChar::Space => ' ',
                     TChar::NewLine => '\n',
-                    TChar::Utf8(v) => String::from_utf8_lossy(v).chars().next().unwrap_or('?'),
+                    TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize])
+                        .chars()
+                        .next()
+                        .unwrap_or('?'),
                 }
             })
             .collect()
@@ -5465,7 +5766,7 @@ mod visible_as_tchars_and_tags_tests {
                 TChar::Ascii(b) => (*b as char).to_string(),
                 TChar::Space => " ".to_string(),
                 TChar::NewLine => "\n".to_string(),
-                TChar::Utf8(v) => String::from_utf8_lossy(v).to_string(),
+                TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize]).to_string(),
             })
             .collect()
     }
@@ -5620,7 +5921,7 @@ mod visible_as_tchars_and_tags_tests {
         // it exactly once (continuation cells must be skipped).
         let mut buf = Buffer::new(80, 5);
         // "あ" is a 2-column wide character — build the TChar directly to avoid fallible ops.
-        let wide_tchar = TChar::Utf8("あ".as_bytes().to_vec());
+        let wide_tchar = TChar::from('あ');
         buf.insert_text(std::slice::from_ref(&wide_tchar));
 
         let (chars, _tags) = buf.visible_as_tchars_and_tags(0);
@@ -6492,7 +6793,7 @@ mod extract_text_tests {
         // Wide characters produce a continuation cell that should be skipped.
         let mut buf = Buffer::new(10, 3);
         // Insert a UTF-8 wide character (e.g. "Ｗ" = fullwidth W, U+FF37).
-        let wide_char = TChar::Utf8("Ｗ".as_bytes().to_vec());
+        let wide_char = TChar::from('Ｗ');
         let chars = vec![wide_char, ascii('x')];
         buf.insert_text(&chars);
 

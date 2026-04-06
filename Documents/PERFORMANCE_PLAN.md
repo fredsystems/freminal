@@ -901,6 +901,68 @@ A static screen (PTY idle, cursor only) now costs essentially nothing to snapsho
 - Buffer insert/resize: **up to 37x faster** (large-line insert, height shrink, reflow)
 - ArcSwap store+load overhead: ~70 ns total, load-only ~8 ns — confirms lock-free design cost is negligible
 
+**Task 24 baseline (30 benchmarks — recorded after new benchmarks added + fragile fixes):**
+
+Environment: AMD Ryzen 9 9950X 16-Core, 32 threads, Linux 6.19.9 NixOS.
+Baseline saved per-crate via `--save-baseline current`.
+
+**`freminal-buffer` (`buffer_row_bench.rs`) — 17 benchmarks:**
+
+| Benchmark                                                    | Time      | Throughput    | Notes             |
+| ------------------------------------------------------------ | --------- | ------------- | ----------------- |
+| `buffer_insert_large_line/insert_full/500000`                | ~504 ms   | ~992 Kelem/s  |                   |
+| `buffer_insert_chunks/insert_chunks_1000/500`                | ~514 ms   | ~973 Kelem/s  |                   |
+| `buffer_resize/reflow_width/40`                              | ~269 µs   | —             | Fixed: setup-free |
+| `buffer_resize/shrink_height/20`                             | ~22.1 µs  | —             | Fixed: setup-free |
+| `softwrap_heavy/wrap_long_line_to_width_10`                  | ~309 µs   | —             |                   |
+| `bench_visible_flatten/visible_200x50`                       | ~8.92 µs  | ~1.12 Gelem/s |                   |
+| `bench_scrollback_flatten/scrollback_1024_rows`              | ~1.99 ns  | —             |                   |
+| `bench_insert_with_color_changes/color_change_every_8_chars` | ~147 µs   | ~27.2 Melem/s |                   |
+| `bench_cursor_ops/cup_then_data_24x80`                       | ~61.1 µs  | ~31.4 Melem/s |                   |
+| `bench_lf_heavy/lf_4100_times`                               | ~17.3 ms  | ~237 Kelem/s  |                   |
+| `bench_erase_display/erase_to_end_of_display_80x24`          | ~26.8 µs  | —             |                   |
+| `bench_scrollback_render/offset_0`                           | ~2.42 µs  | —             | **NEW** (24.1)    |
+| `bench_scrollback_render/offset_1000`                        | ~2.46 µs  | —             | **NEW** (24.1)    |
+| `bench_scrollback_render/offset_4000`                        | ~2.45 µs  | —             | **NEW** (24.1)    |
+| `bench_alternate_screen_switch/enter_alternate`              | ~31.4 µs  | —             | **NEW** (24.1)    |
+| `bench_alternate_screen_switch/leave_alternate`              | ~18.2 µs  | —             | **NEW** (24.1)    |
+| `bench_erase_display_full/erase_display_200x50`              | ~139.8 µs | —             | **NEW** (24.1)    |
+
+**`freminal-terminal-emulator` (`buffer_benches.rs`) — 10 benchmarks:**
+
+| Benchmark                                                            | Time     | Throughput    | Notes          |
+| -------------------------------------------------------------------- | -------- | ------------- | -------------- |
+| `bench_parse_plain_text/parser_push/4096`                            | ~17.7 µs | ~221 MiB/s    |                |
+| `bench_parse_sgr_heavy/parser_push_sgr/4097`                         | ~104 µs  | ~37.7 MiB/s   |                |
+| `bench_parse_cup_writes/parse_and_handle_80x24`                      | ~109 µs  | ~18.2 MiB/s   |                |
+| `bench_parse_bursty/bursty_10_small_plus_1_large`                    | ~632 µs  | ~6.26 MiB/s   |                |
+| `bench_handle_incoming_data/handle_incoming_data_4096`               | ~638 µs  | ~6.12 MiB/s   |                |
+| `bench_data_and_format_for_gui/flatten_80x24`                        | ~2.27 µs | ~844 Melem/s  |                |
+| `bench_build_snapshot/build_snapshot_80x24_dirty`                    | ~36.7 µs | ~52.3 Melem/s |                |
+| `bench_build_snapshot/build_snapshot_80x24_clean`                    | ~770 ns  | ~2.49 Gelem/s |                |
+| `bench_build_snapshot_with_scrollback/snapshot_10k_scrollback_dirty` | ~6.44 ms | —             | **NEW** (24.1) |
+| `bench_build_snapshot_with_scrollback/snapshot_10k_scrollback_clean` | ~679 ns  | —             | **NEW** (24.1) |
+
+**`freminal` (`render_loop_bench.rs`) — 15 benchmarks:**
+
+| Benchmark                                                        | Time     | Throughput    | Notes |
+| ---------------------------------------------------------------- | -------- | ------------- | ----- |
+| `render_terminal_text/feed_data_incremental/100_lines`           | ~1.90 ms | ~2.61 MiB/s   |       |
+| `render_terminal_text/feed_data_incremental/1000_lines`          | ~47.1 ms | ~1.05 MiB/s   |       |
+| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/24_lines`  | ~282 µs  | ~20.2 MiB/s   |       |
+| `render_terminal_text_ansi_heavy/feed_data_ansi_heavy/240_lines` | ~2.56 ms | ~22.3 MiB/s   |       |
+| `render_terminal_text_bursty/feed_data_bursty_5_rounds`          | ~16.9 ms | ~1.20 MiB/s   |       |
+| `render_terminal_text_snapshot/build_snapshot_after_ansi_feed`   | ~44.8 µs | ~42.9 Melem/s |       |
+| `render_terminal_text_arcswap/store_and_load`                    | ~70.1 ns | —             |       |
+| `render_terminal_text_arcswap/load_only`                         | ~7.83 ns | —             |       |
+| `shaping_ligatures/shape_visible/ligatures_off`                  | ~913 µs  | ~4.38 Melem/s |       |
+| `shaping_ligatures/shape_visible/ligatures_on`                   | ~920 µs  | ~4.35 Melem/s |       |
+| `shaping_ligatures/shape_visible_cache_hit`                      | ~24.7 µs | ~162 Melem/s  |       |
+| `instanced_bg/build_bg_instances/80x24`                          | ~75.1 ns | ~25.6 Gelem/s |       |
+| `instanced_bg/build_bg_instances/200x50`                         | ~123 ns  | ~81.6 Gelem/s |       |
+| `instanced_fg/build_fg_instances/80x24`                          | ~455 µs  | ~4.22 Melem/s |       |
+| `instanced_fg/build_fg_instances/200x50`                         | ~767 µs  | ~13.0 Melem/s |       |
+
 ### 8.3 `freminal-buffer` — Augment `buffer_row_bench.rs`
 
 **Keep:** `bench_insert_chunks`, `bench_softwrap_heavy` — these are sound.

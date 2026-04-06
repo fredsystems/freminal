@@ -149,7 +149,7 @@ pub fn default_index_to_rgb(index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TerminalColor {
     Default,
     DefaultBackground,

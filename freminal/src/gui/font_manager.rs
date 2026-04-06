@@ -15,7 +15,7 @@ use std::path::Path;
 
 use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
-use freminal_common::buffer_states::fonts::{FontDecorations, FontWeight};
+use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
 use freminal_common::config::Config;
 
 // ---------------------------------------------------------------------------
@@ -87,10 +87,10 @@ impl GlyphStyle {
 
     /// Construct from the buffer-layer font types.
     #[must_use]
-    pub fn from_format(weight: &FontWeight, decorations: &[FontDecorations]) -> Self {
+    pub fn from_format(weight: &FontWeight, decorations: FontDecorationFlags) -> Self {
         Self {
             bold: *weight == FontWeight::Bold,
-            italic: decorations.contains(&FontDecorations::Italic),
+            italic: decorations.contains(FontDecorations::Italic),
         }
     }
 }
@@ -1435,11 +1435,13 @@ mod tests {
 
     #[test]
     fn glyph_style_from_format() {
-        let style = GlyphStyle::from_format(&FontWeight::Bold, &[FontDecorations::Italic]);
+        let mut flags = FontDecorationFlags::empty();
+        flags.insert(FontDecorations::Italic);
+        let style = GlyphStyle::from_format(&FontWeight::Bold, flags);
         assert!(style.bold);
         assert!(style.italic);
 
-        let style = GlyphStyle::from_format(&FontWeight::Normal, &[]);
+        let style = GlyphStyle::from_format(&FontWeight::Normal, FontDecorationFlags::empty());
         assert!(!style.bold);
         assert!(!style.italic);
     }

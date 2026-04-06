@@ -11,7 +11,7 @@ use std::fmt;
 /// the parameter field. Freminal stores only the `id` value (if present) and the
 /// URI string.  Adjacent cells that share the same `id` and `url` are treated as
 /// the same hyperlink region.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Url {
     /// Optional opaque link identifier from the `id=` parameter.
     ///

@@ -1415,7 +1415,7 @@ fn dec_special_replace_lower_right_corner() {
         .expect("cell 0 must exist after writing");
     assert_eq!(
         cell.tchar(),
-        &freminal_common::buffer_states::tchar::TChar::Utf8("\u{2518}".as_bytes().to_vec()),
+        &freminal_common::buffer_states::tchar::TChar::from('\u{2518}'),
         "0x6a in Replace mode must produce ┘ (U+2518)"
     );
 }
@@ -1467,7 +1467,7 @@ fn dec_special_toggle() {
 
     assert_eq!(
         cell0.tchar(),
-        &freminal_common::buffer_states::tchar::TChar::Utf8("\u{2518}".as_bytes().to_vec()),
+        &freminal_common::buffer_states::tchar::TChar::from('\u{2518}'),
         "cell 0 must be ┘ (Replace mode)"
     );
     assert_eq!(
@@ -4430,12 +4430,12 @@ fn alt_buffer_lf_scrolls_after_resize_shrink() {
     // LF at scroll_region_bottom should scroll the region up.
     // Before the fix, this was a no-op because cursor.pos.y (e.g. 23)
     // was > scroll_region_bottom (19), so the scroll_region check failed.
-    let bottom_tchar_before = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+    let bottom_tchar_before = *buf.get_rows()[19].resolve_cell(0).tchar();
 
     buf.handle_lf();
 
     // The old bottom row should have been replaced with a blank row
-    let bottom_tchar_after = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+    let bottom_tchar_after = *buf.get_rows()[19].resolve_cell(0).tchar();
 
     assert_ne!(
         bottom_tchar_before, bottom_tchar_after,
@@ -4475,13 +4475,13 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
     buf.set_cursor_pos(Some(0), Some(5));
 
     // Read the character at row 6 before DL
-    let row_6_tchar_before = buf.get_rows()[6].resolve_cell(0).tchar().clone();
+    let row_6_tchar_before = *buf.get_rows()[6].resolve_cell(0).tchar();
 
     // Delete 1 line at cursor position
     buf.delete_lines(1);
 
     // Row 6's content should now be at row 5 (shifted up by DL)
-    let row_5_tchar_after = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+    let row_5_tchar_after = *buf.get_rows()[5].resolve_cell(0).tchar();
 
     assert_eq!(
         row_5_tchar_after, row_6_tchar_before,
@@ -4489,7 +4489,7 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
     );
 
     // Bottom of scroll region should be blank after DL
-    let bottom_tchar = buf.get_rows()[19].resolve_cell(0).tchar().clone();
+    let bottom_tchar = *buf.get_rows()[19].resolve_cell(0).tchar();
     assert_eq!(
         bottom_tchar,
         TChar::Space,
@@ -4522,20 +4522,20 @@ fn alt_buffer_insert_lines_works_after_resize_shrink() {
     buf.set_cursor_pos(Some(0), Some(5));
 
     // Read the character at row 5 before IL
-    let row_5_tchar_before = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+    let row_5_tchar_before = *buf.get_rows()[5].resolve_cell(0).tchar();
 
     // Insert 1 line at cursor position
     buf.insert_lines(1);
 
     // Row 5's content should have shifted down to row 6
-    let row_6_tchar_after = buf.get_rows()[6].resolve_cell(0).tchar().clone();
+    let row_6_tchar_after = *buf.get_rows()[6].resolve_cell(0).tchar();
     assert_eq!(
         row_6_tchar_after, row_5_tchar_before,
         "IL should shift row 5 content down to row 6"
     );
 
     // Row 5 itself should now be blank (the inserted line)
-    let row_5_tchar_after = buf.get_rows()[5].resolve_cell(0).tchar().clone();
+    let row_5_tchar_after = *buf.get_rows()[5].resolve_cell(0).tchar();
     assert_eq!(
         row_5_tchar_after,
         TChar::Space,
@@ -4568,20 +4568,20 @@ fn alt_buffer_ri_scrolls_after_resize_shrink() {
     buf.set_cursor_pos(Some(0), Some(0));
 
     // Read the character at row 0 before RI
-    let row_0_tchar_before = buf.get_rows()[0].resolve_cell(0).tchar().clone();
+    let row_0_tchar_before = *buf.get_rows()[0].resolve_cell(0).tchar();
 
     // RI at scroll_region_top should scroll the region down
     buf.handle_ri();
 
     // Row 0's content should have moved to row 1
-    let row_1_tchar_after = buf.get_rows()[1].resolve_cell(0).tchar().clone();
+    let row_1_tchar_after = *buf.get_rows()[1].resolve_cell(0).tchar();
     assert_eq!(
         row_1_tchar_after, row_0_tchar_before,
         "RI should shift row 0 content down to row 1"
     );
 
     // Row 0 should now be blank
-    let row_0_tchar_after = buf.get_rows()[0].resolve_cell(0).tchar().clone();
+    let row_0_tchar_after = *buf.get_rows()[0].resolve_cell(0).tchar();
     assert_eq!(
         row_0_tchar_after,
         TChar::Space,
@@ -4665,7 +4665,7 @@ fn alt_buffer_tmux_resize_scenario() {
     );
 
     // The new bottom row (16) should be blank (LF scrolled the region)
-    let bottom_tchar = buf.get_rows()[16].resolve_cell(0).tchar().clone();
+    let bottom_tchar = *buf.get_rows()[16].resolve_cell(0).tchar();
     assert_eq!(
         bottom_tchar,
         TChar::Space,
@@ -4793,12 +4793,12 @@ fn alt_buffer_lf_works_after_width_shrink() {
 
     // Cursor at bottom of screen
     buf.set_cursor_pos(Some(0), Some(23));
-    let bottom_before = buf.get_rows()[23].resolve_cell(0).tchar().clone();
+    let bottom_before = *buf.get_rows()[23].resolve_cell(0).tchar();
 
     buf.handle_lf();
 
     // Bottom row should be blank (scroll happened)
-    let bottom_after = buf.get_rows()[23].resolve_cell(0).tchar().clone();
+    let bottom_after = *buf.get_rows()[23].resolve_cell(0).tchar();
     assert_ne!(
         bottom_before, bottom_after,
         "LF at bottom must scroll after width-only shrink"
