@@ -198,7 +198,7 @@ This could be done as an addendum subtask if time permits.
 Ordered to minimize merge conflict risk. `terminal_handler.rs` is split first because it is the
 largest and has the cleanest subsystem boundaries. The `freminal` crate splits come second.
 
-### Subtask 29.1 — Split `terminal_handler.rs`: extract `pty_writer.rs`
+### Subtask 29.1 — Split `terminal_handler.rs`: extract `pty_writer.rs` ✅
 
 Extract PTY response encoding into `terminal_handler/pty_writer.rs`:
 
@@ -207,6 +207,15 @@ Extract PTY response encoding into `terminal_handler/pty_writer.rs`:
 - Move associated tests
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
+
+**Completed 2026-04-06.** Converted `terminal_handler.rs` into a `terminal_handler/` directory
+with `mod.rs` + `pty_writer.rs`. Extracted the 5 C1 encoding helpers (`csi_response`,
+`dcs_response`, `osc_response`, `st_response`) and the 5 write methods (`write_to_pty`,
+`write_bytes_to_pty`, `write_csi_response`, `write_dcs_response`, `write_osc_response`) into
+`pty_writer.rs` as a separate `impl TerminalHandler` block. All methods changed from private
+`fn` to `pub(super)`. The `direct_write_not_wrapped` test was moved to `pty_writer.rs`.
+`cargo test --all`: all tests pass. `cargo clippy --all-targets --all-features -- -D warnings`:
+clean. `cargo-machete`: no unused dependencies.
 
 ### Subtask 29.2 — Split `terminal_handler.rs`: extract `sgr.rs`
 
