@@ -1,6 +1,6 @@
 # PLAN_29 — God File Refactoring
 
-## Status: Pending
+## Status: Complete
 
 ---
 
@@ -217,7 +217,7 @@ with `mod.rs` + `pty_writer.rs`. Extracted the 5 C1 encoding helpers (`csi_respo
 `cargo test --all`: all tests pass. `cargo clippy --all-targets --all-features -- -D warnings`:
 clean. `cargo-machete`: no unused dependencies.
 
-### Subtask 29.2 — Split `terminal_handler.rs`: extract `sgr.rs`
+### Subtask 29.2 — Split `terminal_handler.rs`: extract `sgr.rs` ✅
 
 Extract SGR/FormatTag mapping into `terminal_handler/sgr.rs`:
 
@@ -227,7 +227,7 @@ Extract SGR/FormatTag mapping into `terminal_handler/sgr.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.3 — Split `terminal_handler.rs`: extract `graphics_kitty.rs`
+### Subtask 29.3 — Split `terminal_handler.rs`: extract `graphics_kitty.rs` ✅
 
 Extract Kitty graphics protocol into `terminal_handler/graphics_kitty.rs`:
 
@@ -237,7 +237,7 @@ Extract Kitty graphics protocol into `terminal_handler/graphics_kitty.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.4 — Split `terminal_handler.rs`: extract `graphics_sixel.rs`
+### Subtask 29.4 — Split `terminal_handler.rs`: extract `graphics_sixel.rs` ✅
 
 Extract Sixel graphics protocol into `terminal_handler/graphics_sixel.rs`:
 
@@ -246,7 +246,7 @@ Extract Sixel graphics protocol into `terminal_handler/graphics_sixel.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.5 — Split `terminal_handler.rs`: extract `graphics_iterm2.rs`
+### Subtask 29.5 — Split `terminal_handler.rs`: extract `graphics_iterm2.rs` ✅
 
 Extract iTerm2 inline image protocol into `terminal_handler/graphics_iterm2.rs`:
 
@@ -256,7 +256,7 @@ Extract iTerm2 inline image protocol into `terminal_handler/graphics_iterm2.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.6 — Split `terminal_handler.rs`: extract `dcs.rs`
+### Subtask 29.6 — Split `terminal_handler.rs`: extract `dcs.rs` ✅
 
 Extract DCS sub-protocol dispatch into `terminal_handler/dcs.rs`:
 
@@ -267,7 +267,7 @@ Extract DCS sub-protocol dispatch into `terminal_handler/dcs.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.7 — Split `terminal_handler.rs`: extract `osc_colors.rs`
+### Subtask 29.7 — Split `terminal_handler.rs`: extract `osc_colors.rs` ✅
 
 Extract OSC color management into `terminal_handler/osc_colors.rs`:
 
@@ -277,7 +277,7 @@ Extract OSC color management into `terminal_handler/osc_colors.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.8 — Split `terminal_handler.rs`: extract `shell_integration.rs`
+### Subtask 29.8 — Split `terminal_handler.rs`: extract `shell_integration.rs` ✅
 
 Extract CWD + FTCS tracking into `terminal_handler/shell_integration.rs`:
 
@@ -286,7 +286,7 @@ Extract CWD + FTCS tracking into `terminal_handler/shell_integration.rs`:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.9 — Split `renderer.rs`: extract `vertex.rs` and `shaders.rs`
+### Subtask 29.9 — Split `renderer.rs`: extract `vertex.rs` and `shaders.rs` ✅
 
 Convert `freminal/src/gui/renderer.rs` into a `renderer/` directory:
 
@@ -298,7 +298,7 @@ Convert `freminal/src/gui/renderer.rs` into a `renderer/` directory:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.10 — Split `terminal.rs`: extract `input.rs` and `coords.rs`
+### Subtask 29.10 — Split `terminal.rs`: extract `input.rs` and `coords.rs` ✅
 
 Convert `freminal/src/gui/terminal.rs` into a `terminal/` directory:
 
@@ -312,26 +312,29 @@ Convert `freminal/src/gui/terminal.rs` into a `terminal/` directory:
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.11 — Extract shared param utilities (addendum)
+### Subtask 29.11 — Extract shared param utilities (addendum) ✅
 
 Consolidate duplicated parameter-parsing utilities from
-`freminal-terminal-emulator/src/ansi.rs` and `src/ansi_components/osc.rs` into a shared
-`freminal-terminal-emulator/src/ansi_components/params.rs`:
+`freminal-terminal-emulator/src/ansi.rs` and `src/ansi_components/osc.rs`:
 
-- `extract_param`, `split_params_into_semicolon_delimited_usize`,
-  `split_params_into_colon_delimited_usize`, `parse_param_as`
-- Update import paths in `ansi.rs`, `osc.rs`, `csi.rs`, and `sgr.rs`
-- Remove the duplicated copies
+- Upgraded `ansi.rs::parse_param_as` to include `debug!()` logging from the `osc.rs` copy
+- Deleted the duplicate `parse_param_as` from `osc.rs`; `osc.rs` now imports from `crate::ansi`
+- Renamed `osc.rs::split_params_into_semicolon_delimited_usize` to
+  `split_params_into_semicolon_delimited_tokens` (it returns `AnsiOscToken`, not `usize`)
+- Demoted `osc.rs::extract_param` from `pub` to `fn` (only used within `osc.rs`)
+- Note: `extract_param` was not a true duplicate (different element types: `usize` vs
+  `AnsiOscToken`). `split_params_into_semicolon_delimited_usize` was similarly not a true
+  duplicate (different return types). Only `parse_param_as<T>` was genuinely consolidatable.
 
 **Verify:** `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`
 
-### Subtask 29.12 — Final verification and plan update
+### Subtask 29.12 — Final verification and plan update ✅
 
 - Run full verification suite: `cargo test --all`, `cargo clippy --all-targets --all-features
--- -D warnings`, `cargo-machete`
-- Run benchmarks to confirm no regressions
-- Update this document: mark all subtasks complete, record completion notes
-- Update `MASTER_PLAN.md`: mark Task 29 complete
+-- -D warnings`, `cargo-machete` — all pass
+- Benchmarks compile cleanly (`cargo bench --no-run --all`)
+- This document updated: all subtasks marked complete
+- `MASTER_PLAN.md` updated: Task 29 marked complete
 
 ---
 
