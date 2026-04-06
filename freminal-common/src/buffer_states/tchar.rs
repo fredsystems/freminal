@@ -108,6 +108,12 @@ impl TChar {
     /// Returns an error if the slice is not valid UTF-8, or if any grapheme
     /// cluster exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
     pub fn from_vec(v: &[u8]) -> Result<Vec<Self>> {
+        // Fast path: if every byte is ASCII (< 0x80), each byte is its own
+        // grapheme cluster and we can skip unicode_segmentation entirely.
+        if v.iter().all(|&b| b < 0x80) {
+            return Ok(v.iter().map(|&b| Self::new_from_single_char(b)).collect());
+        }
+
         let data_as_string = std::str::from_utf8(v)?;
         let graphemes = data_as_string.graphemes(true).collect::<Vec<&str>>();
 
@@ -136,6 +142,11 @@ impl TChar {
     /// # Errors
     /// Returns an error if any grapheme exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
     pub fn from_string(s: &str) -> Result<Vec<Self>> {
+        // Fast path: if the string is pure ASCII, each byte is one grapheme.
+        if s.is_ascii() {
+            return Ok(s.bytes().map(Self::new_from_single_char).collect());
+        }
+
         let graphemes = s.graphemes(true).collect::<Vec<&str>>();
 
         graphemes
