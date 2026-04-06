@@ -183,6 +183,10 @@
 
                 LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
 
+                # Enable the `playback` feature by default in the devshell so
+                # developers get recording/playback support without extra flags.
+                CARGO_BUILD_FEATURES = "playback";
+
                 shellHook = ''
                   ${chk.shellHook}
 
