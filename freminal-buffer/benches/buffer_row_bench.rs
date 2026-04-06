@@ -112,7 +112,7 @@ fn bench_insert_chunks(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: resizing
+// Benchmark: resizing (24.2 — uses iter_batched to separate setup from measurement)
 // ---------------------------------------------------------------
 fn bench_resize(c: &mut Criterion) {
     let data = load_tchars_for_large_bench();
@@ -120,19 +120,31 @@ fn bench_resize(c: &mut Criterion) {
     let mut group = c.benchmark_group("buffer_resize");
 
     group.bench_with_input(BenchmarkId::new("reflow_width", 40), &data, |b, data| {
-        b.iter(|| {
-            let mut buf = Buffer::new(100, 80);
-            buf.insert_text(data);
-            buf.set_size(40, 80, 0);
-        });
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(100, 80);
+                buf.insert_text(data);
+                buf
+            },
+            |mut buf| {
+                std::hint::black_box(buf.set_size(40, 80, 0));
+            },
+            BatchSize::LargeInput,
+        );
     });
 
     group.bench_with_input(BenchmarkId::new("shrink_height", 20), &data, |b, data| {
-        b.iter(|| {
-            let mut buf = Buffer::new(100, 200);
-            buf.insert_text(data);
-            buf.set_size(100, 20, 0);
-        });
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(100, 200);
+                buf.insert_text(data);
+                buf
+            },
+            |mut buf| {
+                std::hint::black_box(buf.set_size(100, 20, 0));
+            },
+            BatchSize::LargeInput,
+        );
     });
 
     group.finish();
@@ -353,6 +365,110 @@ fn bench_erase_display(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: scrollback rendering at various offsets (24.1)
+// ---------------------------------------------------------------
+fn bench_scrollback_render(c: &mut Criterion) {
+    // Pre-populate a buffer with ~5000 rows of scrollback.
+    // width=80, height=24 → 5000+24 lines needed for 5000 scrollback rows.
+    let total_lines = 5024;
+    let mut data = Vec::with_capacity(total_lines * 81);
+    for i in 0..total_lines {
+        for j in 0..80 {
+            data.push(TChar::Ascii(b'a' + ((i + j) % 26) as u8));
+        }
+        data.push(TChar::NewLine);
+    }
+    let mut buf = Buffer::new(80, 24);
+    buf.insert_text(&data);
+
+    let mut group = c.benchmark_group("bench_scrollback_render");
+    group.throughput(Throughput::Elements((80 * 24) as u64));
+
+    for offset in [0, 1000, 4000] {
+        group.bench_with_input(
+            BenchmarkId::new("visible_at_offset", offset),
+            &offset,
+            |b, &offset| {
+                b.iter(|| {
+                    std::hint::black_box(buf.visible_as_tchars_and_tags(offset));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// Benchmark: alternate screen switch (24.1)
+// ---------------------------------------------------------------
+fn bench_alternate_screen_switch(c: &mut Criterion) {
+    // Measure the cost of enter_alternate and leave_alternate on a populated buffer.
+    let primary_data = gen_ascii_tchars(80 * 100); // 100 lines in primary
+    let alt_data = gen_ascii_tchars(80 * 24); // full alternate screen
+
+    let mut group = c.benchmark_group("bench_alternate_screen_switch");
+
+    group.bench_function("enter_alternate", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(80, 24);
+                buf.insert_text(&primary_data);
+                buf
+            },
+            |mut buf| {
+                buf.enter_alternate(0);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("leave_alternate", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(80, 24);
+                buf.insert_text(&primary_data);
+                buf.enter_alternate(0);
+                buf.insert_text(&alt_data);
+                buf
+            },
+            |mut buf| {
+                std::hint::black_box(buf.leave_alternate());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// Benchmark: erase entire display — ED Ps=2 (24.1)
+// ---------------------------------------------------------------
+fn bench_erase_display_full(c: &mut Criterion) {
+    // Fill a 200×50 buffer then erase entire display.
+    let data = gen_ascii_tchars(200 * 50);
+
+    let mut group = c.benchmark_group("bench_erase_display_full");
+
+    group.bench_function("erase_display_200x50", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(200, 50);
+                buf.insert_text(&data);
+                buf
+            },
+            |mut buf| {
+                buf.erase_display();
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -369,6 +485,9 @@ criterion_group!(
         bench_cursor_ops,
         bench_lf_heavy,
         bench_erase_display,
+        bench_scrollback_render,
+        bench_alternate_screen_switch,
+        bench_erase_display_full,
 );
 
 criterion_main!(benches);

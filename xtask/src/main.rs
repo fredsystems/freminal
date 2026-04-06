@@ -73,7 +73,7 @@ impl Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
-    /// Run CI checks (lint, deny, machete, build, test)
+    /// Run CI checks (lint, deny, machete, build, test, bench compile)
     CI,
 
     /// Build the project
@@ -147,6 +147,10 @@ enum Command {
     /// Run lib tests
     #[command(visible_alias = "tl")]
     TestLibs,
+
+    /// Compile all benchmarks without running them
+    #[command(visible_alias = "bc")]
+    BenchCompile,
 }
 
 impl Command {
@@ -171,11 +175,12 @@ impl Command {
             Self::Test => test(),
             Self::TestDocs => test_docs(),
             Self::TestLibs => test_libs(),
+            Self::BenchCompile => bench_compile(),
         }
     }
 }
 
-/// Run CI checks (lint, deny, machete, build, test)
+/// Run CI checks (lint, deny, machete, build, test, bench compile)
 ///
 /// ## Step ordering rationale
 ///
@@ -188,12 +193,15 @@ impl Command {
 /// 4. `build` — validates that the workspace compiles cleanly with all targets
 ///    and features; must pass before tests are meaningful.
 /// 5. `test` — runs lib + doc tests only after the build is confirmed clean.
+/// 6. `bench_compile` — compiles all benchmarks without running them;
+///    catches benchmark compilation failures before the next manual bench run.
 fn ci() -> Result<()> {
     lint()?;
     deny()?;
     machete()?;
     build()?;
     test()?;
+    bench_compile()?;
     Ok(())
 }
 
@@ -349,6 +357,15 @@ fn test_docs() -> Result<()> {
 /// Run lib tests for the workspace's default packages
 fn test_libs() -> Result<()> {
     run_cargo(vec!["test", "--all-targets", "--all-features"])
+}
+
+/// Compile all benchmarks without running them.
+///
+/// This catches benchmark compilation failures early, without the cost of
+/// actually executing the benchmarks. Benchmark results on shared CI runners
+/// are meaningless due to noisy neighbors, so only compilation is verified.
+fn bench_compile() -> Result<()> {
+    run_cargo(vec!["bench", "--no-run", "--all"])
 }
 
 /// Run a cargo subcommand with the default toolchain

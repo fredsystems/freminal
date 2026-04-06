@@ -1,6 +1,6 @@
 # PLAN_24 — Benchmark Improvements and CI Integration
 
-## Status: Pending
+## Status: In Progress
 
 ---
 
@@ -94,7 +94,7 @@ benchmarks into CI, and updates `agents.md` with benchmark-related rules.
 
 ### 24.1 — Add Missing Benchmarks
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `freminal-buffer/benches/buffer_row_bench.rs`,
   `freminal-terminal-emulator/benches/buffer_benches.rs`,
@@ -129,7 +129,7 @@ benchmarks into CI, and updates `agents.md` with benchmark-related rules.
 
 ### 24.2 — Fix Fragile Benchmarks
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `freminal-buffer/benches/buffer_row_bench.rs`
 - **Details:**
@@ -172,7 +172,7 @@ benchmarks into CI, and updates `agents.md` with benchmark-related rules.
 
 ### 24.3 — Add `cargo bench --no-run` to CI
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 1 — High
 - **Scope:** `xtask/src/main.rs`, `.github/workflows/ci.yml`
 - **Details:**
@@ -233,7 +233,7 @@ benchmarks into CI, and updates `agents.md` with benchmark-related rules.
 
 ### 24.5 — Update `agents.md` Benchmark Rules
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `agents.md`
 - **Details:**
@@ -272,7 +272,7 @@ benchmarks into CI, and updates `agents.md` with benchmark-related rules.
 
 ### 24.6 — Baseline Recording and Documentation
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 2 — Medium
 - **Scope:** `Documents/PERFORMANCE_PLAN.md`
 - **Details:**

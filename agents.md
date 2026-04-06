@@ -186,15 +186,16 @@ When merging subtasks into one commit, the commit message must list all subtask 
 
 ### Build & Test Commands
 
-| Command                                                    | Purpose                                       |
-| ---------------------------------------------------------- | --------------------------------------------- |
-| `cargo xtask ci`                                           | Full CI: lint + deny + machete + build + test |
-| `cargo test --all`                                         | Run all unit and integration tests            |
-| `cargo clippy --all-targets --all-features -- -D warnings` | Lint with strict warnings                     |
-| `cargo-machete`                                            | Detect unused dependencies                    |
-| `cargo bench --all`                                        | Run all benchmarks (Criterion)                |
-| `cargo xtask coverage`                                     | Generate coverage report (lcov)               |
-| `cargo fmt --all -- --check`                               | Check formatting                              |
+| Command                                                    | Purpose                                                       |
+| ---------------------------------------------------------- | ------------------------------------------------------------- |
+| `cargo xtask ci`                                           | Full CI: lint + deny + machete + build + test + bench compile |
+| `cargo test --all`                                         | Run all unit and integration tests                            |
+| `cargo clippy --all-targets --all-features -- -D warnings` | Lint with strict warnings                                     |
+| `cargo-machete`                                            | Detect unused dependencies                                    |
+| `cargo bench --all`                                        | Run all benchmarks (Criterion)                                |
+| `cargo bench --no-run --all`                               | Compile benchmarks without running                            |
+| `cargo xtask coverage`                                     | Generate coverage report (lcov)                               |
+| `cargo fmt --all -- --check`                               | Check formatting                                              |
 
 ### Full Verification Suite
 
@@ -316,6 +317,40 @@ These rules apply to ALL agents and ALL implementation work going forward.
 - If no appropriate benchmark exists for the code being changed, the agent MUST create a new
   benchmark as part of the task before proceeding with the change.
 - Performance regressions must be justified and documented, or the change must be revised.
+
+#### Benchmark Lookup Table
+
+Use this table to determine which benchmarks are relevant for a given change area:
+
+| Change Area                             | Benchmark File                                         | Key Benchmarks                                                                 |
+| --------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| Buffer insert / cell ops                | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_insert_*`, `bench_cursor_ops`, `bench_lf_heavy`                         |
+| Buffer resize / reflow                  | `freminal-buffer/benches/buffer_row_bench.rs`          | `buffer_resize`, `softwrap_heavy`                                              |
+| Buffer flatten / visible rows           | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_visible_flatten`, `bench_scrollback_flatten`, `bench_scrollback_render` |
+| Alternate screen                        | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_alternate_screen_switch`                                                |
+| Erase operations                        | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_erase_display`, `bench_erase_display_full`                              |
+| ANSI parser                             | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_parse_plain_text`, `bench_parse_sgr_heavy`, `bench_parse_cup_writes`    |
+| `handle_incoming_data` / UTF-8 assembly | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_handle_incoming_data`, `bench_parse_bursty`                             |
+| Snapshot building                       | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_build_snapshot`, `bench_build_snapshot_with_scrollback`                 |
+| Data flatten for GUI                    | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_data_and_format_for_gui`                                                |
+| Rendering pipeline / shaping            | `freminal/benches/render_loop_bench.rs`                | `feed_data_*`, `build_snapshot_*`, `shaping_ligatures`                         |
+| ArcSwap / snapshot transport            | `freminal/benches/render_loop_bench.rs`                | `render_terminal_text_arcswap`                                                 |
+
+#### Benchmark Recording Rule
+
+Agents modifying performance-sensitive code must record before/after benchmark numbers in
+their completion report using this format:
+
+```text
+| Benchmark | Before | After | Change |
+| --- | --- | --- | --- |
+```
+
+#### Regression Threshold
+
+Any regression > 15% on a relevant benchmark must be justified in the completion report or
+the change must be revised. Regressions <= 15% may be acceptable if the change provides
+correctness or maintainability benefits that outweigh the performance cost.
 
 ### Plan Document Maintenance
 
