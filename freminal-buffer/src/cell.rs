@@ -98,7 +98,7 @@ impl Cell {
     pub fn into_utf8(&self) -> String {
         match self.value {
             TChar::Ascii(c) => (c as char).to_string(),
-            TChar::Utf8(ref bytes) => String::from_utf8_lossy(bytes).to_string(),
+            TChar::Utf8(_, _) => String::from_utf8_lossy(self.value.as_bytes()).to_string(),
             TChar::Space => " ".to_string(),
             TChar::NewLine => "\n".to_string(),
         }
@@ -152,8 +152,8 @@ mod cell_tests {
         assert!(!cell.is_head());
         assert!(!cell.is_continuation());
 
-        let wide_char = TChar::Utf8("あ".as_bytes().to_vec());
-        let wide_cell = Cell::new(wide_char.clone(), FormatTag::default());
+        let wide_char = TChar::from('あ');
+        let wide_cell = Cell::new(wide_char, FormatTag::default());
         assert_eq!(wide_cell.tchar(), &wide_char);
         assert!(wide_cell.is_head());
         assert!(!wide_cell.is_continuation());
@@ -168,7 +168,7 @@ mod cell_tests {
         let ascii_cell = Cell::new(TChar::Ascii(b'A'), FormatTag::default());
         assert_eq!(ascii_cell.display_width(), 1);
 
-        let wide_cell = Cell::new(TChar::Utf8("あ".as_bytes().to_vec()), FormatTag::default());
+        let wide_cell = Cell::new(TChar::from('あ'), FormatTag::default());
         assert_eq!(wide_cell.display_width(), 2);
 
         let space_cell = Cell::new(TChar::Space, FormatTag::default());
@@ -183,7 +183,7 @@ mod cell_tests {
         let ascii_cell = Cell::new(TChar::Ascii(b'A'), FormatTag::default());
         assert_eq!(ascii_cell.into_utf8(), "A");
 
-        let wide_cell = Cell::new(TChar::Utf8("あ".as_bytes().to_vec()), FormatTag::default());
+        let wide_cell = Cell::new(TChar::from('あ'), FormatTag::default());
         assert_eq!(wide_cell.into_utf8(), "あ");
 
         let space_cell = Cell::new(TChar::Space, FormatTag::default());

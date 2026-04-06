@@ -337,7 +337,7 @@ impl Row {
             // -----------------------------------------------------------
             // Insert head cell
             // -----------------------------------------------------------
-            self.cells[col] = Cell::new(tchar.clone(), tag.clone());
+            self.cells[col] = Cell::new(*tchar, tag.clone());
 
             // -----------------------------------------------------------
             // Insert continuation cells within bounds

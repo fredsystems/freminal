@@ -242,9 +242,9 @@ fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> 
                 0u8.hash(&mut hasher); // discriminant
                 b.hash(&mut hasher);
             }
-            TChar::Utf8(v) => {
+            TChar::Utf8(buf, len) => {
                 1u8.hash(&mut hasher);
-                v.hash(&mut hasher);
+                buf[..*len as usize].hash(&mut hasher);
             }
             TChar::Space => 2u8.hash(&mut hasher),
             TChar::NewLine => 3u8.hash(&mut hasher),
@@ -424,8 +424,8 @@ fn tchar_to_char(tch: &TChar) -> char {
         TChar::Ascii(b) => char::from(*b),
         TChar::Space => ' ',
         TChar::NewLine => '\n',
-        TChar::Utf8(v) => {
-            std::str::from_utf8(v)
+        TChar::Utf8(buf, len) => {
+            std::str::from_utf8(&buf[..*len as usize])
                 .ok()
                 .and_then(|s| s.chars().next())
                 .unwrap_or('\u{FFFD}') // replacement character

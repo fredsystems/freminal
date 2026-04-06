@@ -514,7 +514,7 @@ impl TerminalHandler {
         // Fast path: if no virtual placements exist, no placeholder can resolve.
         if self.virtual_placements.is_empty() {
             if let Some(last) = text.last() {
-                self.last_graphic_char = Some(last.clone());
+                self.last_graphic_char = Some(*last);
             }
             self.prev_placeholder = None;
             self.insert_text_irm_aware(&text);
@@ -533,14 +533,15 @@ impl TerminalHandler {
         let mut batch_start: usize = 0;
 
         for (i, tch) in text.iter().enumerate() {
-            let is_ph = matches!(tch, TChar::Utf8(b) if is_placeholder(b));
+            let is_ph =
+                matches!(tch, TChar::Utf8(buf, len) if is_placeholder(&buf[..*len as usize]));
 
             if is_ph {
                 // Flush any pending normal text batch.
                 if batch_start < i {
                     let batch = &text[batch_start..i];
                     if let Some(last) = batch.last() {
-                        self.last_graphic_char = Some(last.clone());
+                        self.last_graphic_char = Some(*last);
                     }
                     self.prev_placeholder = None;
                     self.insert_text_irm_aware(batch);
@@ -548,8 +549,8 @@ impl TerminalHandler {
                 batch_start = i + 1;
 
                 // Process the placeholder character.
-                if let TChar::Utf8(bytes) = tch {
-                    self.handle_placeholder_char(bytes);
+                if let TChar::Utf8(buf, len) = tch {
+                    self.handle_placeholder_char(&buf[..*len as usize]);
                 }
             }
         }
@@ -558,7 +559,7 @@ impl TerminalHandler {
         if batch_start < text.len() {
             let batch = &text[batch_start..];
             if let Some(last) = batch.last() {
-                self.last_graphic_char = Some(last.clone());
+                self.last_graphic_char = Some(*last);
             }
             self.prev_placeholder = None;
             self.insert_text_irm_aware(batch);
@@ -730,7 +731,7 @@ impl TerminalHandler {
     /// Handle REP (CSI Ps b) — repeat the last graphic character Ps times.
     fn handle_repeat_character(&mut self, count: usize) {
         if let Some(ref ch) = self.last_graphic_char {
-            let repeated = vec![ch.clone(); count];
+            let repeated = vec![*ch; count];
             self.buffer.insert_text(&repeated);
         }
     }
@@ -5078,8 +5079,8 @@ mod tests {
                 freminal_common::buffer_states::tchar::TChar::Ascii(b) => (*b as char).to_string(),
                 freminal_common::buffer_states::tchar::TChar::Space => " ".to_string(),
                 freminal_common::buffer_states::tchar::TChar::NewLine => "\n".to_string(),
-                freminal_common::buffer_states::tchar::TChar::Utf8(v) => {
-                    String::from_utf8_lossy(v).to_string()
+                freminal_common::buffer_states::tchar::TChar::Utf8(buf, len) => {
+                    String::from_utf8_lossy(&buf[..*len as usize]).to_string()
                 }
             })
             .collect();

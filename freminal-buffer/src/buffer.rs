@@ -2590,7 +2590,7 @@ impl Buffer {
             }
 
             let byte_pos = chars.len();
-            chars.push(cell.tchar().clone());
+            chars.push(*cell.tchar());
 
             let cell_tag = cell.tag();
             if let Some(last) = tags.last_mut() {
@@ -4456,8 +4456,8 @@ mod insert_space_tests {
                     TChar::Ascii(b) => *b as char,
                     TChar::Space => ' ',
                     TChar::NewLine => '⏎',
-                    TChar::Utf8(v) => {
-                        let s = String::from_utf8_lossy(&v[..]);
+                    TChar::Utf8(buf, len) => {
+                        let s = String::from_utf8_lossy(&buf[..*len as usize]);
                         s.chars().next().unwrap_or('�')
                     }
                 }
@@ -4579,7 +4579,10 @@ mod dch_tests {
                     TChar::Ascii(b) => *b as char,
                     TChar::Space => ' ',
                     TChar::NewLine => '\n',
-                    TChar::Utf8(v) => String::from_utf8_lossy(v).chars().next().unwrap_or('?'),
+                    TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize])
+                        .chars()
+                        .next()
+                        .unwrap_or('?'),
                 }
             })
             .collect()
@@ -4653,7 +4656,7 @@ mod dch_tests {
     fn dch_wide_head() {
         // Width 10; insert the wide char "あ" (display width 2) followed by "BC".
         // Cursor at col 0, delete 1 → head + continuation gone, "BC" shifts left.
-        let wide = TChar::Utf8("あ".as_bytes().to_vec());
+        let wide = TChar::from('あ');
         let mut buf = Buffer::new(10, 5);
         buf.insert_text(&[wide, a('B'), a('C')]);
         buf.cursor.pos.x = 0;
@@ -4688,7 +4691,10 @@ mod ech_tests {
                     TChar::Ascii(b) => *b as char,
                     TChar::Space => ' ',
                     TChar::NewLine => '\n',
-                    TChar::Utf8(v) => String::from_utf8_lossy(v).chars().next().unwrap_or('?'),
+                    TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize])
+                        .chars()
+                        .next()
+                        .unwrap_or('?'),
                 }
             })
             .collect()
@@ -5465,7 +5471,7 @@ mod visible_as_tchars_and_tags_tests {
                 TChar::Ascii(b) => (*b as char).to_string(),
                 TChar::Space => " ".to_string(),
                 TChar::NewLine => "\n".to_string(),
-                TChar::Utf8(v) => String::from_utf8_lossy(v).to_string(),
+                TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize]).to_string(),
             })
             .collect()
     }
@@ -5620,7 +5626,7 @@ mod visible_as_tchars_and_tags_tests {
         // it exactly once (continuation cells must be skipped).
         let mut buf = Buffer::new(80, 5);
         // "あ" is a 2-column wide character — build the TChar directly to avoid fallible ops.
-        let wide_tchar = TChar::Utf8("あ".as_bytes().to_vec());
+        let wide_tchar = TChar::from('あ');
         buf.insert_text(std::slice::from_ref(&wide_tchar));
 
         let (chars, _tags) = buf.visible_as_tchars_and_tags(0);
@@ -6492,7 +6498,7 @@ mod extract_text_tests {
         // Wide characters produce a continuation cell that should be skipped.
         let mut buf = Buffer::new(10, 3);
         // Insert a UTF-8 wide character (e.g. "Ｗ" = fullwidth W, U+FF37).
-        let wide_char = TChar::Utf8("Ｗ".as_bytes().to_vec());
+        let wide_char = TChar::from('Ｗ');
         let chars = vec![wide_char, ascii('x')];
         buf.insert_text(&chars);
 
