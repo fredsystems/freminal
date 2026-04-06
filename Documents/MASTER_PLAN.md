@@ -53,7 +53,7 @@ and plan document maintenance rules.
 | 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                   | Complete | None                 |
 | 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                    | Complete | None                 |
 | 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                  | Complete | None                 |
-| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Stub     | All other tasks      |
+| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`              | Complete | All other tasks      |
 | 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`             | Complete | None                 |
 | 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                | Complete | None                 |
 | 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`          | Complete | None                 |
@@ -321,21 +321,12 @@ Must run after all other tasks are complete to avoid merge conflicts.
 - **Task 29** — God File Refactoring (depends on all other tasks)
 
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 23, 25, 26, 31, 32, 34, 35
+Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │                              │
-Phase 8:      ├── Task 22 (vttest Suite)     ┤ (any time)
-              ├── Task 24 (Benchmarks)       ┤ (any time)
-              ├── Task 27 (FIXME Audit)      ┤ (pending — 9 subtasks)
-              ├── Task 28 (Comment Audit)    ┤ (pending — 10 subtasks)
-              ├── Task 30 (Clippy Allows)    ┤ (any time)
-              ├── Task 31 (Dead Code Audit)  ┤ (complete)
-              ├── Task 32 (Playback Flag)    ┤ (stub — audit first)
-              ├── Task 33 (Palettes)         ┤ (any time)
-              │                              │
-Phase 9:      └── Task 29 (God File Split)   ┘ (last — after all others)
+              └────────────────────────────── ┘
 ```
 
 ---
@@ -428,7 +419,7 @@ Update this section as tasks complete:
 | 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                                |
 | 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit                        |
 | 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit                     |
-| 29   |            |            |                                                                       |
+| 29   | 2026-04-06 | 2026-04-06 | All 12 subtasks complete on task-29/god-file-refactor                 |
 | 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit                 |
 | 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)                       |
 | 32   | 2026-04-06 | 2026-04-06 | All 9 subtasks complete on task-32/playback-feature-flag              |

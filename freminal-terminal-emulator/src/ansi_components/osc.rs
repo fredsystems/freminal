@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::ParserOutcome;
+use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use anyhow::Result;
 use freminal_common::buffer_states::ftcs::parse_ftcs_params;
@@ -149,7 +149,7 @@ impl AnsiOscParser {
 
         match self.state {
             AnsiOscParserState::Finished => {
-                if let Ok(params) = split_params_into_semicolon_delimited_usize(&self.params) {
+                if let Ok(params) = split_params_into_semicolon_delimited_tokens(&self.params) {
                     let Some(type_number) = extract_param(0, &params) else {
                         output.push(TerminalOutput::Invalid);
                         return ParserOutcome::Invalid(format!(
@@ -301,8 +301,8 @@ fn is_valid_osc_param(b: u8) -> bool {
 }
 
 /// # Errors
-/// Will return an error if the parameter is not a valid number
-pub fn split_params_into_semicolon_delimited_usize(
+/// Will return an error if a parameter segment cannot be parsed as an `AnsiOscToken`.
+fn split_params_into_semicolon_delimited_tokens(
     params: &[u8],
 ) -> Result<Vec<Option<AnsiOscToken>>> {
     params
@@ -311,27 +311,6 @@ pub fn split_params_into_semicolon_delimited_usize(
         .collect::<Result<Vec<Option<AnsiOscToken>>>>()
 }
 
-/// # Errors
-///
-/// Will return an error if the parameter is not a valid number
-pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option<T>> {
-    let param_str = std::str::from_utf8(param_bytes)?;
-    if param_str.is_empty() {
-        return Ok(None);
-    }
-    param_str.parse().map_err(|_| ()).map_or_else(
-        |()| {
-            debug!(
-                "Failed to parse parameter ({:?}) as {:?}",
-                param_bytes,
-                std::any::type_name::<T>()
-            );
-            Err(anyhow::anyhow!("Failed to parse parameter"))
-        },
-        |value| Ok(Some(value)),
-    )
-}
-
-pub fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {
+fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {
     params.get(idx).and_then(std::clone::Clone::clone)
 }

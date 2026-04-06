@@ -77,10 +77,17 @@ pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option
         return Ok(None);
     }
 
-    param_str
-        .parse()
-        .map_err(|_| anyhow::Error::msg("Parse error"))
-        .map(Some)
+    param_str.parse().map_err(|_| ()).map_or_else(
+        |()| {
+            debug!(
+                "Failed to parse parameter ({:?}) as {:?}",
+                param_bytes,
+                std::any::type_name::<T>()
+            );
+            Err(anyhow::anyhow!("Failed to parse parameter"))
+        },
+        |value| Ok(Some(value)),
+    )
 }
 
 fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
