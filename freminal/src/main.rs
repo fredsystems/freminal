@@ -269,7 +269,7 @@ fn main() {
         );
 
         let (mut terminal, _pty_write_rx) =
-            TerminalEmulator::new_for_playback(Some(cfg.scrollback.limit));
+            TerminalEmulator::new_headless(Some(cfg.scrollback.limit));
 
         // Apply the configured theme.
         let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);

@@ -56,4 +56,5 @@ criterion.workspace = true
 
 [features]
 default = []
+playback = ["freminal-terminal-emulator/playback"]
 validation = []

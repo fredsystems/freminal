@@ -183,14 +183,16 @@ impl TerminalEmulator {
         }
     }
 
-    /// Creates a headless terminal emulator for playback mode.
+    /// Creates a headless terminal emulator without a PTY.
     ///
     /// No PTY is spawned.  The returned `Receiver<PtyWrite>` drains any
     /// escape-sequence responses that the emulator's handler sends (DA, CPR,
-    /// etc.) so channels never block.  The caller feeds recorded data via
+    /// etc.) so channels never block.  The caller feeds data via
     /// `handle_incoming_data`.
+    ///
+    /// Used by playback mode, tests, and benchmarks.
     #[must_use]
-    pub fn new_for_playback(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
+    pub fn new_headless(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
         use crossbeam_channel::unbounded;
 
         let (write_tx, write_rx) = unbounded();
