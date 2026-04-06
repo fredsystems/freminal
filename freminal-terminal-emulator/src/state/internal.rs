@@ -7,7 +7,6 @@ use anyhow::Result;
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
-        format_tag::FormatTag,
         mode::SetMode,
         mode::{Mode, TerminalModes},
         modes::{
@@ -25,7 +24,6 @@ use freminal_common::{
             sync_updates::SynchronizedUpdates,
             xtmsewin::XtMseWin,
         },
-        tchar::TChar,
         terminal_output::TerminalOutput,
         window_manipulation::WindowManipulation,
     },
@@ -42,8 +40,6 @@ use crate::{
 };
 
 use freminal_buffer::terminal_handler::TerminalHandler as NewHandler;
-
-use super::TerminalSections;
 
 /// Format the first `max_bytes` of `data` as a hex string for trace logging.
 ///
@@ -162,22 +158,6 @@ impl TerminalState {
     #[must_use]
     pub const fn get_win_size(&mut self) -> (usize, usize) {
         self.handler.get_win_size()
-    }
-
-    // `missing_const_for_fn`: calls `TerminalHandler::data_and_format_data_for_gui` which is not
-    // `const` (it mutates the row cache).
-    // `needless_pass_by_ref_mut`: the `&mut self` is required because
-    // `TerminalHandler::data_and_format_data_for_gui` takes `&mut self` (it writes the row cache).
-    #[allow(clippy::missing_const_for_fn)]
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    pub(crate) fn data_and_format_data_for_gui(
-        &mut self,
-        scroll_offset: usize,
-    ) -> (
-        TerminalSections<Vec<TChar>>,
-        TerminalSections<Vec<FormatTag>>,
-    ) {
-        self.handler.data_and_format_data_for_gui(scroll_offset)
     }
 
     #[must_use]
