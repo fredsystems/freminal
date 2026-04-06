@@ -1,6 +1,6 @@
 # PLAN_24 — Benchmark Improvements and CI Integration
 
-## Status: In Progress
+## Status: Complete
 
 ---
 
@@ -198,7 +198,7 @@ benchmarks into CI, and updates `agents.md` with benchmark-related rules.
 
 ### 24.4 — Weekly Benchmark Regression Workflow
 
-- **Status:** Pending
+- **Status:** Complete
 - **Priority:** 3 — Low
 - **Scope:** `.github/workflows/bench.yml` (new)
 - **Details:**
