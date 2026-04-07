@@ -117,25 +117,26 @@ const BELL_PERSISTENT_ALPHA: u8 = 30;
 ///
 /// **Unfocused window:** a persistent subtle overlay at
 /// [`BELL_PERSISTENT_ALPHA`] that remains until the window regains focus.
-/// When focus returns, `bell_since` is cleared so the overlay disappears
-/// immediately without a distracting fade.
+/// When focus returns the flash duration will have long since elapsed, so
+/// `bell_since` is cleared on the first focused frame (no fade).
 fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
     let Some(since) = view_state.bell_since else {
         return;
     };
 
     if !view_state.window_focused {
-        // Unfocused: show a persistent, non-fading overlay.
+        // Unfocused: show a persistent, non-fading overlay.  No repaint
+        // request — the overlay is static and doesn't need continuous
+        // redraws while the window is in the background.
         let alpha = BELL_PERSISTENT_ALPHA;
         let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
         ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
-        ui.ctx().request_repaint();
         return;
     }
 
-    // Focused: if the bell originally fired while unfocused, clear it now
-    // that focus has returned (the user has seen the persistent tint and
-    // is now looking at the terminal).
+    // Focused: if the flash duration has elapsed the bell either fired
+    // while unfocused (the user just alt-tabbed back) or the fade-out
+    // already completed — either way, clear immediately.
     let elapsed = since.elapsed();
     if elapsed >= BELL_FLASH_DURATION {
         view_state.bell_since = None;
@@ -1311,9 +1312,18 @@ fn shell_escape_path(path: &std::path::Path) -> String {
 /// **Hover:** Draws a semi-transparent overlay with a "Drop files here" label
 /// while files are being dragged over the terminal area.
 fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>) {
+    // Only handle drops/hovers when the pointer is over the terminal area.
+    // `raw.dropped_files` / `raw.hovered_files` are window-global, so without
+    // this gate a drop on the menu bar or settings modal would inject paths.
+    let pointer_over_terminal = ui.ctx().input(|i| {
+        i.pointer
+            .hover_pos()
+            .is_some_and(|p| terminal_rect.contains(p))
+    });
+
     // ── Drop handling ────────────────────────────────────────────────
     let dropped_files = ui.ctx().input(|i| i.raw.dropped_files.clone());
-    if !dropped_files.is_empty() {
+    if pointer_over_terminal && !dropped_files.is_empty() {
         let mut payload = String::new();
         for (i, file) in dropped_files.iter().enumerate() {
             if i > 0 {
@@ -1333,7 +1343,7 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
 
     // ── Hover overlay ────────────────────────────────────────────────
     let hovered_files = ui.ctx().input(|i| i.raw.hovered_files.clone());
-    if !hovered_files.is_empty() {
+    if pointer_over_terminal && !hovered_files.is_empty() {
         let overlay_color = Color32::from_rgba_premultiplied(0, 0, 0, 160);
         ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
         ui.painter().text(

@@ -655,14 +655,32 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
 ///
 /// Returns an empty string on any error (clipboard unavailable, empty, etc.).
 /// This is intentionally infallible — clipboard access is best-effort.
+///
+/// Clipboard contents beyond [`MAX_CLIPBOARD_BYTES`] are truncated to avoid
+/// excessive memory allocation and PTY traffic from a large clipboard.
 fn read_clipboard_base64() -> String {
+    /// Maximum clipboard payload size (bytes) returned for OSC 52 queries.
+    /// 100 KiB matches limits used by other terminal emulators (e.g. xterm).
+    const MAX_CLIPBOARD_BYTES: usize = 100 * 1024;
+
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         debug!("OSC 52 query: failed to open clipboard");
         return String::new();
     };
 
     match clipboard.get_text() {
-        Ok(text) if !text.is_empty() => freminal_common::base64::encode(text.as_bytes()),
+        Ok(text) if !text.is_empty() => {
+            let bytes = text.as_bytes();
+            if bytes.len() > MAX_CLIPBOARD_BYTES {
+                debug!(
+                    "OSC 52 query: clipboard truncated from {} to {MAX_CLIPBOARD_BYTES} bytes",
+                    bytes.len()
+                );
+                freminal_common::base64::encode(&bytes[..MAX_CLIPBOARD_BYTES])
+            } else {
+                freminal_common::base64::encode(bytes)
+            }
+        }
         Ok(_) => String::new(),
         Err(e) => {
             debug!("OSC 52 query: clipboard read error: {e}");
@@ -1019,12 +1037,13 @@ fn handle_window_manipulation(
                 send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};{payload}\x1b\\"));
             }
 
-            // Terminal bell: mark this tab as having an unacknowledged bell
-            // and start the visual flash timer (if bell mode is visual).
-            // When the window is unfocused, request OS-level taskbar attention.
+            // Terminal bell: ignored entirely when bell mode is `None`.
+            // Otherwise mark this tab as having an unacknowledged bell and
+            // start the visual flash timer.  When the window is unfocused,
+            // also request OS-level taskbar attention.
             WindowManipulation::Bell => {
-                *bell_active = true;
                 if bell_mode == freminal_common::config::BellMode::Visual {
+                    *bell_active = true;
                     *bell_since = Some(Instant::now());
 
                     if !window_focused {
