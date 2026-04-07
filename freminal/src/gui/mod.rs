@@ -266,7 +266,7 @@ impl FreminalGui {
     }
 
     /// Render a single tab element with label, optional close button,
-    /// and an underline accent for the active tab.
+    /// and a distinct background color for the active tab.
     fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
@@ -281,7 +281,7 @@ impl FreminalGui {
             &tab.title
         };
 
-        // Group the label and close button together so the underline
+        // Group the label and close button together so the background
         // spans the full tab width.
         let group_response = ui
             .horizontal(|ui| {
@@ -299,12 +299,14 @@ impl FreminalGui {
             })
             .response;
 
-        // Draw a colored underline beneath the active tab.
+        // Paint a distinct background behind the active tab to make it
+        // visually obvious which tab is selected. The fill color uses the
+        // theme's selection background with reduced opacity so it blends
+        // with the surrounding chrome.
         if is_active {
             let rect = group_response.rect;
-            let bottom = rect.bottom();
-            let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
-            ui.painter().hline(rect.x_range(), bottom, stroke);
+            let fill = ui.visuals().selection.bg_fill.linear_multiply(0.35);
+            ui.painter().rect_filled(rect, 4.0, fill);
         }
 
         action

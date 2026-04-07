@@ -17,9 +17,8 @@ use conv2::ConvUtil;
 use crossbeam_channel::Sender;
 use eframe::egui::{Event, InputState, Key, Modifiers, PointerButton, Pos2};
 use freminal_common::buffer_states::modes::{
-    alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
-    decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
-    mouse::MouseTrack, rl_bracket::RlBracket,
+    application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
+    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_terminal_emulator::{
@@ -371,7 +370,15 @@ pub(super) fn send_terminal_inputs(
 ///
 /// On the **alternate screen** (less, vim, htop, ...) scroll events are
 /// converted to `ArrowUp`/`ArrowDown` key presses sent to the PTY — this
-/// matches the behaviour of every major terminal emulator.
+/// matches the behaviour of every major terminal emulator (kitty, Alacritty,
+/// `WezTerm`, GNOME Terminal, etc.).
+///
+/// The conversion happens unconditionally on the alternate screen, regardless
+/// of the `?1007` (Alternate Scroll) DEC private mode.  Most terminal
+/// emulators translate scroll to arrow keys on the alternate screen by
+/// default, and most applications (less, vim, htop) do not explicitly set
+/// `?1007`.  Gating on `AlternateScroll::Enabled` would break scroll in
+/// nearly all alternate-screen applications.
 ///
 /// On the **primary screen** scroll events adjust the scroll offset and send
 /// it to the PTY thread via `InputEvent::ScrollOffset`.  The PTY thread
@@ -387,27 +394,23 @@ pub(super) fn handle_scroll_fallback(
     let abs_lines = lines.abs();
 
     if snap.is_alternate_screen {
-        if snap.alternate_scroll == AlternateScroll::Enabled {
-            // Convert scroll delta to arrow key presses.
-            // Safety: abs_lines >= 0, and we clamp to 1 below.
-            let count = abs_lines.approx_as::<usize>().unwrap_or(0).max(1);
-            let key = if lines > 0.0 {
-                TerminalInput::ArrowUp(KeyModifiers::NONE)
-            } else {
-                TerminalInput::ArrowDown(KeyModifiers::NONE)
-            };
-            for _ in 0..count {
-                send_terminal_inputs(
-                    std::slice::from_ref(&key),
-                    input_tx,
-                    &InputModes::from_snapshot(snap),
-                );
-            }
+        // Convert scroll delta to arrow key presses unconditionally.
+        // This matches kitty, Alacritty, WezTerm, and GNOME Terminal
+        // behaviour: scroll on the alternate screen always sends arrow
+        // keys to the PTY, regardless of the ?1007 mode flag.
+        let count = abs_lines.approx_as::<usize>().unwrap_or(0).max(1);
+        let key = if lines > 0.0 {
+            TerminalInput::ArrowUp(KeyModifiers::NONE)
+        } else {
+            TerminalInput::ArrowDown(KeyModifiers::NONE)
+        };
+        for _ in 0..count {
+            send_terminal_inputs(
+                std::slice::from_ref(&key),
+                input_tx,
+                &InputModes::from_snapshot(snap),
+            );
         }
-        // When alternate scroll is disabled, silently drop the scroll event.
-        // The alternate screen has no scrollback history to navigate, and the
-        // application did not request arrow-key conversion — scrolling into
-        // a non-existent scrollback buffer would be incorrect.
     } else {
         // Primary screen: adjust scroll offset and send to PTY thread.
         // Multiply by 3 so each wheel tick scrolls 3 lines — matching the
@@ -457,7 +460,7 @@ pub(super) fn handle_scroll_fallback(
 /// | `Key` (special)      | Arrows, Home/End, Delete, Insert, PgUp/Dn, F1–F12 → xterm escape sequences via `to_payload()`. |
 /// | `PointerButton`      | Translated to X10/X11/SGR mouse report bytes when mouse tracking is active. |
 /// | `PointerMoved`       | Mouse-move report when button-motion or any-event tracking is active; updates text selection when tracking is off. |
-/// | `Scroll`             | Alternate screen: converted to arrow-key bytes (`AlternateScroll` mode). Primary screen: updates `ViewState::scroll_offset` and sends `InputEvent::ScrollOffset`. |
+/// | `Scroll`             | Alternate screen: unconditionally converted to arrow-key bytes (matching kitty/Alacritty/WezTerm). Primary screen: updates `ViewState::scroll_offset` and sends `InputEvent::ScrollOffset`. |
 /// | `WindowFocused`      | Sends `InputEvent::FocusChange`; clears mouse position on unfocus. |
 /// | `Paste`              | Bracketed-paste wrapped if `RlBracket::Bracketed` is set. |
 /// | `Copy`               | Selection text placed on system clipboard. |
