@@ -266,9 +266,12 @@ are discoverable and configurable.
    - Added `keybindingsSection` to config attrset builder with conditional inclusion
    - Default is empty attrset (no overrides), only included in generated TOML when non-empty
 
-6. **37.6 — Update `agents.md`**
+6. **37.6 — Update `agents.md`** ✅ _Complete (2026-04-06)_
    Add the keybinding mapping rule to `agents.md` under a new "Keybinding Convention" section:
    all new features with keyboard shortcuts must add `KeyAction` variants and default bindings.
+   - Added "Keybinding Convention" section with 4-step checklist (KeyAction variant, default
+     binding, dispatch handler, config_example.toml documentation)
+   - Forbids hardcoded shortcuts outside the BindingMap system
 
 7. **37.7 — Tests**
    Unit tests: default bindings produce correct actions, custom bindings override defaults,
