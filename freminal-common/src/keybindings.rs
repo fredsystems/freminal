@@ -1,0 +1,1460 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
+//! Configurable key bindings for Freminal.
+//!
+//! Provides a data-driven keybinding system that maps keyboard shortcuts to
+//! application actions. Users can customize bindings via the `[keybindings]`
+//! section in `config.toml`.
+//!
+//! The keybinding types ([`BindingKey`], [`BindingModifiers`], [`KeyCombo`])
+//! are framework-independent. Conversion from GUI framework key types
+//! (e.g. `egui::Key`) happens in the binary crate's GUI layer, not here.
+//!
+//! # Default Bindings
+//!
+//! [`BindingMap::default()`] produces the set of bindings matching common
+//! terminal emulator conventions:
+//!
+//! | Combo              | Action           |
+//! |--------------------|------------------|
+//! | `Ctrl+Shift+C`     | Copy             |
+//! | `Ctrl+Shift+V`     | Paste            |
+//! | `Ctrl+Shift+T`     | New Tab          |
+//! | `Ctrl+Shift+W`     | Close Tab        |
+//! | `Ctrl+Shift+,`     | Open Settings    |
+//! | `Shift+PageUp`     | Scroll Page Up   |
+//! | `Shift+PageDown`   | Scroll Page Down |
+//!
+//! See [`BindingMap::default()`] for the complete list.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+//  Error types
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur when parsing key binding strings.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum KeyBindingError {
+    /// The key name was not recognized.
+    #[error("unknown key: \"{0}\"")]
+    UnknownKey(String),
+
+    /// The action name was not recognized.
+    #[error("unknown action: \"{0}\"")]
+    UnknownAction(String),
+
+    /// A modifier name was not recognized.
+    #[error("unknown modifier: \"{0}\"")]
+    UnknownModifier(String),
+
+    /// The key combo string was empty.
+    #[error("empty key combo string")]
+    EmptyCombo,
+}
+
+// ---------------------------------------------------------------------------
+//  BindingKey
+// ---------------------------------------------------------------------------
+
+/// A keyboard key that can be part of a binding.
+///
+/// This is Freminal's own key representation, independent of any GUI framework.
+/// Conversion from framework-specific key types (e.g. `egui::Key`) happens in
+/// the GUI layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BindingKey {
+    // Letters
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+
+    // Numbers (top row)
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
+
+    // Function keys
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+
+    // Navigation
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+
+    // Editing
+    Insert,
+    Delete,
+    Backspace,
+
+    // Whitespace / control
+    Tab,
+    Enter,
+    Space,
+    Escape,
+
+    // Symbols
+    Plus,
+    Minus,
+    Equals,
+    Comma,
+    Period,
+    Semicolon,
+    Colon,
+    Slash,
+    Backslash,
+    OpenBracket,
+    CloseBracket,
+    Backtick,
+    Quote,
+}
+
+impl BindingKey {
+    /// Returns the canonical display name for this key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
+            Self::F => "F",
+            Self::G => "G",
+            Self::H => "H",
+            Self::I => "I",
+            Self::J => "J",
+            Self::K => "K",
+            Self::L => "L",
+            Self::M => "M",
+            Self::N => "N",
+            Self::O => "O",
+            Self::P => "P",
+            Self::Q => "Q",
+            Self::R => "R",
+            Self::S => "S",
+            Self::T => "T",
+            Self::U => "U",
+            Self::V => "V",
+            Self::W => "W",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+            Self::Num0 => "0",
+            Self::Num1 => "1",
+            Self::Num2 => "2",
+            Self::Num3 => "3",
+            Self::Num4 => "4",
+            Self::Num5 => "5",
+            Self::Num6 => "6",
+            Self::Num7 => "7",
+            Self::Num8 => "8",
+            Self::Num9 => "9",
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+            Self::ArrowUp => "Up",
+            Self::ArrowDown => "Down",
+            Self::ArrowLeft => "Left",
+            Self::ArrowRight => "Right",
+            Self::Home => "Home",
+            Self::End => "End",
+            Self::PageUp => "PageUp",
+            Self::PageDown => "PageDown",
+            Self::Insert => "Insert",
+            Self::Delete => "Delete",
+            Self::Backspace => "Backspace",
+            Self::Tab => "Tab",
+            Self::Enter => "Enter",
+            Self::Space => "Space",
+            Self::Escape => "Escape",
+            Self::Plus => "Plus",
+            Self::Minus => "Minus",
+            Self::Equals => "Equals",
+            Self::Comma => "Comma",
+            Self::Period => "Period",
+            Self::Semicolon => "Semicolon",
+            Self::Colon => "Colon",
+            Self::Slash => "Slash",
+            Self::Backslash => "Backslash",
+            Self::OpenBracket => "OpenBracket",
+            Self::CloseBracket => "CloseBracket",
+            Self::Backtick => "Backtick",
+            Self::Quote => "Quote",
+        }
+    }
+}
+
+impl fmt::Display for BindingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for BindingKey {
+    type Err = KeyBindingError;
+
+    /// Parse a key name (case-insensitive).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyBindingError::UnknownKey`] if the string does not match
+    /// any known key name.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "a" => Ok(Self::A),
+            "b" => Ok(Self::B),
+            "c" => Ok(Self::C),
+            "d" => Ok(Self::D),
+            "e" => Ok(Self::E),
+            "f" => Ok(Self::F),
+            "g" => Ok(Self::G),
+            "h" => Ok(Self::H),
+            "i" => Ok(Self::I),
+            "j" => Ok(Self::J),
+            "k" => Ok(Self::K),
+            "l" => Ok(Self::L),
+            "m" => Ok(Self::M),
+            "n" => Ok(Self::N),
+            "o" => Ok(Self::O),
+            "p" => Ok(Self::P),
+            "q" => Ok(Self::Q),
+            "r" => Ok(Self::R),
+            "s" => Ok(Self::S),
+            "t" => Ok(Self::T),
+            "u" => Ok(Self::U),
+            "v" => Ok(Self::V),
+            "w" => Ok(Self::W),
+            "x" => Ok(Self::X),
+            "y" => Ok(Self::Y),
+            "z" => Ok(Self::Z),
+            "0" => Ok(Self::Num0),
+            "1" => Ok(Self::Num1),
+            "2" => Ok(Self::Num2),
+            "3" => Ok(Self::Num3),
+            "4" => Ok(Self::Num4),
+            "5" => Ok(Self::Num5),
+            "6" => Ok(Self::Num6),
+            "7" => Ok(Self::Num7),
+            "8" => Ok(Self::Num8),
+            "9" => Ok(Self::Num9),
+            "f1" => Ok(Self::F1),
+            "f2" => Ok(Self::F2),
+            "f3" => Ok(Self::F3),
+            "f4" => Ok(Self::F4),
+            "f5" => Ok(Self::F5),
+            "f6" => Ok(Self::F6),
+            "f7" => Ok(Self::F7),
+            "f8" => Ok(Self::F8),
+            "f9" => Ok(Self::F9),
+            "f10" => Ok(Self::F10),
+            "f11" => Ok(Self::F11),
+            "f12" => Ok(Self::F12),
+            "up" | "arrowup" => Ok(Self::ArrowUp),
+            "down" | "arrowdown" => Ok(Self::ArrowDown),
+            "left" | "arrowleft" => Ok(Self::ArrowLeft),
+            "right" | "arrowright" => Ok(Self::ArrowRight),
+            "home" => Ok(Self::Home),
+            "end" => Ok(Self::End),
+            "pageup" => Ok(Self::PageUp),
+            "pagedown" => Ok(Self::PageDown),
+            "insert" => Ok(Self::Insert),
+            "delete" => Ok(Self::Delete),
+            "backspace" => Ok(Self::Backspace),
+            "tab" => Ok(Self::Tab),
+            "enter" | "return" => Ok(Self::Enter),
+            "space" => Ok(Self::Space),
+            "escape" | "esc" => Ok(Self::Escape),
+            "plus" | "+" => Ok(Self::Plus),
+            "minus" | "-" => Ok(Self::Minus),
+            "equals" | "=" => Ok(Self::Equals),
+            "comma" | "," => Ok(Self::Comma),
+            "period" | "." => Ok(Self::Period),
+            "semicolon" | ";" => Ok(Self::Semicolon),
+            "colon" | ":" => Ok(Self::Colon),
+            "slash" | "/" => Ok(Self::Slash),
+            "backslash" | "\\" => Ok(Self::Backslash),
+            "openbracket" | "[" => Ok(Self::OpenBracket),
+            "closebracket" | "]" => Ok(Self::CloseBracket),
+            "backtick" | "`" => Ok(Self::Backtick),
+            "quote" | "'" => Ok(Self::Quote),
+            other => Err(KeyBindingError::UnknownKey(other.to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  BindingModifiers
+// ---------------------------------------------------------------------------
+
+/// Modifier keys for a key binding.
+///
+/// Framework-independent representation. Conversion from `egui::Modifiers`
+/// (or any other framework type) happens in the GUI layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct BindingModifiers {
+    /// The Ctrl key (or Cmd on macOS, at the GUI layer's discretion).
+    pub ctrl: bool,
+    /// The Shift key.
+    pub shift: bool,
+    /// The Alt key (Option on macOS).
+    pub alt: bool,
+}
+
+impl BindingModifiers {
+    /// No modifiers held.
+    pub const NONE: Self = Self {
+        ctrl: false,
+        shift: false,
+        alt: false,
+    };
+
+    /// Ctrl only.
+    pub const CTRL: Self = Self {
+        ctrl: true,
+        shift: false,
+        alt: false,
+    };
+
+    /// Shift only.
+    pub const SHIFT: Self = Self {
+        ctrl: false,
+        shift: true,
+        alt: false,
+    };
+
+    /// Ctrl + Shift.
+    pub const CTRL_SHIFT: Self = Self {
+        ctrl: true,
+        shift: true,
+        alt: false,
+    };
+
+    /// Alt only.
+    pub const ALT: Self = Self {
+        ctrl: false,
+        shift: false,
+        alt: true,
+    };
+}
+
+impl fmt::Display for BindingModifiers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.ctrl {
+            f.write_str("Ctrl+")?;
+        }
+        if self.shift {
+            f.write_str("Shift+")?;
+        }
+        if self.alt {
+            f.write_str("Alt+")?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  KeyCombo
+// ---------------------------------------------------------------------------
+
+/// A key combination: a key plus zero or more modifiers.
+///
+/// Used as the lookup key in the binding map. Displayed and parsed in the
+/// format `"Ctrl+Shift+T"`, `"Alt+F4"`, `"Escape"`, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyCombo {
+    /// The primary key.
+    pub key: BindingKey,
+    /// Active modifier keys.
+    pub modifiers: BindingModifiers,
+}
+
+impl KeyCombo {
+    /// Create a new key combo from a key and modifiers.
+    #[must_use]
+    pub const fn new(key: BindingKey, modifiers: BindingModifiers) -> Self {
+        Self { key, modifiers }
+    }
+
+    /// Create a key combo with no modifiers.
+    #[must_use]
+    pub const fn bare(key: BindingKey) -> Self {
+        Self {
+            key,
+            modifiers: BindingModifiers::NONE,
+        }
+    }
+}
+
+impl fmt::Display for KeyCombo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.modifiers, self.key)
+    }
+}
+
+impl FromStr for KeyCombo {
+    type Err = KeyBindingError;
+
+    /// Parse a key combo string like `"Ctrl+Shift+T"` or `"Escape"`.
+    ///
+    /// The last `+`-separated segment is the key; all preceding segments are
+    /// modifiers. Matching is case-insensitive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyBindingError::EmptyCombo`] if the string is empty,
+    /// [`KeyBindingError::UnknownModifier`] for unrecognized modifier names,
+    /// or [`KeyBindingError::UnknownKey`] for unrecognized key names.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(KeyBindingError::EmptyCombo);
+        }
+
+        let parts: Vec<&str> = s.split('+').collect();
+        if parts.is_empty() {
+            return Err(KeyBindingError::EmptyCombo);
+        }
+
+        // The last segment is the key, everything before is modifiers.
+        // Edge case: the key itself might be "+" which is parsed as BindingKey::Plus.
+        // To handle "Ctrl++" (Ctrl+Plus), we check if the last part is empty
+        // (meaning the string ended with "+", e.g. "Ctrl+" is really "Ctrl+Plus"
+        // if the user intended the + key).
+        let (modifier_parts, key_str) = if parts.len() >= 2 && parts.last() == Some(&"") {
+            // String ended with "+" — the key is "+"
+            (&parts[..parts.len() - 2], "+")
+        } else {
+            let (mods, key) = parts.split_at(parts.len() - 1);
+            (mods, key[0])
+        };
+
+        let mut modifiers = BindingModifiers::NONE;
+        for &modifier in modifier_parts {
+            match modifier.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" | "cmd" | "command" => modifiers.ctrl = true,
+                "shift" => modifiers.shift = true,
+                "alt" | "option" | "opt" => modifiers.alt = true,
+                other => return Err(KeyBindingError::UnknownModifier(other.to_string())),
+            }
+        }
+
+        let key = BindingKey::from_str(key_str)?;
+        Ok(Self { key, modifiers })
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  KeyAction
+// ---------------------------------------------------------------------------
+
+/// An application-level action that can be triggered by a key binding.
+///
+/// Every user-facing keyboard shortcut in Freminal maps to one of these
+/// variants. The dispatch layer in the GUI checks incoming key events
+/// against the [`BindingMap`] and executes the corresponding action.
+///
+/// Variants are grouped by feature area. Future features add new variants
+/// here and register default bindings in [`BindingMap::default()`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyAction {
+    // -- Tab actions --------------------------------------------------------
+    /// Create a new tab.
+    NewTab,
+    /// Close the active tab.
+    CloseTab,
+    /// Switch to the next tab.
+    NextTab,
+    /// Switch to the previous tab.
+    PrevTab,
+    /// Switch to tab 1.
+    SwitchToTab1,
+    /// Switch to tab 2.
+    SwitchToTab2,
+    /// Switch to tab 3.
+    SwitchToTab3,
+    /// Switch to tab 4.
+    SwitchToTab4,
+    /// Switch to tab 5.
+    SwitchToTab5,
+    /// Switch to tab 6.
+    SwitchToTab6,
+    /// Switch to tab 7.
+    SwitchToTab7,
+    /// Switch to tab 8.
+    SwitchToTab8,
+    /// Switch to tab 9.
+    SwitchToTab9,
+    /// Move the active tab one position to the left.
+    MoveTabLeft,
+    /// Move the active tab one position to the right.
+    MoveTabRight,
+    /// Rename the active tab.
+    RenameTab,
+
+    // -- Clipboard / selection ----------------------------------------------
+    /// Copy the current selection to the system clipboard.
+    Copy,
+    /// Paste the system clipboard contents into the terminal.
+    Paste,
+    /// Select all visible terminal content.
+    SelectAll,
+
+    // -- Search -------------------------------------------------------------
+    /// Open the search overlay.
+    OpenSearch,
+
+    // -- Font zoom ----------------------------------------------------------
+    /// Increase font size.
+    ZoomIn,
+    /// Decrease font size.
+    ZoomOut,
+    /// Reset font size to the configured default.
+    ZoomReset,
+
+    // -- UI -----------------------------------------------------------------
+    /// Toggle the menu bar visibility.
+    ToggleMenuBar,
+    /// Open the settings modal.
+    OpenSettings,
+
+    // -- Scrollback ---------------------------------------------------------
+    /// Scroll up by one page.
+    ScrollPageUp,
+    /// Scroll down by one page.
+    ScrollPageDown,
+    /// Scroll to the top of the scrollback buffer.
+    ScrollToTop,
+    /// Scroll to the bottom (live terminal output).
+    ScrollToBottom,
+    /// Scroll up by one line.
+    ScrollLineUp,
+    /// Scroll down by one line.
+    ScrollLineDown,
+}
+
+impl KeyAction {
+    /// Returns the canonical `snake_case` name for this action.
+    ///
+    /// This matches the serde serialization format and the TOML config key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NewTab => "new_tab",
+            Self::CloseTab => "close_tab",
+            Self::NextTab => "next_tab",
+            Self::PrevTab => "prev_tab",
+            Self::SwitchToTab1 => "switch_to_tab_1",
+            Self::SwitchToTab2 => "switch_to_tab_2",
+            Self::SwitchToTab3 => "switch_to_tab_3",
+            Self::SwitchToTab4 => "switch_to_tab_4",
+            Self::SwitchToTab5 => "switch_to_tab_5",
+            Self::SwitchToTab6 => "switch_to_tab_6",
+            Self::SwitchToTab7 => "switch_to_tab_7",
+            Self::SwitchToTab8 => "switch_to_tab_8",
+            Self::SwitchToTab9 => "switch_to_tab_9",
+            Self::MoveTabLeft => "move_tab_left",
+            Self::MoveTabRight => "move_tab_right",
+            Self::RenameTab => "rename_tab",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+            Self::SelectAll => "select_all",
+            Self::OpenSearch => "open_search",
+            Self::ZoomIn => "zoom_in",
+            Self::ZoomOut => "zoom_out",
+            Self::ZoomReset => "zoom_reset",
+            Self::ToggleMenuBar => "toggle_menu_bar",
+            Self::OpenSettings => "open_settings",
+            Self::ScrollPageUp => "scroll_page_up",
+            Self::ScrollPageDown => "scroll_page_down",
+            Self::ScrollToTop => "scroll_to_top",
+            Self::ScrollToBottom => "scroll_to_bottom",
+            Self::ScrollLineUp => "scroll_line_up",
+            Self::ScrollLineDown => "scroll_line_down",
+        }
+    }
+
+    /// All defined actions, in declaration order.
+    ///
+    /// Useful for iterating over all actions in the settings UI or for
+    /// generating documentation.
+    pub const ALL: &[Self] = &[
+        Self::NewTab,
+        Self::CloseTab,
+        Self::NextTab,
+        Self::PrevTab,
+        Self::SwitchToTab1,
+        Self::SwitchToTab2,
+        Self::SwitchToTab3,
+        Self::SwitchToTab4,
+        Self::SwitchToTab5,
+        Self::SwitchToTab6,
+        Self::SwitchToTab7,
+        Self::SwitchToTab8,
+        Self::SwitchToTab9,
+        Self::MoveTabLeft,
+        Self::MoveTabRight,
+        Self::RenameTab,
+        Self::Copy,
+        Self::Paste,
+        Self::SelectAll,
+        Self::OpenSearch,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::ZoomReset,
+        Self::ToggleMenuBar,
+        Self::OpenSettings,
+        Self::ScrollPageUp,
+        Self::ScrollPageDown,
+        Self::ScrollToTop,
+        Self::ScrollToBottom,
+        Self::ScrollLineUp,
+        Self::ScrollLineDown,
+    ];
+}
+
+impl fmt::Display for KeyAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for KeyAction {
+    type Err = KeyBindingError;
+
+    /// Parse an action name (case-insensitive, underscore-separated).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyBindingError::UnknownAction`] if the string does not match
+    /// any known action name.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "new_tab" => Ok(Self::NewTab),
+            "close_tab" => Ok(Self::CloseTab),
+            "next_tab" => Ok(Self::NextTab),
+            "prev_tab" => Ok(Self::PrevTab),
+            "switch_to_tab_1" => Ok(Self::SwitchToTab1),
+            "switch_to_tab_2" => Ok(Self::SwitchToTab2),
+            "switch_to_tab_3" => Ok(Self::SwitchToTab3),
+            "switch_to_tab_4" => Ok(Self::SwitchToTab4),
+            "switch_to_tab_5" => Ok(Self::SwitchToTab5),
+            "switch_to_tab_6" => Ok(Self::SwitchToTab6),
+            "switch_to_tab_7" => Ok(Self::SwitchToTab7),
+            "switch_to_tab_8" => Ok(Self::SwitchToTab8),
+            "switch_to_tab_9" => Ok(Self::SwitchToTab9),
+            "move_tab_left" => Ok(Self::MoveTabLeft),
+            "move_tab_right" => Ok(Self::MoveTabRight),
+            "rename_tab" => Ok(Self::RenameTab),
+            "copy" => Ok(Self::Copy),
+            "paste" => Ok(Self::Paste),
+            "select_all" => Ok(Self::SelectAll),
+            "open_search" => Ok(Self::OpenSearch),
+            "zoom_in" => Ok(Self::ZoomIn),
+            "zoom_out" => Ok(Self::ZoomOut),
+            "zoom_reset" => Ok(Self::ZoomReset),
+            "toggle_menu_bar" => Ok(Self::ToggleMenuBar),
+            "open_settings" => Ok(Self::OpenSettings),
+            "scroll_page_up" => Ok(Self::ScrollPageUp),
+            "scroll_page_down" => Ok(Self::ScrollPageDown),
+            "scroll_to_top" => Ok(Self::ScrollToTop),
+            "scroll_to_bottom" => Ok(Self::ScrollToBottom),
+            "scroll_line_up" => Ok(Self::ScrollLineUp),
+            "scroll_line_down" => Ok(Self::ScrollLineDown),
+            other => Err(KeyBindingError::UnknownAction(other.to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  BindingMap
+// ---------------------------------------------------------------------------
+
+/// The set of key bindings mapping key combos to application actions.
+///
+/// A single combo maps to exactly one action. Multiple combos may map to the
+/// same action (e.g. both `Ctrl+=` and `Ctrl+Plus` can trigger `ZoomIn`).
+///
+/// The [`Default`] implementation produces the standard set of bindings
+/// matching common terminal emulator conventions.
+#[derive(Debug, Clone)]
+pub struct BindingMap {
+    /// Primary lookup: key combo → action.
+    combo_to_action: HashMap<KeyCombo, KeyAction>,
+}
+
+impl BindingMap {
+    /// Create an empty binding map with no bindings.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            combo_to_action: HashMap::new(),
+        }
+    }
+
+    /// Look up the action bound to a key combo.
+    #[must_use]
+    pub fn lookup(&self, combo: &KeyCombo) -> Option<KeyAction> {
+        self.combo_to_action.get(combo).copied()
+    }
+
+    /// Find the first combo bound to a given action, if any.
+    ///
+    /// When multiple combos are bound to the same action, the returned combo
+    /// is arbitrary (`HashMap` iteration order).
+    #[must_use]
+    pub fn combo_for(&self, action: KeyAction) -> Option<KeyCombo> {
+        self.combo_to_action
+            .iter()
+            .find(|(_, a)| **a == action)
+            .map(|(combo, _)| *combo)
+    }
+
+    /// Find all combos bound to a given action.
+    #[must_use]
+    pub fn all_combos_for(&self, action: KeyAction) -> Vec<KeyCombo> {
+        self.combo_to_action
+            .iter()
+            .filter(|(_, a)| **a == action)
+            .map(|(combo, _)| *combo)
+            .collect()
+    }
+
+    /// Bind a key combo to an action.
+    ///
+    /// If the combo was already bound to a different action, the previous
+    /// action is returned.
+    pub fn bind(&mut self, combo: KeyCombo, action: KeyAction) -> Option<KeyAction> {
+        self.combo_to_action.insert(combo, action)
+    }
+
+    /// Remove the binding for a specific key combo.
+    ///
+    /// Returns the action that was bound to the combo, if any.
+    pub fn unbind_combo(&mut self, combo: &KeyCombo) -> Option<KeyAction> {
+        self.combo_to_action.remove(combo)
+    }
+
+    /// Remove all bindings for a specific action.
+    ///
+    /// Returns the combos that were bound to the action.
+    pub fn unbind_action(&mut self, action: KeyAction) -> Vec<KeyCombo> {
+        let combos: Vec<KeyCombo> = self
+            .combo_to_action
+            .iter()
+            .filter(|(_, a)| **a == action)
+            .map(|(combo, _)| *combo)
+            .collect();
+
+        for combo in &combos {
+            self.combo_to_action.remove(combo);
+        }
+
+        combos
+    }
+
+    /// Iterate over all bindings as `(combo, action)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&KeyCombo, &KeyAction)> {
+        self.combo_to_action.iter()
+    }
+
+    /// Returns the number of bindings in the map.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.combo_to_action.len()
+    }
+
+    /// Returns `true` if the map contains no bindings.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.combo_to_action.is_empty()
+    }
+
+    /// Apply user-specified overrides on top of the current bindings.
+    ///
+    /// Each entry in `overrides` maps an action name (`snake_case`) to a key
+    /// combo string. A combo string of `"none"` or `""` removes all bindings
+    /// for that action.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first parse error encountered. Bindings applied before
+    /// the error are retained (partial application).
+    pub fn apply_overrides(
+        &mut self,
+        overrides: &HashMap<String, String>,
+    ) -> Result<(), KeyBindingError> {
+        for (action_str, combo_str) in overrides {
+            let action = KeyAction::from_str(action_str)?;
+
+            let combo_str = combo_str.trim();
+            if combo_str.is_empty() || combo_str.eq_ignore_ascii_case("none") {
+                // Unbind this action entirely.
+                self.unbind_action(action);
+            } else {
+                let combo = KeyCombo::from_str(combo_str)?;
+                self.bind(combo, action);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Register the standard tab-management bindings (new, close, next, prev, switch 1–9).
+fn register_tab_bindings(map: &mut BindingMap) {
+    map.bind(
+        KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT),
+        KeyAction::NewTab,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::W, BindingModifiers::CTRL_SHIFT),
+        KeyAction::CloseTab,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::Tab, BindingModifiers::CTRL),
+        KeyAction::NextTab,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::Tab, BindingModifiers::CTRL_SHIFT),
+        KeyAction::PrevTab,
+    );
+
+    // Switch to tab N via Ctrl+Shift+<digit>.
+    let digit_actions = [
+        (BindingKey::Num1, KeyAction::SwitchToTab1),
+        (BindingKey::Num2, KeyAction::SwitchToTab2),
+        (BindingKey::Num3, KeyAction::SwitchToTab3),
+        (BindingKey::Num4, KeyAction::SwitchToTab4),
+        (BindingKey::Num5, KeyAction::SwitchToTab5),
+        (BindingKey::Num6, KeyAction::SwitchToTab6),
+        (BindingKey::Num7, KeyAction::SwitchToTab7),
+        (BindingKey::Num8, KeyAction::SwitchToTab8),
+        (BindingKey::Num9, KeyAction::SwitchToTab9),
+    ];
+    for (key, action) in digit_actions {
+        map.bind(KeyCombo::new(key, BindingModifiers::CTRL_SHIFT), action);
+    }
+}
+
+/// Register clipboard, zoom, UI, and scrollback bindings.
+fn register_misc_bindings(map: &mut BindingMap) {
+    // -- Clipboard / selection --
+    map.bind(
+        KeyCombo::new(BindingKey::C, BindingModifiers::CTRL_SHIFT),
+        KeyAction::Copy,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT),
+        KeyAction::Paste,
+    );
+
+    // -- Font zoom --
+    // Ctrl+= is the primary zoom-in binding (= is next to - on US keyboards).
+    // Ctrl+Plus is an alias (Shift+= on US keyboards produces +).
+    map.bind(
+        KeyCombo::new(BindingKey::Equals, BindingModifiers::CTRL),
+        KeyAction::ZoomIn,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::Plus, BindingModifiers::CTRL),
+        KeyAction::ZoomIn,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::Minus, BindingModifiers::CTRL),
+        KeyAction::ZoomOut,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::Num0, BindingModifiers::CTRL),
+        KeyAction::ZoomReset,
+    );
+
+    // -- UI --
+    map.bind(
+        KeyCombo::new(BindingKey::Comma, BindingModifiers::CTRL_SHIFT),
+        KeyAction::OpenSettings,
+    );
+
+    // -- Scrollback --
+    // Shift+PageUp/Down is the standard terminal scrollback shortcut.
+    map.bind(
+        KeyCombo::new(BindingKey::PageUp, BindingModifiers::SHIFT),
+        KeyAction::ScrollPageUp,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::PageDown, BindingModifiers::SHIFT),
+        KeyAction::ScrollPageDown,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::Home, BindingModifiers::SHIFT),
+        KeyAction::ScrollToTop,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::End, BindingModifiers::SHIFT),
+        KeyAction::ScrollToBottom,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::ArrowUp, BindingModifiers::SHIFT),
+        KeyAction::ScrollLineUp,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::ArrowDown, BindingModifiers::SHIFT),
+        KeyAction::ScrollLineDown,
+    );
+}
+
+impl Default for BindingMap {
+    /// Produce the standard set of key bindings matching common terminal
+    /// emulator conventions.
+    fn default() -> Self {
+        let mut map = Self::empty();
+        register_tab_bindings(&mut map);
+        register_misc_bindings(&mut map);
+        map
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // -- BindingKey parsing -------------------------------------------------
+
+    #[test]
+    fn binding_key_parse_letters() {
+        for c in 'a'..='z' {
+            let key: BindingKey = c.to_string().parse().expect("letter should parse");
+            let upper: BindingKey = c.to_ascii_uppercase().to_string().parse().unwrap();
+            assert_eq!(key, upper, "case-insensitive letter parsing");
+        }
+    }
+
+    #[test]
+    fn binding_key_parse_digits() {
+        for d in '0'..='9' {
+            let _key: BindingKey = d.to_string().parse().expect("digit should parse");
+        }
+    }
+
+    #[test]
+    fn binding_key_parse_function_keys() {
+        for n in 1..=12 {
+            let s = format!("F{n}");
+            let _key: BindingKey = s.parse().expect("function key should parse");
+        }
+    }
+
+    #[test]
+    fn binding_key_parse_navigation() {
+        for name in &[
+            "Up",
+            "Down",
+            "Left",
+            "Right",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "ArrowUp",
+            "ArrowDown",
+            "ArrowLeft",
+            "ArrowRight",
+        ] {
+            let _key: BindingKey = name.parse().expect("navigation key should parse");
+        }
+    }
+
+    #[test]
+    fn binding_key_parse_special() {
+        for name in &[
+            "Tab",
+            "Enter",
+            "Return",
+            "Space",
+            "Escape",
+            "Esc",
+            "Insert",
+            "Delete",
+            "Backspace",
+        ] {
+            let _key: BindingKey = name.parse().expect("special key should parse");
+        }
+    }
+
+    #[test]
+    fn binding_key_parse_symbols() {
+        for name in &[
+            "Plus",
+            "+",
+            "Minus",
+            "-",
+            "Equals",
+            "=",
+            "Comma",
+            ",",
+            "Period",
+            ".",
+            "Semicolon",
+            ";",
+            "Colon",
+            ":",
+            "Slash",
+            "/",
+            "Backslash",
+            "\\",
+            "OpenBracket",
+            "[",
+            "CloseBracket",
+            "]",
+            "Backtick",
+            "`",
+            "Quote",
+            "'",
+        ] {
+            let _key: BindingKey = name.parse().expect("symbol key should parse");
+        }
+    }
+
+    #[test]
+    fn binding_key_parse_unknown_returns_error() {
+        let err = "NotAKey".parse::<BindingKey>().unwrap_err();
+        assert!(matches!(err, KeyBindingError::UnknownKey(_)));
+    }
+
+    #[test]
+    fn binding_key_display_roundtrip() {
+        // Every key's Display output should parse back to the same key.
+        let all_keys = [
+            BindingKey::A,
+            BindingKey::Z,
+            BindingKey::Num0,
+            BindingKey::Num9,
+            BindingKey::F1,
+            BindingKey::F12,
+            BindingKey::ArrowUp,
+            BindingKey::Home,
+            BindingKey::Tab,
+            BindingKey::Escape,
+            BindingKey::Plus,
+            BindingKey::Minus,
+            BindingKey::Equals,
+            BindingKey::Comma,
+            BindingKey::Backtick,
+        ];
+        for key in all_keys {
+            let s = key.to_string();
+            let parsed: BindingKey = s.parse().unwrap_or_else(|e| {
+                panic!("BindingKey::Display output {s:?} should parse back: {e}")
+            });
+            assert_eq!(key, parsed);
+        }
+    }
+
+    // -- KeyCombo parsing ---------------------------------------------------
+
+    #[test]
+    fn key_combo_parse_bare_key() {
+        let combo: KeyCombo = "Escape".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::Escape);
+        assert_eq!(combo.modifiers, BindingModifiers::NONE);
+    }
+
+    #[test]
+    fn key_combo_parse_ctrl_shift() {
+        let combo: KeyCombo = "Ctrl+Shift+T".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::T);
+        assert!(combo.modifiers.ctrl);
+        assert!(combo.modifiers.shift);
+        assert!(!combo.modifiers.alt);
+    }
+
+    #[test]
+    fn key_combo_parse_alt() {
+        let combo: KeyCombo = "Alt+F4".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::F4);
+        assert!(combo.modifiers.alt);
+        assert!(!combo.modifiers.ctrl);
+        assert!(!combo.modifiers.shift);
+    }
+
+    #[test]
+    fn key_combo_parse_case_insensitive() {
+        let combo: KeyCombo = "ctrl+shift+c".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::C);
+        assert!(combo.modifiers.ctrl);
+        assert!(combo.modifiers.shift);
+    }
+
+    #[test]
+    fn key_combo_parse_command_alias() {
+        let combo: KeyCombo = "Command+C".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::C);
+        assert!(combo.modifiers.ctrl);
+    }
+
+    #[test]
+    fn key_combo_parse_option_alias() {
+        let combo: KeyCombo = "Option+Tab".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::Tab);
+        assert!(combo.modifiers.alt);
+    }
+
+    #[test]
+    fn key_combo_parse_plus_key() {
+        // "Ctrl++" means Ctrl+Plus — trailing "+" is the key
+        let combo: KeyCombo = "Ctrl++".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::Plus);
+        assert!(combo.modifiers.ctrl);
+    }
+
+    #[test]
+    fn key_combo_parse_empty_returns_error() {
+        let err = "".parse::<KeyCombo>().unwrap_err();
+        assert!(matches!(err, KeyBindingError::EmptyCombo));
+    }
+
+    #[test]
+    fn key_combo_parse_whitespace_only_returns_error() {
+        let err = "  ".parse::<KeyCombo>().unwrap_err();
+        assert!(matches!(err, KeyBindingError::EmptyCombo));
+    }
+
+    #[test]
+    fn key_combo_parse_unknown_modifier() {
+        let err = "Super+A".parse::<KeyCombo>().unwrap_err();
+        assert!(matches!(err, KeyBindingError::UnknownModifier(_)));
+    }
+
+    #[test]
+    fn key_combo_parse_unknown_key() {
+        let err = "Ctrl+FooBar".parse::<KeyCombo>().unwrap_err();
+        assert!(matches!(err, KeyBindingError::UnknownKey(_)));
+    }
+
+    #[test]
+    fn key_combo_display_roundtrip() {
+        let combos = [
+            KeyCombo::bare(BindingKey::Escape),
+            KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT),
+            KeyCombo::new(BindingKey::F4, BindingModifiers::ALT),
+            KeyCombo::new(BindingKey::C, BindingModifiers::CTRL),
+            KeyCombo::new(BindingKey::PageUp, BindingModifiers::SHIFT),
+        ];
+        for combo in combos {
+            let s = combo.to_string();
+            let parsed: KeyCombo = s.parse().unwrap_or_else(|e| {
+                panic!("KeyCombo::Display output {s:?} should parse back: {e}")
+            });
+            assert_eq!(combo, parsed);
+        }
+    }
+
+    // -- KeyAction parsing --------------------------------------------------
+
+    #[test]
+    fn key_action_parse_all_actions() {
+        for action in KeyAction::ALL {
+            let s = action.name();
+            let parsed: KeyAction = s
+                .parse()
+                .unwrap_or_else(|e| panic!("KeyAction name {s:?} should parse back: {e}"));
+            assert_eq!(*action, parsed);
+        }
+    }
+
+    #[test]
+    fn key_action_parse_case_insensitive() {
+        let action: KeyAction = "NEW_TAB".parse().unwrap();
+        assert_eq!(action, KeyAction::NewTab);
+    }
+
+    #[test]
+    fn key_action_parse_unknown_returns_error() {
+        let err = "launch_rockets".parse::<KeyAction>().unwrap_err();
+        assert!(matches!(err, KeyBindingError::UnknownAction(_)));
+    }
+
+    #[test]
+    fn key_action_all_count() {
+        // Ensure ALL contains every variant. If a new variant is added but
+        // not added to ALL, this test will fail because the Display/parse
+        // roundtrip test above covers ALL, and name() is exhaustive.
+        assert_eq!(
+            KeyAction::ALL.len(),
+            31,
+            "KeyAction::ALL should contain all variants"
+        );
+    }
+
+    // -- BindingMap ----------------------------------------------------------
+
+    #[test]
+    fn default_binding_map_is_not_empty() {
+        let map = BindingMap::default();
+        assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn default_copy_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::C, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::Copy));
+    }
+
+    #[test]
+    fn default_paste_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::Paste));
+    }
+
+    #[test]
+    fn default_new_tab_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::NewTab));
+    }
+
+    #[test]
+    fn default_zoom_in_has_two_combos() {
+        let map = BindingMap::default();
+        let combos = map.all_combos_for(KeyAction::ZoomIn);
+        assert_eq!(combos.len(), 2, "ZoomIn should have Ctrl+= and Ctrl+Plus");
+    }
+
+    #[test]
+    fn default_scroll_page_up_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::PageUp, BindingModifiers::SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::ScrollPageUp));
+    }
+
+    #[test]
+    fn default_open_settings_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::Comma, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::OpenSettings));
+    }
+
+    #[test]
+    fn lookup_unbound_combo_returns_none() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::bare(BindingKey::Z);
+        assert_eq!(map.lookup(&combo), None);
+    }
+
+    #[test]
+    fn combo_for_returns_a_bound_combo() {
+        let map = BindingMap::default();
+        let combo = map.combo_for(KeyAction::Copy);
+        assert!(combo.is_some());
+        // Verify the reverse lookup is consistent.
+        assert_eq!(map.lookup(&combo.unwrap()), Some(KeyAction::Copy));
+    }
+
+    #[test]
+    fn combo_for_unbound_action_returns_none() {
+        let map = BindingMap::empty();
+        assert_eq!(map.combo_for(KeyAction::Copy), None);
+    }
+
+    #[test]
+    fn bind_overwrites_previous() {
+        let mut map = BindingMap::empty();
+        let combo = KeyCombo::bare(BindingKey::A);
+        map.bind(combo, KeyAction::Copy);
+        let prev = map.bind(combo, KeyAction::Paste);
+        assert_eq!(prev, Some(KeyAction::Copy));
+        assert_eq!(map.lookup(&combo), Some(KeyAction::Paste));
+    }
+
+    #[test]
+    fn unbind_combo_removes_binding() {
+        let mut map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::C, BindingModifiers::CTRL_SHIFT);
+        let removed = map.unbind_combo(&combo);
+        assert_eq!(removed, Some(KeyAction::Copy));
+        assert_eq!(map.lookup(&combo), None);
+    }
+
+    #[test]
+    fn unbind_action_removes_all_combos() {
+        let mut map = BindingMap::default();
+        let removed = map.unbind_action(KeyAction::ZoomIn);
+        assert_eq!(removed.len(), 2);
+        assert!(map.all_combos_for(KeyAction::ZoomIn).is_empty());
+    }
+
+    #[test]
+    fn apply_overrides_adds_new_binding() {
+        let mut map = BindingMap::empty();
+        let mut overrides = HashMap::new();
+        overrides.insert("copy".to_string(), "Ctrl+Shift+C".to_string());
+        map.apply_overrides(&overrides).unwrap();
+        let combo = KeyCombo::new(BindingKey::C, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::Copy));
+    }
+
+    #[test]
+    fn apply_overrides_removes_with_none() {
+        let mut map = BindingMap::default();
+        let mut overrides = HashMap::new();
+        overrides.insert("copy".to_string(), "none".to_string());
+        map.apply_overrides(&overrides).unwrap();
+        assert!(map.all_combos_for(KeyAction::Copy).is_empty());
+    }
+
+    #[test]
+    fn apply_overrides_removes_with_empty() {
+        let mut map = BindingMap::default();
+        let mut overrides = HashMap::new();
+        overrides.insert("copy".to_string(), String::new());
+        map.apply_overrides(&overrides).unwrap();
+        assert!(map.all_combos_for(KeyAction::Copy).is_empty());
+    }
+
+    #[test]
+    fn apply_overrides_rejects_bad_action() {
+        let mut map = BindingMap::default();
+        let mut overrides = HashMap::new();
+        overrides.insert("launch_rockets".to_string(), "Ctrl+R".to_string());
+        let err = map.apply_overrides(&overrides).unwrap_err();
+        assert!(matches!(err, KeyBindingError::UnknownAction(_)));
+    }
+
+    #[test]
+    fn apply_overrides_rejects_bad_combo() {
+        let mut map = BindingMap::default();
+        let mut overrides = HashMap::new();
+        overrides.insert("copy".to_string(), "Ctrl+???".to_string());
+        let err = map.apply_overrides(&overrides).unwrap_err();
+        assert!(matches!(err, KeyBindingError::UnknownKey(_)));
+    }
+
+    #[test]
+    fn empty_map_is_empty() {
+        let map = BindingMap::empty();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn iter_yields_all_bindings() {
+        let map = BindingMap::default();
+        let count = map.iter().count();
+        assert_eq!(count, map.len());
+    }
+
+    #[test]
+    fn default_switch_to_tab_bindings() {
+        let map = BindingMap::default();
+        let expected = [
+            (BindingKey::Num1, KeyAction::SwitchToTab1),
+            (BindingKey::Num2, KeyAction::SwitchToTab2),
+            (BindingKey::Num3, KeyAction::SwitchToTab3),
+            (BindingKey::Num4, KeyAction::SwitchToTab4),
+            (BindingKey::Num5, KeyAction::SwitchToTab5),
+            (BindingKey::Num6, KeyAction::SwitchToTab6),
+            (BindingKey::Num7, KeyAction::SwitchToTab7),
+            (BindingKey::Num8, KeyAction::SwitchToTab8),
+            (BindingKey::Num9, KeyAction::SwitchToTab9),
+        ];
+        for (key, action) in expected {
+            let combo = KeyCombo::new(key, BindingModifiers::CTRL_SHIFT);
+            assert_eq!(
+                map.lookup(&combo),
+                Some(action),
+                "default binding for {combo} should be {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_scroll_bindings() {
+        let map = BindingMap::default();
+        let expected = [
+            (BindingKey::PageUp, KeyAction::ScrollPageUp),
+            (BindingKey::PageDown, KeyAction::ScrollPageDown),
+            (BindingKey::Home, KeyAction::ScrollToTop),
+            (BindingKey::End, KeyAction::ScrollToBottom),
+            (BindingKey::ArrowUp, KeyAction::ScrollLineUp),
+            (BindingKey::ArrowDown, KeyAction::ScrollLineDown),
+        ];
+        for (key, action) in expected {
+            let combo = KeyCombo::new(key, BindingModifiers::SHIFT);
+            assert_eq!(
+                map.lookup(&combo),
+                Some(action),
+                "default binding for {combo} should be {action}"
+            );
+        }
+    }
+}
