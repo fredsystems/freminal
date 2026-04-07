@@ -1117,6 +1117,18 @@ pub(super) fn write_input_to_terminal(
                         view_state.context_menu_pos = Some(*pos);
                     } else if *button == PointerButton::Primary {
                         if *pressed {
+                            // If there is an active selection, this click
+                            // should ONLY clear it — not start a new one.
+                            // The user must click a second time to begin
+                            // selecting again. This matches the behaviour
+                            // of most terminal emulators (iTerm2, kitty,
+                            // Alacritty, GNOME Terminal).
+                            if view_state.selection.has_selection() {
+                                view_state.selection.clear();
+                                view_state.click_count = 0;
+                                continue;
+                            }
+
                             // Start a new selection at this cell.
                             // Use buffer-absolute row so the selection
                             // survives scroll offset changes.

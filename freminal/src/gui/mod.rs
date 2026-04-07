@@ -168,11 +168,21 @@ impl FreminalGui {
     /// Contains a "Freminal" menu with Settings and Quit entries, a "Tab"
     /// menu with tab management actions, and playback controls when
     /// running in playback mode.
+    ///
+    /// Returns `(action, any_menu_open)` — the second element is `true`
+    /// when any dropdown menu is currently expanded, so the caller can
+    /// suppress terminal input and prevent the dismiss-click from leaking
+    /// through to the PTY.
     #[cfg_attr(not(feature = "playback"), allow(unused_variables))]
-    fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) -> TabBarAction {
+    fn show_menu_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        snap: &TerminalSnapshot,
+    ) -> (TabBarAction, bool) {
         let mut menu_action = TabBarAction::None;
+        let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Freminal", |ui| {
+            let freminal_resp = ui.menu_button("Freminal", |ui| {
                 if ui.button("Settings...").clicked() {
                     let families = self.terminal_widget.monospace_families();
                     self.settings_modal.open(&self.config, families);
@@ -187,8 +197,11 @@ impl FreminalGui {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
             });
+            if freminal_resp.inner.is_some() {
+                any_menu_open = true;
+            }
 
-            ui.menu_button("Tab", |ui| {
+            let tab_resp = ui.menu_button("Tab", |ui| {
                 if ui.button("New Tab").clicked() {
                     menu_action = TabBarAction::NewTab;
                     ui.close();
@@ -219,6 +232,9 @@ impl FreminalGui {
                     ui.close();
                 }
             });
+            if tab_resp.inner.is_some() {
+                any_menu_open = true;
+            }
 
             // Playback controls: only shown when running in playback mode.
             #[cfg(feature = "playback")]
@@ -226,7 +242,7 @@ impl FreminalGui {
                 self.show_playback_controls(ui, snap);
             }
         });
-        menu_action
+        (menu_action, any_menu_open)
     }
 
     /// Render the tab bar between the menu bar and the terminal area.
@@ -997,10 +1013,12 @@ impl eframe::App for FreminalGui {
         }
 
         // Menu bar at the top of the window.
+        let mut any_menu_open = false;
         if !self.config.ui.hide_menu_bar {
-            let menu_action = Panel::top("menu_bar")
+            let (menu_action, menu_open) = Panel::top("menu_bar")
                 .show_inside(ui, |ui| self.show_menu_bar(ui, &snap))
                 .inner;
+            any_menu_open = menu_open;
             self.dispatch_tab_bar_action(menu_action);
         }
 
@@ -1142,7 +1160,7 @@ impl eframe::App for FreminalGui {
                 &mut tab.view_state,
                 &tab.input_tx,
                 &tab.clipboard_rx,
-                self.settings_modal.is_open,
+                self.settings_modal.is_open || any_menu_open,
                 bg_opacity,
                 &self.binding_map,
             );

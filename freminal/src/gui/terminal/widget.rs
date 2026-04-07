@@ -553,7 +553,7 @@ impl FreminalTerminalWidget {
     /// - `view_state` — GUI-local scroll, selection, blink, and focus state.
     /// - `input_tx` — channel to send keyboard/resize/focus events to the PTY.
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
-    /// - `modal_is_open` — suppresses terminal input while a modal is visible.
+    /// - `ui_overlay_open` — suppresses terminal input while a modal or menu dropdown is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
@@ -569,7 +569,7 @@ impl FreminalTerminalWidget {
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
-        modal_is_open: bool,
+        ui_overlay_open: bool,
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
     ) -> Vec<freminal_common::keybindings::KeyAction> {
@@ -592,8 +592,8 @@ impl FreminalTerminalWidget {
         // Suppress input for one extra frame after a modal closes.
         // This prevents the dismiss-click (Cancel / X / click-away) from
         // leaking through to the terminal as a pointer event.
-        let suppress_input = modal_is_open || self.modal_was_open_last_frame;
-        self.modal_was_open_last_frame = modal_is_open;
+        let suppress_input = ui_overlay_open || self.modal_was_open_last_frame;
+        self.modal_was_open_last_frame = ui_overlay_open;
 
         // Claim the full available space.
         let available = ui.available_size();
