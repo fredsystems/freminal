@@ -281,10 +281,20 @@ impl FreminalGui {
             &tab.title
         };
 
-        // Group the label and close button together so the background
-        // spans the full tab width.
-        let group_response = ui
-            .horizontal(|ui| {
+        // Wrap the active tab in a filled frame so the background is
+        // painted *behind* the label and close button.  Inactive tabs
+        // use a transparent frame to keep layout consistent.
+        let frame = if is_active {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_gray(100))
+                .corner_radius(4.0)
+                .inner_margin(0.0)
+        } else {
+            egui::Frame::NONE
+        };
+
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
                 // Pad the label for a roomier feel.
                 let response =
                     ui.selectable_label(is_active, egui::RichText::new(label).size(13.0));
@@ -296,18 +306,8 @@ impl FreminalGui {
                 if count > 1 && ui.small_button("\u{00d7}").clicked() {
                     action = TabBarAction::Close(index);
                 }
-            })
-            .response;
-
-        // Paint a distinct background behind the active tab so it is
-        // immediately obvious which tab is selected.  A medium-grey fill
-        // provides good contrast against both light and dark panel fills
-        // without depending on the color theme.
-        if is_active {
-            let rect = group_response.rect;
-            let fill = egui::Color32::from_gray(100);
-            ui.painter().rect_filled(rect, 4.0, fill);
-        }
+            });
+        });
 
         action
     }
