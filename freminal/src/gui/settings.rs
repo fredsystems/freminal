@@ -75,6 +75,15 @@ pub enum SettingsAction {
     RevertOpacity(f32),
 }
 
+/// Result of scanning a frame's egui events for a key-binding press.
+#[derive(Debug, Clone, Copy)]
+enum KeyCapture {
+    /// User pressed Escape — cancel recording.
+    Cancelled,
+    /// A valid binding combo was captured.
+    Combo(KeyCombo),
+}
+
 /// State machine for the press-to-record keybinding editor.
 #[derive(Debug, Clone)]
 enum KeyRecordingState {
@@ -622,102 +631,11 @@ impl SettingsModal {
     /// and transitions to `Confirming` (with conflict info) or directly writes
     /// the new binding.
     fn handle_key_recording(&mut self, ui: &Ui, effective_map: &BindingMap) {
-        use crate::gui::terminal::input::{egui_key_to_binding_key, egui_mods_to_binding_mods};
-
         match &self.key_recording {
             KeyRecordingState::Idle => {}
             KeyRecordingState::Recording { action } => {
                 let action = *action;
-
-                // Show a non-interactive overlay prompting for key input.
-                egui::Area::new(ui.id().with("key_recording_overlay"))
-                    .order(egui::Order::Foreground)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_min_width(280.0);
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(12.0);
-                                ui.heading(format!("Recording: {}", action.display_label()));
-                                ui.add_space(8.0);
-                                ui.label("Press the key combination you want to assign.");
-                                ui.label("Press Escape to cancel.");
-                                ui.add_space(12.0);
-                            });
-                        });
-                    });
-
-                // Scan this frame's events for a key press.
-                let captured = ui.input(|input| {
-                    for event in &input.raw.events {
-                        if let egui::Event::Key {
-                            key,
-                            pressed: true,
-                            modifiers,
-                            ..
-                        } = event
-                        {
-                            // Escape cancels recording.
-                            if *key == egui::Key::Escape {
-                                return Some(None); // signal: cancel
-                            }
-
-                            // Require at least one modifier for non-function keys
-                            // to avoid accidentally binding plain letters.
-                            let has_modifier = modifiers.ctrl
-                                || modifiers.shift
-                                || modifiers.alt
-                                || modifiers.command;
-                            let is_function_key = matches!(
-                                key,
-                                egui::Key::F1
-                                    | egui::Key::F2
-                                    | egui::Key::F3
-                                    | egui::Key::F4
-                                    | egui::Key::F5
-                                    | egui::Key::F6
-                                    | egui::Key::F7
-                                    | egui::Key::F8
-                                    | egui::Key::F9
-                                    | egui::Key::F10
-                                    | egui::Key::F11
-                                    | egui::Key::F12
-                            );
-
-                            if !has_modifier && !is_function_key {
-                                continue;
-                            }
-
-                            if let Some(binding_key) = egui_key_to_binding_key(*key) {
-                                let combo = KeyCombo::new(
-                                    binding_key,
-                                    egui_mods_to_binding_mods(*modifiers),
-                                );
-                                return Some(Some(combo));
-                            }
-                        }
-                    }
-                    None
-                });
-
-                match captured {
-                    Some(None) => {
-                        // Escape pressed — cancel.
-                        self.key_recording = KeyRecordingState::Idle;
-                    }
-                    Some(Some(combo)) => {
-                        // Check for conflicts.
-                        let conflict = effective_map.lookup(&combo).filter(|a| *a != action);
-                        self.key_recording = KeyRecordingState::Confirming {
-                            action,
-                            combo,
-                            conflict,
-                        };
-                    }
-                    None => {
-                        // No key event this frame — stay in recording.
-                    }
-                }
+                self.handle_recording_state(ui, effective_map, action);
             }
             KeyRecordingState::Confirming {
                 action,
@@ -730,6 +648,131 @@ impl SettingsModal {
                 self.show_confirm_dialog(ui, action, combo, conflict);
             }
         }
+    }
+
+    /// Drive the recording overlay: show prompt, capture key events, transition
+    /// to `Confirming` or back to `Idle` on Escape.
+    fn handle_recording_state(&mut self, ui: &Ui, effective_map: &BindingMap, action: KeyAction) {
+        // Show a non-interactive overlay prompting for key input.
+        egui::Area::new(ui.id().with("key_recording_overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(12.0);
+                        ui.heading(format!("Recording: {}", action.display_label()));
+                        ui.add_space(8.0);
+                        ui.label("Press the key combination you want to assign.");
+                        ui.label("Press Escape to cancel.");
+                        ui.add_space(12.0);
+                    });
+                });
+            });
+
+        // Scan this frame's events for a key press.
+        let captured = ui.input(|input| Self::scan_key_events(&input.raw.events));
+
+        match captured {
+            Some(KeyCapture::Cancelled) => {
+                // Escape pressed — cancel.
+                self.key_recording = KeyRecordingState::Idle;
+            }
+            Some(KeyCapture::Combo(combo)) => {
+                // Check for conflicts.
+                let conflict = effective_map.lookup(&combo).filter(|a| *a != action);
+                self.key_recording = KeyRecordingState::Confirming {
+                    action,
+                    combo,
+                    conflict,
+                };
+            }
+            None => {
+                // No key event this frame — stay in recording.
+            }
+        }
+    }
+
+    /// Scan a slice of egui events for a valid key-binding press.
+    ///
+    /// Returns `Some(KeyCapture::Cancelled)` for Escape,
+    /// `Some(KeyCapture::Combo(..))` for a valid binding, or `None` if no
+    /// relevant key was pressed this frame.
+    fn scan_key_events(events: &[egui::Event]) -> Option<KeyCapture> {
+        use crate::gui::terminal::input::{egui_key_to_binding_key, egui_mods_to_binding_mods};
+
+        for event in events {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            {
+                // Escape cancels recording.
+                if *key == egui::Key::Escape {
+                    return Some(KeyCapture::Cancelled);
+                }
+
+                if !Self::is_valid_binding_press(*key, *modifiers) {
+                    continue;
+                }
+
+                if let Some(binding_key) = egui_key_to_binding_key(*key) {
+                    let combo = KeyCombo::new(binding_key, egui_mods_to_binding_mods(*modifiers));
+                    return Some(KeyCapture::Combo(combo));
+                }
+            }
+        }
+        None
+    }
+
+    /// Check whether a key press qualifies as a valid binding.
+    ///
+    /// Function keys are always valid.  Other keys require at least one
+    /// modifier.  Alphanumeric keys additionally require a non-Shift modifier
+    /// (Ctrl, Alt, or Cmd) so that Shift+letter does not steal uppercase
+    /// typing.
+    const fn is_valid_binding_press(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+        use crate::gui::terminal::input::egui_key_to_binding_key;
+
+        let is_function_key = matches!(
+            key,
+            egui::Key::F1
+                | egui::Key::F2
+                | egui::Key::F3
+                | egui::Key::F4
+                | egui::Key::F5
+                | egui::Key::F6
+                | egui::Key::F7
+                | egui::Key::F8
+                | egui::Key::F9
+                | egui::Key::F10
+                | egui::Key::F11
+                | egui::Key::F12
+        );
+
+        if is_function_key {
+            return true;
+        }
+
+        let has_modifier = modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.command;
+        if !has_modifier {
+            return false;
+        }
+
+        // For alphanumeric keys, Shift alone would steal uppercase letters /
+        // shifted digits from normal typing.  Require at least Ctrl or Alt.
+        let has_non_shift_modifier = modifiers.ctrl || modifiers.alt || modifiers.command;
+        if let Some(binding_key) = egui_key_to_binding_key(key)
+            && binding_key.is_alphanumeric()
+            && !has_non_shift_modifier
+        {
+            return false;
+        }
+
+        true
     }
 
     /// Show the confirmation dialog for a newly captured key combo.

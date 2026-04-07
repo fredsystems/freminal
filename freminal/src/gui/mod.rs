@@ -781,7 +781,7 @@ impl eframe::App for FreminalGui {
                     // They are consumed (not forwarded to PTY) but silently
                     // ignored until their respective features land.
                     _ => {
-                        debug!("Unhandled deferred key action: {:?}", action);
+                        trace!("Unhandled deferred key action: {:?}", action);
                     }
                 }
             }

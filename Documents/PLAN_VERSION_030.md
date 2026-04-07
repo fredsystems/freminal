@@ -10,17 +10,17 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 
 ## Task Summary
 
-| #   | Feature                       | Scope        | Status  |
-| --- | ----------------------------- | ------------ | ------- |
-| 36  | Tabs                          | Large        | Pending |
-| 37  | Configurable Key Bindings     | Medium-Large | Pending |
-| 38  | Double/Triple-Click Selection | Small-Medium | Pending |
-| 39  | Right-Click Context Menu      | Small-Medium | Pending |
-| 40  | Font Zoom                     | Small-Medium | Pending |
-| 41  | Bell Handling (Visual Only)   | Small        | Pending |
-| 42  | Drag-and-Drop                 | Small        | Pending |
-| 43  | OSC 52 Clipboard Read         | Small        | Pending |
-| 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Pending |
+| #   | Feature                       | Scope        | Status   |
+| --- | ----------------------------- | ------------ | -------- |
+| 36  | Tabs                          | Large        | Pending  |
+| 37  | Configurable Key Bindings     | Medium-Large | Complete |
+| 38  | Double/Triple-Click Selection | Small-Medium | Pending  |
+| 39  | Right-Click Context Menu      | Small-Medium | Pending  |
+| 40  | Font Zoom                     | Small-Medium | Pending  |
+| 41  | Bell Handling (Visual Only)   | Small        | Pending  |
+| 42  | Drag-and-Drop                 | Small        | Pending  |
+| 43  | OSC 52 Clipboard Read         | Small        | Pending  |
+| 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Pending  |
 
 ---
 

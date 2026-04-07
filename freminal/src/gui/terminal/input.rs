@@ -166,13 +166,16 @@ pub(super) fn dispatch_binding_action(
     match action {
         KeyAction::Copy => {
             if let Some((start, end)) = view_state.selection.normalised() {
-                let _ = input_tx.send(InputEvent::ExtractSelection {
+                if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
                     start_row: start.row,
                     start_col: start.col,
                     end_row: end.row,
                     end_col: end.col,
-                });
-                *clipboard_pending = true;
+                }) {
+                    error!("Failed to send ExtractSelection to PTY consumer: {e}");
+                } else {
+                    *clipboard_pending = true;
+                }
             }
         }
         KeyAction::ScrollPageUp => {

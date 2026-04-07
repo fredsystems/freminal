@@ -164,6 +164,55 @@ pub enum BindingKey {
 }
 
 impl BindingKey {
+    /// Returns `true` if this key produces a printable character that would
+    /// be consumed by normal text entry (letters A–Z and digits 0–9).
+    ///
+    /// Used by the keybinding recorder to reject `Shift+letter` combos
+    /// (which would hijack uppercase typing) — alphanumeric keys require
+    /// at least Ctrl or Alt as a modifier for bindings.
+    #[must_use]
+    pub const fn is_alphanumeric(self) -> bool {
+        matches!(
+            self,
+            Self::A
+                | Self::B
+                | Self::C
+                | Self::D
+                | Self::E
+                | Self::F
+                | Self::G
+                | Self::H
+                | Self::I
+                | Self::J
+                | Self::K
+                | Self::L
+                | Self::M
+                | Self::N
+                | Self::O
+                | Self::P
+                | Self::Q
+                | Self::R
+                | Self::S
+                | Self::T
+                | Self::U
+                | Self::V
+                | Self::W
+                | Self::X
+                | Self::Y
+                | Self::Z
+                | Self::Num0
+                | Self::Num1
+                | Self::Num2
+                | Self::Num3
+                | Self::Num4
+                | Self::Num5
+                | Self::Num6
+                | Self::Num7
+                | Self::Num8
+                | Self::Num9
+        )
+    }
+
     /// Returns the canonical display name for this key.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -479,21 +528,55 @@ impl FromStr for KeyCombo {
             return Err(KeyBindingError::EmptyCombo);
         }
 
-        // The last segment is the key, everything before is modifiers.
-        // Edge case: the key itself might be "+" which is parsed as BindingKey::Plus.
-        // To handle "Ctrl++" (Ctrl+Plus), we check if the last part is empty
-        // (meaning the string ended with "+", e.g. "Ctrl+" is really "Ctrl+Plus"
-        // if the user intended the + key).
-        let (modifier_parts, key_str) = if parts.len() >= 2 && parts.last() == Some(&"") {
-            // String ended with "+" — the key is "+"
-            (&parts[..parts.len() - 2], "+")
+        // The last `+`-separated segment is the key; all preceding segments
+        // are modifiers.
+        //
+        // Edge case: the key itself can be literal `+` (`BindingKey::Plus`).
+        // When `+` is the key the string ends with `+`, producing an empty
+        // trailing part after `split('+')`.  Examples:
+        //
+        //   "+"        → ["", ""]      → modifiers=[], key="+"
+        //   "Ctrl+"    → ["Ctrl", ""]  → modifiers=["Ctrl"], key="+"
+        //   "Ctrl++"   → ["Ctrl", "", ""] → modifiers=["Ctrl"], key="+"
+        //
+        // We detect this by checking whether the last part is empty (i.e.
+        // the string ended with `+`).  When it is, the key is `"+"` and
+        // the modifier parts are everything *before* the last separator
+        // that was consumed as the key delimiter.  `rsplit_once('+')` on
+        // the string *without the trailing `+`* gives us the modifier
+        // prefix cleanly.
+        let (modifier_parts_str, key_str) = if parts.last() == Some(&"") {
+            // String ended with "+": the key is Plus.
+            // Strip the trailing "+" (the key), then the remainder before it
+            // is the modifier prefix (possibly empty, possibly "Ctrl+",
+            // "Ctrl+Shift+", etc.).
+            let without_key = &s[..s.len() - 1]; // remove trailing '+'
+            // If there is another trailing '+', it was the separator between
+            // the last modifier and the key — strip it too.
+            let prefix = without_key.strip_suffix('+').unwrap_or(without_key);
+            (prefix, "+")
         } else {
+            // Normal case: last segment is a named key.
             let (mods, key) = parts.split_at(parts.len() - 1);
-            (mods, key[0])
+            let mod_str = if mods.is_empty() {
+                ""
+            } else {
+                // Rejoin just the modifier parts.  Safe because `s` started
+                // as `"Mod1+Mod2+…+Key"` and we only need the part before
+                // the last `+`.
+                &s[..s.len() - key[0].len() - 1]
+            };
+            (mod_str, key[0])
+        };
+
+        let modifier_tokens: Vec<&str> = if modifier_parts_str.is_empty() {
+            Vec::new()
+        } else {
+            modifier_parts_str.split('+').collect()
         };
 
         let mut modifiers = BindingModifiers::NONE;
-        for &modifier in modifier_parts {
+        for modifier in &modifier_tokens {
             match modifier.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" | "cmd" | "command" => modifiers.ctrl = true,
                 "shift" => modifiers.shift = true,
@@ -1223,6 +1306,35 @@ mod tests {
     }
 
     #[test]
+    fn key_combo_parse_ctrl_plus_preserves_modifier() {
+        // "Ctrl+" means Ctrl+Plus — the Ctrl modifier must be preserved.
+        // Regression test for a bug where "Ctrl+" dropped Ctrl because
+        // the modifier_parts slice was empty.
+        let combo: KeyCombo = "Ctrl+".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::Plus);
+        assert!(combo.modifiers.ctrl, "Ctrl modifier must be preserved");
+        assert!(!combo.modifiers.shift);
+        assert!(!combo.modifiers.alt);
+    }
+
+    #[test]
+    fn key_combo_parse_bare_plus() {
+        // "+" alone is a bare Plus key with no modifiers.
+        let combo: KeyCombo = "+".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::Plus);
+        assert_eq!(combo.modifiers, BindingModifiers::NONE);
+    }
+
+    #[test]
+    fn key_combo_parse_ctrl_shift_plus() {
+        // "Ctrl+Shift++" means Ctrl+Shift+Plus.
+        let combo: KeyCombo = "Ctrl+Shift++".parse().unwrap();
+        assert_eq!(combo.key, BindingKey::Plus);
+        assert!(combo.modifiers.ctrl);
+        assert!(combo.modifiers.shift);
+    }
+
+    #[test]
     fn key_combo_parse_empty_returns_error() {
         let err = "".parse::<KeyCombo>().unwrap_err();
         assert!(matches!(err, KeyBindingError::EmptyCombo));
@@ -1254,6 +1366,10 @@ mod tests {
             KeyCombo::new(BindingKey::F4, BindingModifiers::ALT),
             KeyCombo::new(BindingKey::C, BindingModifiers::CTRL),
             KeyCombo::new(BindingKey::PageUp, BindingModifiers::SHIFT),
+            // Plus key combos: exercise the trailing-"+" edge case in FromStr.
+            KeyCombo::bare(BindingKey::Plus),
+            KeyCombo::new(BindingKey::Plus, BindingModifiers::CTRL),
+            KeyCombo::new(BindingKey::Plus, BindingModifiers::CTRL_SHIFT),
         ];
         for combo in combos {
             let s = combo.to_string();
@@ -1703,6 +1819,43 @@ mod tests {
                 Some(combo),
                 "combo_for must be deterministic across calls"
             );
+        }
+    }
+
+    // ── is_alphanumeric tests ────────────────────────────────────────────
+
+    #[test]
+    fn is_alphanumeric_letters() {
+        let letters = [BindingKey::A, BindingKey::B, BindingKey::C, BindingKey::Z];
+        for key in letters {
+            assert!(key.is_alphanumeric(), "{key:?} should be alphanumeric");
+        }
+    }
+
+    #[test]
+    fn is_alphanumeric_digits() {
+        let digits = [BindingKey::Num0, BindingKey::Num5, BindingKey::Num9];
+        for key in digits {
+            assert!(key.is_alphanumeric(), "{key:?} should be alphanumeric");
+        }
+    }
+
+    #[test]
+    fn is_alphanumeric_non_text_keys() {
+        let non_alpha = [
+            BindingKey::F1,
+            BindingKey::ArrowUp,
+            BindingKey::PageUp,
+            BindingKey::Tab,
+            BindingKey::Enter,
+            BindingKey::Escape,
+            BindingKey::Plus,
+            BindingKey::Minus,
+            BindingKey::Comma,
+            BindingKey::Space,
+        ];
+        for key in non_alpha {
+            assert!(!key.is_alphanumeric(), "{key:?} should not be alphanumeric");
         }
     }
 }
