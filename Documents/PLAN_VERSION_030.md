@@ -15,7 +15,7 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 | 36  | Tabs                          | Large        | Complete |
 | 37  | Configurable Key Bindings     | Medium-Large | Complete |
 | 38  | Double/Triple-Click Selection | Small-Medium | Complete |
-| 39  | Right-Click Context Menu      | Small-Medium | Active   |
+| 39  | Right-Click Context Menu      | Small-Medium | Complete |
 | 40  | Font Zoom                     | Small-Medium | Complete |
 | 41  | Bell Handling (Visual Only)   | Small        | Pending  |
 | 42  | Drag-and-Drop                 | Small        | Pending  |
@@ -433,7 +433,7 @@ Use egui's built-in context menu (`response.context_menu()`). Menu items:
    The snapshot already contains URL data. On right-click, determine if the clicked cell is
    within a URL span. If so, add "Open URL" menu item that calls `open::that(url)`.
 
-3. **39.3 — Tests**
+3. **39.3 — Tests** ✅
    Unit tests for URL span detection at a given cell coordinate.
 
 ### 39 Primary Files

@@ -189,18 +189,13 @@ fn render_context_menu_area(
 
     // Look up whether the right-clicked cell sits inside a URL span.
     let url_under_cursor = view_state.context_menu_cell.and_then(|cell| {
-        // `cell.row` is buffer-absolute; convert to screen-relative for tag
-        // lookup in `visible_tags` (which is indexed by flat visible index).
-        let screen_row = cell
-            .row
-            .checked_sub(super::coords::visible_window_start(snap))?;
-        let flat_idx =
-            super::coords::flat_index_for_cell(&snap.visible_chars, screen_row, cell.col)?;
-        snap.visible_tags
-            .iter()
-            .find(|tag| tag.start <= flat_idx && flat_idx < tag.end)
-            .and_then(|tag| tag.url.as_ref())
-            .map(|u| u.url.clone())
+        super::coords::url_at_cell(
+            cell.row,
+            cell.col,
+            &snap.visible_chars,
+            &snap.visible_tags,
+            super::coords::visible_window_start(snap),
+        )
     });
 
     egui::Area::new(area_id)

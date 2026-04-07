@@ -10,7 +10,7 @@
 
 use conv2::ConvUtil;
 use eframe::egui::Pos2;
-use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
 /// Compute the buffer-absolute row index of the first visible row.
@@ -78,6 +78,29 @@ pub(super) fn flat_index_for_cell(
     }
 
     None // col is beyond the row's content
+}
+
+/// Look up the URL (if any) at a given buffer-absolute cell coordinate.
+///
+/// Converts the buffer-absolute `(cell_row, cell_col)` to a screen-relative
+/// position, computes the flat index into `visible_chars`, then searches
+/// `visible_tags` for a tag covering that index whose `url` field is `Some`.
+///
+/// Returns the URL string if found, `None` otherwise.
+pub(super) fn url_at_cell(
+    cell_row: usize,
+    cell_col: usize,
+    visible_chars: &[TChar],
+    visible_tags: &[FormatTag],
+    window_start: usize,
+) -> Option<String> {
+    let screen_row = cell_row.checked_sub(window_start)?;
+    let flat_idx = flat_index_for_cell(visible_chars, screen_row, cell_col)?;
+    visible_tags
+        .iter()
+        .find(|tag| tag.start <= flat_idx && flat_idx < tag.end)
+        .and_then(|tag| tag.url.as_ref())
+        .map(|u| u.url.clone())
 }
 
 /// Convert an egui pointer position to `(col, row)` terminal-grid coordinates.
@@ -258,5 +281,208 @@ mod flat_index_for_cell_tests {
         assert_eq!(flat_index_for_cell(&chars, 0, 3), Some(1));
         assert_eq!(flat_index_for_cell(&chars, 0, 4), Some(2));
         assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
+    }
+}
+
+#[cfg(test)]
+mod url_at_cell_tests {
+    use super::*;
+    use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar, url::Url};
+    use std::sync::Arc;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Build a simple `visible_chars` vec: rows of ASCII chars separated by `NewLine`.
+    fn make_visible(rows: &[&str]) -> Vec<TChar> {
+        let mut chars = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for c in row.chars() {
+                chars.push(ascii(c));
+            }
+            if i + 1 < rows.len() {
+                chars.push(TChar::NewLine);
+            }
+        }
+        chars
+    }
+
+    fn url_tag(start: usize, end: usize, url: &str) -> FormatTag {
+        FormatTag {
+            start,
+            end,
+            url: Some(Arc::new(Url {
+                id: None,
+                url: url.to_string(),
+            })),
+            ..FormatTag::default()
+        }
+    }
+
+    fn plain_tag(start: usize, end: usize) -> FormatTag {
+        FormatTag {
+            start,
+            end,
+            ..FormatTag::default()
+        }
+    }
+
+    #[test]
+    fn cell_inside_url_returns_url() {
+        // Row 0: "hello" (indices 0..5)
+        // Row 1: "world" (indices 6..11, NL at 5)
+        // URL covers indices 1..4 ("ell" in "hello").
+        let chars = make_visible(&["hello", "world"]);
+        let tags = vec![
+            plain_tag(0, 1),
+            url_tag(1, 4, "https://example.com"),
+            plain_tag(4, 11),
+        ];
+        let window_start = 0;
+
+        // Cell (row=0, col=2) → flat_idx=2, inside the URL tag [1,4).
+        assert_eq!(
+            url_at_cell(0, 2, &chars, &tags, window_start),
+            Some("https://example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn cell_outside_url_returns_none() {
+        let chars = make_visible(&["hello", "world"]);
+        let tags = vec![
+            plain_tag(0, 1),
+            url_tag(1, 4, "https://example.com"),
+            plain_tag(4, 11),
+        ];
+        let window_start = 0;
+
+        // Cell (row=0, col=0) → flat_idx=0, inside plain tag [0,1).
+        assert_eq!(url_at_cell(0, 0, &chars, &tags, window_start), None);
+    }
+
+    #[test]
+    fn cell_on_second_row_with_url() {
+        // Row 0: "hello" (indices 0..5), NL at 5
+        // Row 1: "world" (indices 6..11)
+        // URL covers all of row 1: [6, 11).
+        let chars = make_visible(&["hello", "world"]);
+        let tags = vec![plain_tag(0, 6), url_tag(6, 11, "https://row2.example.com")];
+        let window_start = 0;
+
+        // Cell (row=1, col=3) → screen_row=1, flat_idx=9, inside URL tag.
+        assert_eq!(
+            url_at_cell(1, 3, &chars, &tags, window_start),
+            Some("https://row2.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn cell_with_nonzero_window_start() {
+        // Simulates scrollback: window_start = 10, so buffer row 10 maps
+        // to screen row 0.
+        let chars = make_visible(&["hello"]);
+        let tags = vec![url_tag(0, 5, "https://scroll.example.com")];
+        let window_start = 10;
+
+        // Buffer row 10, col 2 → screen_row = 0, flat_idx = 2.
+        assert_eq!(
+            url_at_cell(10, 2, &chars, &tags, window_start),
+            Some("https://scroll.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn cell_row_before_window_returns_none() {
+        // Buffer row 5 is before window_start=10 → checked_sub underflows.
+        let chars = make_visible(&["hello"]);
+        let tags = vec![url_tag(0, 5, "https://example.com")];
+        let window_start = 10;
+
+        assert_eq!(url_at_cell(5, 0, &chars, &tags, window_start), None);
+    }
+
+    #[test]
+    fn cell_col_beyond_row_returns_none() {
+        let chars = make_visible(&["abc"]);
+        let tags = vec![url_tag(0, 3, "https://example.com")];
+        let window_start = 0;
+
+        // Col 10 is way past the 3-char row.
+        assert_eq!(url_at_cell(0, 10, &chars, &tags, window_start), None);
+    }
+
+    #[test]
+    fn empty_tags_returns_none() {
+        let chars = make_visible(&["hello"]);
+        let tags: Vec<FormatTag> = Vec::new();
+        let window_start = 0;
+
+        assert_eq!(url_at_cell(0, 2, &chars, &tags, window_start), None);
+    }
+
+    #[test]
+    fn tag_at_boundary_start_is_inclusive() {
+        // URL tag covers [2, 5). Cell at col 2 should match.
+        let chars = make_visible(&["abcde"]);
+        let tags = vec![
+            plain_tag(0, 2),
+            url_tag(2, 5, "https://boundary.example.com"),
+        ];
+        let window_start = 0;
+
+        assert_eq!(
+            url_at_cell(0, 2, &chars, &tags, window_start),
+            Some("https://boundary.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn tag_at_boundary_end_is_exclusive() {
+        // URL tag covers [2, 5). Cell at col 5 (flat_idx=5) should NOT match
+        // the URL tag — it's at the exclusive boundary.
+        let chars = make_visible(&["abcdefgh"]);
+        let tags = vec![
+            plain_tag(0, 2),
+            url_tag(2, 5, "https://boundary.example.com"),
+            plain_tag(5, 8),
+        ];
+        let window_start = 0;
+
+        // Col 4 → flat_idx 4, inside [2,5) → match.
+        assert_eq!(
+            url_at_cell(0, 4, &chars, &tags, window_start),
+            Some("https://boundary.example.com".to_string())
+        );
+        // Col 5 → flat_idx 5, NOT inside [2,5) → no match.
+        assert_eq!(url_at_cell(0, 5, &chars, &tags, window_start), None);
+    }
+
+    #[test]
+    fn multiple_urls_returns_correct_one() {
+        // Two URLs on the same row.
+        // Row: "abc_xyz_end" (11 chars, indices 0..11)
+        // URL 1 covers [0,3): "abc" → https://first.example.com
+        // URL 2 covers [4,7): "xyz" → https://second.example.com
+        let chars = make_visible(&["abc_xyz_end"]);
+        let tags = vec![
+            url_tag(0, 3, "https://first.example.com"),
+            plain_tag(3, 4),
+            url_tag(4, 7, "https://second.example.com"),
+            plain_tag(7, 11),
+        ];
+        let window_start = 0;
+
+        assert_eq!(
+            url_at_cell(0, 1, &chars, &tags, window_start),
+            Some("https://first.example.com".to_string())
+        );
+        assert_eq!(
+            url_at_cell(0, 5, &chars, &tags, window_start),
+            Some("https://second.example.com".to_string())
+        );
+        // Col 3 is the underscore between URLs — plain tag.
+        assert_eq!(url_at_cell(0, 3, &chars, &tags, window_start), None);
     }
 }
