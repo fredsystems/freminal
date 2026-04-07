@@ -14,7 +14,7 @@ and plan document maintenance rules.
 | Version | Codename                | Plan Document         | Tasks | Status  |
 | ------- | ----------------------- | --------------------- | ----- | ------- |
 | v0.2.0  | —                       | (Tasks 1–35 below)    | 35    | Done    |
-| v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Pending |
+| v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Active  |
 | v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52 | Pending |
 | v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–56 | Pending |
 

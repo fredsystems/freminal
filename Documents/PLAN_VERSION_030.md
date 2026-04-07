@@ -12,7 +12,7 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 
 | #   | Feature                       | Scope        | Status   |
 | --- | ----------------------------- | ------------ | -------- |
-| 36  | Tabs                          | Large        | Active   |
+| 36  | Tabs                          | Large        | Complete |
 | 37  | Configurable Key Bindings     | Medium-Large | Complete |
 | 38  | Double/Triple-Click Selection | Small-Medium | Pending  |
 | 39  | Right-Click Context Menu      | Small-Medium | Pending  |
@@ -128,35 +128,61 @@ tab is created inside `FreminalGui::new()` from the channels passed at startup.
    - Added `TabId::first()` constructor
    - Removed `#[allow(clippy::too_many_arguments)]` from `gui::run()` (down from 9 to 5 params)
 
-4. **36.4 — Tab bar UI rendering**
+4. **36.4 — Tab bar UI rendering** ✅ _Complete (2026-04-07)_
    Implement the tab bar as an egui `TopBottomPanel` (or `CentralPanel` child). Render tab
    labels, close buttons, "+" button. Handle click-to-switch, click-close, and the "+" button.
    Respect `tabs.position` and `tabs.show_single_tab` config.
+   - Implemented `show_tab_bar()` with `TabBarAction` enum (`None`, `NewTab`, `SwitchTo`, `Close`)
+   - Tab labels render with close "×" buttons and "+" new-tab button
+   - Moved PTY spawn logic from `main.rs` to `gui/pty.rs` (`TabChannels`, `spawn_pty_tab()`,
+     `spawn_pty_consumer_thread()`)
+   - `spawn_new_tab()` and `close_tab()` methods on `FreminalGui`
+   - `FreminalGui` stores `args: Args` and `egui_ctx: Arc<OnceLock<egui::Context>>` for spawning
 
-5. **36.5 — Keyboard shortcuts for tabs**
+5. **36.5 — Keyboard shortcuts for tabs** ✅ _Complete (2026-04-07)_
    Wire up default shortcuts: Ctrl+Shift+T (new), Ctrl+Shift+W (close), Ctrl+Tab /
    Ctrl+Shift+Tab (next/prev), Ctrl+Shift+1-9 (switch to tab N). These must go through the
    keybindings system (Task 37) if it is implemented first, otherwise hardcode with a TODO
    to migrate.
+   - All tab actions wired through Task 37's `BindingMap`/`KeyAction` dispatch system
+   - `dispatch_deferred_action()` handles `NewTab`, `CloseTab`, `NextTab`, `PrevTab`,
+     `SwitchToTab1-9`, `MoveTabLeft`, `MoveTabRight`
+   - `switch_to_tab_n()` helper for 1-indexed tab switching
 
-6. **36.6 — Tab titles from OSC 0/2**
+6. **36.6 — Tab titles from OSC 0/2** ✅ _Complete (2026-04-07)_
    The `WindowManipulation::SetTitle` command currently sets the window title. With tabs, it
    should set the _tab_ title instead. The window title becomes the active tab's title (or
    "Freminal" if no title is set).
+   - `handle_window_manipulation()` now takes `tab_title: &mut String` parameter
+   - `SetTitleBarText` (OSC 0/2) updates the active tab's title
+   - Per-frame window title sync in `ui()`: viewport title bar reflects active tab title
 
-7. **36.7 — Config: `[tabs]` section**
+7. **36.7 — Config: `[tabs]` section** ✅ _Complete (2026-04-07)_
    Add `TabsConfig` to `freminal-common/src/config.rs`. Add to `Config`, `ConfigPartial`,
    `apply_partial()`, `validate()`. Update `config_example.toml`. Update
    `nix/home-manager-module.nix`.
+   - Added `TabBarPosition` enum (Top/Bottom) and `TabsConfig` struct
+   - Wired into `Config`, `ConfigPartial`, `apply_partial()`
+   - Tab bar visibility: `tab_count > 1 || config.tabs.show_single_tab`
+   - Tab bar position: `Panel::top` or `Panel::bottom` based on config
+   - Settings Modal "Tabs" tab with checkbox and ComboBox
+   - Updated `config_example.toml` and `nix/home-manager-module.nix`
 
-8. **36.8 — Per-tab `ViewState`**
+8. **36.8 — Per-tab `ViewState`** ✅ _Complete (2026-04-07)_
    Each tab needs its own `ViewState` (scroll offset, selection, blink state, mouse state).
    Move `ViewState` into `Tab` or maintain a parallel `Vec<ViewState>` in `TabManager`.
    Ensure switching tabs preserves each tab's scroll position and selection.
+   - `ViewState` stored per-tab in `Tab` struct since 36.3
+   - All GUI code accesses view state via `self.tabs.active_tab().view_state`
+   - 4 unit tests: isolation across switch, preserved after close, preserved after move,
+     new tabs start with default ViewState
 
-9. **36.9 — Tests and verification**
+9. **36.9 — Tests and verification** ✅ _Complete (2026-04-07)_
    Unit tests for `TabManager` operations, config parsing, and keyboard shortcut dispatch.
    Integration test: create tab, switch, close, verify no panic or leak.
+   - 22 TabManager unit tests (36.1), config parsing tests (36.7), 4 ViewState isolation
+     tests (36.8)
+   - Full verification suite passes: `cargo test --all`, `cargo clippy`, `cargo-machete`
 
 ### 36 Primary Files
 
