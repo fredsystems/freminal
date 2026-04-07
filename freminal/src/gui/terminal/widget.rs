@@ -1195,6 +1195,10 @@ impl FreminalTerminalWidget {
             rs.atlas.clear();
             drop(rs);
             self.shaping_cache.clear();
+            // Force a full vertex rebuild on the next frame.  The existing
+            // VBO data was built for the old cell pixel size and must not be
+            // reused.
+            self.last_rendered_visible = None;
         }
     }
 
