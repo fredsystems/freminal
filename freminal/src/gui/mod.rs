@@ -317,6 +317,13 @@ impl FreminalGui {
     /// Uses the stored `Args` and `Config` to configure the new terminal.
     /// Logs an error and does nothing if the PTY fails to start.
     fn spawn_new_tab(&mut self) {
+        // Tabs are not supported in playback mode — there is exactly one
+        // recording session to replay and no PTY to spawn.
+        #[cfg(feature = "playback")]
+        if self.is_playback {
+            return;
+        }
+
         let theme = freminal_common::themes::by_slug(&self.config.theme.name)
             .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
 
@@ -1010,18 +1017,34 @@ impl eframe::App for FreminalGui {
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
-            {
-                let tab = self.tabs.active_tab_mut();
-                handle_window_manipulation(
-                    ui,
-                    &tab.window_cmd_rx,
-                    &tab.pty_write_tx,
-                    font_width,
-                    font_height,
-                    window_width,
-                    &mut self.window_title_stack,
-                    &mut tab.title,
-                );
+            // Drain window commands for ALL tabs.  The active tab gets full
+            // handling (viewport commands, reports, title updates).  Inactive
+            // tabs only apply title updates (OSC 0/2) and discard everything
+            // else, preventing unbounded channel growth.
+            let active_idx = self.tabs.active_index();
+            for (idx, tab) in self.tabs.iter_mut().enumerate() {
+                if idx == active_idx {
+                    handle_window_manipulation(
+                        ui,
+                        &tab.window_cmd_rx,
+                        &tab.pty_write_tx,
+                        font_width,
+                        font_height,
+                        window_width,
+                        &mut self.window_title_stack,
+                        &mut tab.title,
+                    );
+                } else {
+                    // Drain and discard non-title commands for inactive tabs.
+                    while let Ok(wc) = tab.window_cmd_rx.try_recv() {
+                        let wm = match wc {
+                            WindowCommand::Viewport(cmd) | WindowCommand::Report(cmd) => cmd,
+                        };
+                        if let WindowManipulation::SetTitleBarText(title) = wm {
+                            tab.title = title;
+                        }
+                    }
+                }
             }
 
             // Update background color based on whether the terminal is in

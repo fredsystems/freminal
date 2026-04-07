@@ -66,8 +66,10 @@ pub struct Tab {
     /// application when it is the last remaining tab).
     pub pty_dead_rx: Receiver<()>,
 
-    /// Tab title, set by OSC 0/2 escape sequences.  Falls back to a default
-    /// like "Tab N" when the shell has not sent a title.
+    /// Tab title, set by OSC 0/2 escape sequences.
+    ///
+    /// When empty, the visible label is supplied by tab creation or tab-bar UI
+    /// fallback logic rather than a guaranteed model-level default title.
     pub title: String,
 
     /// Whether a bell has fired in this tab and not yet been cleared.
