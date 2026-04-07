@@ -100,6 +100,10 @@ impl Default for FontConfig {
 pub struct CursorConfig {
     pub shape: CursorShapeConfig,
     pub blink: bool,
+    /// Enable smooth cursor trail animation (cursor glides to new position).
+    pub trail: bool,
+    /// Duration of the cursor trail animation in milliseconds.
+    pub trail_duration_ms: u32,
 }
 
 impl Default for CursorConfig {
@@ -107,6 +111,8 @@ impl Default for CursorConfig {
         Self {
             shape: CursorShapeConfig::Block,
             blink: true,
+            trail: false,
+            trail_duration_ms: 150,
         }
     }
 }
@@ -1507,5 +1513,79 @@ allow_clipboard_read = true
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.security.allow_clipboard_read);
+    }
+
+    // -----------------------------------------------------------------
+    //  cursor trail config
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cursor_config_defaults() {
+        let cfg = CursorConfig::default();
+        assert!(!cfg.trail, "trail should default to false");
+        assert_eq!(
+            cfg.trail_duration_ms, 150,
+            "trail_duration_ms should default to 150"
+        );
+    }
+
+    #[test]
+    fn cursor_trail_deserialize_enabled() {
+        let toml_str = r"
+[cursor]
+trail = true
+trail_duration_ms = 200
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let cursor = partial.cursor.expect("cursor section should be present");
+        assert!(cursor.trail);
+        assert_eq!(cursor.trail_duration_ms, 200);
+    }
+
+    #[test]
+    fn cursor_trail_missing_defaults_correctly() {
+        // Backward compatibility: old config files without trail fields
+        // should default to trail=false, trail_duration_ms=150.
+        let toml_str = r#"
+[cursor]
+shape = "block"
+blink = true
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let cursor = partial.cursor.expect("cursor section should be present");
+        assert!(!cursor.trail, "missing trail field should default to false");
+        assert_eq!(
+            cursor.trail_duration_ms, 150,
+            "missing trail_duration_ms should default to 150"
+        );
+    }
+
+    #[test]
+    fn cursor_trail_applied_via_partial() {
+        let mut cfg = Config::default();
+        assert!(!cfg.cursor.trail);
+
+        let toml_str = r"
+[cursor]
+trail = true
+trail_duration_ms = 250
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.cursor.trail);
+        assert_eq!(cfg.cursor.trail_duration_ms, 250);
+    }
+
+    #[test]
+    fn cursor_trail_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.cursor.trail = true;
+        cfg.cursor.trail_duration_ms = 300;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.cursor.trail);
+        assert_eq!(deserialized.cursor.trail_duration_ms, 300);
     }
 }

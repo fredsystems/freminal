@@ -34,7 +34,6 @@ use freminal::gui::renderer::{
     FgRenderOptions, build_background_instances, build_foreground_instances,
 };
 use freminal::gui::shaping::ShapingCache;
-use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::config::Config;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -432,7 +431,7 @@ fn bench_bg_instances(c: &mut Criterion) {
         let strikeout_offset = fm.strikeout_offset();
         let stroke_size = fm.stroke_size();
 
-        let cursor_pos = CursorPos { x: 0, y: 0 };
+        let cursor_pixel_pos = (0.0_f32, 0.0_f32);
         let cursor_style = CursorVisualStyle::BlockCursorSteady;
 
         group.bench_function(
@@ -449,7 +448,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                         stroke_size,
                         true, // show_cursor
                         true, // cursor_blink_on
-                        cursor_pos,
+                        cursor_pixel_pos,
                         &cursor_style,
                         None, // selection
                         &CATPPUCCIN_MOCHA,

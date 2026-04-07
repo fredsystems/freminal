@@ -38,6 +38,12 @@ shape = "block"
 # Whether the cursor should blink
 blink = true
 
+# Smooth cursor trail animation (cursor glides to new position)
+trail = false
+
+# Duration of the cursor trail animation in milliseconds
+trail_duration_ms = 150
+
 
 ################################################################################
 # THEME SETTINGS

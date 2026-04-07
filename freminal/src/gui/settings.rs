@@ -487,6 +487,20 @@ impl SettingsModal {
         ui.add_space(8.0);
 
         ui.checkbox(&mut self.draft.cursor.blink, "Cursor Blink");
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.draft.cursor.trail, "Cursor Trail");
+        ui.add_space(4.0);
+
+        ui.add_enabled_ui(self.draft.cursor.trail, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Trail Duration (ms):");
+                ui.add(egui::Slider::new(
+                    &mut self.draft.cursor.trail_duration_ms,
+                    10..=500,
+                ));
+            });
+        });
     }
 
     fn show_theme_tab(&mut self, ui: &mut Ui) {

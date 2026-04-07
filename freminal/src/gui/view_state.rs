@@ -226,6 +226,42 @@ pub struct ViewState {
     ///
     /// Automatically cleared once the flash duration has elapsed.
     pub bell_since: Option<Instant>,
+
+    // ── Cursor trail animation ───────────────────────────────────────
+    /// Current visual cursor position (fractional cell coordinates).
+    ///
+    /// When cursor trail is enabled, this is the interpolated position
+    /// between the previous snapshot cursor position and the current one.
+    /// Updated each frame by [`Self::update_cursor_animation`].
+    pub cursor_visual_col: f32,
+
+    /// Current visual cursor row (fractional cell coordinates).
+    pub cursor_visual_row: f32,
+
+    /// The target cursor column (from the latest snapshot).
+    ///
+    /// When the snapshot's `cursor_pos` differs from this, a new
+    /// animation is started.
+    pub cursor_target_col: f32,
+
+    /// The target cursor row (from the latest snapshot).
+    pub cursor_target_row: f32,
+
+    /// Timestamp when the current cursor trail animation started.
+    ///
+    /// `Some(instant)` = animation is in progress.
+    /// `None` = cursor is at rest (visual == target).
+    pub cursor_anim_start: Option<Instant>,
+
+    /// The cursor column at the start of the current animation.
+    ///
+    /// Captured when a new target is detected so that the interpolation
+    /// always proceeds from a fixed origin to the target, rather than
+    /// from a mid-interpolation visual position.
+    pub cursor_start_col: f32,
+
+    /// The cursor row at the start of the current animation.
+    pub cursor_start_row: f32,
 }
 
 impl Default for ViewState {
@@ -250,6 +286,13 @@ impl Default for ViewState {
             context_menu_pos: None,
             zoom_delta: 0.0,
             bell_since: None,
+            cursor_visual_col: 0.0,
+            cursor_visual_row: 0.0,
+            cursor_target_col: 0.0,
+            cursor_target_row: 0.0,
+            cursor_anim_start: None,
+            cursor_start_col: 0.0,
+            cursor_start_row: 0.0,
         }
     }
 }
@@ -292,6 +335,84 @@ impl ViewState {
     /// Reset the zoom delta to zero (back to the config's base font size).
     pub const fn reset_zoom(&mut self) {
         self.zoom_delta = 0.0;
+    }
+
+    // ── Cursor trail animation ───────────────────────────────────────
+
+    /// Update the cursor animation state for this frame.
+    ///
+    /// `target_col` and `target_row` come from the snapshot's `cursor_pos`.
+    /// `trail_enabled` is the config flag; when `false`, the visual position
+    /// snaps instantly to the target.  `duration` is the configured animation
+    /// duration (ignored when trail is disabled).
+    ///
+    /// Returns `true` if the animation is still in progress (i.e. the caller
+    /// should `request_repaint()` to continue driving it).
+    pub fn update_cursor_animation(
+        &mut self,
+        target_col: f32,
+        target_row: f32,
+        trail_enabled: bool,
+        duration: Duration,
+    ) -> bool {
+        if !trail_enabled {
+            // Snap instantly — no animation.
+            self.cursor_visual_col = target_col;
+            self.cursor_visual_row = target_row;
+            self.cursor_target_col = target_col;
+            self.cursor_target_row = target_row;
+            self.cursor_anim_start = None;
+            return false;
+        }
+
+        // Detect a new target position.
+        let target_changed = (target_col - self.cursor_target_col).abs() > f32::EPSILON
+            || (target_row - self.cursor_target_row).abs() > f32::EPSILON;
+
+        if target_changed {
+            // Capture the current visual position as the animation origin.
+            self.cursor_start_col = self.cursor_visual_col;
+            self.cursor_start_row = self.cursor_visual_row;
+            self.cursor_target_col = target_col;
+            self.cursor_target_row = target_row;
+            self.cursor_anim_start = Some(Instant::now());
+        }
+
+        // If no animation is active, nothing to interpolate.
+        let Some(start) = self.cursor_anim_start else {
+            return false;
+        };
+
+        let elapsed = start.elapsed();
+        if elapsed >= duration {
+            // Animation complete — snap to target.
+            self.cursor_visual_col = self.cursor_target_col;
+            self.cursor_visual_row = self.cursor_target_row;
+            self.cursor_anim_start = None;
+            return false;
+        }
+
+        // Compute progress [0.0, 1.0] and apply ease-out cubic: 1 - (1 - t)^3
+        let t = elapsed.as_secs_f32() / duration.as_secs_f32();
+        let eased = Self::ease_out_cubic(t);
+
+        // Interpolate from the captured start position to the target.
+        self.cursor_visual_col =
+            (self.cursor_target_col - self.cursor_start_col).mul_add(eased, self.cursor_start_col);
+        self.cursor_visual_row =
+            (self.cursor_target_row - self.cursor_start_row).mul_add(eased, self.cursor_start_row);
+
+        true // animation still in progress
+    }
+
+    /// Ease-out cubic curve: `1 - (1 - t)^3`.
+    ///
+    /// Starts fast and decelerates towards the end.  `t` is clamped to [0, 1].
+    #[must_use]
+    fn ease_out_cubic(t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        let inv = 1.0 - t;
+        (inv * inv).mul_add(-inv, 1.0)
     }
 
     /// Advance the text blink cycle if enough time has elapsed.
@@ -1331,6 +1452,249 @@ mod tests {
         assert!(
             (vs.effective_font_size(16.0) - 20.0).abs() < f32::EPSILON,
             "after base change: 16 + 4 = 20"
+        );
+    }
+
+    // ── ease_out_cubic tests ─────────────────────────────────────────
+
+    #[test]
+    fn ease_out_cubic_at_zero() {
+        let val = ViewState::ease_out_cubic(0.0);
+        assert!(
+            val.abs() < f32::EPSILON,
+            "ease_out_cubic(0.0) should be 0.0, got {val}"
+        );
+    }
+
+    #[test]
+    fn ease_out_cubic_at_one() {
+        let val = ViewState::ease_out_cubic(1.0);
+        assert!(
+            (val - 1.0).abs() < f32::EPSILON,
+            "ease_out_cubic(1.0) should be 1.0, got {val}"
+        );
+    }
+
+    #[test]
+    fn ease_out_cubic_at_half() {
+        // 1 - (1 - 0.5)^3 = 1 - 0.125 = 0.875
+        let val = ViewState::ease_out_cubic(0.5);
+        assert!(
+            (val - 0.875).abs() < 1e-6,
+            "ease_out_cubic(0.5) should be 0.875, got {val}"
+        );
+    }
+
+    #[test]
+    fn ease_out_cubic_monotonically_increasing() {
+        let mut prev = 0.0_f32;
+        for i in 1..=100 {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / 100.0;
+            let val = ViewState::ease_out_cubic(t);
+            assert!(
+                val >= prev,
+                "ease_out_cubic should be monotonically increasing: f({t}) = {val} < prev = {prev}",
+            );
+            prev = val;
+        }
+    }
+
+    #[test]
+    fn ease_out_cubic_clamps_below_zero() {
+        let val = ViewState::ease_out_cubic(-0.5);
+        assert!(
+            val.abs() < f32::EPSILON,
+            "ease_out_cubic(-0.5) should clamp to 0.0, got {val}"
+        );
+    }
+
+    #[test]
+    fn ease_out_cubic_clamps_above_one() {
+        let val = ViewState::ease_out_cubic(1.5);
+        assert!(
+            (val - 1.0).abs() < f32::EPSILON,
+            "ease_out_cubic(1.5) should clamp to 1.0, got {val}"
+        );
+    }
+
+    // ── cursor trail animation tests ─────────────────────────────────
+
+    #[test]
+    fn cursor_animation_disabled_snaps_instantly() {
+        let mut vs = ViewState::new();
+        let animating = vs.update_cursor_animation(10.0, 5.0, false, Duration::from_millis(150));
+
+        assert!(!animating, "should not be animating when trail disabled");
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target"
+        );
+        assert!(vs.cursor_anim_start.is_none());
+    }
+
+    #[test]
+    fn cursor_animation_starts_on_target_change() {
+        let mut vs = ViewState::new();
+        // Initial position is (0, 0). Move to (10, 5) with trail enabled.
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::from_millis(150));
+
+        assert!(animating, "should be animating after target change");
+        assert!(vs.cursor_anim_start.is_some());
+        assert!(
+            (vs.cursor_target_col - 10.0).abs() < f32::EPSILON,
+            "target col should be set"
+        );
+        assert!(
+            (vs.cursor_target_row - 5.0).abs() < f32::EPSILON,
+            "target row should be set"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_completes_after_duration() {
+        let mut vs = ViewState::new();
+        let duration = Duration::from_millis(100);
+
+        // Start animation.
+        vs.update_cursor_animation(10.0, 5.0, true, duration);
+
+        // Artificially set start time to the past so duration has elapsed.
+        vs.cursor_anim_start = Some(
+            Instant::now()
+                .checked_sub(duration + Duration::from_millis(10))
+                .unwrap(),
+        );
+
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, duration);
+
+        assert!(!animating, "should not be animating after duration elapsed");
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target on completion"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target on completion"
+        );
+        assert!(
+            vs.cursor_anim_start.is_none(),
+            "anim_start should be cleared"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_no_change_returns_false() {
+        let mut vs = ViewState::new();
+        // Move to (5, 3) and let animation complete.
+        vs.cursor_visual_col = 5.0;
+        vs.cursor_visual_row = 3.0;
+        vs.cursor_target_col = 5.0;
+        vs.cursor_target_row = 3.0;
+        vs.cursor_anim_start = None;
+
+        // Call with same target — nothing changes.
+        let animating = vs.update_cursor_animation(5.0, 3.0, true, Duration::from_millis(150));
+
+        assert!(
+            !animating,
+            "should not be animating when target unchanged and no active animation"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_mid_animation_target_change_restarts() {
+        let mut vs = ViewState::new();
+        let duration = Duration::from_millis(200);
+
+        // Start first animation to (10, 0).
+        vs.update_cursor_animation(10.0, 0.0, true, duration);
+
+        // Simulate partial progress: set start to 50ms ago.
+        vs.cursor_anim_start = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(50))
+                .unwrap(),
+        );
+        // Update once to interpolate visual position partway.
+        vs.update_cursor_animation(10.0, 0.0, true, duration);
+        let mid_col = vs.cursor_visual_col;
+        assert!(
+            mid_col > 0.0 && mid_col < 10.0,
+            "mid-animation visual_col should be between 0 and 10, got {mid_col}"
+        );
+
+        // Now change target to (20, 0) — should restart from current visual.
+        let animating = vs.update_cursor_animation(20.0, 0.0, true, duration);
+        assert!(animating, "should be animating after target change");
+        assert!(
+            (vs.cursor_start_col - mid_col).abs() < f32::EPSILON,
+            "start_col should capture the mid-animation visual position"
+        );
+        assert!(
+            (vs.cursor_target_col - 20.0).abs() < f32::EPSILON,
+            "target should update to new position"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_interpolation_between_start_and_target() {
+        let mut vs = ViewState::new();
+        let duration = Duration::from_millis(200);
+
+        // Start animation from (0, 0) to (20, 10).
+        vs.update_cursor_animation(20.0, 10.0, true, duration);
+
+        // Set start to 100ms ago (halfway through duration).
+        vs.cursor_anim_start = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .unwrap(),
+        );
+        let animating = vs.update_cursor_animation(20.0, 10.0, true, duration);
+        assert!(animating, "should still be animating at halfway");
+
+        // At t=0.5, ease_out_cubic(0.5) = 0.875.
+        // Visual should be 0 + (20 - 0) * 0.875 = 17.5 for col.
+        // Allow some tolerance for timing jitter.
+        assert!(
+            vs.cursor_visual_col > 10.0,
+            "at halfway+ with ease-out, visual col should be well past halfway, got {}",
+            vs.cursor_visual_col
+        );
+        assert!(
+            vs.cursor_visual_col <= 20.0,
+            "visual col should not exceed target, got {}",
+            vs.cursor_visual_col
+        );
+    }
+
+    #[test]
+    fn cursor_animation_default_state_at_origin() {
+        let vs = ViewState::new();
+        assert!(
+            vs.cursor_visual_col.abs() < f32::EPSILON,
+            "default visual_col should be 0.0"
+        );
+        assert!(
+            vs.cursor_visual_row.abs() < f32::EPSILON,
+            "default visual_row should be 0.0"
+        );
+        assert!(
+            vs.cursor_target_col.abs() < f32::EPSILON,
+            "default target_col should be 0.0"
+        );
+        assert!(
+            vs.cursor_target_row.abs() < f32::EPSILON,
+            "default target_row should be 0.0"
+        );
+        assert!(
+            vs.cursor_anim_start.is_none(),
+            "default anim_start should be None"
         );
     }
 }
