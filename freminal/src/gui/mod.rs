@@ -106,7 +106,6 @@ struct FreminalGui {
     tabs: TabManager,
 
     terminal_widget: FreminalTerminalWidget,
-    window_title_stack: Vec<String>,
     config: Config,
 
     /// CLI arguments needed for spawning new PTY tabs.
@@ -149,7 +148,6 @@ impl FreminalGui {
         Self {
             tabs: TabManager::new(initial_tab),
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
-            window_title_stack: Vec::new(),
             binding_map: config.build_binding_map().unwrap_or_else(|e| {
                 error!("Failed to build binding map from config: {e}. Using defaults.");
                 freminal_common::keybindings::BindingMap::default()
@@ -345,6 +343,7 @@ impl FreminalGui {
                     pty_dead_rx: channels.pty_dead_rx,
                     title: "Terminal".to_owned(),
                     bell_active: false,
+                    title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                 };
                 self.tabs.add_tab(tab);
@@ -636,6 +635,7 @@ fn handle_window_manipulation(
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
     tab_title: &mut String,
+    is_active: bool,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -644,6 +644,37 @@ fn handle_window_manipulation(
         };
 
         match window_event {
+            // ── Viewport-mutating commands: skip for inactive tabs ───
+            // An inactive tab must not resize, move, minimize, or fullscreen
+            // the shared window.
+            WindowManipulation::DeIconifyWindow
+            | WindowManipulation::MinimizeWindow
+            | WindowManipulation::MoveWindow(_, _)
+            | WindowManipulation::ResizeWindow(_, _)
+            | WindowManipulation::MaximizeWindow
+            | WindowManipulation::RestoreNonMaximizedWindow
+            | WindowManipulation::ResizeWindowToLinesAndColumns(_, _)
+            | WindowManipulation::NotFullScreen
+            | WindowManipulation::FullScreen
+            | WindowManipulation::ToggleFullScreen
+                if !is_active => {}
+
+            // ── Title: inactive tabs update their own title only ─────
+            WindowManipulation::SetTitleBarText(title) if !is_active => {
+                tab_title.clone_from(&title);
+            }
+
+            // ── Title stack: inactive tabs save their own tab title ──
+            WindowManipulation::SaveWindowTitleToStack if !is_active => {
+                title_stack.push(tab_title.clone());
+            }
+            WindowManipulation::RestoreWindowTitleFromStack if !is_active => {
+                if let Some(title) = title_stack.pop() {
+                    tab_title.clone_from(&title);
+                } else {
+                    tab_title.clear();
+                }
+            }
             WindowManipulation::DeIconifyWindow => {
                 ui.ctx()
                     .send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -1018,33 +1049,24 @@ impl eframe::App for FreminalGui {
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
             // Drain window commands for ALL tabs.  The active tab gets full
-            // handling (viewport commands, reports, title updates).  Inactive
-            // tabs only apply title updates (OSC 0/2) and discard everything
-            // else, preventing unbounded channel growth.
+            // handling (viewport commands, reports, title updates, clipboard).
+            // Inactive tabs get reports answered, titles updated, and clipboard
+            // handled — only viewport-mutating commands (resize, move, minimize,
+            // fullscreen) are discarded since an inactive tab must not alter the
+            // shared window geometry.
             let active_idx = self.tabs.active_index();
             for (idx, tab) in self.tabs.iter_mut().enumerate() {
-                if idx == active_idx {
-                    handle_window_manipulation(
-                        ui,
-                        &tab.window_cmd_rx,
-                        &tab.pty_write_tx,
-                        font_width,
-                        font_height,
-                        window_width,
-                        &mut self.window_title_stack,
-                        &mut tab.title,
-                    );
-                } else {
-                    // Drain and discard non-title commands for inactive tabs.
-                    while let Ok(wc) = tab.window_cmd_rx.try_recv() {
-                        let wm = match wc {
-                            WindowCommand::Viewport(cmd) | WindowCommand::Report(cmd) => cmd,
-                        };
-                        if let WindowManipulation::SetTitleBarText(title) = wm {
-                            tab.title = title;
-                        }
-                    }
-                }
+                handle_window_manipulation(
+                    ui,
+                    &tab.window_cmd_rx,
+                    &tab.pty_write_tx,
+                    font_width,
+                    font_height,
+                    window_width,
+                    &mut tab.title_stack,
+                    &mut tab.title,
+                    idx == active_idx,
+                );
             }
 
             // Update background color based on whether the terminal is in

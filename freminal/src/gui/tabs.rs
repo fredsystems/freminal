@@ -75,6 +75,12 @@ pub struct Tab {
     /// Whether a bell has fired in this tab and not yet been cleared.
     pub bell_active: bool,
 
+    /// Per-tab title stack for `SaveWindowTitleToStack` /
+    /// `RestoreWindowTitleFromStack` (CSI 22/23 t).  Each tab maintains its
+    /// own stack so that background shells pushing/popping titles do not
+    /// interfere with the active tab.
+    pub title_stack: Vec<String>,
+
     /// Per-tab GUI view state (scroll offset, selection, blink, mouse).
     pub view_state: ViewState,
 }
@@ -355,6 +361,7 @@ mod tests {
             pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,
+            title_stack: Vec::new(),
             view_state: ViewState::new(),
         }
     }

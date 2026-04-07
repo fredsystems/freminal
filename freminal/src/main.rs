@@ -101,6 +101,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         pty_dead_rx: channels.pty_dead_rx,
         title: "Terminal".to_owned(),
         bell_active: false,
+        title_stack: Vec::new(),
         view_state: gui::view_state::ViewState::new(),
     };
 
@@ -368,6 +369,7 @@ fn main() {
                 pty_dead_rx,
                 title: "Playback".to_owned(),
                 bell_active: false,
+                title_stack: Vec::new(),
                 view_state: gui::view_state::ViewState::new(),
             },
             cfg,
