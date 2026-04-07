@@ -613,13 +613,15 @@ impl FreminalTerminalWidget {
         // (e.g. clicks on the tab bar).
         let terminal_rect = ui.available_rect_before_wrap();
 
-        // When a modal dialog (e.g. the settings window) is open — or was
-        // open last frame — do NOT forward keyboard/mouse events to the PTY.
-        // The one-frame delay prevents the dismiss-click from leaking through
-        // as a pointer event, and resets stale inter-frame state so the next
-        // real input starts from a clean slate.
+        // When a modal dialog (e.g. the settings window) or the right-click
+        // context menu is open — or the modal was open last frame — do NOT
+        // forward keyboard/mouse events to the PTY.  For modals, the one-frame
+        // delay prevents the dismiss-click from leaking through as a pointer
+        // event.  For the context menu, suppression ensures that clicking a
+        // menu button (e.g. Copy) is delivered to egui's Area widget instead
+        // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
-        if suppress_input {
+        if suppress_input || context_menu_open {
             self.previous_key = None;
             self.previous_mouse_state = None;
             self.previous_scroll_amount = 0.0;
