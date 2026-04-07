@@ -436,6 +436,10 @@ Use egui's built-in context menu (`response.context_menu()`). Menu items:
 3. **39.3 — Tests** ✅
    Unit tests for URL span detection at a given cell coordinate.
 
+4. **39.4 — New Terminal menu item + Close Tab guard** ✅
+   Add "New Terminal" item to the right-click context menu (propagates `KeyAction::NewTab`
+   through deferred actions). Disable "Close Tab" in the Tab menu bar when only one tab is open.
+
 ### 39 Primary Files
 
 - `freminal/src/gui/terminal/widget.rs`
