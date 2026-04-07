@@ -3,12 +3,16 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::keybindings::{BindingMap, KeyAction, KeyCombo};
 use crate::themes;
 use directories::BaseDirs;
 
@@ -26,6 +30,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub scrollback: ScrollbackConfig,
     pub ui: UiConfig,
+    #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
+    pub keybindings: KeybindingsConfig,
 
     /// Indicates which external tool manages this config file.
     ///
@@ -51,6 +57,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             scrollback: ScrollbackConfig::default(),
             ui: UiConfig::default(),
+            keybindings: KeybindingsConfig::default(),
             managed_by: None,
         }
     }
@@ -192,6 +199,46 @@ impl Default for UiConfig {
     }
 }
 
+// ------------------------------------------------------------------------------------------------
+//  Keybindings
+// ------------------------------------------------------------------------------------------------
+
+/// User-specified key binding overrides.
+///
+/// Each entry maps an action name (matching [`KeyAction`] `snake_case` names)
+/// to a key combo string (e.g. `"Ctrl+Shift+C"`). A value of `"none"` or `""`
+/// disables the binding for that action.
+///
+/// Only overridden actions need to be listed — omitted actions keep their
+/// default bindings from [`BindingMap::default()`].
+///
+/// ## TOML example
+///
+/// ```toml
+/// [keybindings]
+/// copy = "Ctrl+C"
+/// paste = "Ctrl+V"
+/// new_tab = "none"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeybindingsConfig {
+    /// Override map: action name → key combo string.
+    ///
+    /// Stored as flat key-value pairs so that the TOML representation is a
+    /// simple table of `action = "combo"` entries.
+    #[serde(flatten)]
+    pub overrides: HashMap<String, String>,
+}
+
+impl KeybindingsConfig {
+    /// Returns `true` if no overrides are specified.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.overrides.is_empty()
+    }
+}
+
 /// ---------------------------------------------------------------------------------------------
 ///  Partial config (for layered merging)
 /// ---------------------------------------------------------------------------------------------
@@ -206,6 +253,7 @@ struct ConfigPartial {
     pub logging: Option<LoggingConfig>,
     pub scrollback: Option<ScrollbackConfig>,
     pub ui: Option<UiConfig>,
+    pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
 }
 
@@ -234,6 +282,12 @@ impl Config {
         }
         if let Some(ui) = partial.ui {
             self.ui = ui;
+        }
+        if let Some(keybindings) = partial.keybindings {
+            // Merge override maps: later layers add to / overwrite earlier ones.
+            for (action, combo) in keybindings.overrides {
+                self.keybindings.overrides.insert(action, combo);
+            }
         }
         if partial.managed_by.is_some() {
             self.managed_by = partial.managed_by;
@@ -322,7 +376,41 @@ impl Config {
             )));
         }
 
+        // Validate keybinding overrides: every action name must be recognized,
+        // and every combo string must parse (or be "none" / empty to disable).
+        for (action_str, combo_str) in &self.keybindings.overrides {
+            KeyAction::from_str(action_str).map_err(|e| {
+                ConfigError::Validation(format!(
+                    "keybindings: invalid action \"{action_str}\": {e}"
+                ))
+            })?;
+
+            let trimmed = combo_str.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("none") {
+                KeyCombo::from_str(trimmed).map_err(|e| {
+                    ConfigError::Validation(format!(
+                        "keybindings.{action_str}: invalid combo \"{combo_str}\": {e}"
+                    ))
+                })?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Build a [`BindingMap`] from the default bindings plus any user overrides
+    /// specified in `[keybindings]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::Validation` if any override action name or combo
+    /// string is invalid. (This should not happen if `validate()` has already
+    /// been called, but the method is defensive.)
+    pub fn build_binding_map(&self) -> Result<BindingMap, ConfigError> {
+        let mut map = BindingMap::default();
+        map.apply_overrides(&self.keybindings.overrides)
+            .map_err(|e| ConfigError::Validation(format!("keybindings: {e}")))?;
+        Ok(map)
     }
 }
 
@@ -914,5 +1002,229 @@ hide_menu_bar = false
             (ui.background_opacity - 1.0).abs() < f32::EPSILON,
             "missing background_opacity should default to 1.0"
         );
+    }
+
+    // -----------------------------------------------------------------
+    //  keybindings
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_config_keybindings_is_empty() {
+        let cfg = Config::default();
+        assert!(cfg.keybindings.is_empty());
+    }
+
+    #[test]
+    fn keybindings_deserialize_from_toml() {
+        let toml_str = r#"
+[keybindings]
+copy = "Ctrl+C"
+paste = "Ctrl+V"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let kb = partial
+            .keybindings
+            .expect("keybindings section should be present");
+        assert_eq!(kb.overrides.get("copy").unwrap(), "Ctrl+C");
+        assert_eq!(kb.overrides.get("paste").unwrap(), "Ctrl+V");
+    }
+
+    #[test]
+    fn keybindings_absent_in_toml_defaults_to_empty() {
+        let toml_str = "version = 1\n";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        // When the section is absent, serde default gives us None.
+        assert!(
+            partial.keybindings.is_none()
+                || partial
+                    .keybindings
+                    .as_ref()
+                    .is_some_and(KeybindingsConfig::is_empty),
+            "absent keybindings section should be None or empty"
+        );
+    }
+
+    #[test]
+    fn keybindings_applied_via_partial() {
+        let mut cfg = Config::default();
+        assert!(cfg.keybindings.is_empty());
+
+        let toml_str = r#"
+[keybindings]
+copy = "Ctrl+C"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert_eq!(cfg.keybindings.overrides.get("copy").unwrap(), "Ctrl+C");
+    }
+
+    #[test]
+    fn keybindings_partial_merge_is_additive() {
+        let mut cfg = Config::default();
+
+        let toml1 = r#"
+[keybindings]
+copy = "Ctrl+C"
+"#;
+        let partial1: ConfigPartial = toml::from_str(toml1).expect("valid TOML");
+        cfg.apply_partial(partial1);
+
+        let toml2 = r#"
+[keybindings]
+paste = "Ctrl+V"
+"#;
+        let partial2: ConfigPartial = toml::from_str(toml2).expect("valid TOML");
+        cfg.apply_partial(partial2);
+
+        assert_eq!(cfg.keybindings.overrides.len(), 2);
+        assert_eq!(cfg.keybindings.overrides.get("copy").unwrap(), "Ctrl+C");
+        assert_eq!(cfg.keybindings.overrides.get("paste").unwrap(), "Ctrl+V");
+    }
+
+    #[test]
+    fn keybindings_partial_merge_overwrites() {
+        let mut cfg = Config::default();
+
+        let toml1 = r#"
+[keybindings]
+copy = "Ctrl+C"
+"#;
+        let partial1: ConfigPartial = toml::from_str(toml1).expect("valid TOML");
+        cfg.apply_partial(partial1);
+
+        let toml2 = r#"
+[keybindings]
+copy = "Ctrl+Shift+C"
+"#;
+        let partial2: ConfigPartial = toml::from_str(toml2).expect("valid TOML");
+        cfg.apply_partial(partial2);
+
+        assert_eq!(
+            cfg.keybindings.overrides.get("copy").unwrap(),
+            "Ctrl+Shift+C"
+        );
+    }
+
+    #[test]
+    fn keybindings_not_serialized_when_empty() {
+        let cfg = Config::default();
+        let toml_str = toml::to_string_pretty(&cfg).expect("should serialize");
+        assert!(
+            !toml_str.contains("keybindings"),
+            "keybindings should be omitted when empty: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn keybindings_roundtrip_when_set() {
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .overrides
+            .insert("copy".to_string(), "Ctrl+C".to_string());
+        cfg.keybindings
+            .overrides
+            .insert("new_tab".to_string(), "none".to_string());
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("should serialize");
+        assert!(
+            toml_str.contains("keybindings"),
+            "keybindings should appear when non-empty"
+        );
+
+        let deserialized: Config = toml::from_str(&toml_str).expect("should deserialize");
+        assert_eq!(
+            deserialized.keybindings.overrides.get("copy").unwrap(),
+            "Ctrl+C"
+        );
+        assert_eq!(
+            deserialized.keybindings.overrides.get("new_tab").unwrap(),
+            "none"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_valid_keybinding_overrides() {
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .overrides
+            .insert("copy".to_string(), "Ctrl+C".to_string());
+        cfg.keybindings
+            .overrides
+            .insert("paste".to_string(), "none".to_string());
+        cfg.keybindings
+            .overrides
+            .insert("new_tab".to_string(), String::new());
+        cfg.validate().expect("valid overrides should pass");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_action_name() {
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .overrides
+            .insert("launch_rockets".to_string(), "Ctrl+R".to_string());
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("launch_rockets"),
+            "error should mention the bad action: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_combo_string() {
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .overrides
+            .insert("copy".to_string(), "Super+C".to_string());
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Super"),
+            "error should mention the bad modifier: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_binding_map_default_when_no_overrides() {
+        use crate::keybindings::{BindingKey, BindingModifiers, KeyAction, KeyCombo};
+
+        let cfg = Config::default();
+        let map = cfg.build_binding_map().expect("should build default map");
+
+        // Verify a default binding is present.
+        let combo = KeyCombo::new(BindingKey::C, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::Copy));
+    }
+
+    #[test]
+    fn build_binding_map_with_override() {
+        use crate::keybindings::{BindingKey, BindingModifiers, KeyAction, KeyCombo};
+
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .overrides
+            .insert("copy".to_string(), "Ctrl+C".to_string());
+        let map = cfg
+            .build_binding_map()
+            .expect("should build map with override");
+
+        // The override Ctrl+C should now trigger Copy.
+        let new_combo = KeyCombo::new(BindingKey::C, BindingModifiers::CTRL);
+        assert_eq!(map.lookup(&new_combo), Some(KeyAction::Copy));
+    }
+
+    #[test]
+    fn build_binding_map_with_none_unbinds() {
+        use crate::keybindings::KeyAction;
+
+        let mut cfg = Config::default();
+        cfg.keybindings
+            .overrides
+            .insert("copy".to_string(), "none".to_string());
+        let map = cfg.build_binding_map().expect("should build map");
+
+        // Copy should have no bindings.
+        assert!(map.all_combos_for(KeyAction::Copy).is_empty());
     }
 }

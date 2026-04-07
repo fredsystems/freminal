@@ -217,13 +217,26 @@ are discoverable and configurable.
 
 ### 37 Subtasks
 
-1. **37.1 — `KeyAction` enum and `KeyCombo` struct**
+1. **37.1 — `KeyAction` enum and `KeyCombo` struct** ✅ _Complete (2026-04-06)_
    Create `freminal-common/src/keybindings.rs`. Define `KeyAction`, `KeyCombo`, `KeyBindings`.
    Implement `Default` for `KeyBindings` matching current hardcoded shortcuts.
+   - Added `BindingKey` enum (letters, digits, F-keys, navigation, editing, symbols)
+   - Added `BindingModifiers` struct with constants (`NONE`, `CTRL`, `SHIFT`, `CTRL_SHIFT`, `ALT`)
+   - Added `KeyCombo` with `Display`/`FromStr` (parses "Ctrl+Shift+T" format)
+   - Added `KeyAction` enum (31 variants) with `Display`/`FromStr`/`Serialize`/`Deserialize`
+   - Added `BindingMap` with `lookup`/`bind`/`unbind`/`apply_overrides` and standard defaults
+   - 46 unit tests — all passing
 
-2. **37.2 — Config: `[keybindings]` section**
+2. **37.2 — Config: `[keybindings]` section** ✅ Complete
    Design TOML syntax for keybindings. Add deserialization. Add to `Config`, `ConfigPartial`,
    `validate()`. Update `config_example.toml` with documented examples.
+   - Added `KeybindingsConfig` struct with `HashMap<String, String>` overrides, `#[serde(flatten)]`
+   - Added to `Config`, `ConfigPartial`, `apply_partial()` (additive merge across layers)
+   - Added validation: rejects unknown action names and invalid combo strings
+   - Added `build_binding_map()` method on `Config` to produce a `BindingMap` from defaults + overrides
+   - `skip_serializing_if` keeps empty keybindings out of serialized output
+   - Updated `config_example.toml` with full documentation of all available actions and their defaults
+   - 16 new unit tests covering deserialization, partial merging, round-trip, validation, and binding map construction
 
 3. **37.3 — Key dispatch refactor**
    Refactor `terminal/input.rs` to check `KeyBindings` before hardcoded logic. All current
