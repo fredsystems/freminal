@@ -1180,11 +1180,21 @@ pub(super) fn write_input_to_terminal(
                             // mouse position on release.
                             let abs_row = visible_window_start(snap) + y;
                             let end_col = release_end_col(view_state, snap, x, y, abs_row);
-                            view_state.selection.end = Some(CellCoord {
+                            let end_coord = CellCoord {
                                 col: end_col,
                                 row: abs_row,
-                            });
+                            };
+                            view_state.selection.end = Some(end_coord);
                             view_state.selection.is_selecting = false;
+
+                            // If anchor == end the user clicked without
+                            // dragging — there is no real selection.
+                            // Clear it so the next click starts fresh
+                            // rather than hitting the "clear existing
+                            // selection" path.
+                            if view_state.selection.anchor == Some(end_coord) {
+                                view_state.selection.clear();
+                            }
                         }
                     }
                     continue;
