@@ -102,10 +102,16 @@ tab is created inside `FreminalGui::new()` from the channels passed at startup.
    - Created `TabError` enum with `IndexOutOfBounds`, `CannotCloseLastTab`, `MoveToSelf`
    - 22 unit tests covering all operations, edge cases, and error conditions
 
-2. **36.2 — Extract PTY setup into reusable function**
+2. **36.2 — Extract PTY setup into reusable function** ✅ _Complete (2026-04-07)_
    Refactor `normal_run()` in `main.rs` to extract the PTY thread creation (TerminalEmulator,
    channels, ArcSwap, thread spawn) into a function that returns the components needed for a
    `Tab`. This function will be called for the initial tab and for each subsequent `new_tab()`.
+   - Created `TabChannels` struct holding GUI-side endpoints (arc_swap, input_tx, pty_write_tx,
+     window_cmd_rx, clipboard_rx)
+   - Created `spawn_pty_tab()` function that creates TerminalEmulator, sets theme, creates
+     channels, and spawns the PTY consumer thread
+   - Extracted `spawn_pty_consumer_thread()` containing the full PTY event loop
+   - Simplified `normal_run()` to a 15-line function calling `spawn_pty_tab()` then `gui::run()`
 
 3. **36.3 — Wire `TabManager` into `FreminalGui`**
    Replace the single `arc_swap`, `input_tx`, `pty_write_tx`, `window_cmd_rx`, `clipboard_rx`
