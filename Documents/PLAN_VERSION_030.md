@@ -247,10 +247,17 @@ are discoverable and configurable.
    - `BindingMap` stored on `FreminalGui`, rebuilt on settings apply, threaded to widget and input
    - Simplified `Event::Copy` arm — `Ctrl+Shift+C → Copy` now handled by pre-check
 
-4. **37.4 — Settings Modal: keybindings tab**
+4. **37.4 — Settings Modal: keybindings tab** ✅ _Complete (2026-04-06)_
    Add a "Keybindings" tab to the Settings Modal showing all actions and their current bindings.
    Allow editing (click binding → press new key combo → save). Respect `managed_by` read-only
    mode.
+   - Added `Keybindings` variant to `SettingsTab` enum and `ALL` array
+   - Added `show_keybindings_tab()` method rendering a grid of all 31 actions
+   - Added `show_keybinding_row()` free function with text-edit fields seeded from effective map
+   - Added `KeyAction::display_label()` for human-friendly action names in UI
+   - Extracted `draw_active_tab()` helper to keep `show()` under 100-line limit
+   - Read-only mode (managed_by) automatically disables all edit fields
+   - Tests updated: `all_tabs_present` (7→8), `settings_tab_labels` (+Keybindings)
 
 5. **37.5 — Home-manager module update**
    Add `keybindings` options to `nix/home-manager-module.nix` so Nix users can declaratively

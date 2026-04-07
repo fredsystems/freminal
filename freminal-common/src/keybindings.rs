@@ -638,6 +638,48 @@ impl KeyAction {
         }
     }
 
+    /// Returns a human-friendly label for display in the Settings UI.
+    ///
+    /// Unlike [`name()`](Self::name), which returns the `snake_case` config
+    /// key, this returns a title-cased string with spaces (e.g. "New Tab",
+    /// "Scroll Page Up", "Switch to Tab 1").
+    #[must_use]
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::NewTab => "New Tab",
+            Self::CloseTab => "Close Tab",
+            Self::NextTab => "Next Tab",
+            Self::PrevTab => "Previous Tab",
+            Self::SwitchToTab1 => "Switch to Tab 1",
+            Self::SwitchToTab2 => "Switch to Tab 2",
+            Self::SwitchToTab3 => "Switch to Tab 3",
+            Self::SwitchToTab4 => "Switch to Tab 4",
+            Self::SwitchToTab5 => "Switch to Tab 5",
+            Self::SwitchToTab6 => "Switch to Tab 6",
+            Self::SwitchToTab7 => "Switch to Tab 7",
+            Self::SwitchToTab8 => "Switch to Tab 8",
+            Self::SwitchToTab9 => "Switch to Tab 9",
+            Self::MoveTabLeft => "Move Tab Left",
+            Self::MoveTabRight => "Move Tab Right",
+            Self::RenameTab => "Rename Tab",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
+            Self::SelectAll => "Select All",
+            Self::OpenSearch => "Open Search",
+            Self::ZoomIn => "Zoom In",
+            Self::ZoomOut => "Zoom Out",
+            Self::ZoomReset => "Zoom Reset",
+            Self::ToggleMenuBar => "Toggle Menu Bar",
+            Self::OpenSettings => "Open Settings",
+            Self::ScrollPageUp => "Scroll Page Up",
+            Self::ScrollPageDown => "Scroll Page Down",
+            Self::ScrollToTop => "Scroll to Top",
+            Self::ScrollToBottom => "Scroll to Bottom",
+            Self::ScrollLineUp => "Scroll Line Up",
+            Self::ScrollLineDown => "Scroll Line Down",
+        }
+    }
+
     /// All defined actions, in declaration order.
     ///
     /// Useful for iterating over all actions in the settings UI or for

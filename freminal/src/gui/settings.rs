@@ -18,11 +18,12 @@ pub enum SettingsTab {
     Scrollback,
     Logging,
     Ui,
+    Keybindings,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -30,6 +31,7 @@ impl SettingsTab {
         Self::Scrollback,
         Self::Logging,
         Self::Ui,
+        Self::Keybindings,
     ];
 
     const fn label(self) -> &'static str {
@@ -41,6 +43,7 @@ impl SettingsTab {
             Self::Scrollback => "Scrollback",
             Self::Logging => "Logging",
             Self::Ui => "UI",
+            Self::Keybindings => "Keybindings",
         }
     }
 }
@@ -240,15 +243,7 @@ impl SettingsModal {
                         if is_read_only {
                             ui.disable();
                         }
-                        match self.active_tab {
-                            SettingsTab::Font => self.show_font_tab(ui),
-                            SettingsTab::Cursor => self.show_cursor_tab(ui),
-                            SettingsTab::Theme => self.show_theme_tab(ui),
-                            SettingsTab::Shell => self.show_shell_tab(ui),
-                            SettingsTab::Scrollback => self.show_scrollback_tab(ui),
-                            SettingsTab::Logging => self.show_logging_tab(ui),
-                            SettingsTab::Ui => self.show_ui_tab(ui),
-                        }
+                        self.draw_active_tab(ui);
                     });
 
                 ui.separator();
@@ -322,6 +317,24 @@ impl SettingsModal {
     #[must_use]
     pub const fn applied_config(&self) -> &Config {
         &self.draft
+    }
+
+    // -------------------------------------------------------------------------
+    //  Tab dispatch
+    // -------------------------------------------------------------------------
+
+    /// Dispatch rendering to the currently active tab.
+    fn draw_active_tab(&mut self, ui: &mut Ui) {
+        match self.active_tab {
+            SettingsTab::Font => self.show_font_tab(ui),
+            SettingsTab::Cursor => self.show_cursor_tab(ui),
+            SettingsTab::Theme => self.show_theme_tab(ui),
+            SettingsTab::Shell => self.show_shell_tab(ui),
+            SettingsTab::Scrollback => self.show_scrollback_tab(ui),
+            SettingsTab::Logging => self.show_logging_tab(ui),
+            SettingsTab::Ui => self.show_ui_tab(ui),
+            SettingsTab::Keybindings => self.show_keybindings_tab(ui),
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -547,6 +560,37 @@ impl SettingsModal {
         );
     }
 
+    fn show_keybindings_tab(&mut self, ui: &mut Ui) {
+        use freminal_common::keybindings::KeyAction;
+
+        // Build the effective map (defaults + current draft overrides) so we
+        // can display what each action is currently bound to.
+        let effective_map = self.draft.build_binding_map().unwrap_or_default();
+
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Edit key bindings below.  Type a combo like \"Ctrl+Shift+T\" or \
+             leave blank to unbind.",
+        );
+        ui.add_space(8.0);
+
+        egui::Grid::new("keybindings_grid")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for action in KeyAction::ALL {
+                    show_keybinding_row(
+                        ui,
+                        *action,
+                        &effective_map,
+                        &mut self.draft.keybindings.overrides,
+                    );
+                    ui.end_row();
+                }
+            });
+    }
+
     // -------------------------------------------------------------------------
     //  Font preview helpers
     // -------------------------------------------------------------------------
@@ -628,6 +672,45 @@ impl SettingsModal {
                 self.status_message = Some(format!("Save failed: {e}"));
                 SettingsAction::None
             }
+        }
+    }
+}
+
+/// Render one row of the keybindings grid: action label + editable combo field.
+///
+/// `effective_map` is the fully resolved `BindingMap` (defaults + overrides),
+/// used to display the current combo.  Edits are written back into
+/// `overrides`, which stores only user-customised entries.
+fn show_keybinding_row(
+    ui: &mut Ui,
+    action: freminal_common::keybindings::KeyAction,
+    effective_map: &freminal_common::keybindings::BindingMap,
+    overrides: &mut std::collections::HashMap<String, String>,
+) {
+    ui.label(action.display_label());
+
+    let override_key = action.name().to_owned();
+
+    // Seed the text field: prefer the override if present, else the effective
+    // combo from the resolved map, else empty (unbound).
+    let mut text = overrides.get(&override_key).cloned().unwrap_or_else(|| {
+        effective_map
+            .combo_for(action)
+            .map_or_else(String::new, |c| c.to_string())
+    });
+
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(180.0)
+            .hint_text("unbound"),
+    );
+
+    if response.changed() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            overrides.remove(&override_key);
+        } else {
+            overrides.insert(override_key, trimmed.to_owned());
         }
     }
 }
@@ -732,6 +815,7 @@ mod tests {
         assert_eq!(SettingsTab::Scrollback.label(), "Scrollback");
         assert_eq!(SettingsTab::Logging.label(), "Logging");
         assert_eq!(SettingsTab::Ui.label(), "UI");
+        assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
     }
 
     #[test]
@@ -746,7 +830,7 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 7);
+        assert_eq!(SettingsTab::ALL.len(), 8);
     }
 
     #[test]
