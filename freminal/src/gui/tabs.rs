@@ -731,4 +731,98 @@ mod tests {
         let e3 = TabError::MoveToSelf { index: 2 };
         assert!(e3.to_string().contains('2'));
     }
+
+    // ── 36.8: Per-tab ViewState isolation ────────────────────────────────
+
+    #[test]
+    fn view_state_isolated_across_tab_switch() {
+        let tab1 = dummy_tab(TabId(0), "Tab 1");
+        let mut mgr = TabManager::new(tab1);
+        let tab2 = dummy_tab(TabId(1), "Tab 2");
+        mgr.add_tab(tab2);
+
+        // Modify Tab 2's scroll offset.
+        mgr.active_tab_mut().view_state.scroll_offset = 42;
+
+        // Switch to Tab 1 — its scroll offset should still be 0 (default).
+        mgr.switch_to(0).unwrap();
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 0);
+
+        // Switch back to Tab 2 — its scroll offset should still be 42.
+        mgr.switch_to(1).unwrap();
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 42);
+    }
+
+    #[test]
+    fn view_state_preserved_after_close() {
+        let tab1 = dummy_tab(TabId(0), "Tab 1");
+        let mut mgr = TabManager::new(tab1);
+        let tab2 = dummy_tab(TabId(1), "Tab 2");
+        let tab3 = dummy_tab(TabId(2), "Tab 3");
+        mgr.add_tab(tab2);
+        mgr.add_tab(tab3);
+
+        // Set distinct scroll offsets.
+        mgr.switch_to(0).unwrap();
+        mgr.active_tab_mut().view_state.scroll_offset = 10;
+        mgr.switch_to(1).unwrap();
+        mgr.active_tab_mut().view_state.scroll_offset = 20;
+        mgr.switch_to(2).unwrap();
+        mgr.active_tab_mut().view_state.scroll_offset = 30;
+
+        // Close Tab 2 (index 1) — Tab 1 and Tab 3 should keep their offsets.
+        mgr.close_tab(1).unwrap();
+        // After close, Tab 3 slid to index 1 and is still active.
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 30);
+        mgr.switch_to(0).unwrap();
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 10);
+    }
+
+    #[test]
+    fn view_state_preserved_after_move() {
+        let tab1 = dummy_tab(TabId(0), "A");
+        let mut mgr = TabManager::new(tab1);
+        let tab2 = dummy_tab(TabId(1), "B");
+        let tab3 = dummy_tab(TabId(2), "C");
+        mgr.add_tab(tab2);
+        mgr.add_tab(tab3);
+
+        // Set distinct scroll offsets.
+        mgr.switch_to(0).unwrap();
+        mgr.active_tab_mut().view_state.scroll_offset = 100;
+        mgr.switch_to(1).unwrap();
+        mgr.active_tab_mut().view_state.scroll_offset = 200;
+        mgr.switch_to(2).unwrap();
+        mgr.active_tab_mut().view_state.scroll_offset = 300;
+
+        // Move C (index 2) to index 0.  Order becomes [C, A, B].
+        mgr.move_tab(2, 0).unwrap();
+
+        // Verify each tab still has its own scroll offset.
+        mgr.switch_to(0).unwrap();
+        assert_eq!(mgr.active_tab().title, "C");
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 300);
+
+        mgr.switch_to(1).unwrap();
+        assert_eq!(mgr.active_tab().title, "A");
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 100);
+
+        mgr.switch_to(2).unwrap();
+        assert_eq!(mgr.active_tab().title, "B");
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 200);
+    }
+
+    #[test]
+    fn new_tab_starts_with_default_view_state() {
+        let tab1 = dummy_tab(TabId(0), "Tab 1");
+        let mut mgr = TabManager::new(tab1);
+
+        // Modify Tab 1's view state.
+        mgr.active_tab_mut().view_state.scroll_offset = 999;
+
+        // Add a new tab — it should have a fresh ViewState.
+        let tab2 = dummy_tab(TabId(1), "Tab 2");
+        mgr.add_tab(tab2);
+        assert_eq!(mgr.active_tab().view_state.scroll_offset, 0);
+    }
 }
