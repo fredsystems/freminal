@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
 use freminal_common::args::Args;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::config::Config;
+use freminal_common::config::{Config, TabBarPosition};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 #[cfg(feature = "playback")]
@@ -836,11 +836,16 @@ impl eframe::App for FreminalGui {
             });
         }
 
-        // Tab bar between menu bar and terminal area.
-        // Hidden when only one tab is open (default; 36.7 will add a config
-        // option `tabs.show_single_tab` to override this).
-        if self.tabs.tab_count() > 1 {
-            let tab_action = Panel::top("tab_bar").show_inside(ui, |ui| self.show_tab_bar(ui));
+        // Tab bar: shown when multiple tabs are open, or when the config
+        // option `tabs.show_single_tab` is enabled.
+        let show_tab_bar = self.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
+
+        if show_tab_bar {
+            let panel = match self.config.tabs.position {
+                TabBarPosition::Top => Panel::top("tab_bar"),
+                TabBarPosition::Bottom => Panel::bottom("tab_bar"),
+            };
+            let tab_action = panel.show_inside(ui, |ui| self.show_tab_bar(ui));
 
             match tab_action.inner {
                 TabBarAction::NewTab => self.spawn_new_tab(),

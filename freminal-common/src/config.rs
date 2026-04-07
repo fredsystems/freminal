@@ -30,6 +30,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub scrollback: ScrollbackConfig,
     pub ui: UiConfig,
+    pub tabs: TabsConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -57,6 +58,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             scrollback: ScrollbackConfig::default(),
             ui: UiConfig::default(),
+            tabs: TabsConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
         }
@@ -199,6 +201,41 @@ impl Default for UiConfig {
     }
 }
 
+// ----------------------------------------------------------------------------------------------
+//  Tabs
+// ----------------------------------------------------------------------------------------------
+
+/// Position of the tab bar relative to the terminal area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TabBarPosition {
+    /// Tab bar above the terminal (default).
+    #[default]
+    Top,
+    /// Tab bar below the terminal.
+    Bottom,
+}
+
+/// Configuration for tab behaviour and appearance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    /// Whether to show the tab bar when only one tab is open.
+    /// Default: `false` (tab bar only appears with multiple tabs).
+    pub show_single_tab: bool,
+    /// Position of the tab bar: `"top"` or `"bottom"`.
+    pub position: TabBarPosition,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self {
+            show_single_tab: false,
+            position: TabBarPosition::Top,
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------------
 //  Keybindings
 // ------------------------------------------------------------------------------------------------
@@ -253,6 +290,7 @@ struct ConfigPartial {
     pub logging: Option<LoggingConfig>,
     pub scrollback: Option<ScrollbackConfig>,
     pub ui: Option<UiConfig>,
+    pub tabs: Option<TabsConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
 }
@@ -282,6 +320,9 @@ impl Config {
         }
         if let Some(ui) = partial.ui {
             self.ui = ui;
+        }
+        if let Some(tabs) = partial.tabs {
+            self.tabs = tabs;
         }
         if let Some(keybindings) = partial.keybindings {
             // Merge override maps: later layers add to / overwrite earlier ones.
@@ -1226,5 +1267,84 @@ copy = "Ctrl+Shift+C"
 
         // Copy should have no bindings.
         assert!(map.all_combos_for(KeyAction::Copy).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    //  tabs config
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_tabs_config() {
+        let cfg = Config::default();
+        assert!(!cfg.tabs.show_single_tab);
+        assert_eq!(cfg.tabs.position, TabBarPosition::Top);
+    }
+
+    #[test]
+    fn tabs_config_deserialize_from_toml() {
+        let toml_str = r#"
+[tabs]
+show_single_tab = true
+position = "bottom"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let tabs = partial.tabs.expect("tabs section should be present");
+        assert!(tabs.show_single_tab);
+        assert_eq!(tabs.position, TabBarPosition::Bottom);
+    }
+
+    #[test]
+    fn tabs_config_missing_defaults_correctly() {
+        let toml_str = "version = 1\n";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        // When the section is absent, serde default gives us None.
+        assert!(partial.tabs.is_none());
+    }
+
+    #[test]
+    fn tabs_config_applied_via_partial() {
+        let mut cfg = Config::default();
+        assert!(!cfg.tabs.show_single_tab);
+
+        let toml_str = r#"
+[tabs]
+show_single_tab = true
+position = "bottom"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.tabs.show_single_tab);
+        assert_eq!(cfg.tabs.position, TabBarPosition::Bottom);
+    }
+
+    #[test]
+    fn tabs_config_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.tabs.show_single_tab = true;
+        cfg.tabs.position = TabBarPosition::Bottom;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.tabs.show_single_tab);
+        assert_eq!(deserialized.tabs.position, TabBarPosition::Bottom);
+    }
+
+    #[test]
+    fn tabs_config_partial_fields_default_when_missing() {
+        // Backward compatibility: old config files without tabs section
+        // should default to show_single_tab=false, position=top.
+        let toml_str = r"
+[tabs]
+show_single_tab = true
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let tabs = partial.tabs.expect("tabs section should be present");
+        assert!(tabs.show_single_tab);
+        assert_eq!(
+            tabs.position,
+            TabBarPosition::Top,
+            "missing position should default to Top"
+        );
     }
 }

@@ -75,6 +75,10 @@ let
         inherit (s.ui) hide_menu_bar background_opacity;
       };
 
+      tabsSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.tabs) show_single_tab position;
+      };
+
       keybindingsSection = s.keybindings;
 
       result = {
@@ -88,6 +92,7 @@ let
       // lib.optionalAttrs (shellSection != { }) { shell = shellSection; }
       // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; }
       // lib.optionalAttrs (uiSection != { }) { ui = uiSection; }
+      // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
       // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
     in
     result;
@@ -240,6 +245,31 @@ in
           description = ''
             Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
             Null uses the default (1.0).
+          '';
+        };
+      };
+
+      tabs = {
+        show_single_tab = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Whether to show the tab bar when only one tab is open.
+            Null uses the default (false).
+          '';
+        };
+
+        position = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "top"
+              "bottom"
+            ]
+          );
+          default = null;
+          description = ''
+            Position of the tab bar: "top" or "bottom".
+            Null uses the default ("top").
           '';
         };
       };
