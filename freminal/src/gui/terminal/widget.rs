@@ -297,6 +297,7 @@ impl FreminalTerminalWidget {
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
     /// - `modal_is_open` — suppresses terminal input while a modal is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
+    /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
     // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
@@ -312,6 +313,7 @@ impl FreminalTerminalWidget {
         clipboard_rx: &Receiver<String>,
         modal_is_open: bool,
         bg_opacity: f32,
+        binding_map: &freminal_common::keybindings::BindingMap,
     ) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -408,6 +410,7 @@ impl FreminalTerminalWidget {
                     repeat_characters,
                     self.previous_key,
                     self.previous_scroll_amount,
+                    binding_map,
                 )
             });
             self.previous_mouse_state = new_mouse_pos;

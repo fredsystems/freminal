@@ -21,6 +21,7 @@ use freminal_common::buffer_states::modes::{
     decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
     mouse::MouseTrack, rl_bracket::RlBracket,
 };
+use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_terminal_emulator::{
     input::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
     io::InputEvent,
@@ -41,6 +42,208 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers) -> KeyModifiers {
         shift: m.shift,
         ctrl: m.ctrl || m.command,
         alt: m.alt,
+    }
+}
+
+/// Convert an egui [`Key`] to the keybinding layer's [`BindingKey`].
+///
+/// Returns `None` for keys that have no `BindingKey` equivalent (numpad
+/// variants, media keys, etc.) — those fall through to the normal PTY
+/// dispatch path unchanged.
+pub(super) const fn egui_key_to_binding_key(key: Key) -> Option<BindingKey> {
+    match key {
+        Key::A => Some(BindingKey::A),
+        Key::B => Some(BindingKey::B),
+        Key::C => Some(BindingKey::C),
+        Key::D => Some(BindingKey::D),
+        Key::E => Some(BindingKey::E),
+        Key::F => Some(BindingKey::F),
+        Key::G => Some(BindingKey::G),
+        Key::H => Some(BindingKey::H),
+        Key::I => Some(BindingKey::I),
+        Key::J => Some(BindingKey::J),
+        Key::K => Some(BindingKey::K),
+        Key::L => Some(BindingKey::L),
+        Key::M => Some(BindingKey::M),
+        Key::N => Some(BindingKey::N),
+        Key::O => Some(BindingKey::O),
+        Key::P => Some(BindingKey::P),
+        Key::Q => Some(BindingKey::Q),
+        Key::R => Some(BindingKey::R),
+        Key::S => Some(BindingKey::S),
+        Key::T => Some(BindingKey::T),
+        Key::U => Some(BindingKey::U),
+        Key::V => Some(BindingKey::V),
+        Key::W => Some(BindingKey::W),
+        Key::X => Some(BindingKey::X),
+        Key::Y => Some(BindingKey::Y),
+        Key::Z => Some(BindingKey::Z),
+        Key::Num0 => Some(BindingKey::Num0),
+        Key::Num1 => Some(BindingKey::Num1),
+        Key::Num2 => Some(BindingKey::Num2),
+        Key::Num3 => Some(BindingKey::Num3),
+        Key::Num4 => Some(BindingKey::Num4),
+        Key::Num5 => Some(BindingKey::Num5),
+        Key::Num6 => Some(BindingKey::Num6),
+        Key::Num7 => Some(BindingKey::Num7),
+        Key::Num8 => Some(BindingKey::Num8),
+        Key::Num9 => Some(BindingKey::Num9),
+        Key::F1 => Some(BindingKey::F1),
+        Key::F2 => Some(BindingKey::F2),
+        Key::F3 => Some(BindingKey::F3),
+        Key::F4 => Some(BindingKey::F4),
+        Key::F5 => Some(BindingKey::F5),
+        Key::F6 => Some(BindingKey::F6),
+        Key::F7 => Some(BindingKey::F7),
+        Key::F8 => Some(BindingKey::F8),
+        Key::F9 => Some(BindingKey::F9),
+        Key::F10 => Some(BindingKey::F10),
+        Key::F11 => Some(BindingKey::F11),
+        Key::F12 => Some(BindingKey::F12),
+        Key::ArrowUp => Some(BindingKey::ArrowUp),
+        Key::ArrowDown => Some(BindingKey::ArrowDown),
+        Key::ArrowLeft => Some(BindingKey::ArrowLeft),
+        Key::ArrowRight => Some(BindingKey::ArrowRight),
+        Key::Home => Some(BindingKey::Home),
+        Key::End => Some(BindingKey::End),
+        Key::PageUp => Some(BindingKey::PageUp),
+        Key::PageDown => Some(BindingKey::PageDown),
+        Key::Insert => Some(BindingKey::Insert),
+        Key::Delete => Some(BindingKey::Delete),
+        Key::Backspace => Some(BindingKey::Backspace),
+        Key::Tab => Some(BindingKey::Tab),
+        Key::Enter => Some(BindingKey::Enter),
+        Key::Space => Some(BindingKey::Space),
+        Key::Escape => Some(BindingKey::Escape),
+        Key::Plus => Some(BindingKey::Plus),
+        Key::Minus => Some(BindingKey::Minus),
+        Key::Equals => Some(BindingKey::Equals),
+        Key::Comma => Some(BindingKey::Comma),
+        Key::Period => Some(BindingKey::Period),
+        Key::Semicolon => Some(BindingKey::Semicolon),
+        Key::Colon => Some(BindingKey::Colon),
+        Key::Slash => Some(BindingKey::Slash),
+        Key::Backslash => Some(BindingKey::Backslash),
+        Key::OpenBracket => Some(BindingKey::OpenBracket),
+        Key::CloseBracket => Some(BindingKey::CloseBracket),
+        Key::Backtick => Some(BindingKey::Backtick),
+        Key::Quote => Some(BindingKey::Quote),
+        _ => None,
+    }
+}
+
+/// Convert egui [`Modifiers`] to the keybinding layer's [`BindingModifiers`].
+///
+/// `m.command` (macOS Cmd) is mapped to `ctrl = true` — matching the
+/// behaviour of [`egui_mods_to_key_modifiers`].
+pub(super) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingModifiers {
+    BindingModifiers {
+        ctrl: m.ctrl || m.command,
+        shift: m.shift,
+        alt: m.alt,
+    }
+}
+
+/// Dispatch a [`KeyAction`] that was resolved from the binding map.
+///
+/// Handles the subset of actions that can be executed inside
+/// `write_input_to_terminal`: clipboard copy and all scrollback actions.
+/// All other actions (zoom, open settings, tab management, etc.) are no-ops
+/// here — they require access to GUI state that is not available at this call
+/// site.
+///
+/// Returns `true` if the action was consumed (the caller should `continue`
+/// to the next event), `false` if the action is not handled here (the caller
+/// should fall through to normal PTY dispatch).
+pub(super) fn dispatch_binding_action(
+    action: KeyAction,
+    view_state: &mut ViewState,
+    input_tx: &Sender<InputEvent>,
+    snap: &TerminalSnapshot,
+    clipboard_pending: &mut bool,
+) -> bool {
+    match action {
+        KeyAction::Copy => {
+            if let Some((start, end)) = view_state.selection.normalised() {
+                let _ = input_tx.send(InputEvent::ExtractSelection {
+                    start_row: start.row,
+                    start_col: start.col,
+                    end_row: end.row,
+                    end_col: end.col,
+                });
+                *clipboard_pending = true;
+            }
+            true
+        }
+        KeyAction::ScrollPageUp => {
+            let new_offset = view_state
+                .scroll_offset
+                .saturating_add(snap.term_height)
+                .min(snap.max_scroll_offset);
+            if new_offset != view_state.scroll_offset {
+                view_state.scroll_offset = new_offset;
+                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
+                    error!("Failed to send scroll offset to PTY consumer: {e}");
+                }
+            }
+            true
+        }
+        KeyAction::ScrollPageDown => {
+            let new_offset = view_state.scroll_offset.saturating_sub(snap.term_height);
+            if new_offset != view_state.scroll_offset {
+                view_state.scroll_offset = new_offset;
+                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
+                    error!("Failed to send scroll offset to PTY consumer: {e}");
+                }
+            }
+            true
+        }
+        KeyAction::ScrollToTop => {
+            let new_offset = snap.max_scroll_offset;
+            if new_offset != view_state.scroll_offset {
+                view_state.scroll_offset = new_offset;
+                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
+                    error!("Failed to send scroll offset to PTY consumer: {e}");
+                }
+            }
+            true
+        }
+        KeyAction::ScrollToBottom => {
+            if view_state.scroll_offset != 0 {
+                view_state.scroll_offset = 0;
+                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(0)) {
+                    error!("Failed to send scroll offset to PTY consumer: {e}");
+                }
+            }
+            true
+        }
+        KeyAction::ScrollLineUp => {
+            let new_offset = view_state
+                .scroll_offset
+                .saturating_add(1)
+                .min(snap.max_scroll_offset);
+            if new_offset != view_state.scroll_offset {
+                view_state.scroll_offset = new_offset;
+                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
+                    error!("Failed to send scroll offset to PTY consumer: {e}");
+                }
+            }
+            true
+        }
+        KeyAction::ScrollLineDown => {
+            let new_offset = view_state.scroll_offset.saturating_sub(1);
+            if new_offset != view_state.scroll_offset {
+                view_state.scroll_offset = new_offset;
+                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
+                    error!("Failed to send scroll offset to PTY consumer: {e}");
+                }
+            }
+            true
+        }
+        // All other actions (zoom, settings, tabs, etc.) require GUI state
+        // not available here.  Return false so the event falls through to the
+        // normal PTY dispatch path.
+        _ => false,
     }
 }
 
@@ -285,6 +488,7 @@ pub(super) fn write_input_to_terminal(
     repeat_characters: Decarm,
     previous_key: Option<Key>,
     scroll_amount: f32,
+    binding_map: &BindingMap,
 ) -> (bool, Option<PreviousMouseState>, Option<Key>, f32, bool) {
     if input.raw.events.is_empty() {
         return (
@@ -321,6 +525,66 @@ pub(super) fn write_input_to_terminal(
             previous_key = None;
         }
 
+        // ── Binding map pre-check ─────────────────────────────────────────
+        // Before routing the event to the PTY, check whether the key combo
+        // is bound to a terminal action in the user's BindingMap.  Bound
+        // combos are consumed here and never forwarded to the PTY.
+        //
+        // Event::Key carries the key and modifiers directly, so we can
+        // build a KeyCombo and look it up.  Event::Copy is a synthetic
+        // egui-winit event (Ctrl+C / Ctrl+Shift+C never arrive as
+        // Event::Key), so it is checked separately below.
+        if let Event::Key {
+            key,
+            modifiers,
+            pressed: true,
+            ..
+        } = event
+            && let Some(binding_key) = egui_key_to_binding_key(*key)
+        {
+            let combo = KeyCombo::new(binding_key, egui_mods_to_binding_mods(*modifiers));
+            if let Some(action) = binding_map.lookup(&combo) {
+                let consumed = dispatch_binding_action(
+                    action,
+                    view_state,
+                    input_tx,
+                    snap,
+                    &mut clipboard_pending,
+                );
+                if consumed {
+                    state_changed = true;
+                    continue;
+                }
+            }
+        }
+        // Event::Copy is the synthetic event fired by egui-winit for
+        // Ctrl+C (and Ctrl+Shift+C).  Reconstruct the key combo so the
+        // binding map can intercept Ctrl+Shift+C → Copy before it falls
+        // through to the Ctrl+C → \x03 arm below.
+        if matches!(event, Event::Copy) {
+            let combo = KeyCombo::new(
+                BindingKey::C,
+                BindingModifiers {
+                    ctrl: true,
+                    shift: input.modifiers.shift,
+                    alt: false,
+                },
+            );
+            if let Some(action) = binding_map.lookup(&combo) {
+                let consumed = dispatch_binding_action(
+                    action,
+                    view_state,
+                    input_tx,
+                    snap,
+                    &mut clipboard_pending,
+                );
+                if consumed {
+                    state_changed = true;
+                    continue;
+                }
+            }
+        }
+
         let inputs: Cow<'static, [TerminalInput]> = match event {
             // LIMITATION (egui#3653): egui unifies numpad and main-row keys.
             // Application keypad mode cannot distinguish them until egui exposes
@@ -351,31 +615,11 @@ pub(super) fn write_input_to_terminal(
             // here so that terminal apps (e.g. nano ^C interrupt, ^X exit) receive the correct
             // C0 control bytes.
             //
-            // Ctrl+Shift+C is the standard "copy selection" shortcut in terminal emulators.
-            // egui-winit also converts it to Event::Copy (the shift is an extra modifier),
-            // so we check input.modifiers.shift to distinguish:
-            //   - Ctrl+C       (no shift) → send \x03 (SIGINT)
-            //   - Ctrl+Shift+C (shift)    → copy selection to clipboard (Phase 3)
+            // Ctrl+Shift+C → Copy is now intercepted by the binding-map pre-check above
+            // (which calls dispatch_binding_action and continues).  Any Event::Copy that
+            // reaches this arm is therefore an unbound Ctrl+C: send \x03 (SIGINT).
             // Same logic for Cut: Ctrl+X → \x18, Ctrl+Shift+X → no-op (can't cut from terminal).
-            Event::Copy => {
-                if input.modifiers.shift {
-                    // Ctrl+Shift+C: copy selection text to clipboard.
-                    // Send an ExtractSelection request to the PTY thread which
-                    // owns the full buffer.  The response arrives on clipboard_rx
-                    // and is consumed after the ui.input() closure returns.
-                    if let Some((start, end)) = view_state.selection.normalised() {
-                        let _ = input_tx.send(InputEvent::ExtractSelection {
-                            start_row: start.row,
-                            start_col: start.col,
-                            end_row: end.row,
-                            end_col: end.col,
-                        });
-                        clipboard_pending = true;
-                    }
-                    continue;
-                }
-                [TerminalInput::Ctrl(b'c')].as_ref().into()
-            }
+            Event::Copy => [TerminalInput::Ctrl(b'c')].as_ref().into(),
             Event::Cut => {
                 if input.modifiers.shift {
                     continue;

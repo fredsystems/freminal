@@ -238,9 +238,14 @@ are discoverable and configurable.
    - Updated `config_example.toml` with full documentation of all available actions and their defaults
    - 16 new unit tests covering deserialization, partial merging, round-trip, validation, and binding map construction
 
-3. **37.3 — Key dispatch refactor**
+3. **37.3 — Key dispatch refactor** ✅ _Complete (2026-04-06)_
    Refactor `terminal/input.rs` to check `KeyBindings` before hardcoded logic. All current
    shortcuts (copy, paste, scroll, etc.) must go through the binding system.
+   - Added `egui_key_to_binding_key()` and `egui_mods_to_binding_mods()` conversion functions
+   - Added `dispatch_binding_action()` handling Copy and all 6 scroll actions
+   - Added binding-map pre-check in event loop before PTY dispatch (both `Event::Key` and `Event::Copy`)
+   - `BindingMap` stored on `FreminalGui`, rebuilt on settings apply, threaded to widget and input
+   - Simplified `Event::Copy` arm — `Ctrl+Shift+C → Copy` now handled by pre-check
 
 4. **37.4 — Settings Modal: keybindings tab**
    Add a "Keybindings" tab to the Settings Modal showing all actions and their current bindings.

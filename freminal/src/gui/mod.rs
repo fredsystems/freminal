@@ -108,6 +108,11 @@ struct FreminalGui {
     /// Receiver for clipboard text extraction responses from the PTY thread.
     clipboard_rx: Receiver<String>,
 
+    /// Compiled key-binding map from config. Rebuilt when the user applies
+    /// new settings. Passed into the terminal widget on every frame so that
+    /// bound key combos are intercepted before PTY dispatch.
+    binding_map: freminal_common::keybindings::BindingMap,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -140,6 +145,10 @@ impl FreminalGui {
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
             view_state: ViewState::new(),
             window_title_stack: Vec::new(),
+            binding_map: config.build_binding_map().unwrap_or_else(|e| {
+                error!("Failed to build binding map from config: {e}. Using defaults.");
+                freminal_common::keybindings::BindingMap::default()
+            }),
             config,
             settings_modal: SettingsModal::new(config_path),
             input_tx,
@@ -753,6 +762,7 @@ impl eframe::App for FreminalGui {
                 &self.clipboard_rx,
                 self.settings_modal.is_open,
                 bg_opacity,
+                &self.binding_map,
             );
 
             // Only schedule a wakeup when there is work to do:
@@ -836,6 +846,12 @@ impl eframe::App for FreminalGui {
 
                 self.terminal_widget
                     .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
+                    error!(
+                        "Failed to rebuild binding map after settings apply: {e}. Using defaults."
+                    );
+                    freminal_common::keybindings::BindingMap::default()
+                });
                 self.config = new_cfg;
             }
             SettingsAction::PreviewTheme(ref slug) => {
