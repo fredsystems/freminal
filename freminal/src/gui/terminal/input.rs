@@ -15,11 +15,10 @@ use crate::gui::{
 
 use conv2::ConvUtil;
 use crossbeam_channel::Sender;
-use eframe::egui::{Event, InputState, Key, Modifiers, PointerButton, Pos2};
+use eframe::egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
 use freminal_common::buffer_states::modes::{
-    alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
-    decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
-    mouse::MouseTrack, rl_bracket::RlBracket,
+    application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
+    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_terminal_emulator::{
@@ -371,7 +370,15 @@ pub(super) fn send_terminal_inputs(
 ///
 /// On the **alternate screen** (less, vim, htop, ...) scroll events are
 /// converted to `ArrowUp`/`ArrowDown` key presses sent to the PTY — this
-/// matches the behaviour of every major terminal emulator.
+/// matches the behaviour of every major terminal emulator (kitty, Alacritty,
+/// `WezTerm`, GNOME Terminal, etc.).
+///
+/// The conversion happens unconditionally on the alternate screen, regardless
+/// of the `?1007` (Alternate Scroll) DEC private mode.  Most terminal
+/// emulators translate scroll to arrow keys on the alternate screen by
+/// default, and most applications (less, vim, htop) do not explicitly set
+/// `?1007`.  Gating on `AlternateScroll::Enabled` would break scroll in
+/// nearly all alternate-screen applications.
 ///
 /// On the **primary screen** scroll events adjust the scroll offset and send
 /// it to the PTY thread via `InputEvent::ScrollOffset`.  The PTY thread
@@ -386,9 +393,11 @@ pub(super) fn handle_scroll_fallback(
     let lines = (scroll_amount_to_do / character_size_y).round();
     let abs_lines = lines.abs();
 
-    if snap.is_alternate_screen && snap.alternate_scroll == AlternateScroll::Enabled {
-        // Convert scroll delta to arrow key presses.
-        // Safety: abs_lines >= 0, and we clamp to 1 below.
+    if snap.is_alternate_screen {
+        // Convert scroll delta to arrow key presses unconditionally.
+        // This matches kitty, Alacritty, WezTerm, and GNOME Terminal
+        // behaviour: scroll on the alternate screen always sends arrow
+        // keys to the PTY, regardless of the ?1007 mode flag.
         let count = abs_lines.approx_as::<usize>().unwrap_or(0).max(1);
         let key = if lines > 0.0 {
             TerminalInput::ArrowUp(KeyModifiers::NONE)
@@ -451,7 +460,7 @@ pub(super) fn handle_scroll_fallback(
 /// | `Key` (special)      | Arrows, Home/End, Delete, Insert, PgUp/Dn, F1–F12 → xterm escape sequences via `to_payload()`. |
 /// | `PointerButton`      | Translated to X10/X11/SGR mouse report bytes when mouse tracking is active. |
 /// | `PointerMoved`       | Mouse-move report when button-motion or any-event tracking is active; updates text selection when tracking is off. |
-/// | `Scroll`             | Alternate screen: converted to arrow-key bytes (`AlternateScroll` mode). Primary screen: updates `ViewState::scroll_offset` and sends `InputEvent::ScrollOffset`. |
+/// | `Scroll`             | Alternate screen: unconditionally converted to arrow-key bytes (matching kitty/Alacritty/WezTerm). Primary screen: updates `ViewState::scroll_offset` and sends `InputEvent::ScrollOffset`. |
 /// | `WindowFocused`      | Sends `InputEvent::FocusChange`; clears mouse position on unfocus. |
 /// | `Paste`              | Bracketed-paste wrapped if `RlBracket::Bracketed` is set. |
 /// | `Copy`               | Selection text placed on system clipboard. |
@@ -479,7 +488,7 @@ pub(super) fn write_input_to_terminal(
     view_state: &mut ViewState,
     character_size_x: f32,
     character_size_y: f32,
-    terminal_origin: Pos2,
+    terminal_rect: Rect,
     last_reported_mouse_pos: Option<PreviousMouseState>,
     repeat_characters: Decarm,
     previous_key: Option<Key>,
@@ -511,6 +520,11 @@ pub(super) fn write_input_to_terminal(
     let mut scroll_amount = scroll_amount;
     let mut clipboard_pending = false;
     let mut deferred_actions: Vec<KeyAction> = Vec::new();
+
+    // Derive the terminal origin from the rect.  Pointer events whose
+    // position falls outside `terminal_rect` are ignored — they belong to
+    // other UI panels (e.g. the tab bar).
+    let terminal_origin = terminal_rect.min;
 
     // When the user is scrolled back into history, suppress mouse forwarding
     // to the PTY — the visible content is historical, not the live terminal
@@ -915,6 +929,14 @@ pub(super) fn write_input_to_terminal(
             }
             Event::PointerMoved(pos) => {
                 view_state.mouse_position = Some(*pos);
+
+                // Ignore pointer moves outside the terminal area (e.g. over
+                // the tab bar) so they do not pollute mouse-tracking state or
+                // start spurious text selections.
+                if !terminal_rect.contains(*pos) {
+                    continue;
+                }
+
                 let (x, y) = encode_egui_mouse_pos_as_usize(
                     *pos,
                     (character_size_x, character_size_y),
@@ -971,6 +993,13 @@ pub(super) fn write_input_to_terminal(
                 modifiers,
                 pos,
             } => {
+                // Ignore clicks outside the terminal area (e.g. tab bar
+                // buttons) so they do not start text selections or generate
+                // spurious mouse reports at row 0.
+                if !terminal_rect.contains(*pos) {
+                    continue;
+                }
+
                 state_changed = true;
 
                 let (x, y) = encode_egui_mouse_pos_as_usize(
@@ -1061,6 +1090,30 @@ pub(super) fn write_input_to_terminal(
                 scroll_amount -= scroll_amount_to_do;
 
                 state_changed = true;
+
+                // Resolve the mouse position for scroll reporting.  Prefer
+                // `last_reported_mouse_pos` (set by PointerMoved), but fall
+                // back to egui's `latest_pos()` when the tracked position was
+                // cleared (e.g. by PointerGone or window unfocus).  Without
+                // this fallback, scrolling after re-focusing the window would
+                // bypass mouse tracking and send arrow keys instead.
+                if last_reported_mouse_pos.is_none()
+                    && let Some(hover) = input.pointer.latest_pos()
+                    && terminal_rect.contains(hover)
+                {
+                    let (x, y) = encode_egui_mouse_pos_as_usize(
+                        hover,
+                        (character_size_x, character_size_y),
+                        terminal_origin,
+                    );
+                    let position = FreminalMousePosition::new(x, y, hover.x, hover.y);
+                    last_reported_mouse_pos = Some(PreviousMouseState::new(
+                        PointerButton::Primary,
+                        false,
+                        position,
+                        *modifiers,
+                    ));
+                }
 
                 if let Some(last_mouse_position) = &mut last_reported_mouse_pos {
                     // update the modifiers if necessary

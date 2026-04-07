@@ -7,29 +7,31 @@ use std::sync::{Arc, OnceLock};
 
 use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
+use freminal_common::args::Args;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::config::Config;
+use freminal_common::config::{Config, TabBarPosition};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 #[cfg(feature = "playback")]
 use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use settings::{SettingsAction, SettingsModal};
+use tabs::{Tab, TabManager};
 use terminal::FreminalTerminalWidget;
-use view_state::ViewState;
 
 pub mod atlas;
 pub mod colors;
 pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
+pub mod pty;
 pub mod renderer;
 pub mod settings;
 pub mod shaping;
+pub mod tabs;
 pub mod terminal;
 pub mod view_state;
 
@@ -82,31 +84,39 @@ fn update_egui_theme(
     });
 }
 
+/// Action requested by the tab bar UI.
+///
+/// Returned by `show_tab_bar()` and consumed by the main `ui()` method
+/// after the panel finishes rendering.
+#[derive(Clone, Copy)]
+enum TabBarAction {
+    /// No tab bar interaction this frame.
+    None,
+    /// User clicked the "+" button — spawn a new tab.
+    NewTab,
+    /// User clicked a tab label — switch to tab at `index`.
+    SwitchTo(usize),
+    /// User clicked the "x" close button — close tab at `index`.
+    Close(usize),
+}
+
 struct FreminalGui {
-    /// The latest terminal snapshot published by the PTY consumer thread.
-    /// Loaded lock-free via a single atomic pointer swap.
-    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+    /// All open terminal tabs, managed by `TabManager`.
+    /// Each tab owns its own PTY channels, snapshot handle, and `ViewState`.
+    tabs: TabManager,
 
     terminal_widget: FreminalTerminalWidget,
-    view_state: ViewState,
-    window_title_stack: Vec<String>,
     config: Config,
+
+    /// CLI arguments needed for spawning new PTY tabs.
+    args: Args,
+
+    /// Shared egui context handle used by PTY consumer threads to request
+    /// repaints after publishing new snapshots.
+    egui_ctx: Arc<OnceLock<egui::Context>>,
 
     /// Settings modal state (open/close, draft config, tabs).
     settings_modal: SettingsModal,
-
-    /// Channel sender used to deliver input events (key, resize, focus) to the
-    /// PTY consumer thread.
-    input_tx: Sender<InputEvent>,
-
-    /// Sender used to write raw bytes back to the PTY (for Report* responses).
-    pty_write_tx: Sender<PtyWrite>,
-
-    /// Receiver for window manipulation commands produced by the PTY thread.
-    window_cmd_rx: Receiver<WindowCommand>,
-
-    /// Receiver for clipboard text extraction responses from the PTY thread.
-    clipboard_rx: Receiver<String>,
 
     /// Compiled key-binding map from config. Rebuilt when the user applies
     /// new settings. Passed into the terminal widget on every frame so that
@@ -124,37 +134,28 @@ struct FreminalGui {
 }
 
 impl FreminalGui {
-    // All parameters are required to construct the GUI: channels, snapshot handle, config, and
-    // font settings. Grouping into a builder struct would add complexity without reducing count.
-    #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
-        arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+        initial_tab: Tab,
         config: Config,
+        args: Args,
+        egui_ctx: Arc<OnceLock<egui::Context>>,
         config_path: Option<std::path::PathBuf>,
-        input_tx: Sender<InputEvent>,
-        pty_write_tx: Sender<PtyWrite>,
-        window_cmd_rx: Receiver<WindowCommand>,
-        clipboard_rx: Receiver<String>,
         #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
         set_egui_options(&cc.egui_ctx, config.ui.background_opacity);
 
         Self {
-            arc_swap,
+            tabs: TabManager::new(initial_tab),
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
-            view_state: ViewState::new(),
-            window_title_stack: Vec::new(),
             binding_map: config.build_binding_map().unwrap_or_else(|e| {
                 error!("Failed to build binding map from config: {e}. Using defaults.");
                 freminal_common::keybindings::BindingMap::default()
             }),
             config,
+            args,
+            egui_ctx,
             settings_modal: SettingsModal::new(config_path),
-            input_tx,
-            pty_write_tx,
-            window_cmd_rx,
-            clipboard_rx,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -164,12 +165,14 @@ impl FreminalGui {
 
     /// Show the top menu bar.
     ///
-    /// Contains a "Terminal" menu with Settings and Quit entries, plus
-    /// playback controls when running in playback mode.
+    /// Contains a "Freminal" menu with Settings and Quit entries, a "Tab"
+    /// menu with tab management actions, and playback controls when
+    /// running in playback mode.
     #[cfg_attr(not(feature = "playback"), allow(unused_variables))]
-    fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
+    fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) -> TabBarAction {
+        let mut menu_action = TabBarAction::None;
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Terminal", |ui| {
+            ui.menu_button("Freminal", |ui| {
                 if ui.button("Settings...").clicked() {
                     let families = self.terminal_widget.monospace_families();
                     self.settings_modal.open(&self.config, families);
@@ -185,12 +188,271 @@ impl FreminalGui {
                 }
             });
 
+            ui.menu_button("Tab", |ui| {
+                if ui.button("New Tab").clicked() {
+                    menu_action = TabBarAction::NewTab;
+                    ui.close();
+                }
+
+                let active = self.tabs.active_index();
+                if ui.button("Close Tab").clicked() {
+                    menu_action = TabBarAction::Close(active);
+                    ui.close();
+                }
+
+                ui.separator();
+
+                if ui.button("Next Tab").clicked() {
+                    let next = (active + 1) % self.tabs.tab_count();
+                    menu_action = TabBarAction::SwitchTo(next);
+                    ui.close();
+                }
+
+                if ui.button("Previous Tab").clicked() {
+                    let count = self.tabs.tab_count();
+                    let prev = if active == 0 { count - 1 } else { active - 1 };
+                    menu_action = TabBarAction::SwitchTo(prev);
+                    ui.close();
+                }
+            });
+
             // Playback controls: only shown when running in playback mode.
             #[cfg(feature = "playback")]
             if self.is_playback {
                 self.show_playback_controls(ui, snap);
             }
         });
+        menu_action
+    }
+
+    /// Render the tab bar between the menu bar and the terminal area.
+    ///
+    /// Shows one button per open tab (active tab visually distinguished
+    /// with a colored underline), a close button (x) on each tab when
+    /// more than one tab is open, and a "+" button at the end to create
+    /// new tabs. Tabs are separated by thin vertical dividers.
+    ///
+    /// Returns a `TabBarAction` describing what the user did (if anything).
+    fn show_tab_bar(&self, ui: &mut egui::Ui) -> TabBarAction {
+        ui.horizontal(|ui| {
+            let active = self.tabs.active_index();
+            let count = self.tabs.tab_count();
+            let mut action = TabBarAction::None;
+
+            for (i, tab) in self.tabs.iter().enumerate() {
+                // Thin vertical separator between tabs (skip before first).
+                if i > 0 {
+                    ui.separator();
+                }
+
+                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count);
+                if !matches!(tab_action, TabBarAction::None) {
+                    action = tab_action;
+                }
+            }
+
+            ui.separator();
+
+            // "+" button to create a new tab.
+            if ui.button("+").clicked() {
+                action = TabBarAction::NewTab;
+            }
+
+            action
+        })
+        .inner
+    }
+
+    /// Render a single tab element with label, optional close button,
+    /// and a distinct background color for the active tab.
+    fn show_single_tab(
+        ui: &mut egui::Ui,
+        tab: &Tab,
+        index: usize,
+        is_active: bool,
+        count: usize,
+    ) -> TabBarAction {
+        let mut action = TabBarAction::None;
+        let label = if tab.title.is_empty() {
+            "Shell"
+        } else {
+            &tab.title
+        };
+
+        // Wrap the active tab in a filled frame so the background is
+        // painted *behind* the label and close button.  Inactive tabs
+        // use a transparent frame to keep layout consistent.
+        let frame = if is_active {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_gray(100))
+                .corner_radius(4.0)
+                .inner_margin(0.0)
+        } else {
+            egui::Frame::NONE
+        };
+
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Pad the label for a roomier feel.
+                let response =
+                    ui.selectable_label(is_active, egui::RichText::new(label).size(13.0));
+                if response.clicked() && !is_active {
+                    action = TabBarAction::SwitchTo(index);
+                }
+
+                // Show close button when more than one tab is open.
+                if count > 1 && ui.small_button("\u{00d7}").clicked() {
+                    action = TabBarAction::Close(index);
+                }
+            });
+        });
+
+        action
+    }
+
+    /// Spawn a new PTY-backed tab and add it to the tab manager.
+    ///
+    /// Uses the stored `Args` and `Config` to configure the new terminal.
+    /// Logs an error and does nothing if the PTY fails to start.
+    fn spawn_new_tab(&mut self) {
+        // Tabs are not supported in playback mode — there is exactly one
+        // recording session to replay and no PTY to spawn.
+        #[cfg(feature = "playback")]
+        if self.is_playback {
+            return;
+        }
+
+        let theme = freminal_common::themes::by_slug(&self.config.theme.name)
+            .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+
+        match pty::spawn_pty_tab(
+            &self.args,
+            self.config.scrollback.limit,
+            theme,
+            &self.egui_ctx,
+        ) {
+            Ok(channels) => {
+                let id = self.tabs.next_tab_id();
+                let tab = Tab {
+                    id,
+                    arc_swap: channels.arc_swap,
+                    input_tx: channels.input_tx,
+                    pty_write_tx: channels.pty_write_tx,
+                    window_cmd_rx: channels.window_cmd_rx,
+                    clipboard_rx: channels.clipboard_rx,
+                    pty_dead_rx: channels.pty_dead_rx,
+                    title: "Terminal".to_owned(),
+                    bell_active: false,
+                    title_stack: Vec::new(),
+                    view_state: view_state::ViewState::new(),
+                };
+                self.tabs.add_tab(tab);
+            }
+            Err(e) => {
+                error!("Failed to spawn new tab: {e}");
+            }
+        }
+    }
+
+    /// Close the tab at `index`. If it is the last tab, does nothing
+    /// (the window close is handled by the PTY exit path instead).
+    fn close_tab(&mut self, index: usize) {
+        if let Err(e) = self.tabs.close_tab(index) {
+            trace!("Cannot close tab: {e}");
+        }
+    }
+
+    /// Dispatch a `TabBarAction` from either the tab bar or the Tab menu.
+    fn dispatch_tab_bar_action(&mut self, action: TabBarAction) {
+        match action {
+            TabBarAction::NewTab => self.spawn_new_tab(),
+            TabBarAction::SwitchTo(i) => {
+                if let Err(e) = self.tabs.switch_to(i) {
+                    error!("Failed to switch tab: {e}");
+                }
+            }
+            TabBarAction::Close(i) => self.close_tab(i),
+            TabBarAction::None => {}
+        }
+    }
+
+    /// Dispatch a deferred key action that requires full GUI state.
+    ///
+    /// Called from the `ui()` method for each action returned by the terminal
+    /// widget's input handler. Actions that can be handled at the input layer
+    /// (e.g. scrollback, copy/paste) are dispatched there; the remaining
+    /// actions (tab management, settings, zoom, search) land here.
+    fn dispatch_deferred_action(&mut self, action: freminal_common::keybindings::KeyAction) {
+        use freminal_common::keybindings::KeyAction;
+
+        match action {
+            // -- Settings --
+            KeyAction::OpenSettings => {
+                if !self.settings_modal.is_open {
+                    let families = self.terminal_widget.monospace_families();
+                    self.settings_modal.open(&self.config, families);
+                    self.settings_modal
+                        .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
+                }
+            }
+
+            // -- Tab management --
+            KeyAction::NewTab => self.spawn_new_tab(),
+            KeyAction::CloseTab => {
+                if let Err(e) = self.tabs.close_active_tab() {
+                    trace!("Cannot close tab: {e}");
+                }
+            }
+            KeyAction::NextTab => self.tabs.next_tab(),
+            KeyAction::PrevTab => self.tabs.prev_tab(),
+            KeyAction::SwitchToTab1 => self.switch_to_tab_n(0),
+            KeyAction::SwitchToTab2 => self.switch_to_tab_n(1),
+            KeyAction::SwitchToTab3 => self.switch_to_tab_n(2),
+            KeyAction::SwitchToTab4 => self.switch_to_tab_n(3),
+            KeyAction::SwitchToTab5 => self.switch_to_tab_n(4),
+            KeyAction::SwitchToTab6 => self.switch_to_tab_n(5),
+            KeyAction::SwitchToTab7 => self.switch_to_tab_n(6),
+            KeyAction::SwitchToTab8 => self.switch_to_tab_n(7),
+            KeyAction::SwitchToTab9 => self.switch_to_tab_n(8),
+            KeyAction::MoveTabLeft => self.tabs.move_active_left(),
+            KeyAction::MoveTabRight => self.tabs.move_active_right(),
+
+            // -- Not yet implemented --
+            // Consumed (not forwarded to PTY) but silently ignored until
+            // their respective features land.
+            KeyAction::RenameTab
+            | KeyAction::ZoomIn
+            | KeyAction::ZoomOut
+            | KeyAction::ZoomReset
+            | KeyAction::OpenSearch => {
+                trace!("Unhandled deferred key action: {action:?}");
+            }
+
+            // These actions are handled at the input layer and should never
+            // reach the deferred dispatch. Log if they somehow do.
+            KeyAction::Copy
+            | KeyAction::Paste
+            | KeyAction::SelectAll
+            | KeyAction::ToggleMenuBar
+            | KeyAction::ScrollPageUp
+            | KeyAction::ScrollPageDown
+            | KeyAction::ScrollToTop
+            | KeyAction::ScrollToBottom
+            | KeyAction::ScrollLineUp
+            | KeyAction::ScrollLineDown => {
+                trace!(
+                    "Unexpected deferred key action (should be handled at input layer): {action:?}"
+                );
+            }
+        }
+    }
+
+    /// Switch to tab N (0-indexed). Silently does nothing if the index
+    /// is out of bounds (e.g. user presses Ctrl+Shift+5 with only 3 tabs).
+    fn switch_to_tab_n(&mut self, index: usize) {
+        if let Err(e) = self.tabs.switch_to(index) {
+            trace!("Cannot switch to tab {index}: {e}");
+        }
     }
 
     /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
@@ -295,7 +557,12 @@ impl FreminalGui {
     /// Send a playback command to the consumer thread via the input channel.
     #[cfg(feature = "playback")]
     fn send_playback_cmd(&self, cmd: PlaybackCommand) {
-        if let Err(e) = self.input_tx.send(InputEvent::PlaybackControl(cmd)) {
+        if let Err(e) = self
+            .tabs
+            .active_tab()
+            .input_tx
+            .send(InputEvent::PlaybackControl(cmd))
+        {
             error!("Failed to send playback command: {e}");
         }
     }
@@ -367,6 +634,8 @@ fn handle_window_manipulation(
     font_height: usize,
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
+    tab_title: &mut String,
+    is_active: bool,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -375,6 +644,37 @@ fn handle_window_manipulation(
         };
 
         match window_event {
+            // ── Viewport-mutating commands: skip for inactive tabs ───
+            // An inactive tab must not resize, move, minimize, or fullscreen
+            // the shared window.
+            WindowManipulation::DeIconifyWindow
+            | WindowManipulation::MinimizeWindow
+            | WindowManipulation::MoveWindow(_, _)
+            | WindowManipulation::ResizeWindow(_, _)
+            | WindowManipulation::MaximizeWindow
+            | WindowManipulation::RestoreNonMaximizedWindow
+            | WindowManipulation::ResizeWindowToLinesAndColumns(_, _)
+            | WindowManipulation::NotFullScreen
+            | WindowManipulation::FullScreen
+            | WindowManipulation::ToggleFullScreen
+                if !is_active => {}
+
+            // ── Title: inactive tabs update their own title only ─────
+            WindowManipulation::SetTitleBarText(title) if !is_active => {
+                tab_title.clone_from(&title);
+            }
+
+            // ── Title stack: inactive tabs save their own tab title ──
+            WindowManipulation::SaveWindowTitleToStack if !is_active => {
+                title_stack.push(tab_title.clone());
+            }
+            WindowManipulation::RestoreWindowTitleFromStack if !is_active => {
+                if let Some(title) = title_stack.pop() {
+                    tab_title.clone_from(&title);
+                } else {
+                    tab_title.clear();
+                }
+            }
             WindowManipulation::DeIconifyWindow => {
                 ui.ctx()
                     .send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -570,6 +870,9 @@ fn handle_window_manipulation(
                 send_pty_response(pty_write_tx, &format!("\x1b]l{title}\x1b\\"));
             }
             WindowManipulation::SetTitleBarText(title) => {
+                // Update the tab title for the tab bar display.
+                tab_title.clone_from(&title);
+                // Set the window title bar to the active tab's title.
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Title(title));
             }
@@ -583,9 +886,11 @@ fn handle_window_manipulation(
             }
             WindowManipulation::RestoreWindowTitleFromStack => {
                 if let Some(title) = title_stack.pop() {
+                    tab_title.clone_from(&title);
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Title(title));
                 } else {
+                    tab_title.clear();
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Title("Freminal".to_string()));
                 }
@@ -637,25 +942,59 @@ impl eframe::App for FreminalGui {
     // the shared snapshot. Artificial sub-functions would not reduce the coupling.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        debug!("Starting new frame");
+        trace!("Starting new frame");
         let now = std::time::Instant::now();
 
+        // Poll all tabs for PTY death signals.  Dead tabs are collected by
+        // index (in reverse order so removal doesn't shift later indices).
+        let dead_indices: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.pty_dead_rx.try_recv().is_ok())
+            .map(|(i, _)| i)
+            .rev()
+            .collect();
+
+        for idx in dead_indices {
+            if self.tabs.tab_count() <= 1 {
+                // Last tab died — close the whole application.
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
+            self.close_tab(idx);
+        }
+
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
-        let snap = self.arc_swap.load();
+        let snap = self.tabs.active_tab().arc_swap.load();
 
         // Sync the GUI's scroll offset from the snapshot.  When new PTY output
         // arrives the PTY thread resets its offset to 0, so the snapshot will
         // carry scroll_offset = 0 even if the GUI previously sent a non-zero
         // value.  Adopting the snapshot's value keeps ViewState in sync.
-        if self.view_state.scroll_offset != snap.scroll_offset {
-            self.view_state.scroll_offset = snap.scroll_offset;
+        if self.tabs.active_tab().view_state.scroll_offset != snap.scroll_offset {
+            self.tabs.active_tab_mut().view_state.scroll_offset = snap.scroll_offset;
         }
 
         // Menu bar at the top of the window.
         if !self.config.ui.hide_menu_bar {
-            Panel::top("menu_bar").show_inside(ui, |ui| {
-                self.show_menu_bar(ui, &snap);
-            });
+            let menu_action = Panel::top("menu_bar")
+                .show_inside(ui, |ui| self.show_menu_bar(ui, &snap))
+                .inner;
+            self.dispatch_tab_bar_action(menu_action);
+        }
+
+        // Tab bar: shown when multiple tabs are open, or when the config
+        // option `tabs.show_single_tab` is enabled.
+        let show_tab_bar = self.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
+
+        if show_tab_bar {
+            let panel = match self.config.tabs.position {
+                TabBarPosition::Top => Panel::top("tab_bar"),
+                TabBarPosition::Bottom => Panel::bottom("tab_bar"),
+            };
+            let tab_action = panel.show_inside(ui, |ui| self.show_tab_bar(ui)).inner;
+            self.dispatch_tab_bar_action(tab_action);
         }
 
         let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
@@ -694,8 +1033,8 @@ impl eframe::App for FreminalGui {
             // Debounced resize: only send an InputEvent::Resize when the
             // character-cell dimensions actually change.
             let new_size = (width_chars, height_chars);
-            if new_size != self.view_state.last_sent_size {
-                if let Err(e) = self.input_tx.send(InputEvent::Resize(
+            if new_size != self.tabs.active_tab().view_state.last_sent_size {
+                if let Err(e) = self.tabs.active_tab().input_tx.send(InputEvent::Resize(
                     width_chars,
                     height_chars,
                     font_width,
@@ -703,21 +1042,32 @@ impl eframe::App for FreminalGui {
                 )) {
                     error!("Failed to send resize event: {e}");
                 } else {
-                    self.view_state.last_sent_size = new_size;
+                    self.tabs.active_tab_mut().view_state.last_sent_size = new_size;
                 }
             }
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
-            handle_window_manipulation(
-                ui,
-                &self.window_cmd_rx,
-                &self.pty_write_tx,
-                font_width,
-                font_height,
-                window_width,
-                &mut self.window_title_stack,
-            );
+            // Drain window commands for ALL tabs.  The active tab gets full
+            // handling (viewport commands, reports, title updates, clipboard).
+            // Inactive tabs get reports answered, titles updated, and clipboard
+            // handled — only viewport-mutating commands (resize, move, minimize,
+            // fullscreen) are discarded since an inactive tab must not alter the
+            // shared window geometry.
+            let active_idx = self.tabs.active_index();
+            for (idx, tab) in self.tabs.iter_mut().enumerate() {
+                handle_window_manipulation(
+                    ui,
+                    &tab.window_cmd_rx,
+                    &tab.pty_write_tx,
+                    font_width,
+                    font_height,
+                    window_width,
+                    &mut tab.title_stack,
+                    &mut tab.title,
+                    idx == active_idx,
+                );
+            }
 
             // Update background color based on whether the terminal is in
             // normal (non-inverted) display mode.
@@ -754,12 +1104,13 @@ impl eframe::App for FreminalGui {
                 });
             }
 
+            let tab = self.tabs.active_tab_mut();
             let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
-                &mut self.view_state,
-                &self.input_tx,
-                &self.clipboard_rx,
+                &mut tab.view_state,
+                &tab.input_tx,
+                &tab.clipboard_rx,
                 self.settings_modal.is_open,
                 bg_opacity,
                 &self.binding_map,
@@ -768,23 +1119,20 @@ impl eframe::App for FreminalGui {
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
             for action in deferred_actions {
-                match action {
-                    freminal_common::keybindings::KeyAction::OpenSettings => {
-                        if !self.settings_modal.is_open {
-                            let families = self.terminal_widget.monospace_families();
-                            self.settings_modal.open(&self.config, families);
-                            self.settings_modal
-                                .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
-                        }
-                    }
-                    // Tab actions, zoom, search, etc. are not yet implemented.
-                    // They are consumed (not forwarded to PTY) but silently
-                    // ignored until their respective features land.
-                    _ => {
-                        trace!("Unhandled deferred key action: {:?}", action);
-                    }
-                }
+                self.dispatch_deferred_action(action);
             }
+
+            // Keep the window title bar in sync with the active tab's title.
+            // This handles tab switches, OSC 0/2 title changes, and restore
+            // from the title stack — all in one place.
+            let active_title = &self.tabs.active_tab().title;
+            let window_title = if active_title.is_empty() {
+                "Freminal"
+            } else {
+                active_title.as_str()
+            };
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(window_title.to_owned()));
 
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)
@@ -803,7 +1151,7 @@ impl eframe::App for FreminalGui {
 
             // Advance the text blink cycle when blinking text is present.
             if snap.has_blinking_text {
-                self.view_state.tick_text_blink();
+                self.tabs.active_tab_mut().view_state.tick_text_blink();
             }
 
             if snap.content_changed || cursor_is_blinking || snap.has_blinking_text {
@@ -853,7 +1201,12 @@ impl eframe::App for FreminalGui {
                 if new_cfg.theme.name != self.config.theme.name
                     && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
                 {
-                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    if let Err(e) = self
+                        .tabs
+                        .active_tab()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
                         error!("Failed to send ThemeChange to PTY thread: {e}");
                     }
                     update_egui_theme(ui.ctx(), theme, new_cfg.ui.background_opacity);
@@ -877,7 +1230,12 @@ impl eframe::App for FreminalGui {
             }
             SettingsAction::PreviewTheme(ref slug) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    if let Err(e) = self
+                        .tabs
+                        .active_tab()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
                         error!("Failed to send theme preview to PTY thread: {e}");
                     }
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
@@ -885,7 +1243,12 @@ impl eframe::App for FreminalGui {
             }
             SettingsAction::RevertTheme(ref slug, original_opacity) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    if let Err(e) = self
+                        .tabs
+                        .active_tab()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
                         error!("Failed to send theme revert to PTY thread: {e}");
                     }
                     // Restore opacity first so update_egui_theme uses the
@@ -907,7 +1270,7 @@ impl eframe::App for FreminalGui {
             format!("Frame time={}μs", elapsed.as_micros())
         };
 
-        debug!("{}", frame_time);
+        trace!("{}", frame_time);
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -935,17 +1298,11 @@ impl eframe::App for FreminalGui {
 ///
 /// # Errors
 /// Will return an error if the GUI fails to run
-// All parameters are required to wire the GUI to the PTY thread: snapshot handle, channels,
-// config, and font. Grouping into a struct would hide required coupling without reducing it.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
-    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+    initial_tab: Tab,
     config: Config,
+    args: Args,
     config_path: Option<std::path::PathBuf>,
-    input_tx: Sender<InputEvent>,
-    pty_write_tx: Sender<PtyWrite>,
-    window_cmd_rx: Receiver<WindowCommand>,
-    clipboard_rx: Receiver<String>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
     #[cfg(feature = "playback")] is_playback: bool,
 ) -> Result<()> {
@@ -999,13 +1356,11 @@ pub fn run(
 
             Ok(Box::new(FreminalGui::new(
                 cc,
-                arc_swap,
+                initial_tab,
                 config,
+                args,
+                egui_ctx_lock,
                 config_path,
-                input_tx,
-                pty_write_tx,
-                window_cmd_rx,
-                clipboard_rx,
                 #[cfg(feature = "playback")]
                 is_playback,
             )))

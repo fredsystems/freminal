@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use eframe::egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
-use freminal_common::config::{self, Config, CursorShapeConfig};
+use freminal_common::config::{self, Config, CursorShapeConfig, TabBarPosition};
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
 use std::path::PathBuf;
@@ -19,12 +19,13 @@ pub enum SettingsTab {
     Scrollback,
     Logging,
     Ui,
+    Tabs,
     Keybindings,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -32,6 +33,7 @@ impl SettingsTab {
         Self::Scrollback,
         Self::Logging,
         Self::Ui,
+        Self::Tabs,
         Self::Keybindings,
     ];
 
@@ -44,6 +46,7 @@ impl SettingsTab {
             Self::Scrollback => "Scrollback",
             Self::Logging => "Logging",
             Self::Ui => "UI",
+            Self::Tabs => "Tabs",
             Self::Keybindings => "Keybindings",
         }
     }
@@ -370,6 +373,7 @@ impl SettingsModal {
             SettingsTab::Scrollback => self.show_scrollback_tab(ui),
             SettingsTab::Logging => self.show_logging_tab(ui),
             SettingsTab::Ui => self.show_ui_tab(ui),
+            SettingsTab::Tabs => self.show_tabs_tab(ui),
             SettingsTab::Keybindings => self.show_keybindings_tab(ui),
         }
     }
@@ -595,6 +599,35 @@ impl SettingsModal {
             egui::Color32::GRAY,
             "On X11, requires a running compositor (e.g. picom).",
         );
+    }
+
+    fn show_tabs_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.tabs.show_single_tab,
+            "Show Tab Bar With Single Tab",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When disabled, the tab bar only appears with multiple tabs.",
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Tab Bar Position:");
+        let current_label = tab_bar_position_label(self.draft.tabs.position);
+        ComboBox::from_id_salt("tab_bar_position")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.draft.tabs.position, TabBarPosition::Top, "Top");
+                ui.selectable_value(
+                    &mut self.draft.tabs.position,
+                    TabBarPosition::Bottom,
+                    "Bottom",
+                );
+            });
     }
 
     fn show_keybindings_tab(&mut self, ui: &mut Ui) {
@@ -998,6 +1031,14 @@ const fn cursor_shape_label(shape: &CursorShapeConfig) -> &'static str {
     }
 }
 
+/// Human-readable label for a `TabBarPosition` variant.
+const fn tab_bar_position_label(pos: TabBarPosition) -> &'static str {
+    match pos {
+        TabBarPosition::Top => "Top",
+        TabBarPosition::Bottom => "Bottom",
+    }
+}
+
 /// Paint a small colored rectangle as an inline swatch.
 fn color_swatch(ui: &mut Ui, (r, g, b): (u8, u8, u8), size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -1089,6 +1130,7 @@ mod tests {
         assert_eq!(SettingsTab::Scrollback.label(), "Scrollback");
         assert_eq!(SettingsTab::Logging.label(), "Logging");
         assert_eq!(SettingsTab::Ui.label(), "UI");
+        assert_eq!(SettingsTab::Tabs.label(), "Tabs");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
     }
 
@@ -1103,8 +1145,14 @@ mod tests {
     }
 
     #[test]
+    fn tab_bar_position_labels() {
+        assert_eq!(tab_bar_position_label(TabBarPosition::Top), "Top");
+        assert_eq!(tab_bar_position_label(TabBarPosition::Bottom), "Bottom");
+    }
+
+    #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 8);
+        assert_eq!(SettingsTab::ALL.len(), 9);
     }
 
     #[test]

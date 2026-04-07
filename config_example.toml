@@ -111,6 +111,18 @@ limit = 4000
 # background_opacity = 1.0
 
 ################################################################################
+# TAB SETTINGS
+################################################################################
+[tabs]
+# Whether to show the tab bar when only one tab is open.
+# Default: false (tab bar appears only when multiple tabs are open).
+# show_single_tab = false
+
+# Position of the tab bar: "top" or "bottom".
+# Default: "top"
+# position = "top"
+
+################################################################################
 # KEY BINDINGS
 ################################################################################
 # Override the default key bindings. Each key is an action name, and the value

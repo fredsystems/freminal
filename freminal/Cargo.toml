@@ -43,6 +43,7 @@ fontdb.workspace = true
 freminal-common = { path = "../freminal-common" }
 freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
 glow.workspace = true
+thiserror.workspace = true
 open.workspace = true
 rustybuzz.workspace = true
 swash.workspace = true
