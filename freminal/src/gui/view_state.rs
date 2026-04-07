@@ -855,4 +855,233 @@ mod tests {
         );
         assert!(vs.selection.is_selecting);
     }
+
+    // ── release-without-move regression tests ────────────────────────────
+
+    /// Helper that mirrors `release_end_col()` from `input.rs`.
+    ///
+    /// Given the current `ViewState` (with `click_count` and `selection`
+    /// already set by the press handler), compute the end column that the
+    /// release handler should use.
+    fn release_end_col(
+        vs: &ViewState,
+        visible_chars: &[TChar],
+        x: usize,
+        y: usize,
+        abs_row: usize,
+    ) -> usize {
+        if vs.click_count >= 3 {
+            let anchor_row = vs.selection.anchor.map_or(abs_row, |a| a.row);
+            let (line_start, line_end) = line_boundaries(visible_chars, y);
+            if abs_row >= anchor_row {
+                line_end
+            } else {
+                line_start
+            }
+        } else if vs.click_count == 2 {
+            let anchor_row = vs.selection.anchor.map_or(abs_row, |a| a.row);
+            let anchor_col = vs.selection.anchor.map_or(x, |a| a.col);
+            let (word_start, word_end) = word_boundaries(visible_chars, y, x);
+            if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col) {
+                word_end
+            } else {
+                word_start
+            }
+        } else {
+            x
+        }
+    }
+
+    /// Double-click press+release without any pointer-move in between must
+    /// keep the full word selection (regression test for the release handler
+    /// collapsing the selection to the raw mouse column).
+    #[test]
+    fn double_click_release_without_move_keeps_word() {
+        let chars = make_visible(&["hello world"]);
+        // "hello" = cols 0–4, space = col 5, "world" = cols 6–10.
+        // Double-click on 'e' (col 1) — press selects "hello" (0–4).
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+        let click_coord = CellCoord { col: 1, row: 0 };
+
+        // First click.
+        vs.register_click(click_coord, t);
+        // Second click (double).
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 2);
+
+        // Press handler: set anchor/end to word boundaries.
+        let (word_start, word_end) = word_boundaries(&chars, 0, 1);
+        vs.selection.anchor = Some(CellCoord {
+            col: word_start,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: word_end,
+            row: 0,
+        });
+        vs.selection.is_selecting = true;
+
+        // Release at the same raw position (col 1) — no PointerMoved fired.
+        let end_col = release_end_col(&vs, &chars, 1, 0, 0);
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+        vs.selection.is_selecting = false;
+
+        // Selection must still span the full word "hello" (0–4), NOT col 1.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor must stay at word start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 4, row: 0 }),
+            "end must stay at word end, not collapse to raw col"
+        );
+    }
+
+    /// Triple-click press+release without any pointer-move in between must
+    /// keep the full line selection.
+    #[test]
+    fn triple_click_release_without_move_keeps_line() {
+        let chars = make_visible(&["hello world"]);
+        // Row 0 spans cols 0–10.
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+        let click_coord = CellCoord { col: 3, row: 0 };
+
+        vs.register_click(click_coord, t);
+        vs.register_click(click_coord, t);
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 3);
+
+        // Press handler: set anchor/end to line boundaries.
+        let (line_start, line_end) = line_boundaries(&chars, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: line_start,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: line_end,
+            row: 0,
+        });
+        vs.selection.is_selecting = true;
+
+        // Release at raw col 3 — no PointerMoved fired.
+        let end_col = release_end_col(&vs, &chars, 3, 0, 0);
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+        vs.selection.is_selecting = false;
+
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor must stay at line start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 10, row: 0 }),
+            "end must stay at line end, not collapse to raw col"
+        );
+    }
+
+    // ── upward drag in word/line mode ────────────────────────────────────
+
+    /// Double-click on row 1, then drag upward to row 0.  The end should
+    /// snap to the word boundary on row 0, and after normalisation the
+    /// anchor word on row 1 must still be fully included.
+    #[test]
+    fn double_click_drag_upward_preserves_anchor_word() {
+        let chars = make_visible(&["foo bar", "baz qux"]);
+        // Row 0: "foo"=0–2, ' '=3, "bar"=4–6
+        // Row 1: "baz"=0–2, ' '=3, "qux"=4–6
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        // Double-click on "qux" (row 1, col 5) — abs_row = 1.
+        let click_coord = CellCoord { col: 5, row: 1 };
+        vs.register_click(click_coord, t);
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 2);
+
+        // Press handler: anchor/end to "qux" word boundaries on row 1.
+        let (ws, we) = word_boundaries(&chars, 1, 5);
+        vs.selection.anchor = Some(CellCoord { col: ws, row: 1 });
+        vs.selection.end = Some(CellCoord { col: we, row: 1 });
+        vs.selection.is_selecting = true;
+
+        // Drag upward to row 0, col 1 (inside "foo").
+        // The drag handler snaps to word boundaries:
+        // abs_row (0) < anchor_row (1), so use word_start.
+        let (drag_word_start, _) = word_boundaries(&chars, 0, 1);
+        vs.selection.end = Some(CellCoord {
+            col: drag_word_start,
+            row: 0,
+        });
+
+        // After normalisation, the selection should span from "foo" start
+        // on row 0 to "qux" end on row 1.
+        let (start, end) = vs.selection.normalised().unwrap();
+        assert_eq!(start, CellCoord { col: 0, row: 0 }, "start at 'foo' begin");
+        assert_eq!(end, CellCoord { col: 4, row: 1 }, "end at 'qux' anchor");
+    }
+
+    /// Triple-click on row 1, then drag upward to row 0.  The end should
+    /// snap to line start on row 0, and after normalisation the anchor
+    /// line (row 1) must still be fully included.
+    #[test]
+    fn triple_click_drag_upward_preserves_anchor_line() {
+        let chars = make_visible(&["hello", "world"]);
+        // Row 0: cols 0–4, Row 1: cols 0–4.
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        // Triple-click on row 1, col 2 — abs_row = 1.
+        let click_coord = CellCoord { col: 2, row: 1 };
+        vs.register_click(click_coord, t);
+        vs.register_click(click_coord, t);
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 3);
+
+        // Press handler: anchor/end to full line on row 1.
+        let (ls, le) = line_boundaries(&chars, 1);
+        vs.selection.anchor = Some(CellCoord { col: ls, row: 1 });
+        vs.selection.end = Some(CellCoord { col: le, row: 1 });
+        vs.selection.is_selecting = true;
+
+        // Drag upward to row 0, col 3.
+        // abs_row (0) < anchor_row (1), so use line_start.
+        let (drag_line_start, _) = line_boundaries(&chars, 0);
+        vs.selection.end = Some(CellCoord {
+            col: drag_line_start,
+            row: 0,
+        });
+
+        // After normalisation: row 0 col 0 → row 1 col 4.
+        let (start, end) = vs.selection.normalised().unwrap();
+        assert_eq!(
+            start,
+            CellCoord { col: 0, row: 0 },
+            "start at row 0 line begin"
+        );
+        assert_eq!(
+            end,
+            CellCoord { col: 0, row: 1 },
+            "end at anchor row line start (anchor holds line end)"
+        );
+
+        // The anchor (row 1, col 0) and the original anchor end (col 4)
+        // ensure the full anchor line is covered.  Verify the anchor
+        // itself still points at the line start of row 1.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 1 }),
+            "anchor stays at line start of row 1"
+        );
+    }
 }
