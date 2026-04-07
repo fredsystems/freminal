@@ -98,6 +98,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         pty_write_tx: channels.pty_write_tx,
         window_cmd_rx: channels.window_cmd_rx,
         clipboard_rx: channels.clipboard_rx,
+        pty_dead_rx: channels.pty_dead_rx,
         title: "Terminal".to_owned(),
         bell_active: false,
         view_state: gui::view_state::ViewState::new(),
@@ -355,6 +356,7 @@ fn main() {
         });
 
         let config_path = args.config.clone();
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
         gui::run(
             gui::tabs::Tab {
                 id: gui::tabs::TabId::first(),
@@ -363,6 +365,7 @@ fn main() {
                 pty_write_tx,
                 window_cmd_rx,
                 clipboard_rx,
+                pty_dead_rx,
                 title: "Playback".to_owned(),
                 bell_active: false,
                 view_state: gui::view_state::ViewState::new(),

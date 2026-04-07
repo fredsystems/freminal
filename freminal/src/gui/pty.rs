@@ -41,6 +41,13 @@ pub struct TabChannels {
 
     /// Receiver for clipboard text extraction responses from the PTY thread.
     pub clipboard_rx: Receiver<String>,
+
+    /// Signals that the PTY process has exited.
+    ///
+    /// The PTY consumer thread sends `()` on this channel when the child
+    /// process exits or the PTY read channel closes.  The GUI polls this
+    /// to close the tab (or the whole app if it was the last tab).
+    pub pty_dead_rx: Receiver<()>,
 }
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
@@ -78,6 +85,7 @@ pub fn spawn_pty_tab(
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+    let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
 
     let egui_ctx_pty = Arc::clone(egui_ctx);
 
@@ -90,6 +98,7 @@ pub fn spawn_pty_tab(
         child_exit_rx,
         arc_swap,
         egui_ctx_pty,
+        pty_dead_tx,
     );
 
     Ok(TabChannels {
@@ -98,6 +107,7 @@ pub fn spawn_pty_tab(
         pty_write_tx,
         window_cmd_rx,
         clipboard_rx,
+        pty_dead_rx,
     })
 }
 
@@ -123,6 +133,7 @@ fn spawn_pty_consumer_thread(
     child_exit_rx: Option<Receiver<()>>,
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     egui_ctx_pty: Arc<OnceLock<eframe::egui::Context>>,
+    pty_dead_tx: Sender<()>,
 ) {
     std::thread::spawn(move || {
         let mut emulator = terminal;
@@ -216,12 +227,11 @@ fn spawn_pty_consumer_thread(
                             &read.buf[0..read.read_amount],
                         );
                     } else {
-                        info!("PTY read channel closed; requesting GUI close");
+                        info!("PTY read channel closed; signaling tab death");
                         post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+                        let _ = pty_dead_tx.send(());
                         if let Some(ctx) = egui_ctx_pty.get() {
-                            ctx.send_viewport_cmd(
-                                eframe::egui::ViewportCommand::Close,
-                            );
+                            ctx.request_repaint();
                         }
                         return;
                     }
@@ -240,12 +250,11 @@ fn spawn_pty_consumer_thread(
                         );
                     }
 
-                    info!("PTY drain complete; requesting GUI close");
+                    info!("PTY drain complete; signaling tab death");
                     post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+                    let _ = pty_dead_tx.send(());
                     if let Some(ctx) = egui_ctx_pty.get() {
-                        ctx.send_viewport_cmd(
-                            eframe::egui::ViewportCommand::Close,
-                        );
+                        ctx.request_repaint();
                     }
                     return;
                 }

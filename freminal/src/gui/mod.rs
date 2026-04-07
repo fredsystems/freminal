@@ -88,6 +88,7 @@ fn update_egui_theme(
 ///
 /// Returned by `show_tab_bar()` and consumed by the main `ui()` method
 /// after the panel finishes rendering.
+#[derive(Clone, Copy)]
 enum TabBarAction {
     /// No tab bar interaction this frame.
     None,
@@ -95,7 +96,7 @@ enum TabBarAction {
     NewTab,
     /// User clicked a tab label — switch to tab at `index`.
     SwitchTo(usize),
-    /// User clicked the "×" close button — close tab at `index`.
+    /// User clicked the "x" close button — close tab at `index`.
     Close(usize),
 }
 
@@ -166,12 +167,14 @@ impl FreminalGui {
 
     /// Show the top menu bar.
     ///
-    /// Contains a "Terminal" menu with Settings and Quit entries, plus
-    /// playback controls when running in playback mode.
+    /// Contains a "Freminal" menu with Settings and Quit entries, a "Tab"
+    /// menu with tab management actions, and playback controls when
+    /// running in playback mode.
     #[cfg_attr(not(feature = "playback"), allow(unused_variables))]
-    fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
+    fn show_menu_bar(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) -> TabBarAction {
+        let mut menu_action = TabBarAction::None;
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Terminal", |ui| {
+            ui.menu_button("Freminal", |ui| {
                 if ui.button("Settings...").clicked() {
                     let families = self.terminal_widget.monospace_families();
                     self.settings_modal.open(&self.config, families);
@@ -187,53 +190,122 @@ impl FreminalGui {
                 }
             });
 
+            ui.menu_button("Tab", |ui| {
+                if ui.button("New Tab").clicked() {
+                    menu_action = TabBarAction::NewTab;
+                    ui.close();
+                }
+
+                let active = self.tabs.active_index();
+                if ui.button("Close Tab").clicked() {
+                    menu_action = TabBarAction::Close(active);
+                    ui.close();
+                }
+
+                ui.separator();
+
+                if ui.button("Next Tab").clicked() {
+                    let next = (active + 1) % self.tabs.tab_count();
+                    menu_action = TabBarAction::SwitchTo(next);
+                    ui.close();
+                }
+
+                if ui.button("Previous Tab").clicked() {
+                    let count = self.tabs.tab_count();
+                    let prev = if active == 0 { count - 1 } else { active - 1 };
+                    menu_action = TabBarAction::SwitchTo(prev);
+                    ui.close();
+                }
+            });
+
             // Playback controls: only shown when running in playback mode.
             #[cfg(feature = "playback")]
             if self.is_playback {
                 self.show_playback_controls(ui, snap);
             }
         });
+        menu_action
     }
 
     /// Render the tab bar between the menu bar and the terminal area.
     ///
-    /// Shows one button per open tab (active tab visually distinguished),
-    /// a close button (×) on each tab when more than one tab is open, and
-    /// a "+" button at the end to create new tabs.
+    /// Shows one button per open tab (active tab visually distinguished
+    /// with a colored underline), a close button (x) on each tab when
+    /// more than one tab is open, and a "+" button at the end to create
+    /// new tabs. Tabs are separated by thin vertical dividers.
     ///
     /// Returns a `TabBarAction` describing what the user did (if anything).
     fn show_tab_bar(&self, ui: &mut egui::Ui) -> TabBarAction {
-        let mut action = TabBarAction::None;
-
         ui.horizontal(|ui| {
             let active = self.tabs.active_index();
             let count = self.tabs.tab_count();
+            let mut action = TabBarAction::None;
 
             for (i, tab) in self.tabs.iter().enumerate() {
-                let is_active = i == active;
-                let label = if tab.title.is_empty() {
-                    "Shell".to_owned()
-                } else {
-                    tab.title.clone()
-                };
+                // Thin vertical separator between tabs (skip before first).
+                if i > 0 {
+                    ui.separator();
+                }
 
-                // Use a selectable label for tab switching.
-                let response = ui.selectable_label(is_active, &label);
+                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count);
+                if !matches!(tab_action, TabBarAction::None) {
+                    action = tab_action;
+                }
+            }
+
+            ui.separator();
+
+            // "+" button to create a new tab.
+            if ui.button("+").clicked() {
+                action = TabBarAction::NewTab;
+            }
+
+            action
+        })
+        .inner
+    }
+
+    /// Render a single tab element with label, optional close button,
+    /// and an underline accent for the active tab.
+    fn show_single_tab(
+        ui: &mut egui::Ui,
+        tab: &Tab,
+        index: usize,
+        is_active: bool,
+        count: usize,
+    ) -> TabBarAction {
+        let mut action = TabBarAction::None;
+        let label = if tab.title.is_empty() {
+            "Shell"
+        } else {
+            &tab.title
+        };
+
+        // Group the label and close button together so the underline
+        // spans the full tab width.
+        let group_response = ui
+            .horizontal(|ui| {
+                // Pad the label for a roomier feel.
+                let response =
+                    ui.selectable_label(is_active, egui::RichText::new(label).size(13.0));
                 if response.clicked() && !is_active {
-                    action = TabBarAction::SwitchTo(i);
+                    action = TabBarAction::SwitchTo(index);
                 }
 
                 // Show close button when more than one tab is open.
                 if count > 1 && ui.small_button("\u{00d7}").clicked() {
-                    action = TabBarAction::Close(i);
+                    action = TabBarAction::Close(index);
                 }
-            }
+            })
+            .response;
 
-            // "+" button to create a new tab.
-            if ui.small_button("+").clicked() {
-                action = TabBarAction::NewTab;
-            }
-        });
+        // Draw a colored underline beneath the active tab.
+        if is_active {
+            let rect = group_response.rect;
+            let bottom = rect.bottom();
+            let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
+            ui.painter().hline(rect.x_range(), bottom, stroke);
+        }
 
         action
     }
@@ -261,6 +333,7 @@ impl FreminalGui {
                     pty_write_tx: channels.pty_write_tx,
                     window_cmd_rx: channels.window_cmd_rx,
                     clipboard_rx: channels.clipboard_rx,
+                    pty_dead_rx: channels.pty_dead_rx,
                     title: "Terminal".to_owned(),
                     bell_active: false,
                     view_state: view_state::ViewState::new(),
@@ -278,6 +351,20 @@ impl FreminalGui {
     fn close_tab(&mut self, index: usize) {
         if let Err(e) = self.tabs.close_tab(index) {
             trace!("Cannot close tab: {e}");
+        }
+    }
+
+    /// Dispatch a `TabBarAction` from either the tab bar or the Tab menu.
+    fn dispatch_tab_bar_action(&mut self, action: TabBarAction) {
+        match action {
+            TabBarAction::NewTab => self.spawn_new_tab(),
+            TabBarAction::SwitchTo(i) => {
+                if let Err(e) = self.tabs.switch_to(i) {
+                    error!("Failed to switch tab: {e}");
+                }
+            }
+            TabBarAction::Close(i) => self.close_tab(i),
+            TabBarAction::None => {}
         }
     }
 
@@ -818,6 +905,26 @@ impl eframe::App for FreminalGui {
         debug!("Starting new frame");
         let now = std::time::Instant::now();
 
+        // Poll all tabs for PTY death signals.  Dead tabs are collected by
+        // index (in reverse order so removal doesn't shift later indices).
+        let dead_indices: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.pty_dead_rx.try_recv().is_ok())
+            .map(|(i, _)| i)
+            .rev()
+            .collect();
+
+        for idx in dead_indices {
+            if self.tabs.tab_count() <= 1 {
+                // Last tab died — close the whole application.
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
+            self.close_tab(idx);
+        }
+
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
         let snap = self.tabs.active_tab().arc_swap.load();
 
@@ -831,9 +938,10 @@ impl eframe::App for FreminalGui {
 
         // Menu bar at the top of the window.
         if !self.config.ui.hide_menu_bar {
-            Panel::top("menu_bar").show_inside(ui, |ui| {
-                self.show_menu_bar(ui, &snap);
-            });
+            let menu_action = Panel::top("menu_bar")
+                .show_inside(ui, |ui| self.show_menu_bar(ui, &snap))
+                .inner;
+            self.dispatch_tab_bar_action(menu_action);
         }
 
         // Tab bar: shown when multiple tabs are open, or when the config
@@ -845,18 +953,8 @@ impl eframe::App for FreminalGui {
                 TabBarPosition::Top => Panel::top("tab_bar"),
                 TabBarPosition::Bottom => Panel::bottom("tab_bar"),
             };
-            let tab_action = panel.show_inside(ui, |ui| self.show_tab_bar(ui));
-
-            match tab_action.inner {
-                TabBarAction::NewTab => self.spawn_new_tab(),
-                TabBarAction::SwitchTo(i) => {
-                    if let Err(e) = self.tabs.switch_to(i) {
-                        error!("Failed to switch tab: {e}");
-                    }
-                }
-                TabBarAction::Close(i) => self.close_tab(i),
-                TabBarAction::None => {}
-            }
+            let tab_action = panel.show_inside(ui, |ui| self.show_tab_bar(ui)).inner;
+            self.dispatch_tab_bar_action(tab_action);
         }
 
         let _panel_response = CentralPanel::default().show_inside(ui, |ui| {

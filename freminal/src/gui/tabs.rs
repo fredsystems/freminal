@@ -59,6 +59,13 @@ pub struct Tab {
     /// Receiver for clipboard text extraction responses from this tab's PTY thread.
     pub clipboard_rx: Receiver<String>,
 
+    /// Signals that this tab's PTY process has exited.
+    ///
+    /// The PTY consumer thread sends `()` when the child exits or the PTY read
+    /// channel closes.  The GUI polls this to close the tab (or the whole
+    /// application when it is the last remaining tab).
+    pub pty_dead_rx: Receiver<()>,
+
     /// Tab title, set by OSC 0/2 escape sequences.  Falls back to a default
     /// like "Tab N" when the shell has not sent a title.
     pub title: String,
@@ -169,7 +176,8 @@ impl TabManager {
     }
 
     /// Return an iterator over all tabs (in display order).
-    pub fn iter(&self) -> impl Iterator<Item = &Tab> {
+    #[must_use]
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Tab> + ExactSizeIterator {
         self.tabs.iter()
     }
 
@@ -333,6 +341,7 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
 
         Tab {
             id,
@@ -341,6 +350,7 @@ mod tests {
             pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
+            pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,
             view_state: ViewState::new(),

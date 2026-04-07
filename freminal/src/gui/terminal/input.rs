@@ -386,22 +386,28 @@ pub(super) fn handle_scroll_fallback(
     let lines = (scroll_amount_to_do / character_size_y).round();
     let abs_lines = lines.abs();
 
-    if snap.is_alternate_screen && snap.alternate_scroll == AlternateScroll::Enabled {
-        // Convert scroll delta to arrow key presses.
-        // Safety: abs_lines >= 0, and we clamp to 1 below.
-        let count = abs_lines.approx_as::<usize>().unwrap_or(0).max(1);
-        let key = if lines > 0.0 {
-            TerminalInput::ArrowUp(KeyModifiers::NONE)
-        } else {
-            TerminalInput::ArrowDown(KeyModifiers::NONE)
-        };
-        for _ in 0..count {
-            send_terminal_inputs(
-                std::slice::from_ref(&key),
-                input_tx,
-                &InputModes::from_snapshot(snap),
-            );
+    if snap.is_alternate_screen {
+        if snap.alternate_scroll == AlternateScroll::Enabled {
+            // Convert scroll delta to arrow key presses.
+            // Safety: abs_lines >= 0, and we clamp to 1 below.
+            let count = abs_lines.approx_as::<usize>().unwrap_or(0).max(1);
+            let key = if lines > 0.0 {
+                TerminalInput::ArrowUp(KeyModifiers::NONE)
+            } else {
+                TerminalInput::ArrowDown(KeyModifiers::NONE)
+            };
+            for _ in 0..count {
+                send_terminal_inputs(
+                    std::slice::from_ref(&key),
+                    input_tx,
+                    &InputModes::from_snapshot(snap),
+                );
+            }
         }
+        // When alternate scroll is disabled, silently drop the scroll event.
+        // The alternate screen has no scrollback history to navigate, and the
+        // application did not request arrow-key conversion — scrolling into
+        // a non-existent scrollback buffer would be incorrect.
     } else {
         // Primary screen: adjust scroll offset and send to PTY thread.
         // Multiply by 3 so each wheel tick scrolls 3 lines — matching the
