@@ -48,6 +48,8 @@ pub mod colors;
 pub mod config;
 /// Cursor position and visual style types.
 pub mod cursor;
+/// Configurable key bindings: actions, key combos, and the binding map.
+pub mod keybindings;
 /// PTY write command types shared between the emulator and the OS PTY writer.
 pub mod pty_write;
 /// SGR (Select Graphic Rendition) parameter types.

@@ -297,6 +297,7 @@ impl FreminalTerminalWidget {
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
     /// - `modal_is_open` — suppresses terminal input while a modal is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
+    /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
     // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
@@ -312,7 +313,8 @@ impl FreminalTerminalWidget {
         clipboard_rx: &Receiver<String>,
         modal_is_open: bool,
         bg_opacity: f32,
-    ) {
+        binding_map: &freminal_common::keybindings::BindingMap,
+    ) -> Vec<freminal_common::keybindings::KeyAction> {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
         // `sync_pixels_per_point()` has already been called by
@@ -381,6 +383,7 @@ impl FreminalTerminalWidget {
         // The one-frame delay prevents the dismiss-click from leaking through
         // as a pointer event, and resets stale inter-frame state so the next
         // real input starts from a clean slate.
+        let mut deferred_actions = Vec::new();
         if suppress_input {
             self.previous_key = None;
             self.previous_mouse_state = None;
@@ -395,6 +398,7 @@ impl FreminalTerminalWidget {
                 previous_key,
                 scroll_amount,
                 clipboard_pending,
+                actions,
             ) = ui.input(|input_state| {
                 write_input_to_terminal(
                     input_state,
@@ -408,11 +412,13 @@ impl FreminalTerminalWidget {
                     repeat_characters,
                     self.previous_key,
                     self.previous_scroll_amount,
+                    binding_map,
                 )
             });
             self.previous_mouse_state = new_mouse_pos;
             self.previous_key = previous_key;
             self.previous_scroll_amount = scroll_amount;
+            deferred_actions = actions;
 
             // Perform the clipboard copy OUTSIDE the ui.input() closure.
             // copy_text() calls ctx.output_mut() which needs a write lock on
@@ -849,6 +855,8 @@ impl FreminalTerminalWidget {
                 output.cursor_icon = CursorIcon::Default;
             });
         }
+
+        deferred_actions
     }
 
     /// Apply config changes that can be hot-reloaded at runtime.

@@ -96,6 +96,20 @@ applies to struct fields on `TerminalHandler`, `Buffer`, `FreminalAnsiParser`,
 `SnapshotModeFields`, `TerminalSnapshot`, and function signatures like `to_payload()` and
 `send_terminal_inputs()`. If no enum exists for a flag, `bool` is fine.
 
+### Keybinding Convention
+
+Every feature that introduces or modifies a keyboard shortcut must:
+
+1. Add a `KeyAction` variant in `freminal-common/src/keybindings.rs` (with `name()`,
+   `display_label()`, `FromStr`, and inclusion in `ALL`).
+2. Add a default binding in `BindingMap::default()` (in `register_*_bindings()` helpers).
+3. Handle the action in `dispatch_binding_action()` in `freminal/src/gui/terminal/input.rs`
+   (or at a higher level in `gui/mod.rs` for actions requiring full GUI state).
+4. Document the default combo in `config_example.toml` under `[keybindings]`.
+
+Hardcoded keyboard shortcuts outside the `BindingMap` system are forbidden. All shortcuts must
+be discoverable and configurable through `[keybindings]` in the config and the Settings Modal.
+
 ### freminal-buffer
 
 Pure data model for terminal content. Responsible for cells, rows, cursor tracking, wrapping, and

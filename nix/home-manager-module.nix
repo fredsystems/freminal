@@ -75,6 +75,8 @@ let
         inherit (s.ui) hide_menu_bar background_opacity;
       };
 
+      keybindingsSection = s.keybindings;
+
       result = {
         version = 1;
         managed_by = "home-manager";
@@ -85,7 +87,8 @@ let
       // lib.optionalAttrs (fontSection != { }) { font = fontSection; }
       // lib.optionalAttrs (shellSection != { }) { shell = shellSection; }
       // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; }
-      // lib.optionalAttrs (uiSection != { }) { ui = uiSection; };
+      // lib.optionalAttrs (uiSection != { }) { ui = uiSection; }
+      // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
     in
     result;
 in
@@ -239,6 +242,32 @@ in
             Null uses the default (1.0).
           '';
         };
+      };
+
+      keybindings = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        example = lib.literalExpression ''
+          {
+            copy = "Ctrl+Shift+C";
+            paste = "Ctrl+Shift+V";
+            new_tab = "Ctrl+Shift+T";
+            zoom_in = "Ctrl+Plus";
+          }
+        '';
+        description = ''
+          Key binding overrides. Each key is an action name (snake_case) and
+          each value is a combo string like "Ctrl+Shift+T". Set a value to
+          "" or "none" to unbind an action. Only overridden actions need to
+          be listed — all others keep their defaults.
+
+          Available actions: new_tab, close_tab, next_tab, prev_tab,
+          switch_to_tab_1 through switch_to_tab_9, move_tab_left,
+          move_tab_right, rename_tab, copy, paste, select_all, open_search,
+          zoom_in, zoom_out, zoom_reset, toggle_menu_bar, open_settings,
+          scroll_page_up, scroll_page_down, scroll_to_top, scroll_to_bottom,
+          scroll_line_up, scroll_line_down.
+        '';
       };
     };
   };

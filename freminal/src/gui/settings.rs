@@ -5,6 +5,7 @@
 
 use eframe::egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
 use freminal_common::config::{self, Config, CursorShapeConfig};
+use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
 use std::path::PathBuf;
 
@@ -18,11 +19,12 @@ pub enum SettingsTab {
     Scrollback,
     Logging,
     Ui,
+    Keybindings,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -30,6 +32,7 @@ impl SettingsTab {
         Self::Scrollback,
         Self::Logging,
         Self::Ui,
+        Self::Keybindings,
     ];
 
     const fn label(self) -> &'static str {
@@ -41,6 +44,7 @@ impl SettingsTab {
             Self::Scrollback => "Scrollback",
             Self::Logging => "Logging",
             Self::Ui => "UI",
+            Self::Keybindings => "Keybindings",
         }
     }
 }
@@ -69,6 +73,37 @@ pub enum SettingsAction {
     /// The modal was closed without Apply while opacity was being previewed —
     /// revert to the original value.
     RevertOpacity(f32),
+}
+
+/// Result of scanning a frame's egui events for a key-binding press.
+#[derive(Debug, Clone, Copy)]
+enum KeyCapture {
+    /// User pressed Escape — cancel recording.
+    Cancelled,
+    /// A valid binding combo was captured.
+    Combo(KeyCombo),
+}
+
+/// State machine for the press-to-record keybinding editor.
+#[derive(Debug, Clone)]
+enum KeyRecordingState {
+    /// Not recording — normal grid display.
+    Idle,
+    /// Waiting for the user to press a key combination.
+    Recording {
+        /// The action whose binding is being changed.
+        action: KeyAction,
+    },
+    /// A combo was captured and may conflict with another action.
+    /// Show a confirmation dialog with conflict info.
+    Confirming {
+        /// The action whose binding is being changed.
+        action: KeyAction,
+        /// The captured combo.
+        combo: KeyCombo,
+        /// If `Some`, the combo is already bound to this other action.
+        conflict: Option<KeyAction>,
+    },
 }
 
 /// Persistent state for the settings modal.
@@ -119,6 +154,9 @@ pub struct SettingsModal {
     /// Which font family is currently registered as the preview font in egui.
     /// `None` means no preview font has been registered (or the default is selected).
     preview_registered: Option<String>,
+
+    /// State for the press-to-record keybinding editor.
+    key_recording: KeyRecordingState,
 }
 
 impl SettingsModal {
@@ -138,6 +176,7 @@ impl SettingsModal {
             monospace_families: Vec::new(),
             base_font_defs: None,
             preview_registered: None,
+            key_recording: KeyRecordingState::Idle,
         }
     }
 
@@ -171,6 +210,7 @@ impl SettingsModal {
             None
         };
 
+        self.key_recording = KeyRecordingState::Idle;
         self.is_open = true;
     }
 
@@ -240,15 +280,7 @@ impl SettingsModal {
                         if is_read_only {
                             ui.disable();
                         }
-                        match self.active_tab {
-                            SettingsTab::Font => self.show_font_tab(ui),
-                            SettingsTab::Cursor => self.show_cursor_tab(ui),
-                            SettingsTab::Theme => self.show_theme_tab(ui),
-                            SettingsTab::Shell => self.show_shell_tab(ui),
-                            SettingsTab::Scrollback => self.show_scrollback_tab(ui),
-                            SettingsTab::Logging => self.show_logging_tab(ui),
-                            SettingsTab::Ui => self.show_ui_tab(ui),
-                        }
+                        self.draw_active_tab(ui);
                     });
 
                 ui.separator();
@@ -322,6 +354,24 @@ impl SettingsModal {
     #[must_use]
     pub const fn applied_config(&self) -> &Config {
         &self.draft
+    }
+
+    // -------------------------------------------------------------------------
+    //  Tab dispatch
+    // -------------------------------------------------------------------------
+
+    /// Dispatch rendering to the currently active tab.
+    fn draw_active_tab(&mut self, ui: &mut Ui) {
+        match self.active_tab {
+            SettingsTab::Font => self.show_font_tab(ui),
+            SettingsTab::Cursor => self.show_cursor_tab(ui),
+            SettingsTab::Theme => self.show_theme_tab(ui),
+            SettingsTab::Shell => self.show_shell_tab(ui),
+            SettingsTab::Scrollback => self.show_scrollback_tab(ui),
+            SettingsTab::Logging => self.show_logging_tab(ui),
+            SettingsTab::Ui => self.show_ui_tab(ui),
+            SettingsTab::Keybindings => self.show_keybindings_tab(ui),
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -547,6 +597,313 @@ impl SettingsModal {
         );
     }
 
+    fn show_keybindings_tab(&mut self, ui: &mut Ui) {
+        // Build the effective map (defaults + current draft overrides) so we
+        // can display what each action is currently bound to.
+        let effective_map = self.draft.build_binding_map().unwrap_or_default();
+
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Click a binding to change it.  Press the new key combination \
+             when prompted.",
+        );
+        ui.add_space(8.0);
+
+        // ── Recording overlay ────────────────────────────────────────────
+        // When recording, intercept key events before the grid consumes them.
+        self.handle_key_recording(ui, &effective_map);
+
+        egui::Grid::new("keybindings_grid")
+            .num_columns(3)
+            .spacing([16.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for action in KeyAction::ALL {
+                    self.show_keybinding_row(ui, *action, &effective_map);
+                    ui.end_row();
+                }
+            });
+    }
+
+    /// Handle the key-recording state machine.
+    ///
+    /// When in `Recording` state, intercepts key events from the current frame
+    /// and transitions to `Confirming` (with conflict info) or directly writes
+    /// the new binding.
+    fn handle_key_recording(&mut self, ui: &Ui, effective_map: &BindingMap) {
+        match &self.key_recording {
+            KeyRecordingState::Idle => {}
+            KeyRecordingState::Recording { action } => {
+                let action = *action;
+                self.handle_recording_state(ui, effective_map, action);
+            }
+            KeyRecordingState::Confirming {
+                action,
+                combo,
+                conflict,
+            } => {
+                let action = *action;
+                let combo = *combo;
+                let conflict = *conflict;
+                self.show_confirm_dialog(ui, action, combo, conflict);
+            }
+        }
+    }
+
+    /// Drive the recording overlay: show prompt, capture key events, transition
+    /// to `Confirming` or back to `Idle` on Escape.
+    fn handle_recording_state(&mut self, ui: &Ui, effective_map: &BindingMap, action: KeyAction) {
+        // Show a non-interactive overlay prompting for key input.
+        egui::Area::new(ui.id().with("key_recording_overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(12.0);
+                        ui.heading(format!("Recording: {}", action.display_label()));
+                        ui.add_space(8.0);
+                        ui.label("Press the key combination you want to assign.");
+                        ui.label("Press Escape to cancel.");
+                        ui.add_space(12.0);
+                    });
+                });
+            });
+
+        // Scan this frame's events for a key press.
+        let captured = ui.input(|input| Self::scan_key_events(&input.raw.events));
+
+        match captured {
+            Some(KeyCapture::Cancelled) => {
+                // Escape pressed — cancel.
+                self.key_recording = KeyRecordingState::Idle;
+            }
+            Some(KeyCapture::Combo(combo)) => {
+                // Check for conflicts.
+                let conflict = effective_map.lookup(&combo).filter(|a| *a != action);
+                self.key_recording = KeyRecordingState::Confirming {
+                    action,
+                    combo,
+                    conflict,
+                };
+            }
+            None => {
+                // No key event this frame — stay in recording.
+            }
+        }
+    }
+
+    /// Scan a slice of egui events for a valid key-binding press.
+    ///
+    /// Returns `Some(KeyCapture::Cancelled)` for Escape,
+    /// `Some(KeyCapture::Combo(..))` for a valid binding, or `None` if no
+    /// relevant key was pressed this frame.
+    fn scan_key_events(events: &[egui::Event]) -> Option<KeyCapture> {
+        use crate::gui::terminal::input::{egui_key_to_binding_key, egui_mods_to_binding_mods};
+
+        for event in events {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            {
+                // Escape cancels recording.
+                if *key == egui::Key::Escape {
+                    return Some(KeyCapture::Cancelled);
+                }
+
+                if !Self::is_valid_binding_press(*key, *modifiers) {
+                    continue;
+                }
+
+                if let Some(binding_key) = egui_key_to_binding_key(*key) {
+                    let combo = KeyCombo::new(binding_key, egui_mods_to_binding_mods(*modifiers));
+                    return Some(KeyCapture::Combo(combo));
+                }
+            }
+        }
+        None
+    }
+
+    /// Check whether a key press qualifies as a valid binding.
+    ///
+    /// Function keys are always valid.  Other keys require at least one
+    /// modifier.  Alphanumeric keys additionally require a non-Shift modifier
+    /// (Ctrl, Alt, or Cmd) so that Shift+letter does not steal uppercase
+    /// typing.
+    const fn is_valid_binding_press(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+        use crate::gui::terminal::input::egui_key_to_binding_key;
+
+        let is_function_key = matches!(
+            key,
+            egui::Key::F1
+                | egui::Key::F2
+                | egui::Key::F3
+                | egui::Key::F4
+                | egui::Key::F5
+                | egui::Key::F6
+                | egui::Key::F7
+                | egui::Key::F8
+                | egui::Key::F9
+                | egui::Key::F10
+                | egui::Key::F11
+                | egui::Key::F12
+        );
+
+        if is_function_key {
+            return true;
+        }
+
+        let has_modifier = modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.command;
+        if !has_modifier {
+            return false;
+        }
+
+        // For alphanumeric keys, Shift alone would steal uppercase letters /
+        // shifted digits from normal typing.  Require at least Ctrl or Alt.
+        let has_non_shift_modifier = modifiers.ctrl || modifiers.alt || modifiers.command;
+        if let Some(binding_key) = egui_key_to_binding_key(key)
+            && binding_key.is_alphanumeric()
+            && !has_non_shift_modifier
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// Show the confirmation dialog for a newly captured key combo.
+    fn show_confirm_dialog(
+        &mut self,
+        ui: &Ui,
+        action: KeyAction,
+        combo: KeyCombo,
+        conflict: Option<KeyAction>,
+    ) {
+        egui::Area::new(ui.id().with("key_confirm_overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(320.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(12.0);
+                        ui.heading(format!("Assign {} to {}?", combo, action.display_label()));
+                        ui.add_space(8.0);
+
+                        if let Some(other) = conflict {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!(
+                                    "\u{26a0} {} is already bound to {}.",
+                                    combo,
+                                    other.display_label()
+                                ),
+                            );
+                            ui.label("Accepting will unbind the other action.");
+                            ui.add_space(8.0);
+                        }
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Accept").clicked() {
+                                // Write the new binding.
+                                self.apply_recorded_binding(action, combo, conflict);
+                                self.key_recording = KeyRecordingState::Idle;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.key_recording = KeyRecordingState::Idle;
+                            }
+                        });
+                        ui.add_space(12.0);
+                    });
+                });
+            });
+    }
+
+    /// Apply a recorded key binding to the draft config overrides.
+    ///
+    /// If there is a conflict, the conflicting action's override is set to
+    /// `"none"` to unbind it.
+    fn apply_recorded_binding(
+        &mut self,
+        action: KeyAction,
+        combo: KeyCombo,
+        conflict: Option<KeyAction>,
+    ) {
+        let combo_str = combo.to_string();
+        self.draft
+            .keybindings
+            .overrides
+            .insert(action.name().to_owned(), combo_str);
+
+        if let Some(other) = conflict {
+            self.draft
+                .keybindings
+                .overrides
+                .insert(other.name().to_owned(), "none".to_owned());
+        }
+    }
+
+    /// Render one row of the keybindings grid: action label + current combo
+    /// button + clear button.
+    fn show_keybinding_row(&mut self, ui: &mut Ui, action: KeyAction, effective_map: &BindingMap) {
+        ui.label(action.display_label());
+
+        // Show the current combo (from override or effective map).
+        let override_key = action.name().to_owned();
+        let is_recording = matches!(
+            &self.key_recording,
+            KeyRecordingState::Recording { action: a } if *a == action
+        );
+
+        let current_text = self
+            .draft
+            .keybindings
+            .overrides
+            .get(&override_key)
+            .map_or_else(
+                || {
+                    effective_map
+                        .combo_for(action)
+                        .map_or_else(|| "unbound".to_owned(), |c| c.to_string())
+                },
+                |ov| {
+                    if ov.eq_ignore_ascii_case("none") {
+                        "unbound".to_owned()
+                    } else {
+                        ov.clone()
+                    }
+                },
+            );
+
+        let button_text = if is_recording {
+            "\u{23fa} Recording...".to_owned()
+        } else {
+            current_text
+        };
+
+        let btn = ui.add_sized([180.0, 20.0], egui::Button::new(&button_text));
+        if btn.clicked() && !is_recording {
+            self.key_recording = KeyRecordingState::Recording { action };
+        }
+
+        // Clear button to unbind this action.
+        if ui
+            .small_button("\u{2715}")
+            .on_hover_text("Unbind")
+            .clicked()
+        {
+            self.draft
+                .keybindings
+                .overrides
+                .insert(override_key, "none".to_owned());
+            self.key_recording = KeyRecordingState::Idle;
+        }
+    }
+
     // -------------------------------------------------------------------------
     //  Font preview helpers
     // -------------------------------------------------------------------------
@@ -732,6 +1089,7 @@ mod tests {
         assert_eq!(SettingsTab::Scrollback.label(), "Scrollback");
         assert_eq!(SettingsTab::Logging.label(), "Logging");
         assert_eq!(SettingsTab::Ui.label(), "UI");
+        assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
     }
 
     #[test]
@@ -746,7 +1104,7 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 7);
+        assert_eq!(SettingsTab::ALL.len(), 8);
     }
 
     #[test]

@@ -111,6 +111,60 @@ limit = 4000
 # background_opacity = 1.0
 
 ################################################################################
+# KEY BINDINGS
+################################################################################
+# Override the default key bindings. Each key is an action name, and the value
+# is the key combo string (e.g. "Ctrl+Shift+C"). Set to "none" to disable an
+# action's binding.
+#
+# Only overridden actions need to be listed — omitted actions keep their
+# defaults. Modifier names: Ctrl, Shift, Alt (also: Command, Option as aliases).
+#
+# Available actions (with their defaults):
+#
+#   Tab management:
+#     new_tab         = "Ctrl+Shift+T"
+#     close_tab       = "Ctrl+Shift+W"
+#     next_tab        = "Ctrl+Tab"
+#     prev_tab        = "Ctrl+Shift+Tab"
+#     switch_to_tab_1 = "Ctrl+Shift+1"  (through switch_to_tab_9)
+#     move_tab_left   = (unbound)
+#     move_tab_right  = (unbound)
+#     rename_tab      = (unbound)
+#
+#   Clipboard:
+#     copy            = "Ctrl+Shift+C"
+#     paste           = "Ctrl+Shift+V"
+#     select_all      = (unbound)
+#
+#   Search:
+#     open_search     = (unbound)
+#
+#   Font zoom:
+#     zoom_in         = "Ctrl+Equals"  (also "Ctrl+Plus")
+#     zoom_out        = "Ctrl+Minus"
+#     zoom_reset      = "Ctrl+0"
+#
+#   UI:
+#     toggle_menu_bar = (unbound)
+#     open_settings   = "Ctrl+Shift+Comma"
+#
+#   Scrollback:
+#     scroll_page_up   = "Shift+PageUp"
+#     scroll_page_down = "Shift+PageDown"
+#     scroll_to_top    = "Shift+Home"
+#     scroll_to_bottom = "Shift+End"
+#     scroll_line_up   = "Shift+Up"
+#     scroll_line_down = "Shift+Down"
+#
+# Example: remap copy/paste to Ctrl+C / Ctrl+V (warning: this will prevent
+# Ctrl+C from sending SIGINT to the running program):
+#
+# [keybindings]
+# copy = "Ctrl+C"
+# paste = "Ctrl+V"
+
+################################################################################
 # MANAGED-BY MARKER (do not set manually)
 ################################################################################
 # The `managed_by` field is injected automatically by external config managers

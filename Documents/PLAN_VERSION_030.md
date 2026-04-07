@@ -10,17 +10,17 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 
 ## Task Summary
 
-| #   | Feature                       | Scope        | Status  |
-| --- | ----------------------------- | ------------ | ------- |
-| 36  | Tabs                          | Large        | Pending |
-| 37  | Configurable Key Bindings     | Medium-Large | Pending |
-| 38  | Double/Triple-Click Selection | Small-Medium | Pending |
-| 39  | Right-Click Context Menu      | Small-Medium | Pending |
-| 40  | Font Zoom                     | Small-Medium | Pending |
-| 41  | Bell Handling (Visual Only)   | Small        | Pending |
-| 42  | Drag-and-Drop                 | Small        | Pending |
-| 43  | OSC 52 Clipboard Read         | Small        | Pending |
-| 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Pending |
+| #   | Feature                       | Scope        | Status   |
+| --- | ----------------------------- | ------------ | -------- |
+| 36  | Tabs                          | Large        | Pending  |
+| 37  | Configurable Key Bindings     | Medium-Large | Complete |
+| 38  | Double/Triple-Click Selection | Small-Medium | Pending  |
+| 39  | Right-Click Context Menu      | Small-Medium | Pending  |
+| 40  | Font Zoom                     | Small-Medium | Pending  |
+| 41  | Bell Handling (Visual Only)   | Small        | Pending  |
+| 42  | Drag-and-Drop                 | Small        | Pending  |
+| 43  | OSC 52 Clipboard Read         | Small        | Pending  |
+| 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Pending  |
 
 ---
 
@@ -217,34 +217,71 @@ are discoverable and configurable.
 
 ### 37 Subtasks
 
-1. **37.1 — `KeyAction` enum and `KeyCombo` struct**
+1. **37.1 — `KeyAction` enum and `KeyCombo` struct** ✅ _Complete (2026-04-06)_
    Create `freminal-common/src/keybindings.rs`. Define `KeyAction`, `KeyCombo`, `KeyBindings`.
    Implement `Default` for `KeyBindings` matching current hardcoded shortcuts.
+   - Added `BindingKey` enum (letters, digits, F-keys, navigation, editing, symbols)
+   - Added `BindingModifiers` struct with constants (`NONE`, `CTRL`, `SHIFT`, `CTRL_SHIFT`, `ALT`)
+   - Added `KeyCombo` with `Display`/`FromStr` (parses "Ctrl+Shift+T" format)
+   - Added `KeyAction` enum (31 variants) with `Display`/`FromStr`/`Serialize`/`Deserialize`
+   - Added `BindingMap` with `lookup`/`bind`/`unbind`/`apply_overrides` and standard defaults
+   - 46 unit tests — all passing
 
-2. **37.2 — Config: `[keybindings]` section**
+2. **37.2 — Config: `[keybindings]` section** ✅ Complete
    Design TOML syntax for keybindings. Add deserialization. Add to `Config`, `ConfigPartial`,
    `validate()`. Update `config_example.toml` with documented examples.
+   - Added `KeybindingsConfig` struct with `HashMap<String, String>` overrides, `#[serde(flatten)]`
+   - Added to `Config`, `ConfigPartial`, `apply_partial()` (additive merge across layers)
+   - Added validation: rejects unknown action names and invalid combo strings
+   - Added `build_binding_map()` method on `Config` to produce a `BindingMap` from defaults + overrides
+   - `skip_serializing_if` keeps empty keybindings out of serialized output
+   - Updated `config_example.toml` with full documentation of all available actions and their defaults
+   - 16 new unit tests covering deserialization, partial merging, round-trip, validation, and binding map construction
 
-3. **37.3 — Key dispatch refactor**
+3. **37.3 — Key dispatch refactor** ✅ _Complete (2026-04-06)_
    Refactor `terminal/input.rs` to check `KeyBindings` before hardcoded logic. All current
    shortcuts (copy, paste, scroll, etc.) must go through the binding system.
+   - Added `egui_key_to_binding_key()` and `egui_mods_to_binding_mods()` conversion functions
+   - Added `dispatch_binding_action()` handling Copy and all 6 scroll actions
+   - Added binding-map pre-check in event loop before PTY dispatch (both `Event::Key` and `Event::Copy`)
+   - `BindingMap` stored on `FreminalGui`, rebuilt on settings apply, threaded to widget and input
+   - Simplified `Event::Copy` arm — `Ctrl+Shift+C → Copy` now handled by pre-check
 
-4. **37.4 — Settings Modal: keybindings tab**
+4. **37.4 — Settings Modal: keybindings tab** ✅ _Complete (2026-04-06)_
    Add a "Keybindings" tab to the Settings Modal showing all actions and their current bindings.
    Allow editing (click binding → press new key combo → save). Respect `managed_by` read-only
    mode.
+   - Added `Keybindings` variant to `SettingsTab` enum and `ALL` array
+   - Added `show_keybindings_tab()` method rendering a grid of all 31 actions
+   - Added `show_keybinding_row()` free function with text-edit fields seeded from effective map
+   - Added `KeyAction::display_label()` for human-friendly action names in UI
+   - Extracted `draw_active_tab()` helper to keep `show()` under 100-line limit
+   - Read-only mode (managed_by) automatically disables all edit fields
+   - Tests updated: `all_tabs_present` (7→8), `settings_tab_labels` (+Keybindings)
 
-5. **37.5 — Home-manager module update**
+5. **37.5 — Home-manager module update** ✅ _Complete (2026-04-06)_
    Add `keybindings` options to `nix/home-manager-module.nix` so Nix users can declaratively
    configure keybindings.
+   - Added `keybindings` option as `attrsOf str` with example and full action list in description
+   - Added `keybindingsSection` to config attrset builder with conditional inclusion
+   - Default is empty attrset (no overrides), only included in generated TOML when non-empty
 
-6. **37.6 — Update `agents.md`**
+6. **37.6 — Update `agents.md`** ✅ _Complete (2026-04-06)_
    Add the keybinding mapping rule to `agents.md` under a new "Keybinding Convention" section:
    all new features with keyboard shortcuts must add `KeyAction` variants and default bindings.
+   - Added "Keybinding Convention" section with 4-step checklist (KeyAction variant, default
+     binding, dispatch handler, config_example.toml documentation)
+   - Forbids hardcoded shortcuts outside the BindingMap system
 
-7. **37.7 — Tests**
+7. **37.7 — Tests** ✅ _Complete (2026-04-06)_
    Unit tests: default bindings produce correct actions, custom bindings override defaults,
    config round-trip, invalid combos rejected. Integration: verify dispatch works end-to-end.
+   - 14 new tests in `keybindings.rs`: `display_label` non-empty/distinct, `name()` round-trip,
+     default bindings for NextTab/PrevTab/ZoomOut/ZoomReset/CloseTab, ZoomIn specific combos,
+     total binding count (26), unbound actions confirmed absent, combo_for determinism
+   - Fixed `combo_for()` non-deterministic iteration by deriving `Ord` on `BindingKey`,
+     `BindingModifiers`, `KeyCombo` and using `.min()` instead of `.find()`
+   - `all_combos_for()` now returns sorted results for consistency
 
 ### 37 Primary Files
 

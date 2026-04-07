@@ -108,6 +108,11 @@ struct FreminalGui {
     /// Receiver for clipboard text extraction responses from the PTY thread.
     clipboard_rx: Receiver<String>,
 
+    /// Compiled key-binding map from config. Rebuilt when the user applies
+    /// new settings. Passed into the terminal widget on every frame so that
+    /// bound key combos are intercepted before PTY dispatch.
+    binding_map: freminal_common::keybindings::BindingMap,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -140,6 +145,10 @@ impl FreminalGui {
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
             view_state: ViewState::new(),
             window_title_stack: Vec::new(),
+            binding_map: config.build_binding_map().unwrap_or_else(|e| {
+                error!("Failed to build binding map from config: {e}. Using defaults.");
+                freminal_common::keybindings::BindingMap::default()
+            }),
             config,
             settings_modal: SettingsModal::new(config_path),
             input_tx,
@@ -745,7 +754,7 @@ impl eframe::App for FreminalGui {
                 });
             }
 
-            self.terminal_widget.show(
+            let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
                 &mut self.view_state,
@@ -753,7 +762,29 @@ impl eframe::App for FreminalGui {
                 &self.clipboard_rx,
                 self.settings_modal.is_open,
                 bg_opacity,
+                &self.binding_map,
             );
+
+            // Handle key actions that couldn't be dispatched at the input
+            // layer because they require full GUI state.
+            for action in deferred_actions {
+                match action {
+                    freminal_common::keybindings::KeyAction::OpenSettings => {
+                        if !self.settings_modal.is_open {
+                            let families = self.terminal_widget.monospace_families();
+                            self.settings_modal.open(&self.config, families);
+                            self.settings_modal
+                                .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
+                        }
+                    }
+                    // Tab actions, zoom, search, etc. are not yet implemented.
+                    // They are consumed (not forwarded to PTY) but silently
+                    // ignored until their respective features land.
+                    _ => {
+                        trace!("Unhandled deferred key action: {:?}", action);
+                    }
+                }
+            }
 
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)
@@ -836,6 +867,12 @@ impl eframe::App for FreminalGui {
 
                 self.terminal_widget
                     .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
+                    error!(
+                        "Failed to rebuild binding map after settings apply: {e}. Using defaults."
+                    );
+                    freminal_common::keybindings::BindingMap::default()
+                });
                 self.config = new_cfg;
             }
             SettingsAction::PreviewTheme(ref slug) => {
