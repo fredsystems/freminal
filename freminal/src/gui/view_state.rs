@@ -215,6 +215,17 @@ pub struct ViewState {
     /// `ZoomReset` (Ctrl+0) sets this back to `0.0` (i.e. back to the
     /// config's base font size).  This value is never persisted.
     pub zoom_delta: f32,
+
+    // ── Visual bell ──────────────────────────────────────────────────
+    /// Timestamp of the most-recent bell event, used to drive a brief
+    /// visual flash overlay.
+    ///
+    /// `Some(instant)` = bell is active and the flash should be rendered
+    /// (fading out over `BELL_FLASH_DURATION`).
+    /// `None` = no active bell flash.
+    ///
+    /// Automatically cleared once the flash duration has elapsed.
+    pub bell_since: Option<Instant>,
 }
 
 impl Default for ViewState {
@@ -238,6 +249,7 @@ impl Default for ViewState {
             context_menu_cell: None,
             context_menu_pos: None,
             zoom_delta: 0.0,
+            bell_since: None,
         }
     }
 }

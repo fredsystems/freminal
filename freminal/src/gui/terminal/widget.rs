@@ -34,6 +34,7 @@ use super::{
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
 use eframe::egui_glow::CallbackFn;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 ///
 /// The scrollbar is only shown when the user is actively scrolled back
@@ -96,6 +97,41 @@ pub(super) fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui
     let rounding = SCROLLBAR_WIDTH / 2.0; // pill shape
 
     painter.rect_filled(thumb_rect, rounding, color);
+}
+
+/// Duration of the visual bell flash overlay.
+const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
+
+/// Maximum alpha for the bell flash overlay (0–255).
+const BELL_FLASH_MAX_ALPHA: u8 = 60;
+
+/// Paint a semi-transparent white overlay that fades out over
+/// [`BELL_FLASH_DURATION`] milliseconds after a bell event.
+///
+/// When the flash duration has elapsed, `view_state.bell_since` is cleared
+/// so no further painting occurs until the next bell.  While the flash is
+/// active, a repaint is requested to animate the fade-out.
+fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
+    let Some(since) = view_state.bell_since else {
+        return;
+    };
+
+    let elapsed = since.elapsed();
+    if elapsed >= BELL_FLASH_DURATION {
+        view_state.bell_since = None;
+        return;
+    }
+
+    // Linear fade from BELL_FLASH_MAX_ALPHA → 0 over the flash duration.
+    let progress = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
+    let alpha_f = f32::from(BELL_FLASH_MAX_ALPHA) * (1.0 - progress);
+    let alpha: u8 = alpha_f.approx_as::<u8>().unwrap_or(0);
+
+    let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
+    ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
+
+    // Request a repaint so the fade-out animation continues next frame.
+    ui.ctx().request_repaint();
 }
 
 /// Context menu action produced by the right-click popup.
@@ -1075,6 +1111,9 @@ impl FreminalTerminalWidget {
 
         paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
 
+        // ── Visual bell flash overlay ────────────────────────────────
+        paint_bell_flash(ui, rect, view_state);
+
         // URL hover detection: convert mouse pixel position to a cell
         // coordinate, find the FormatTag covering that cell in the snapshot,
         // and check whether it carries a URL.
@@ -1129,6 +1168,9 @@ impl FreminalTerminalWidget {
                 output.cursor_icon = CursorIcon::Default;
             });
         }
+
+        // ── Drag-and-drop ────────────────────────────────────────────
+        handle_file_drop(ui, terminal_rect, input_tx);
 
         // ── Right-click context menu ─────────────────────────────────
         render_context_menu(
@@ -1218,6 +1260,69 @@ impl FreminalTerminalWidget {
     /// theme pointer.
     pub const fn invalidate_theme_cache(&mut self) {
         self.previous_theme = None;
+    }
+}
+
+/// POSIX shell-escape a file path for safe pasting into a terminal.
+///
+/// Wraps the path in single quotes and escapes any embedded single quotes
+/// with the `'\''` idiom.  The result is safe to paste into `sh`, `bash`,
+/// `zsh`, and `fish`.
+fn shell_escape_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Handle file drag-and-drop events on the terminal area.
+///
+/// **Drop:** Shell-escapes each dropped file path and sends the result as
+/// keyboard input to the PTY (space-separated, with a trailing space).
+///
+/// **Hover:** Draws a semi-transparent overlay with a "Drop files here" label
+/// while files are being dragged over the terminal area.
+fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>) {
+    // ── Drop handling ────────────────────────────────────────────────
+    let dropped_files = ui.ctx().input(|i| i.raw.dropped_files.clone());
+    if !dropped_files.is_empty() {
+        let mut payload = String::new();
+        for (i, file) in dropped_files.iter().enumerate() {
+            if i > 0 {
+                payload.push(' ');
+            }
+            if let Some(path) = &file.path {
+                payload.push_str(&shell_escape_path(path));
+            }
+        }
+        if !payload.is_empty() {
+            payload.push(' ');
+            if let Err(e) = input_tx.send(InputEvent::Key(payload.into_bytes())) {
+                error!("Failed to send dropped file paths to PTY: {e}");
+            }
+        }
+    }
+
+    // ── Hover overlay ────────────────────────────────────────────────
+    let hovered_files = ui.ctx().input(|i| i.raw.hovered_files.clone());
+    if !hovered_files.is_empty() {
+        let overlay_color = Color32::from_rgba_premultiplied(0, 0, 0, 160);
+        ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
+        ui.painter().text(
+            terminal_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Drop files here",
+            egui::FontId::proportional(20.0),
+            Color32::WHITE,
+        );
     }
 }
 
@@ -1349,5 +1454,49 @@ mod overlay_suppress_input_tests {
         let overlay_is_open = false;
         let suppress = overlay_is_open || overlay_was_open_last_frame;
         assert!(!suppress, "fresh widget should not suppress input");
+    }
+}
+
+#[cfg(test)]
+mod shell_escape_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::path::Path;
+
+    use super::shell_escape_path;
+
+    #[test]
+    fn simple_path() {
+        let result = shell_escape_path(Path::new("/home/user/file.txt"));
+        assert_eq!(result, "'/home/user/file.txt'");
+    }
+
+    #[test]
+    fn path_with_spaces() {
+        let result = shell_escape_path(Path::new("/home/user/my file.txt"));
+        assert_eq!(result, "'/home/user/my file.txt'");
+    }
+
+    #[test]
+    fn path_with_single_quote() {
+        let result = shell_escape_path(Path::new("/home/user/it's a file"));
+        assert_eq!(result, "'/home/user/it'\\''s a file'");
+    }
+
+    #[test]
+    fn path_with_multiple_single_quotes() {
+        let result = shell_escape_path(Path::new("a'b'c"));
+        assert_eq!(result, "'a'\\''b'\\''c'");
+    }
+
+    #[test]
+    fn path_with_special_chars() {
+        let result = shell_escape_path(Path::new("/home/user/$var & (parens)"));
+        assert_eq!(result, "'/home/user/$var & (parens)'");
+    }
+
+    #[test]
+    fn empty_path() {
+        let result = shell_escape_path(Path::new(""));
+        assert_eq!(result, "''");
     }
 }

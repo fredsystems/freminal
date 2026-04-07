@@ -77,6 +77,11 @@ pub enum WindowManipulation {
     /// OSC 52 clipboard query: selection name.  The GUI should read the
     /// clipboard and respond with `OSC 52 ; <sel> ; <base64> ST`.
     QueryClipboard(String),
+    /// Terminal bell (BEL, `\x07`).
+    ///
+    /// Forwarded to the GUI so it can trigger a visual bell indicator
+    /// and/or mark the originating tab as having an unacknowledged bell.
+    Bell,
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {

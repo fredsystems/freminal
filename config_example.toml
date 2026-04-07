@@ -123,6 +123,26 @@ limit = 4000
 # position = "top"
 
 ################################################################################
+# BELL SETTINGS
+################################################################################
+[bell]
+# How the terminal responds to a bell character (\x07).
+# Options: "visual" (flash the terminal), "none" (ignore).
+# Default: "visual"
+# mode = "visual"
+
+################################################################################
+# SECURITY SETTINGS
+################################################################################
+[security]
+# Allow applications to read the system clipboard via OSC 52 query.
+# Default: false (clipboard reads return an empty response).
+# When true, OSC 52 queries return the current clipboard contents
+# base64-encoded. This is a potential security risk if untrusted programs
+# run inside the terminal.
+# allow_clipboard_read = false
+
+################################################################################
 # KEY BINDINGS
 ################################################################################
 # Override the default key bindings. Each key is an action name, and the value

@@ -17,9 +17,9 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 | 38  | Double/Triple-Click Selection | Small-Medium | Complete |
 | 39  | Right-Click Context Menu      | Small-Medium | Complete |
 | 40  | Font Zoom                     | Small-Medium | Complete |
-| 41  | Bell Handling (Visual Only)   | Small        | Pending  |
-| 42  | Drag-and-Drop                 | Small        | Pending  |
-| 43  | OSC 52 Clipboard Read         | Small        | Pending  |
+| 41  | Bell Handling (Visual Only)   | Small        | Complete |
+| 42  | Drag-and-Drop                 | Small        | Complete |
+| 43  | OSC 52 Clipboard Read         | Small        | Complete |
 | 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Pending  |
 
 ---
@@ -536,20 +536,20 @@ and `bell_since = Some(Instant::now())`.
 
 ### 41 Subtasks
 
-1. **41.1 — Forward bell from terminal handler to GUI**
+1. ✅ **41.1 — Forward bell from terminal handler to GUI**
    In `terminal_handler/mod.rs`, replace the `debug!("Bell (ignored)")` with code that pushes
    a bell event to the window command list. Add `WindowCommand::Bell` (or use
    `WindowManipulation`).
 
-2. **41.2 — GUI bell state and rendering**
+2. ✅ **41.2 — GUI bell state and rendering**
    Add bell state to `ViewState`. In `update()`, check for `WindowCommand::Bell` and set state.
    Render visual indicator. Clear on user interaction.
 
-3. **41.3 — Tab-aware bell display**
+3. ✅ **41.3 — Tab-aware bell display**
    If tabs exist (Task 36), bell flags the specific tab. When the user switches to that tab,
    the tab bell clears.
 
-4. **41.4 — Config**
+4. ✅ **41.4 — Config**
    Add `[bell]` section to config:
 
    ```toml
@@ -560,7 +560,7 @@ and `bell_since = Some(Instant::now())`.
 
    Add to `Config`, `ConfigPartial`, home-manager module, settings modal, `config_example.toml`.
 
-5. **41.5 — Tests**
+5. ✅ **41.5 — Tests**
    Unit tests: bell state transitions, clearing logic, config parsing.
 
 ### 41 Primary Files
@@ -594,19 +594,19 @@ are being dragged over the window.
 
 ### 42 Subtasks
 
-1. **42.1 — Drop handling**
+1. ✅ **42.1 — Drop handling**
    In the terminal widget's `update()`, check for `dropped_files`. Shell-escape paths and
    send as key input.
 
-2. **42.2 — Hover indicator**
+2. ✅ **42.2 — Hover indicator**
    When `hovered_files` is non-empty, render a subtle border or overlay to indicate the drop
    target.
 
-3. **42.3 — Shell escape utility**
+3. ✅ **42.3 — Shell escape utility**
    Implement `shell_escape(path: &str) -> String` that handles spaces, quotes, backslashes,
    and other special characters. Unit tests for edge cases.
 
-4. **42.4 — Tests**
+4. ✅ **42.4 — Tests**
    Unit tests for shell escaping. Integration: drop event produces correct bytes.
 
 ### 42 Primary Files
@@ -649,15 +649,15 @@ allow_clipboard_read = false
 
 ### 43 Subtasks
 
-1. **43.1 — Clipboard read implementation**
+1. ✅ **43.1 — Clipboard read implementation**
    Determine the correct egui or arboard API for reading clipboard contents. Implement in
    the `QueryClipboard` handler.
 
-2. **43.2 — Config: `[security]` section**
+2. ✅ **43.2 — Config: `[security]` section**
    Add `SecurityConfig` with `allow_clipboard_read: bool` (default false). Add to `Config`,
    `ConfigPartial`, `config_example.toml`, home-manager module.
 
-3. **43.3 — Tests**
+3. ✅ **43.3 — Tests**
    Unit tests: config parsing, base64 encoding of response. Integration: verify response
    format matches OSC 52 spec.
 

@@ -1577,7 +1577,7 @@ impl TerminalHandler {
 
             // === Bell, Tab Stops, and Miscellaneous ===
             TerminalOutput::Bell => {
-                tracing::debug!("Bell (ignored)");
+                self.window_commands.push(WindowManipulation::Bell);
             }
             TerminalOutput::Tab => {
                 self.buffer.advance_to_next_tab_stop();
@@ -2854,6 +2854,39 @@ mod tests {
             handler.palette(),
             &freminal_common::colors::ColorPalette::default(),
             "full_reset must clear all palette overrides"
+        );
+    }
+
+    #[test]
+    fn bell_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(
+            handler.window_commands.is_empty(),
+            "no window commands initially"
+        );
+
+        handler.process_outputs(&[TerminalOutput::Bell]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        assert!(
+            matches!(
+                handler.window_commands[0],
+                freminal_common::buffer_states::window_manipulation::WindowManipulation::Bell
+            ),
+            "Bell output should produce WindowManipulation::Bell"
+        );
+    }
+
+    #[test]
+    fn multiple_bells_push_multiple_commands() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.process_outputs(&[TerminalOutput::Bell, TerminalOutput::Bell]);
+
+        assert_eq!(
+            handler.window_commands.len(),
+            2,
+            "each Bell output should produce one WindowManipulation::Bell"
         );
     }
 }

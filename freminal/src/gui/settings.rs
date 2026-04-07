@@ -20,12 +20,14 @@ pub enum SettingsTab {
     Logging,
     Ui,
     Tabs,
+    Bell,
+    Security,
     Keybindings,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -34,6 +36,8 @@ impl SettingsTab {
         Self::Logging,
         Self::Ui,
         Self::Tabs,
+        Self::Bell,
+        Self::Security,
         Self::Keybindings,
     ];
 
@@ -47,6 +51,8 @@ impl SettingsTab {
             Self::Logging => "Logging",
             Self::Ui => "UI",
             Self::Tabs => "Tabs",
+            Self::Bell => "Bell",
+            Self::Security => "Security",
             Self::Keybindings => "Keybindings",
         }
     }
@@ -374,6 +380,8 @@ impl SettingsModal {
             SettingsTab::Logging => self.show_logging_tab(ui),
             SettingsTab::Ui => self.show_ui_tab(ui),
             SettingsTab::Tabs => self.show_tabs_tab(ui),
+            SettingsTab::Bell => self.show_bell_tab(ui),
+            SettingsTab::Security => self.show_security_tab(ui),
             SettingsTab::Keybindings => self.show_keybindings_tab(ui),
         }
     }
@@ -628,6 +636,43 @@ impl SettingsModal {
                     "Bottom",
                 );
             });
+    }
+
+    fn show_bell_tab(&mut self, ui: &mut Ui) {
+        ui.label("Bell Mode:");
+        let current_label = bell_mode_label(self.draft.bell.mode);
+        ComboBox::from_id_salt("bell_mode")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.draft.bell.mode,
+                    config::BellMode::Visual,
+                    "Visual",
+                );
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None");
+            });
+
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Visual: briefly flash the terminal area.\n\
+             None: silently ignore the bell.",
+        );
+    }
+
+    fn show_security_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.security.allow_clipboard_read,
+            "Allow Clipboard Read (OSC 52)",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When enabled, programs can read the system clipboard via \
+             OSC 52 query.\n\
+             This is a potential security risk if untrusted programs run \
+             inside the terminal.",
+        );
     }
 
     fn show_keybindings_tab(&mut self, ui: &mut Ui) {
@@ -1039,6 +1084,13 @@ const fn tab_bar_position_label(pos: TabBarPosition) -> &'static str {
     }
 }
 
+const fn bell_mode_label(mode: config::BellMode) -> &'static str {
+    match mode {
+        config::BellMode::Visual => "Visual",
+        config::BellMode::None => "None",
+    }
+}
+
 /// Paint a small colored rectangle as an inline swatch.
 fn color_swatch(ui: &mut Ui, (r, g, b): (u8, u8, u8), size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -1131,6 +1183,8 @@ mod tests {
         assert_eq!(SettingsTab::Logging.label(), "Logging");
         assert_eq!(SettingsTab::Ui.label(), "UI");
         assert_eq!(SettingsTab::Tabs.label(), "Tabs");
+        assert_eq!(SettingsTab::Bell.label(), "Bell");
+        assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
     }
 
@@ -1152,7 +1206,7 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 9);
+        assert_eq!(SettingsTab::ALL.len(), 11);
     }
 
     #[test]

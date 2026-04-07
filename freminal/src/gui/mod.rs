@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
@@ -299,6 +300,14 @@ impl FreminalGui {
             &tab.title
         };
 
+        // Build the display label: prepend a bell indicator when the tab
+        // has an unacknowledged bell and is not the active (focused) tab.
+        let display_label = if tab.bell_active && !is_active {
+            format!("* {label}")
+        } else {
+            label.to_owned()
+        };
+
         // Wrap the active tab in a filled frame so the background is
         // painted *behind* the label and close button.  Inactive tabs
         // use a transparent frame to keep layout consistent.
@@ -315,7 +324,7 @@ impl FreminalGui {
             ui.horizontal(|ui| {
                 // Pad the label for a roomier feel.
                 let response =
-                    ui.selectable_label(is_active, egui::RichText::new(label).size(13.0));
+                    ui.selectable_label(is_active, egui::RichText::new(&display_label).size(13.0));
                 if response.clicked() && !is_active {
                     action = TabBarAction::SwitchTo(index);
                 }
@@ -389,6 +398,10 @@ impl FreminalGui {
             TabBarAction::SwitchTo(i) => {
                 if let Err(e) = self.tabs.switch_to(i) {
                     error!("Failed to switch tab: {e}");
+                } else {
+                    // Clear the bell indicator on the newly-active tab —
+                    // switching to it acknowledges the bell.
+                    self.tabs.active_tab_mut().bell_active = false;
                 }
             }
             TabBarAction::Close(i) => self.close_tab(i),
@@ -423,8 +436,14 @@ impl FreminalGui {
                     trace!("Cannot close tab: {e}");
                 }
             }
-            KeyAction::NextTab => self.tabs.next_tab(),
-            KeyAction::PrevTab => self.tabs.prev_tab(),
+            KeyAction::NextTab => {
+                self.tabs.next_tab();
+                self.tabs.active_tab_mut().bell_active = false;
+            }
+            KeyAction::PrevTab => {
+                self.tabs.prev_tab();
+                self.tabs.active_tab_mut().bell_active = false;
+            }
             KeyAction::SwitchToTab1 => self.switch_to_tab_n(0),
             KeyAction::SwitchToTab2 => self.switch_to_tab_n(1),
             KeyAction::SwitchToTab3 => self.switch_to_tab_n(2),
@@ -488,6 +507,8 @@ impl FreminalGui {
     fn switch_to_tab_n(&mut self, index: usize) {
         if let Err(e) = self.tabs.switch_to(index) {
             trace!("Cannot switch to tab {index}: {e}");
+        } else {
+            self.tabs.active_tab_mut().bell_active = false;
         }
     }
 
@@ -614,6 +635,26 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
     }
 }
 
+/// Read the system clipboard and return its contents as a base64-encoded string.
+///
+/// Returns an empty string on any error (clipboard unavailable, empty, etc.).
+/// This is intentionally infallible — clipboard access is best-effort.
+fn read_clipboard_base64() -> String {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        debug!("OSC 52 query: failed to open clipboard");
+        return String::new();
+    };
+
+    match clipboard.get_text() {
+        Ok(text) if !text.is_empty() => freminal_common::base64::encode(text.as_bytes()),
+        Ok(_) => String::new(),
+        Err(e) => {
+            debug!("OSC 52 query: clipboard read error: {e}");
+            String::new()
+        }
+    }
+}
+
 /// Drain and dispatch all pending [`WindowCommand`]s for this frame.
 ///
 /// ## Flow
@@ -654,9 +695,9 @@ fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
 ///    calls `ViewportCommand::Title`.
 ///
 /// 6. **OSC 52 clipboard** — `SetClipboard` copies decoded text to the system
-///    clipboard via `ui.ctx().copy_text()`.  `QueryClipboard` responds with an
-///    empty OSC 52 payload because egui's public API does not support reading
-///    the clipboard; this is the safe/secure default adopted by many terminals.
+///    clipboard via `ui.ctx().copy_text()`.  `QueryClipboard` reads the system
+///    clipboard via `arboard` when `allow_clipboard_read` is `true`; otherwise
+///    it responds with an empty payload (the safe/secure default).
 // Inherently large: handles all `WindowCommand` variants — viewport commands, Report* PTY
 // responses, title stack, clipboard. Each variant requires distinct context (ui, pty_write_tx,
 // title_stack). Splitting further would scatter a cohesive protocol handler.
@@ -671,6 +712,10 @@ fn handle_window_manipulation(
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
     tab_title: &mut String,
+    bell_active: &mut bool,
+    bell_since: &mut Option<Instant>,
+    bell_mode: freminal_common::config::BellMode,
+    allow_clipboard_read: bool,
     is_active: bool,
 ) {
     // Drain all pending WindowCommands for this frame.
@@ -942,12 +987,28 @@ fn handle_window_manipulation(
                 ui.ctx().copy_text(content);
             }
 
-            // OSC 52 clipboard query: we cannot read the clipboard through
-            // egui's public API, so respond with an empty payload.  This is
-            // the safe/secure default adopted by many terminals.
+            // OSC 52 clipboard query: read the system clipboard when the
+            // user has opted in via [security] allow_clipboard_read = true.
+            // Otherwise respond with an empty payload (safe default).
             WindowManipulation::QueryClipboard(sel) => {
-                tracing::debug!("OSC 52 query for selection '{sel}' — responding empty");
-                send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};\x1b\\"));
+                let payload = if allow_clipboard_read {
+                    read_clipboard_base64()
+                } else {
+                    tracing::debug!(
+                        "OSC 52 query for selection '{sel}' — blocked by security config"
+                    );
+                    String::new()
+                };
+                send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};{payload}\x1b\\"));
+            }
+
+            // Terminal bell: mark this tab as having an unacknowledged bell
+            // and start the visual flash timer (if bell mode is visual).
+            WindowManipulation::Bell => {
+                *bell_active = true;
+                if bell_mode == freminal_common::config::BellMode::Visual {
+                    *bell_since = Some(Instant::now());
+                }
             }
         }
     }
@@ -1114,6 +1175,10 @@ impl eframe::App for FreminalGui {
                     window_width,
                     &mut tab.title_stack,
                     &mut tab.title,
+                    &mut tab.bell_active,
+                    &mut tab.view_state.bell_since,
+                    self.config.bell.mode,
+                    self.config.security.allow_clipboard_read,
                     idx == active_idx,
                 );
             }
