@@ -539,6 +539,7 @@ fn handle_window_manipulation(
     font_height: usize,
     window_width: egui::Rect,
     title_stack: &mut Vec<String>,
+    tab_title: &mut String,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -742,6 +743,9 @@ fn handle_window_manipulation(
                 send_pty_response(pty_write_tx, &format!("\x1b]l{title}\x1b\\"));
             }
             WindowManipulation::SetTitleBarText(title) => {
+                // Update the tab title for the tab bar display.
+                tab_title.clone_from(&title);
+                // Set the window title bar to the active tab's title.
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Title(title));
             }
@@ -755,9 +759,11 @@ fn handle_window_manipulation(
             }
             WindowManipulation::RestoreWindowTitleFromStack => {
                 if let Some(title) = title_stack.pop() {
+                    tab_title.clone_from(&title);
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Title(title));
                 } else {
+                    tab_title.clear();
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Title("Freminal".to_string()));
                 }
@@ -899,15 +905,19 @@ impl eframe::App for FreminalGui {
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
-            handle_window_manipulation(
-                ui,
-                &self.tabs.active_tab().window_cmd_rx,
-                &self.tabs.active_tab().pty_write_tx,
-                font_width,
-                font_height,
-                window_width,
-                &mut self.window_title_stack,
-            );
+            {
+                let tab = self.tabs.active_tab_mut();
+                handle_window_manipulation(
+                    ui,
+                    &tab.window_cmd_rx,
+                    &tab.pty_write_tx,
+                    font_width,
+                    font_height,
+                    window_width,
+                    &mut self.window_title_stack,
+                    &mut tab.title,
+                );
+            }
 
             // Update background color based on whether the terminal is in
             // normal (non-inverted) display mode.
@@ -961,6 +971,18 @@ impl eframe::App for FreminalGui {
             for action in deferred_actions {
                 self.dispatch_deferred_action(action);
             }
+
+            // Keep the window title bar in sync with the active tab's title.
+            // This handles tab switches, OSC 0/2 title changes, and restore
+            // from the title stack — all in one place.
+            let active_title = &self.tabs.active_tab().title;
+            let window_title = if active_title.is_empty() {
+                "Freminal"
+            } else {
+                active_title.as_str()
+            };
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(window_title.to_owned()));
 
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)
