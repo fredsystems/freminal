@@ -598,6 +598,36 @@ impl FontManager {
         }
     }
 
+    /// Change the font size without altering the font family.
+    ///
+    /// Used by font zoom (Ctrl+Plus/Minus/0) to apply a per-tab effective
+    /// font size that differs from the config's base size.  Returns `true`
+    /// if the size actually changed and caches were invalidated.
+    pub fn set_font_size(&mut self, size_pt: f32) -> bool {
+        if (size_pt - self.font_size_pt).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        self.font_size_pt = size_pt;
+        let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
+        let (cw, ch, ascent, descent, uo, so, ss) =
+            compute_cell_metrics(&self.primary.regular, font_size_ppem);
+        self.cell_width = cw;
+        self.cell_height = ch;
+        self.ascent = ascent;
+        self.descent = descent;
+        self.underline_offset = uo;
+        self.strikeout_offset = so;
+        self.stroke_size = ss;
+
+        // Clear caches — glyph sizes differ at the new ppem.
+        self.glyph_cache.clear();
+        self.system_fallback_cache.clear();
+        self.system_faces.clear();
+
+        true
+    }
+
     /// Check whether `pixels_per_point` has changed and recompute cell metrics
     /// if so.  Returns `true` when metrics were recomputed (callers should
     /// invalidate the glyph atlas and shaping cache).
@@ -1623,6 +1653,60 @@ mod tests {
             families.len(),
             deduped.len(),
             "enumerate_monospace_families must not contain duplicates"
+        );
+    }
+
+    // --- Tests: set_font_size ---
+
+    #[test]
+    fn set_font_size_changes_metrics() {
+        let mut fm = default_manager();
+        let old_w = fm.cell_width;
+        let old_h = fm.cell_height;
+        let old_pt = fm.font_size_pt();
+
+        // Increase by 8pt — should produce larger cells.
+        let changed = fm.set_font_size(old_pt + 8.0);
+        assert!(
+            changed,
+            "set_font_size should return true when size differs"
+        );
+        assert!(
+            fm.cell_width > old_w,
+            "cell width should increase with larger font"
+        );
+        assert!(
+            fm.cell_height > old_h,
+            "cell height should increase with larger font"
+        );
+        assert!(
+            (fm.font_size_pt() - (old_pt + 8.0)).abs() < f32::EPSILON,
+            "font_size_pt should reflect the new size"
+        );
+    }
+
+    #[test]
+    fn set_font_size_same_size_returns_false() {
+        let mut fm = default_manager();
+        let current = fm.font_size_pt();
+        let changed = fm.set_font_size(current);
+        assert!(
+            !changed,
+            "set_font_size should return false when size is unchanged"
+        );
+    }
+
+    #[test]
+    fn set_font_size_clears_glyph_cache() {
+        let mut fm = default_manager();
+        let style = GlyphStyle::new(false, false);
+        let _ = fm.resolve_glyph('A', style);
+        assert!(!fm.glyph_cache.is_empty(), "cache should be populated");
+
+        fm.set_font_size(fm.font_size_pt() + 4.0);
+        assert!(
+            fm.glyph_cache.is_empty(),
+            "glyph cache must be cleared after font size change"
         );
     }
 }

@@ -465,27 +465,34 @@ Ctrl+0 resets to the configured default font size.
 
 ### 40 Subtasks
 
-1. **40.1 — Zoom key handling**
-   In the keybinding dispatch (or hardcoded if Task 37 is not yet complete), intercept
-   Ctrl+Plus, Ctrl+Minus, Ctrl+0. Call a new `adjust_font_size(delta)` method.
+1. **40.1 — Zoom key handling** ✅
+   `ZoomIn`/`ZoomOut`/`ZoomReset` `KeyAction` variants and default bindings already existed
+   from Task 37. Wired `dispatch_deferred_action` to adjust `zoom_delta` on the active tab's
+   `ViewState` and call `apply_font_zoom`.
 
-2. **40.2 — Atlas rebuild on font size change**
-   Add a method to `FontManager` that changes the font size, clears the glyph atlas, and
-   recalculates cell metrics. The next render frame will repopulate the atlas.
+2. **40.2 — Atlas rebuild on font size change** ✅
+   Added `FontManager::set_font_size()` for direct size changes without a full config rebuild.
+   Added `FreminalTerminalWidget::apply_font_zoom()` that sets the size and clears atlas/shaping
+   caches when the size actually changed.
 
-3. **40.3 — Terminal reflow on cell size change**
-   After the atlas rebuild, recalculate the terminal dimensions in character cells and send
-   a resize event to the PTY thread. The buffer will reflow to the new width.
+3. **40.3 — Terminal reflow on cell size change** ✅
+   Per-frame zoom sync in the `CentralPanel` closure calls `apply_font_zoom(effective)` before
+   `cell_size()` is read, so the existing resize-detection logic automatically sends
+   `InputEvent::Resize` when cell dimensions change. Also handles tab switching: when the
+   active tab changes, its `zoom_delta` produces a different effective size, triggering a
+   font rebuild and resize on the next frame.
 
-4. **40.4 — Tests**
-   Unit tests: font size clamping, resize event sent after zoom. Integration: zoom in/out
-   changes cell size.
+4. **40.4 — Tests** ✅
+   15 new unit tests: `ViewState` zoom helpers (effective size, adjust, clamp min/max, reset,
+   accumulate, negative step, preserved across base change) and `FontManager::set_font_size`
+   (metrics change, no-op on same size, cache clearing).
 
 ### 40 Primary Files
 
-- `freminal/src/gui/terminal/input.rs` (key handling)
-- `freminal/src/gui/font_manager.rs` (atlas rebuild)
-- `freminal/src/gui/mod.rs` (zoom_with_keyboard stays disabled; we handle it ourselves)
+- `freminal/src/gui/view_state.rs` (`zoom_delta` field, `effective_font_size`, `adjust_zoom`, `reset_zoom`)
+- `freminal/src/gui/font_manager.rs` (`set_font_size`)
+- `freminal/src/gui/terminal/widget.rs` (`apply_font_zoom`)
+- `freminal/src/gui/mod.rs` (zoom dispatch + per-frame zoom sync)
 
 ---
 

@@ -183,6 +183,18 @@ pub struct ViewState {
     /// - `2` — double click (expand to word boundaries).
     /// - `3` — triple click (expand to line boundaries; capped here).
     pub click_count: u8,
+
+    // ── Font zoom ────────────────────────────────────────────────────
+    /// Session-only font size delta applied on top of the base font size
+    /// from the config.
+    ///
+    /// The effective font size is `config.font.size + zoom_delta`, clamped
+    /// to `[4.0, 96.0]`.  Each tab maintains its own zoom delta so that
+    /// zooming in one tab does not affect others.
+    ///
+    /// `ZoomReset` (Ctrl+0) sets this back to `0.0` (i.e. back to the
+    /// config's base font size).  This value is never persisted.
+    pub zoom_delta: f32,
 }
 
 impl Default for ViewState {
@@ -203,6 +215,7 @@ impl Default for ViewState {
             last_click_time: None,
             last_click_pos: None,
             click_count: 0,
+            zoom_delta: 0.0,
         }
     }
 }
@@ -213,6 +226,38 @@ impl ViewState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // ── Font zoom helpers ────────────────────────────────────────────
+
+    /// Minimum allowed effective font size (points).
+    const MIN_FONT_SIZE: f32 = 4.0;
+
+    /// Maximum allowed effective font size (points).
+    const MAX_FONT_SIZE: f32 = 96.0;
+
+    /// Compute the effective font size for this tab.
+    ///
+    /// The effective size is `base_size + zoom_delta`, clamped to
+    /// `[4.0, 96.0]`.  `base_size` is the config's `font.size`.
+    #[must_use]
+    pub fn effective_font_size(&self, base_size: f32) -> f32 {
+        (base_size + self.zoom_delta).clamp(Self::MIN_FONT_SIZE, Self::MAX_FONT_SIZE)
+    }
+
+    /// Adjust the zoom delta by `step` points, clamping the effective size.
+    ///
+    /// After clamping, the zoom delta is back-derived so that
+    /// `base + zoom_delta` equals the clamped effective size exactly.
+    pub fn adjust_zoom(&mut self, base_size: f32, step: f32) {
+        let effective =
+            (base_size + self.zoom_delta + step).clamp(Self::MIN_FONT_SIZE, Self::MAX_FONT_SIZE);
+        self.zoom_delta = effective - base_size;
+    }
+
+    /// Reset the zoom delta to zero (back to the config's base font size).
+    pub const fn reset_zoom(&mut self) {
+        self.zoom_delta = 0.0;
     }
 
     /// Advance the text blink cycle if enough time has elapsed.
@@ -1082,6 +1127,176 @@ mod tests {
             vs.selection.anchor,
             Some(CellCoord { col: 0, row: 1 }),
             "anchor stays at line start of row 1"
+        );
+    }
+
+    // ── font zoom tests ─────────────────────────────────────────────
+
+    #[test]
+    fn zoom_delta_default_is_zero() {
+        let vs = ViewState::new();
+        assert!(
+            vs.zoom_delta.abs() < f32::EPSILON,
+            "new ViewState should have zoom_delta == 0.0"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_no_zoom() {
+        let vs = ViewState::new();
+        let effective = vs.effective_font_size(14.0);
+        assert!(
+            (effective - 14.0).abs() < f32::EPSILON,
+            "effective should equal base when zoom_delta == 0"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_with_positive_delta() {
+        let mut vs = ViewState::new();
+        vs.zoom_delta = 4.0;
+        let effective = vs.effective_font_size(14.0);
+        assert!(
+            (effective - 18.0).abs() < f32::EPSILON,
+            "expected 14 + 4 = 18, got {effective}"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_with_negative_delta() {
+        let mut vs = ViewState::new();
+        vs.zoom_delta = -6.0;
+        let effective = vs.effective_font_size(14.0);
+        assert!(
+            (effective - 8.0).abs() < f32::EPSILON,
+            "expected 14 - 6 = 8, got {effective}"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_clamps_to_minimum() {
+        let mut vs = ViewState::new();
+        vs.zoom_delta = -100.0;
+        let effective = vs.effective_font_size(14.0);
+        assert!(
+            (effective - 4.0).abs() < f32::EPSILON,
+            "effective should clamp to 4.0, got {effective}"
+        );
+    }
+
+    #[test]
+    fn effective_font_size_clamps_to_maximum() {
+        let mut vs = ViewState::new();
+        vs.zoom_delta = 200.0;
+        let effective = vs.effective_font_size(14.0);
+        assert!(
+            (effective - 96.0).abs() < f32::EPSILON,
+            "effective should clamp to 96.0, got {effective}"
+        );
+    }
+
+    #[test]
+    fn adjust_zoom_applies_step() {
+        let mut vs = ViewState::new();
+        vs.adjust_zoom(14.0, 2.0);
+        assert!(
+            (vs.zoom_delta - 2.0).abs() < f32::EPSILON,
+            "after +2 step from 0, zoom_delta should be 2.0, got {}",
+            vs.zoom_delta
+        );
+        assert!(
+            (vs.effective_font_size(14.0) - 16.0).abs() < f32::EPSILON,
+            "effective should be 16.0"
+        );
+    }
+
+    #[test]
+    fn adjust_zoom_accumulates() {
+        let mut vs = ViewState::new();
+        vs.adjust_zoom(14.0, 1.0);
+        vs.adjust_zoom(14.0, 1.0);
+        vs.adjust_zoom(14.0, 1.0);
+        assert!(
+            (vs.zoom_delta - 3.0).abs() < f32::EPSILON,
+            "three +1 steps should give delta 3.0, got {}",
+            vs.zoom_delta
+        );
+    }
+
+    #[test]
+    fn adjust_zoom_negative_step() {
+        let mut vs = ViewState::new();
+        vs.adjust_zoom(14.0, -3.0);
+        assert!(
+            (vs.zoom_delta - -3.0).abs() < f32::EPSILON,
+            "after -3 step from 0, zoom_delta should be -3.0, got {}",
+            vs.zoom_delta
+        );
+        assert!(
+            (vs.effective_font_size(14.0) - 11.0).abs() < f32::EPSILON,
+            "effective should be 11.0"
+        );
+    }
+
+    #[test]
+    fn adjust_zoom_clamps_at_minimum() {
+        let mut vs = ViewState::new();
+        // base=6, step=-10 → effective would be -4, clamps to 4.0
+        vs.adjust_zoom(6.0, -10.0);
+        assert!(
+            (vs.effective_font_size(6.0) - 4.0).abs() < f32::EPSILON,
+            "effective should clamp to 4.0"
+        );
+        // zoom_delta should be back-derived: 4.0 - 6.0 = -2.0
+        assert!(
+            (vs.zoom_delta - -2.0).abs() < f32::EPSILON,
+            "zoom_delta should be -2.0 after clamping, got {}",
+            vs.zoom_delta
+        );
+    }
+
+    #[test]
+    fn adjust_zoom_clamps_at_maximum() {
+        let mut vs = ViewState::new();
+        // base=90, step=100 → effective would be 190, clamps to 96.0
+        vs.adjust_zoom(90.0, 100.0);
+        assert!(
+            (vs.effective_font_size(90.0) - 96.0).abs() < f32::EPSILON,
+            "effective should clamp to 96.0"
+        );
+        // zoom_delta should be back-derived: 96.0 - 90.0 = 6.0
+        assert!(
+            (vs.zoom_delta - 6.0).abs() < f32::EPSILON,
+            "zoom_delta should be 6.0 after clamping, got {}",
+            vs.zoom_delta
+        );
+    }
+
+    #[test]
+    fn reset_zoom_sets_delta_to_zero() {
+        let mut vs = ViewState::new();
+        vs.zoom_delta = 5.0;
+        vs.reset_zoom();
+        assert!(
+            vs.zoom_delta.abs() < f32::EPSILON,
+            "after reset, zoom_delta should be 0.0"
+        );
+    }
+
+    #[test]
+    fn zoom_delta_preserved_across_base_change() {
+        // Simulate: user zooms +4 on base 14, then settings change base to 16.
+        // Effective should be 16 + 4 = 20.
+        let mut vs = ViewState::new();
+        vs.adjust_zoom(14.0, 4.0);
+        assert!(
+            (vs.effective_font_size(14.0) - 18.0).abs() < f32::EPSILON,
+            "before base change: 14 + 4 = 18"
+        );
+        // Base changes to 16 — zoom_delta stays at 4.0
+        assert!(
+            (vs.effective_font_size(16.0) - 20.0).abs() < f32::EPSILON,
+            "after base change: 16 + 4 = 20"
         );
     }
 }

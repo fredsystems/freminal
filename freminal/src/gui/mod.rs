@@ -417,14 +417,30 @@ impl FreminalGui {
             KeyAction::MoveTabLeft => self.tabs.move_active_left(),
             KeyAction::MoveTabRight => self.tabs.move_active_right(),
 
+            // -- Font zoom --
+            KeyAction::ZoomIn => {
+                let base = self.config.font.size;
+                let vs = &mut self.tabs.active_tab_mut().view_state;
+                vs.adjust_zoom(base, 1.0);
+                let effective = vs.effective_font_size(base);
+                self.terminal_widget.apply_font_zoom(effective);
+            }
+            KeyAction::ZoomOut => {
+                let base = self.config.font.size;
+                let vs = &mut self.tabs.active_tab_mut().view_state;
+                vs.adjust_zoom(base, -1.0);
+                let effective = vs.effective_font_size(base);
+                self.terminal_widget.apply_font_zoom(effective);
+            }
+            KeyAction::ZoomReset => {
+                self.tabs.active_tab_mut().view_state.reset_zoom();
+                self.terminal_widget.apply_font_zoom(self.config.font.size);
+            }
+
             // -- Not yet implemented --
             // Consumed (not forwarded to PTY) but silently ignored until
             // their respective features land.
-            KeyAction::RenameTab
-            | KeyAction::ZoomIn
-            | KeyAction::ZoomOut
-            | KeyAction::ZoomReset
-            | KeyAction::OpenSearch => {
+            KeyAction::RenameTab | KeyAction::OpenSearch => {
                 trace!("Unhandled deferred key action: {action:?}");
             }
 
@@ -1003,6 +1019,17 @@ impl eframe::App for FreminalGui {
             // change would use stale pixel metrics for the resize calculation.
             let ppp = ui.ctx().pixels_per_point();
             self.terminal_widget.sync_pixels_per_point(ppp);
+
+            // Synchronise font zoom for the active tab.  Each tab has its own
+            // zoom_delta and the font manager only knows one size at a time.
+            // This check fires on every frame but is a single float comparison
+            // when no change is needed.
+            let effective = self
+                .tabs
+                .active_tab()
+                .view_state
+                .effective_font_size(self.config.font.size);
+            self.terminal_widget.apply_font_zoom(effective);
 
             // Compute char size once and reuse for both PTY sizing and widget layout.
             // `cell_size()` returns integer pixel dimensions (physical) from swash
