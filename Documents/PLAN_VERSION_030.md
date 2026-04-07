@@ -14,7 +14,7 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 | --- | ----------------------------- | ------------ | -------- |
 | 36  | Tabs                          | Large        | Complete |
 | 37  | Configurable Key Bindings     | Medium-Large | Complete |
-| 38  | Double/Triple-Click Selection | Small-Medium | Pending  |
+| 38  | Double/Triple-Click Selection | Small-Medium | Complete |
 | 39  | Right-Click Context Menu      | Small-Medium | Pending  |
 | 40  | Font Zoom                     | Small-Medium | Pending  |
 | 41  | Bell Handling (Visual Only)   | Small        | Pending  |
@@ -373,32 +373,34 @@ extend by whole lines.
 
 ### 38 Subtasks
 
-1. **38.1 — Click-count tracking in `ViewState`**
-   Add fields, implement detection logic in the mouse press handler in `terminal/widget.rs`.
-   Constants for double-click timeout and proximity threshold.
+1. ✅ **38.1 — Click-count tracking in `ViewState`** (2026-04-07)
+   Added `last_click_time`, `last_click_pos`, `click_count` fields to `ViewState`.
+   `CellCoord` struct, `DOUBLE_CLICK_TIMEOUT` (400ms), `DOUBLE_CLICK_MAX_CELL_DISTANCE` (1 cell),
+   `register_click()` method with proximity and timeout logic.
 
-2. **38.2 — Word boundary detection**
-   Add a `word_boundaries(col, row)` method that, given a cell position, returns `(start_col,
-end_col)` for the word at that position. Operates on the snapshot's `TChar` data. Configurable
-   word characters via config (future: `selection.word_characters`).
+2. ✅ **38.2 — Word boundary detection** (2026-04-07)
+   `word_boundaries(col, row, visible_chars)` and `line_boundaries(row, visible_chars)` free
+   functions. `is_word_char()` helper (alphanumeric + underscore). `collect_row_cells()` helper
+   for extracting cell content from `TChar` data.
 
-3. **38.3 — Word selection and drag-by-word**
+3. ✅ **38.3 — Word selection and drag-by-word** (2026-04-07)
    On double-click, set anchor to word start, end to word end. During drag with `click_count == 2`,
    snap the moving endpoint to word boundaries.
 
-4. **38.4 — Line selection and drag-by-line**
+4. ✅ **38.4 — Line selection and drag-by-line** (2026-04-07)
    On triple-click, set anchor to line start (col 0), end to line end. During drag with
    `click_count == 3`, snap to whole lines.
 
-5. **38.5 — Tests**
-   Unit tests: click-count transitions, word boundary detection (alphanumeric, underscore,
-   punctuation, whitespace, Unicode). Integration: double-click selects word, triple-click
-   selects line.
+5. ✅ **38.5 — Tests** (2026-04-07)
+   24 unit tests: click-count transitions (first click, rapid clicks, slow reset, distant reset,
+   proximity threshold), word boundary detection (single word, punctuation, underscore, empty row,
+   second row, clamp beyond row), line boundary detection (simple, single char, empty, second row),
+   integration tests (single/double/triple click → point/word/line selection).
 
 ### 38 Primary Files
 
-- `freminal/src/gui/view_state.rs` (`ViewState`, `SelectionState`)
-- `freminal/src/gui/terminal/widget.rs` (mouse press/drag handlers)
+- `freminal/src/gui/view_state.rs` (`ViewState`, `SelectionState`, `CellCoord`, boundary helpers)
+- `freminal/src/gui/terminal/input.rs` (mouse press/drag handlers with click-count branching)
 
 ---
 

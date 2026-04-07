@@ -11,10 +11,11 @@
 //!
 //! See `Documents/PERFORMANCE_PLAN.md`, Section 4.5 for the architecture context.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use conv2::ConvUtil;
 use eframe::egui;
+use freminal_common::buffer_states::tchar::TChar;
 
 use super::mouse::PreviousMouseState;
 
@@ -23,7 +24,18 @@ use super::mouse::PreviousMouseState;
 /// At this rate the 6-tick cycle completes in ~1 000 ms:
 ///   - Slow blink: visible on ticks 0-2 (501 ms), hidden on ticks 3-5 (501 ms) ≈ 1 Hz.
 ///   - Fast blink: visible on even ticks (0,2,4), hidden on odd ticks (1,3,5) ≈ 3 Hz.
-pub const TEXT_BLINK_TICK_DURATION: std::time::Duration = std::time::Duration::from_millis(167);
+pub const TEXT_BLINK_TICK_DURATION: Duration = Duration::from_millis(167);
+
+/// Maximum elapsed time between two primary clicks to count as a multi-click.
+///
+/// If the second click arrives within this window AND within
+/// [`DOUBLE_CLICK_MAX_CELL_DISTANCE`] of the first, the `click_count` is
+/// incremented rather than reset to 1.
+pub(crate) const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Maximum per-axis distance (in terminal cells) between consecutive clicks
+/// for them to be considered part of the same multi-click sequence.
+pub(crate) const DOUBLE_CLICK_MAX_CELL_DISTANCE: usize = 1;
 
 /// A terminal cell coordinate (column, row), both 0-indexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +166,23 @@ pub struct ViewState {
 
     /// Whether fast-blink text should currently be drawn (derived from cycle).
     pub text_blink_fast_visible: bool,
+
+    // ── Multi-click tracking ─────────────────────────────────────────
+    /// Timestamp of the most-recent primary button press, used to detect
+    /// double- and triple-clicks.  `None` until the first click arrives.
+    pub last_click_time: Option<Instant>,
+
+    /// Buffer-absolute cell coordinate of the most-recent primary button
+    /// press, used for proximity checking in multi-click detection.
+    pub last_click_pos: Option<CellCoord>,
+
+    /// Click multiplicity for the current multi-click sequence.
+    ///
+    /// - `0` — no primary click has been recorded yet.
+    /// - `1` — single click (normal press-drag-release selection).
+    /// - `2` — double click (expand to word boundaries).
+    /// - `3` — triple click (expand to line boundaries; capped here).
+    pub click_count: u8,
 }
 
 impl Default for ViewState {
@@ -171,6 +200,9 @@ impl Default for ViewState {
             text_blink_last_tick: Instant::now(),
             text_blink_slow_visible: true,
             text_blink_fast_visible: true,
+            last_click_time: None,
+            last_click_pos: None,
+            click_count: 0,
         }
     }
 }
@@ -236,6 +268,183 @@ impl ViewState {
     pub const fn blink_visibility_for_cycle(cycle: u8) -> (bool, bool) {
         (cycle < 3, cycle.is_multiple_of(2))
     }
+
+    /// Record a primary button press at `coord` occurring at `now`, updating
+    /// the multi-click sequence counter.
+    ///
+    /// Rules:
+    /// - If there is a previous click within [`DOUBLE_CLICK_TIMEOUT`] **and**
+    ///   within [`DOUBLE_CLICK_MAX_CELL_DISTANCE`] cells on each axis, the
+    ///   count is incremented (capped at 3).
+    /// - Otherwise the count resets to 1.
+    ///
+    /// Returns the new `click_count` so the caller can branch on single /
+    /// double / triple click behaviour.
+    pub fn register_click(&mut self, coord: CellCoord, now: Instant) -> u8 {
+        let is_multi = match (self.last_click_time, self.last_click_pos) {
+            (Some(prev_time), Some(prev_pos)) => {
+                let elapsed = now.duration_since(prev_time);
+                let col_dist = coord.col.abs_diff(prev_pos.col);
+                let row_dist = coord.row.abs_diff(prev_pos.row);
+                elapsed <= DOUBLE_CLICK_TIMEOUT
+                    && col_dist <= DOUBLE_CLICK_MAX_CELL_DISTANCE
+                    && row_dist <= DOUBLE_CLICK_MAX_CELL_DISTANCE
+            }
+            _ => false,
+        };
+
+        if is_multi {
+            self.click_count = (self.click_count + 1).min(3);
+        } else {
+            self.click_count = 1;
+        }
+
+        self.last_click_time = Some(now);
+        self.last_click_pos = Some(coord);
+        self.click_count
+    }
+}
+
+/// Returns `true` if `tc` is a word character for selection purposes.
+///
+/// Word characters are ASCII alphanumerics, `_`, and any non-ASCII Unicode
+/// grapheme (treated conservatively as a word constituent).  Spaces and
+/// newlines are not word characters.
+const fn is_word_char(tc: &TChar) -> bool {
+    match tc {
+        TChar::Ascii(b) => b.is_ascii_alphanumeric() || *b == b'_',
+        // Non-ASCII graphemes (e.g. accented letters, CJK) are word chars.
+        TChar::Utf8(..) => true,
+        TChar::Space | TChar::NewLine => false,
+    }
+}
+
+/// Walk `visible_chars` and collect all displayable cells for `screen_row`.
+///
+/// Returns a `Vec<(start_display_col, display_width, TChar)>` for each
+/// character in the row.  `TChar::NewLine` entries are skipped (they act as
+/// row delimiters, not content).
+///
+/// Returns an empty `Vec` if `screen_row` is beyond the available data.
+fn collect_row_cells(visible_chars: &[TChar], screen_row: usize) -> Vec<(usize, usize, TChar)> {
+    let mut current_row: usize = 0;
+    let mut idx: usize = 0;
+
+    // Advance past all preceding rows.
+    while current_row < screen_row {
+        if idx >= visible_chars.len() {
+            return Vec::new();
+        }
+        if matches!(visible_chars[idx], TChar::NewLine) {
+            current_row += 1;
+        }
+        idx += 1;
+    }
+
+    // Collect cells for this row until the next NewLine or end of slice.
+    let mut cells = Vec::new();
+    let mut display_col: usize = 0;
+    while idx < visible_chars.len() {
+        if matches!(visible_chars[idx], TChar::NewLine) {
+            break;
+        }
+        // Use display_width, but treat zero-width graphemes as width 1 to
+        // avoid infinite loops and degenerate column offsets.
+        let w = visible_chars[idx].display_width().max(1);
+        cells.push((display_col, w, visible_chars[idx]));
+        display_col += w;
+        idx += 1;
+    }
+    cells
+}
+
+/// Find the display-column boundaries of the word that contains `col` in
+/// `screen_row` of `visible_chars`.
+///
+/// `visible_chars` is the flat terminal character buffer (from
+/// `TerminalSnapshot::visible_chars`), using `TChar::NewLine` as a row
+/// separator.  `screen_row` is **screen-relative** (0 = first visible row).
+///
+/// Word characters are defined by [`is_word_char`]: ASCII alphanumerics, `_`,
+/// and non-ASCII Unicode graphemes.
+///
+/// Returns `(start_col, end_col)` as **inclusive** display-column indices for
+/// the word boundaries.  If `col` falls on a non-word character, only that
+/// character's span is returned.  If the row has no content, `(col, col)` is
+/// returned.
+pub(crate) fn word_boundaries(
+    visible_chars: &[TChar],
+    screen_row: usize,
+    col: usize,
+) -> (usize, usize) {
+    let cells = collect_row_cells(visible_chars, screen_row);
+    if cells.is_empty() {
+        return (col, col);
+    }
+
+    // Find the cell that contains display column `col`.
+    let hit = cells
+        .iter()
+        .position(|&(start, w, _)| col >= start && col < start + w);
+
+    // If `col` is beyond row content, clamp to the last cell and
+    // fall through to the word-expansion logic so we return the full
+    // word span rather than a bare single-cell span.
+    let Some(hit) = hit else {
+        let last = cells.len() - 1;
+        // Re-enter the function logic at the word-expansion step by
+        // treating the last cell as the hit.
+        let hit = last;
+        if !is_word_char(&cells[hit].2) {
+            return (cells[hit].0, cells[hit].0 + cells[hit].1 - 1);
+        }
+        let mut start = hit;
+        while start > 0 && is_word_char(&cells[start - 1].2) {
+            start -= 1;
+        }
+        let mut end = hit;
+        while end + 1 < cells.len() && is_word_char(&cells[end + 1].2) {
+            end += 1;
+        }
+        return (cells[start].0, cells[end].0 + cells[end].1 - 1);
+    };
+
+    if !is_word_char(&cells[hit].2) {
+        // Clicked on a delimiter — select just that cell.
+        return (cells[hit].0, cells[hit].0 + cells[hit].1 - 1);
+    }
+
+    // Expand left while the preceding cell is also a word char.
+    let mut start = hit;
+    while start > 0 && is_word_char(&cells[start - 1].2) {
+        start -= 1;
+    }
+
+    // Expand right while the following cell is also a word char.
+    let mut end = hit;
+    while end + 1 < cells.len() && is_word_char(&cells[end + 1].2) {
+        end += 1;
+    }
+
+    (cells[start].0, cells[end].0 + cells[end].1 - 1)
+}
+
+/// Find the display-column boundaries of the entire visual line at
+/// `screen_row` in `visible_chars`.
+///
+/// `visible_chars` is the flat terminal character buffer (from
+/// `TerminalSnapshot::visible_chars`), using `TChar::NewLine` as a row
+/// separator.  `screen_row` is **screen-relative** (0 = first visible row).
+///
+/// Returns `(0, last_col)` where `last_col` is the last occupied display
+/// column in the row (inclusive).  Returns `(0, 0)` for an empty row.
+pub(crate) fn line_boundaries(visible_chars: &[TChar], screen_row: usize) -> (usize, usize) {
+    let cells = collect_row_cells(visible_chars, screen_row);
+    if cells.is_empty() {
+        return (0, 0);
+    }
+    let last = cells.len() - 1;
+    (0, cells[last].0 + cells[last].1 - 1)
 }
 
 #[cfg(test)]
@@ -330,5 +539,549 @@ mod tests {
         assert!(vs.text_blink_slow_visible);
         assert!(vs.text_blink_fast_visible);
         assert_eq!(vs.text_blink_cycle, 0);
+    }
+
+    // ── register_click tests ──────────────────────────────────────────────
+
+    fn coord(col: usize, row: usize) -> CellCoord {
+        CellCoord { col, row }
+    }
+
+    #[test]
+    fn first_click_is_single() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+        let count = vs.register_click(coord(5, 3), t);
+        assert_eq!(count, 1, "first click should be single (count=1)");
+        assert_eq!(vs.click_count, 1);
+    }
+
+    #[test]
+    fn rapid_same_position_clicks_increment_count() {
+        let mut vs = ViewState::new();
+        let t0 = Instant::now();
+        vs.register_click(coord(2, 1), t0);
+
+        // Second click within timeout, same position → double click.
+        let t1 = t0;
+        let count = vs.register_click(coord(2, 1), t1);
+        assert_eq!(count, 2, "quick second click should be double (count=2)");
+
+        // Third click → triple click.
+        let count = vs.register_click(coord(2, 1), t1);
+        assert_eq!(count, 3, "quick third click should be triple (count=3)");
+
+        // Fourth click is capped at 3.
+        let count = vs.register_click(coord(2, 1), t1);
+        assert_eq!(count, 3, "click_count must be capped at 3");
+    }
+
+    #[test]
+    fn slow_click_resets_count() {
+        let mut vs = ViewState::new();
+        let t0 = Instant::now();
+        vs.register_click(coord(0, 0), t0);
+        vs.click_count = 2; // manually set to double
+
+        // Click well past the timeout.
+        let t1 = t0 + DOUBLE_CLICK_TIMEOUT + Duration::from_millis(1);
+        let count = vs.register_click(coord(0, 0), t1);
+        assert_eq!(count, 1, "click after timeout should reset to single");
+    }
+
+    #[test]
+    fn distant_click_resets_count() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+        vs.register_click(coord(0, 0), t);
+        vs.click_count = 2;
+
+        // Click far away (beyond threshold) within the timeout.
+        let count = vs.register_click(coord(10, 0), t);
+        assert_eq!(count, 1, "click far from previous should reset to single");
+    }
+
+    #[test]
+    fn click_within_proximity_threshold_increments() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+        vs.register_click(coord(5, 5), t);
+
+        // Adjacent cell (distance = 1 on each axis) is within threshold.
+        let count = vs.register_click(coord(6, 6), t);
+        assert_eq!(count, 2, "click within 1-cell distance should double-click");
+    }
+
+    #[test]
+    fn click_just_outside_proximity_resets() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+        vs.register_click(coord(5, 5), t);
+
+        // Distance of 2 on col axis is outside the threshold (max is 1).
+        let count = vs.register_click(coord(7, 5), t);
+        assert_eq!(count, 1, "click 2 cells away should reset count");
+    }
+
+    // ── word_boundaries tests ─────────────────────────────────────────────
+
+    fn make_visible(rows: &[&str]) -> Vec<TChar> {
+        let mut chars = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            for b in row.bytes() {
+                chars.push(TChar::new_from_single_char(b));
+            }
+            if i + 1 < rows.len() {
+                chars.push(TChar::NewLine);
+            }
+        }
+        chars
+    }
+
+    #[test]
+    fn word_boundaries_single_word() {
+        // Row: "hello" — clicking anywhere gives (0, 4).
+        let chars = make_visible(&["hello"]);
+        assert_eq!(word_boundaries(&chars, 0, 0), (0, 4));
+        assert_eq!(word_boundaries(&chars, 0, 2), (0, 4));
+        assert_eq!(word_boundaries(&chars, 0, 4), (0, 4));
+    }
+
+    #[test]
+    fn word_boundaries_word_then_space() {
+        // Row: "hi there" — click on 'h'/'i' gives word "hi" (0..1),
+        // click on space gives just the space, click on "there" gives (3..7).
+        let chars = make_visible(&["hi there"]);
+        assert_eq!(word_boundaries(&chars, 0, 0), (0, 1)); // 'h'
+        assert_eq!(word_boundaries(&chars, 0, 1), (0, 1)); // 'i'
+        assert_eq!(word_boundaries(&chars, 0, 2), (2, 2)); // space
+        assert_eq!(word_boundaries(&chars, 0, 3), (3, 7)); // 'there'
+        assert_eq!(word_boundaries(&chars, 0, 7), (3, 7)); // 'e' of 'there'
+    }
+
+    #[test]
+    fn word_boundaries_underscore_included() {
+        // '_' is a word character.
+        let chars = make_visible(&["my_var"]);
+        assert_eq!(word_boundaries(&chars, 0, 0), (0, 5));
+        assert_eq!(word_boundaries(&chars, 0, 2), (0, 5)); // '_'
+        assert_eq!(word_boundaries(&chars, 0, 5), (0, 5));
+    }
+
+    #[test]
+    fn word_boundaries_punctuation_not_word() {
+        // Punctuation breaks the word.  "foo.bar": '.' is not a word char.
+        let chars = make_visible(&["foo.bar"]);
+        assert_eq!(word_boundaries(&chars, 0, 0), (0, 2)); // "foo"
+        assert_eq!(word_boundaries(&chars, 0, 3), (3, 3)); // '.'
+        assert_eq!(word_boundaries(&chars, 0, 4), (4, 6)); // "bar"
+    }
+
+    #[test]
+    fn word_boundaries_second_row() {
+        // Two rows — clicking on row 1.
+        let chars = make_visible(&["abc", "def"]);
+        assert_eq!(word_boundaries(&chars, 1, 0), (0, 2));
+        assert_eq!(word_boundaries(&chars, 1, 2), (0, 2));
+    }
+
+    #[test]
+    fn word_boundaries_empty_row() {
+        // An empty row returns (col, col).
+        let chars = make_visible(&["", "abc"]);
+        assert_eq!(word_boundaries(&chars, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn word_boundaries_col_beyond_row_clamps() {
+        // `col` beyond row content: should return the last cell's span.
+        let chars = make_visible(&["hi"]);
+        // 'h' at col 0, 'i' at col 1.  col=5 is beyond.
+        assert_eq!(word_boundaries(&chars, 0, 5), (0, 1)); // last cell is 'i' at col 1
+    }
+
+    // ── line_boundaries tests ─────────────────────────────────────────────
+
+    #[test]
+    fn line_boundaries_simple_row() {
+        let chars = make_visible(&["hello"]);
+        assert_eq!(line_boundaries(&chars, 0), (0, 4));
+    }
+
+    #[test]
+    fn line_boundaries_second_row() {
+        let chars = make_visible(&["abc", "xyz"]);
+        assert_eq!(line_boundaries(&chars, 0), (0, 2));
+        assert_eq!(line_boundaries(&chars, 1), (0, 2));
+    }
+
+    #[test]
+    fn line_boundaries_empty_row() {
+        let chars = make_visible(&["", "x"]);
+        assert_eq!(line_boundaries(&chars, 0), (0, 0));
+    }
+
+    #[test]
+    fn line_boundaries_single_char() {
+        let chars = make_visible(&["a"]);
+        assert_eq!(line_boundaries(&chars, 0), (0, 0));
+    }
+
+    // ── integration-style selection tests ────────────────────────────────
+
+    /// Simulate the press-handler logic for a double-click and verify that
+    /// `SelectionState` is set to the full word span.
+    ///
+    /// This mirrors the `click_count == 2` branch in `input.rs`:
+    ///   anchor = `word_start`, end = `word_end`.
+    #[test]
+    fn double_click_sets_word_selection() {
+        let chars = make_visible(&["hello world"]);
+        // "hello" spans cols 0–4; "world" spans cols 6–10; space is col 5.
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        // First click (single) — on 'h' at col 0, abs_row 0.
+        let click_coord = CellCoord { col: 0, row: 0 };
+        vs.register_click(click_coord, t);
+        let (anchor_col, end_col) = word_boundaries(&chars, 0, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: anchor_col,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+        vs.selection.is_selecting = true;
+
+        // Second click (double) — same position, within timeout.
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 2, "second click should be double");
+        let (anchor_col, end_col) = word_boundaries(&chars, 0, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: anchor_col,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+
+        // "hello" is cols 0–4.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor at word start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 4, row: 0 }),
+            "end at word end"
+        );
+    }
+
+    /// Simulate the press-handler logic for a triple-click and verify that
+    /// `SelectionState` is set to the full line span.
+    ///
+    /// This mirrors the `click_count >= 3` branch in `input.rs`:
+    ///   anchor = `line_start` (col 0), end = `line_end` (last col).
+    #[test]
+    fn triple_click_sets_line_selection() {
+        let chars = make_visible(&["hello world"]);
+        // Row 0 spans cols 0–10 (11 chars).
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        let click_coord = CellCoord { col: 3, row: 0 };
+
+        // First click.
+        vs.register_click(click_coord, t);
+        // Second click.
+        vs.register_click(click_coord, t);
+        // Third click.
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 3, "third click should be triple");
+
+        let (start_col, end_col) = line_boundaries(&chars, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: start_col,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+
+        // Line spans cols 0–10 inclusive.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor at line start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 10, row: 0 }),
+            "end at line end"
+        );
+    }
+
+    /// Verify that a single click clears any prior multi-click selection
+    /// and records a point selection (anchor == end).
+    #[test]
+    fn single_click_sets_point_selection() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+
+        // Simulate double-click state left over.
+        vs.click_count = 2;
+        vs.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        vs.selection.end = Some(CellCoord { col: 4, row: 0 });
+
+        // A new single click well past the timeout resets to 1.
+        let far_future = t + DOUBLE_CLICK_TIMEOUT + Duration::from_millis(1);
+        let click_coord = CellCoord { col: 7, row: 2 };
+        let count = vs.register_click(click_coord, far_future);
+        assert_eq!(count, 1, "click after timeout must reset to single");
+
+        // Simulate press handler: single-click sets anchor == end.
+        vs.selection.anchor = Some(click_coord);
+        vs.selection.end = Some(click_coord);
+        vs.selection.is_selecting = true;
+
+        assert_eq!(
+            vs.selection.anchor, vs.selection.end,
+            "point selection: anchor==end"
+        );
+        assert!(vs.selection.is_selecting);
+    }
+
+    // ── release-without-move regression tests ────────────────────────────
+
+    /// Helper that mirrors `release_end_col()` from `input.rs`.
+    ///
+    /// Given the current `ViewState` (with `click_count` and `selection`
+    /// already set by the press handler), compute the end column that the
+    /// release handler should use.
+    fn release_end_col(
+        vs: &ViewState,
+        visible_chars: &[TChar],
+        x: usize,
+        y: usize,
+        abs_row: usize,
+    ) -> usize {
+        if vs.click_count >= 3 {
+            let anchor_row = vs.selection.anchor.map_or(abs_row, |a| a.row);
+            let (line_start, line_end) = line_boundaries(visible_chars, y);
+            if abs_row >= anchor_row {
+                line_end
+            } else {
+                line_start
+            }
+        } else if vs.click_count == 2 {
+            let anchor_row = vs.selection.anchor.map_or(abs_row, |a| a.row);
+            let anchor_col = vs.selection.anchor.map_or(x, |a| a.col);
+            let (word_start, word_end) = word_boundaries(visible_chars, y, x);
+            if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col) {
+                word_end
+            } else {
+                word_start
+            }
+        } else {
+            x
+        }
+    }
+
+    /// Double-click press+release without any pointer-move in between must
+    /// keep the full word selection (regression test for the release handler
+    /// collapsing the selection to the raw mouse column).
+    #[test]
+    fn double_click_release_without_move_keeps_word() {
+        let chars = make_visible(&["hello world"]);
+        // "hello" = cols 0–4, space = col 5, "world" = cols 6–10.
+        // Double-click on 'e' (col 1) — press selects "hello" (0–4).
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+        let click_coord = CellCoord { col: 1, row: 0 };
+
+        // First click.
+        vs.register_click(click_coord, t);
+        // Second click (double).
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 2);
+
+        // Press handler: set anchor/end to word boundaries.
+        let (word_start, word_end) = word_boundaries(&chars, 0, 1);
+        vs.selection.anchor = Some(CellCoord {
+            col: word_start,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: word_end,
+            row: 0,
+        });
+        vs.selection.is_selecting = true;
+
+        // Release at the same raw position (col 1) — no PointerMoved fired.
+        let end_col = release_end_col(&vs, &chars, 1, 0, 0);
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+        vs.selection.is_selecting = false;
+
+        // Selection must still span the full word "hello" (0–4), NOT col 1.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor must stay at word start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 4, row: 0 }),
+            "end must stay at word end, not collapse to raw col"
+        );
+    }
+
+    /// Triple-click press+release without any pointer-move in between must
+    /// keep the full line selection.
+    #[test]
+    fn triple_click_release_without_move_keeps_line() {
+        let chars = make_visible(&["hello world"]);
+        // Row 0 spans cols 0–10.
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+        let click_coord = CellCoord { col: 3, row: 0 };
+
+        vs.register_click(click_coord, t);
+        vs.register_click(click_coord, t);
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 3);
+
+        // Press handler: set anchor/end to line boundaries.
+        let (line_start, line_end) = line_boundaries(&chars, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: line_start,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: line_end,
+            row: 0,
+        });
+        vs.selection.is_selecting = true;
+
+        // Release at raw col 3 — no PointerMoved fired.
+        let end_col = release_end_col(&vs, &chars, 3, 0, 0);
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+        vs.selection.is_selecting = false;
+
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor must stay at line start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 10, row: 0 }),
+            "end must stay at line end, not collapse to raw col"
+        );
+    }
+
+    // ── upward drag in word/line mode ────────────────────────────────────
+
+    /// Double-click on row 1, then drag upward to row 0.  The end should
+    /// snap to the word boundary on row 0, and after normalisation the
+    /// anchor word on row 1 must still be fully included.
+    #[test]
+    fn double_click_drag_upward_preserves_anchor_word() {
+        let chars = make_visible(&["foo bar", "baz qux"]);
+        // Row 0: "foo"=0–2, ' '=3, "bar"=4–6
+        // Row 1: "baz"=0–2, ' '=3, "qux"=4–6
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        // Double-click on "qux" (row 1, col 5) — abs_row = 1.
+        let click_coord = CellCoord { col: 5, row: 1 };
+        vs.register_click(click_coord, t);
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 2);
+
+        // Press handler: anchor/end to "qux" word boundaries on row 1.
+        let (ws, we) = word_boundaries(&chars, 1, 5);
+        vs.selection.anchor = Some(CellCoord { col: ws, row: 1 });
+        vs.selection.end = Some(CellCoord { col: we, row: 1 });
+        vs.selection.is_selecting = true;
+
+        // Drag upward to row 0, col 1 (inside "foo").
+        // The drag handler snaps to word boundaries:
+        // abs_row (0) < anchor_row (1), so use word_start.
+        let (drag_word_start, _) = word_boundaries(&chars, 0, 1);
+        vs.selection.end = Some(CellCoord {
+            col: drag_word_start,
+            row: 0,
+        });
+
+        // After normalisation, the selection should span from "foo" start
+        // on row 0 to "qux" end on row 1.
+        let (start, end) = vs.selection.normalised().unwrap();
+        assert_eq!(start, CellCoord { col: 0, row: 0 }, "start at 'foo' begin");
+        assert_eq!(end, CellCoord { col: 4, row: 1 }, "end at 'qux' anchor");
+    }
+
+    /// Triple-click on row 1, then drag upward to row 0.  The end should
+    /// snap to line start on row 0, and after normalisation the anchor
+    /// line (row 1) must still be fully included.
+    #[test]
+    fn triple_click_drag_upward_preserves_anchor_line() {
+        let chars = make_visible(&["hello", "world"]);
+        // Row 0: cols 0–4, Row 1: cols 0–4.
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        // Triple-click on row 1, col 2 — abs_row = 1.
+        let click_coord = CellCoord { col: 2, row: 1 };
+        vs.register_click(click_coord, t);
+        vs.register_click(click_coord, t);
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 3);
+
+        // Press handler: anchor/end to full line on row 1.
+        let (ls, le) = line_boundaries(&chars, 1);
+        vs.selection.anchor = Some(CellCoord { col: ls, row: 1 });
+        vs.selection.end = Some(CellCoord { col: le, row: 1 });
+        vs.selection.is_selecting = true;
+
+        // Drag upward to row 0, col 3.
+        // abs_row (0) < anchor_row (1), so use line_start.
+        let (drag_line_start, _) = line_boundaries(&chars, 0);
+        vs.selection.end = Some(CellCoord {
+            col: drag_line_start,
+            row: 0,
+        });
+
+        // After normalisation: row 0 col 0 → row 1 col 4.
+        let (start, end) = vs.selection.normalised().unwrap();
+        assert_eq!(
+            start,
+            CellCoord { col: 0, row: 0 },
+            "start at row 0 line begin"
+        );
+        assert_eq!(
+            end,
+            CellCoord { col: 0, row: 1 },
+            "end at anchor row line start (anchor holds line end)"
+        );
+
+        // The anchor (row 1, col 0) and the original anchor end (col 4)
+        // ensure the full anchor line is covered.  Verify the anchor
+        // itself still points at the line start of row 1.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 1 }),
+            "anchor stays at line start of row 1"
+        );
     }
 }

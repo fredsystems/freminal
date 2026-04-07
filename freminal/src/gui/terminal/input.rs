@@ -437,6 +437,43 @@ pub(super) fn handle_scroll_fallback(
     }
 }
 
+/// Compute the end column for a mouse-release event, respecting the current
+/// multi-click mode.
+///
+/// For triple-click (`click_count >= 3`) the end snaps to line boundaries.
+/// For double-click (`click_count == 2`) it snaps to word boundaries.
+/// For single-click it returns the raw column `x`.
+fn release_end_col(
+    view_state: &ViewState,
+    snap: &TerminalSnapshot,
+    x: usize,
+    y: usize,
+    abs_row: usize,
+) -> usize {
+    if view_state.click_count >= 3 {
+        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+        let (line_start, line_end) =
+            crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+        if abs_row >= anchor_row {
+            line_end
+        } else {
+            line_start
+        }
+    } else if view_state.click_count == 2 {
+        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+        let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
+        let (word_start, word_end) =
+            crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
+        if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col) {
+            word_end
+        } else {
+            word_start
+        }
+    } else {
+        x
+    }
+}
+
 #[allow(
     clippy::cognitive_complexity,
     clippy::too_many_lines,
@@ -978,8 +1015,35 @@ pub(super) fn write_input_to_terminal(
                     // is in progress.
                     if view_state.selection.is_selecting {
                         let abs_row = visible_window_start(snap) + y;
+                        let end_col = if view_state.click_count >= 3 {
+                            // Triple-click drag — snap end to line boundaries.
+                            let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                            let (line_start, line_end) =
+                                crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+                            if abs_row >= anchor_row {
+                                line_end
+                            } else {
+                                line_start
+                            }
+                        } else if view_state.click_count == 2 {
+                            // Double-click drag — snap end to word boundaries.
+                            let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                            let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
+                            let (word_start, word_end) =
+                                crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
+                            if abs_row > anchor_row
+                                || (abs_row == anchor_row && word_end >= anchor_col)
+                            {
+                                word_end
+                            } else {
+                                word_start
+                            }
+                        } else {
+                            // Single-click drag — track exact cell.
+                            x
+                        };
                         view_state.selection.end = Some(CellCoord {
-                            col: x,
+                            col: end_col,
                             row: abs_row,
                         });
                         state_changed = true;
@@ -1037,14 +1101,51 @@ pub(super) fn write_input_to_terminal(
                                 col: x,
                                 row: abs_row,
                             };
-                            view_state.selection.anchor = Some(coord);
-                            view_state.selection.end = Some(coord);
+                            let click_count =
+                                view_state.register_click(coord, std::time::Instant::now());
+
+                            if click_count >= 3 {
+                                // Triple-click — select the entire visual line.
+                                let (start_col, end_col) =
+                                    crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+                                view_state.selection.anchor = Some(CellCoord {
+                                    col: start_col,
+                                    row: abs_row,
+                                });
+                                view_state.selection.end = Some(CellCoord {
+                                    col: end_col,
+                                    row: abs_row,
+                                });
+                            } else if click_count == 2 {
+                                // Double-click — select the word under the cursor.
+                                let (start_col, end_col) = crate::gui::view_state::word_boundaries(
+                                    &snap.visible_chars,
+                                    y,
+                                    x,
+                                );
+                                view_state.selection.anchor = Some(CellCoord {
+                                    col: start_col,
+                                    row: abs_row,
+                                });
+                                view_state.selection.end = Some(CellCoord {
+                                    col: end_col,
+                                    row: abs_row,
+                                });
+                            } else {
+                                // Single click — start point selection.
+                                view_state.selection.anchor = Some(coord);
+                                view_state.selection.end = Some(coord);
+                            }
                             view_state.selection.is_selecting = true;
                         } else if view_state.selection.is_selecting {
                             // Mouse released — finalize the selection.
+                            // Respect click_count so double/triple-click
+                            // selections are not collapsed to the raw
+                            // mouse position on release.
                             let abs_row = visible_window_start(snap) + y;
+                            let end_col = release_end_col(view_state, snap, x, y, abs_row);
                             view_state.selection.end = Some(CellCoord {
-                                col: x,
+                                col: end_col,
                                 row: abs_row,
                             });
                             view_state.selection.is_selecting = false;
