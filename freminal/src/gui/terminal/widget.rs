@@ -108,6 +108,7 @@ enum ContextMenuAction {
     Paste,
     SelectAll,
     OpenUrl(String),
+    NewTerminal,
 }
 
 /// Render the right-click context menu when `view_state.context_menu_pos`
@@ -119,16 +120,21 @@ enum ContextMenuAction {
 /// - **Copy** (enabled only when a selection exists)
 /// - **Paste**
 /// - **Select All**
+/// - **New Terminal** (opens a new tab)
 /// - **Open URL** (shown only when the right-clicked cell is inside a URL span)
 ///
 /// When the user clicks outside the popup or picks an item, the menu closes
 /// and the relevant `ViewState` fields are cleared.
+///
+/// Actions that require full GUI state (e.g. spawning a new tab) are pushed
+/// onto `deferred_actions` so the caller can dispatch them after this returns.
 fn render_context_menu(
     ui: &Ui,
     snap: &TerminalSnapshot,
     view_state: &mut ViewState,
     input_tx: &Sender<InputEvent>,
     clipboard_rx: &Receiver<String>,
+    deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
 ) {
     let Some(menu_pos) = view_state.context_menu_pos else {
         return;
@@ -161,7 +167,15 @@ fn render_context_menu(
         close = true;
     }
 
-    dispatch_context_menu_action(action, ui, view_state, snap, input_tx, clipboard_rx);
+    dispatch_context_menu_action(
+        action,
+        ui,
+        view_state,
+        snap,
+        input_tx,
+        clipboard_rx,
+        deferred_actions,
+    );
 
     if close {
         view_state.context_menu_cell = None;
@@ -228,6 +242,13 @@ fn render_context_menu_area(
                     *close = true;
                 }
 
+                ui.separator();
+
+                if ui.button("New Terminal").clicked() {
+                    *action = Some(ContextMenuAction::NewTerminal);
+                    *close = true;
+                }
+
                 // "Open URL" — only shown when the clicked cell is a URL.
                 if let Some(ref url) = url_under_cursor {
                     ui.separator();
@@ -257,6 +278,10 @@ fn truncate_url(url: &str, max_len: usize) -> String {
 ///
 /// Separated from [`render_context_menu`] to stay within the 100-line
 /// function limit.
+///
+/// Actions that require full GUI state (e.g. `NewTerminal`) are pushed onto
+/// `deferred_actions` rather than executed directly, because this function
+/// does not have access to `FreminalGui` or `TabManager`.
 fn dispatch_context_menu_action(
     action: Option<ContextMenuAction>,
     ui: &Ui,
@@ -264,6 +289,7 @@ fn dispatch_context_menu_action(
     snap: &TerminalSnapshot,
     input_tx: &Sender<InputEvent>,
     clipboard_rx: &Receiver<String>,
+    deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
 ) {
     let Some(action) = action else {
         return;
@@ -323,6 +349,9 @@ fn dispatch_context_menu_action(
                     error!("Failed to open URL {url_str}: {e}");
                 }
             });
+        }
+        ContextMenuAction::NewTerminal => {
+            deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
         }
     }
 }
@@ -1094,7 +1123,14 @@ impl FreminalTerminalWidget {
         }
 
         // ── Right-click context menu ─────────────────────────────────
-        render_context_menu(ui, snap, view_state, input_tx, clipboard_rx);
+        render_context_menu(
+            ui,
+            snap,
+            view_state,
+            input_tx,
+            clipboard_rx,
+            &mut deferred_actions,
+        );
 
         deferred_actions
     }

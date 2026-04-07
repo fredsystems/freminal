@@ -195,7 +195,11 @@ impl FreminalGui {
                 }
 
                 let active = self.tabs.active_index();
-                if ui.button("Close Tab").clicked() {
+                let can_close = self.tabs.tab_count() > 1;
+                if ui
+                    .add_enabled(can_close, egui::Button::new("Close Tab"))
+                    .clicked()
+                {
                     menu_action = TabBarAction::Close(active);
                     ui.close();
                 }
