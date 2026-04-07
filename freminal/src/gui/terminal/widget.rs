@@ -372,11 +372,13 @@ impl FreminalTerminalWidget {
             });
         }
 
-        // Compute the terminal area origin BEFORE processing input events.
+        // Compute the terminal area rect BEFORE processing input events.
         // Pointer events from `input.raw.events` are in window coordinates,
-        // so `encode_egui_mouse_pos_as_usize` must subtract this origin to
-        // get terminal-grid-relative coordinates.
-        let terminal_origin = ui.available_rect_before_wrap().min;
+        // so `encode_egui_mouse_pos_as_usize` must subtract the rect's min
+        // corner to get terminal-grid-relative coordinates.  The full rect
+        // is also used to reject pointer events outside the terminal area
+        // (e.g. clicks on the tab bar).
+        let terminal_rect = ui.available_rect_before_wrap();
 
         // When a modal dialog (e.g. the settings window) is open — or was
         // open last frame — do NOT forward keyboard/mouse events to the PTY.
@@ -407,7 +409,7 @@ impl FreminalTerminalWidget {
                     view_state,
                     logical_cell_w,
                     logical_cell_h,
-                    terminal_origin,
+                    terminal_rect,
                     self.previous_mouse_state.clone(),
                     repeat_characters,
                     self.previous_key,
@@ -808,7 +810,7 @@ impl FreminalTerminalWidget {
             let (col, row) = encode_egui_mouse_pos_as_usize(
                 mouse_position,
                 (logical_cell_w, logical_cell_h),
-                terminal_origin,
+                terminal_rect.min,
             );
 
             // Convert the mouse's display-column position to a flat index

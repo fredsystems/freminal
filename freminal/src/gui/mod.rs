@@ -299,13 +299,13 @@ impl FreminalGui {
             })
             .response;
 
-        // Paint a distinct background behind the active tab to make it
-        // visually obvious which tab is selected. The fill color uses the
-        // theme's selection background with reduced opacity so it blends
-        // with the surrounding chrome.
+        // Paint a distinct background behind the active tab so it is
+        // immediately obvious which tab is selected.  A medium-grey fill
+        // provides good contrast against both light and dark panel fills
+        // without depending on the color theme.
         if is_active {
             let rect = group_response.rect;
-            let fill = ui.visuals().selection.bg_fill.linear_multiply(0.35);
+            let fill = egui::Color32::from_gray(100);
             ui.painter().rect_filled(rect, 4.0, fill);
         }
 
@@ -904,7 +904,7 @@ impl eframe::App for FreminalGui {
     // the shared snapshot. Artificial sub-functions would not reduce the coupling.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        debug!("Starting new frame");
+        trace!("Starting new frame");
         let now = std::time::Instant::now();
 
         // Poll all tabs for PTY death signals.  Dead tabs are collected by
@@ -1225,7 +1225,7 @@ impl eframe::App for FreminalGui {
             format!("Frame time={}μs", elapsed.as_micros())
         };
 
-        debug!("{}", frame_time);
+        trace!("{}", frame_time);
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
