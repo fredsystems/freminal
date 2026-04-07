@@ -978,8 +978,35 @@ pub(super) fn write_input_to_terminal(
                     // is in progress.
                     if view_state.selection.is_selecting {
                         let abs_row = visible_window_start(snap) + y;
+                        let end_col = if view_state.click_count >= 3 {
+                            // Triple-click drag — snap end to line boundaries.
+                            let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                            let (line_start, line_end) =
+                                crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+                            if abs_row >= anchor_row {
+                                line_end
+                            } else {
+                                line_start
+                            }
+                        } else if view_state.click_count == 2 {
+                            // Double-click drag — snap end to word boundaries.
+                            let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                            let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
+                            let (word_start, word_end) =
+                                crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
+                            if abs_row > anchor_row
+                                || (abs_row == anchor_row && word_end >= anchor_col)
+                            {
+                                word_end
+                            } else {
+                                word_start
+                            }
+                        } else {
+                            // Single-click drag — track exact cell.
+                            x
+                        };
                         view_state.selection.end = Some(CellCoord {
-                            col: x,
+                            col: end_col,
                             row: abs_row,
                         });
                         state_changed = true;
@@ -1037,8 +1064,41 @@ pub(super) fn write_input_to_terminal(
                                 col: x,
                                 row: abs_row,
                             };
-                            view_state.selection.anchor = Some(coord);
-                            view_state.selection.end = Some(coord);
+                            let click_count =
+                                view_state.register_click(coord, std::time::Instant::now());
+
+                            if click_count >= 3 {
+                                // Triple-click — select the entire visual line.
+                                let (start_col, end_col) =
+                                    crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+                                view_state.selection.anchor = Some(CellCoord {
+                                    col: start_col,
+                                    row: abs_row,
+                                });
+                                view_state.selection.end = Some(CellCoord {
+                                    col: end_col,
+                                    row: abs_row,
+                                });
+                            } else if click_count == 2 {
+                                // Double-click — select the word under the cursor.
+                                let (start_col, end_col) = crate::gui::view_state::word_boundaries(
+                                    &snap.visible_chars,
+                                    y,
+                                    x,
+                                );
+                                view_state.selection.anchor = Some(CellCoord {
+                                    col: start_col,
+                                    row: abs_row,
+                                });
+                                view_state.selection.end = Some(CellCoord {
+                                    col: end_col,
+                                    row: abs_row,
+                                });
+                            } else {
+                                // Single click — start point selection.
+                                view_state.selection.anchor = Some(coord);
+                                view_state.selection.end = Some(coord);
+                            }
                             view_state.selection.is_selecting = true;
                         } else if view_state.selection.is_selecting {
                             // Mouse released — finalize the selection.
