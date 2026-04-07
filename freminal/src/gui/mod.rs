@@ -754,7 +754,7 @@ impl eframe::App for FreminalGui {
                 });
             }
 
-            self.terminal_widget.show(
+            let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
                 &mut self.view_state,
@@ -764,6 +764,27 @@ impl eframe::App for FreminalGui {
                 bg_opacity,
                 &self.binding_map,
             );
+
+            // Handle key actions that couldn't be dispatched at the input
+            // layer because they require full GUI state.
+            for action in deferred_actions {
+                match action {
+                    freminal_common::keybindings::KeyAction::OpenSettings => {
+                        if !self.settings_modal.is_open {
+                            let families = self.terminal_widget.monospace_families();
+                            self.settings_modal.open(&self.config, families);
+                            self.settings_modal
+                                .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
+                        }
+                    }
+                    // Tab actions, zoom, search, etc. are not yet implemented.
+                    // They are consumed (not forwarded to PTY) but silently
+                    // ignored until their respective features land.
+                    _ => {
+                        debug!("Unhandled deferred key action: {:?}", action);
+                    }
+                }
+            }
 
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)

@@ -70,7 +70,7 @@ pub enum KeyBindingError {
 /// This is Freminal's own key representation, independent of any GUI framework.
 /// Conversion from framework-specific key types (e.g. `egui::Key`) happens in
 /// the GUI layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BindingKey {
     // Letters
     A,
@@ -354,7 +354,7 @@ impl FromStr for BindingKey {
 ///
 /// Framework-independent representation. Conversion from `egui::Modifiers`
 /// (or any other framework type) happens in the GUI layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct BindingModifiers {
     /// The Ctrl key (or Cmd on macOS, at the GUI layer's discretion).
     pub ctrl: bool,
@@ -424,7 +424,7 @@ impl fmt::Display for BindingModifiers {
 ///
 /// Used as the lookup key in the binding map. Displayed and parsed in the
 /// format `"Ctrl+Shift+T"`, `"Alt+F4"`, `"Escape"`, etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyCombo {
     /// The primary key.
     pub key: BindingKey,
@@ -804,26 +804,31 @@ impl BindingMap {
         self.combo_to_action.get(combo).copied()
     }
 
-    /// Find the first combo bound to a given action, if any.
+    /// Find the smallest combo bound to a given action, if any.
     ///
-    /// When multiple combos are bound to the same action, the returned combo
-    /// is arbitrary (`HashMap` iteration order).
+    /// When multiple combos are bound to the same action, the combo with the
+    /// smallest `Ord` value is returned, ensuring deterministic display even
+    /// though the underlying map is a `HashMap`.
     #[must_use]
     pub fn combo_for(&self, action: KeyAction) -> Option<KeyCombo> {
         self.combo_to_action
             .iter()
-            .find(|(_, a)| **a == action)
+            .filter(|(_, a)| **a == action)
             .map(|(combo, _)| *combo)
+            .min()
     }
 
-    /// Find all combos bound to a given action.
+    /// Find all combos bound to a given action, sorted for deterministic output.
     #[must_use]
     pub fn all_combos_for(&self, action: KeyAction) -> Vec<KeyCombo> {
-        self.combo_to_action
+        let mut combos: Vec<KeyCombo> = self
+            .combo_to_action
             .iter()
             .filter(|(_, a)| **a == action)
             .map(|(combo, _)| *combo)
-            .collect()
+            .collect();
+        combos.sort();
+        combos
     }
 
     /// Bind a key combo to an action.
@@ -1496,6 +1501,207 @@ mod tests {
                 map.lookup(&combo),
                 Some(action),
                 "default binding for {combo} should be {action}"
+            );
+        }
+    }
+
+    // ── display_label tests ──────────────────────────────────────────────
+
+    #[test]
+    fn display_label_non_empty_for_all_actions() {
+        for action in KeyAction::ALL {
+            let label = action.display_label();
+            assert!(!label.is_empty(), "{action:?} has empty display_label()");
+        }
+    }
+
+    #[test]
+    fn display_label_distinct_for_all_actions() {
+        let mut seen = std::collections::HashSet::new();
+        for action in KeyAction::ALL {
+            let label = action.display_label();
+            assert!(
+                seen.insert(label),
+                "duplicate display_label() {label:?} for {action:?}"
+            );
+        }
+    }
+
+    // ── name() → FromStr round-trip completeness ─────────────────────────
+
+    #[test]
+    fn key_action_name_roundtrip_all() {
+        for action in KeyAction::ALL {
+            let name = action.name();
+            let parsed: KeyAction = name
+                .parse()
+                .unwrap_or_else(|_| panic!("failed to parse name {name:?} for {action:?}"));
+            assert_eq!(
+                *action, parsed,
+                "round-trip failed for {action:?} (name={name:?})"
+            );
+        }
+    }
+
+    // ── Default binding exhaustive tests ──────────────────────────────────
+
+    #[test]
+    fn default_next_tab_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(
+            BindingKey::Tab,
+            BindingModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+        );
+        assert_eq!(map.lookup(&combo), Some(KeyAction::NextTab));
+    }
+
+    #[test]
+    fn default_prev_tab_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(
+            BindingKey::Tab,
+            BindingModifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+        );
+        assert_eq!(map.lookup(&combo), Some(KeyAction::PrevTab));
+    }
+
+    #[test]
+    fn default_zoom_out_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(
+            BindingKey::Minus,
+            BindingModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+        );
+        assert_eq!(map.lookup(&combo), Some(KeyAction::ZoomOut));
+    }
+
+    #[test]
+    fn default_zoom_reset_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(
+            BindingKey::Num0,
+            BindingModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+        );
+        assert_eq!(map.lookup(&combo), Some(KeyAction::ZoomReset));
+    }
+
+    #[test]
+    fn default_zoom_in_specific_combos() {
+        let map = BindingMap::default();
+        let combos = map.all_combos_for(KeyAction::ZoomIn);
+        assert_eq!(combos.len(), 2, "ZoomIn should have exactly 2 combos");
+
+        let equals = KeyCombo::new(
+            BindingKey::Equals,
+            BindingModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+        );
+        let plus = KeyCombo::new(
+            BindingKey::Plus,
+            BindingModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+        );
+        assert!(
+            combos.contains(&equals),
+            "ZoomIn should include Ctrl+Equals"
+        );
+        assert!(combos.contains(&plus), "ZoomIn should include Ctrl+Plus");
+    }
+
+    #[test]
+    fn default_close_tab_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(
+            BindingKey::W,
+            BindingModifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+        );
+        assert_eq!(map.lookup(&combo), Some(KeyAction::CloseTab));
+    }
+
+    #[test]
+    fn default_binding_total_count() {
+        // The default map should have a known number of bindings.
+        // This catches silent additions or removals.
+        let map = BindingMap::default();
+        // Count: Copy(1) + Paste(1) + NewTab(1) + CloseTab(1) + NextTab(1)
+        //        + PrevTab(1) + SwitchToTab1-9(9) + ZoomIn(2) + ZoomOut(1)
+        //        + ZoomReset(1) + OpenSettings(1) + ScrollPageUp(1)
+        //        + ScrollPageDown(1) + ScrollToTop(1) + ScrollToBottom(1)
+        //        + ScrollLineUp(1) + ScrollLineDown(1) = 26
+        assert_eq!(
+            map.len(),
+            26,
+            "default binding map should have exactly 26 bindings"
+        );
+    }
+
+    #[test]
+    fn unbound_actions_not_in_default_map() {
+        // These actions have no default binding.
+        let map = BindingMap::default();
+        let unbound = [
+            KeyAction::MoveTabLeft,
+            KeyAction::MoveTabRight,
+            KeyAction::RenameTab,
+            KeyAction::SelectAll,
+            KeyAction::OpenSearch,
+            KeyAction::ToggleMenuBar,
+        ];
+        for action in unbound {
+            assert!(
+                map.combo_for(action).is_none(),
+                "{action:?} should have no default binding"
+            );
+        }
+    }
+
+    // ── combo_for determinism on multi-combo action ────────────────────
+
+    #[test]
+    fn combo_for_multi_combo_action_returns_smallest_combo() {
+        let map = BindingMap::default();
+        // ZoomIn has Ctrl+Equals and Ctrl+Plus. combo_for must always return
+        // the same one (the Ord-smallest) regardless of HashMap iteration order.
+        let combo = map.combo_for(KeyAction::ZoomIn).unwrap();
+        let all = map.all_combos_for(KeyAction::ZoomIn);
+        assert_eq!(all.len(), 2, "ZoomIn should have exactly 2 combos");
+        assert_eq!(
+            combo, all[0],
+            "combo_for must return the Ord-smallest combo (first in sorted all_combos_for)"
+        );
+
+        // Call combo_for multiple times and verify it is stable.
+        for _ in 0..100 {
+            assert_eq!(
+                map.combo_for(KeyAction::ZoomIn),
+                Some(combo),
+                "combo_for must be deterministic across calls"
             );
         }
     }

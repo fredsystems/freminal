@@ -273,9 +273,15 @@ are discoverable and configurable.
      binding, dispatch handler, config_example.toml documentation)
    - Forbids hardcoded shortcuts outside the BindingMap system
 
-7. **37.7 — Tests**
+7. **37.7 — Tests** ✅ _Complete (2026-04-06)_
    Unit tests: default bindings produce correct actions, custom bindings override defaults,
    config round-trip, invalid combos rejected. Integration: verify dispatch works end-to-end.
+   - 14 new tests in `keybindings.rs`: `display_label` non-empty/distinct, `name()` round-trip,
+     default bindings for NextTab/PrevTab/ZoomOut/ZoomReset/CloseTab, ZoomIn specific combos,
+     total binding count (26), unbound actions confirmed absent, combo_for determinism
+   - Fixed `combo_for()` non-deterministic iteration by deriving `Ord` on `BindingKey`,
+     `BindingModifiers`, `KeyCombo` and using `.min()` instead of `.find()`
+   - `all_combos_for()` now returns sorted results for consistency
 
 ### 37 Primary Files
 

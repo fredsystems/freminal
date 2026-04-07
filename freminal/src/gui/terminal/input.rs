@@ -50,7 +50,7 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers) -> KeyModifiers {
 /// Returns `None` for keys that have no `BindingKey` equivalent (numpad
 /// variants, media keys, etc.) — those fall through to the normal PTY
 /// dispatch path unchanged.
-pub(super) const fn egui_key_to_binding_key(key: Key) -> Option<BindingKey> {
+pub(in crate::gui) const fn egui_key_to_binding_key(key: Key) -> Option<BindingKey> {
     match key {
         Key::A => Some(BindingKey::A),
         Key::B => Some(BindingKey::B),
@@ -136,7 +136,7 @@ pub(super) const fn egui_key_to_binding_key(key: Key) -> Option<BindingKey> {
 ///
 /// `m.command` (macOS Cmd) is mapped to `ctrl = true` — matching the
 /// behaviour of [`egui_mods_to_key_modifiers`].
-pub(super) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingModifiers {
+pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingModifiers {
     BindingModifiers {
         ctrl: m.ctrl || m.command,
         shift: m.shift,
@@ -148,20 +148,21 @@ pub(super) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingModifiers 
 ///
 /// Handles the subset of actions that can be executed inside
 /// `write_input_to_terminal`: clipboard copy and all scrollback actions.
-/// All other actions (zoom, open settings, tab management, etc.) are no-ops
-/// here — they require access to GUI state that is not available at this call
-/// site.
+/// All other actions (zoom, open settings, tab management, etc.) cannot be
+/// handled here — they require access to GUI state that is not available at
+/// this call site.  Those actions are collected in `deferred_actions` so the
+/// caller can propagate them to the GUI layer.
 ///
-/// Returns `true` if the action was consumed (the caller should `continue`
-/// to the next event), `false` if the action is not handled here (the caller
-/// should fall through to normal PTY dispatch).
+/// **All bound keys are consumed** — they are never forwarded to the PTY,
+/// regardless of whether the action is handled here or deferred.
 pub(super) fn dispatch_binding_action(
     action: KeyAction,
     view_state: &mut ViewState,
     input_tx: &Sender<InputEvent>,
     snap: &TerminalSnapshot,
     clipboard_pending: &mut bool,
-) -> bool {
+    deferred_actions: &mut Vec<KeyAction>,
+) {
     match action {
         KeyAction::Copy => {
             if let Some((start, end)) = view_state.selection.normalised() {
@@ -173,7 +174,6 @@ pub(super) fn dispatch_binding_action(
                 });
                 *clipboard_pending = true;
             }
-            true
         }
         KeyAction::ScrollPageUp => {
             let new_offset = view_state
@@ -186,7 +186,6 @@ pub(super) fn dispatch_binding_action(
                     error!("Failed to send scroll offset to PTY consumer: {e}");
                 }
             }
-            true
         }
         KeyAction::ScrollPageDown => {
             let new_offset = view_state.scroll_offset.saturating_sub(snap.term_height);
@@ -196,7 +195,6 @@ pub(super) fn dispatch_binding_action(
                     error!("Failed to send scroll offset to PTY consumer: {e}");
                 }
             }
-            true
         }
         KeyAction::ScrollToTop => {
             let new_offset = snap.max_scroll_offset;
@@ -206,7 +204,6 @@ pub(super) fn dispatch_binding_action(
                     error!("Failed to send scroll offset to PTY consumer: {e}");
                 }
             }
-            true
         }
         KeyAction::ScrollToBottom => {
             if view_state.scroll_offset != 0 {
@@ -215,7 +212,6 @@ pub(super) fn dispatch_binding_action(
                     error!("Failed to send scroll offset to PTY consumer: {e}");
                 }
             }
-            true
         }
         KeyAction::ScrollLineUp => {
             let new_offset = view_state
@@ -228,7 +224,6 @@ pub(super) fn dispatch_binding_action(
                     error!("Failed to send scroll offset to PTY consumer: {e}");
                 }
             }
-            true
         }
         KeyAction::ScrollLineDown => {
             let new_offset = view_state.scroll_offset.saturating_sub(1);
@@ -238,12 +233,10 @@ pub(super) fn dispatch_binding_action(
                     error!("Failed to send scroll offset to PTY consumer: {e}");
                 }
             }
-            true
         }
         // All other actions (zoom, settings, tabs, etc.) require GUI state
-        // not available here.  Return false so the event falls through to the
-        // normal PTY dispatch path.
-        _ => false,
+        // not available here.  Defer them to the GUI layer.
+        other => deferred_actions.push(other),
     }
 }
 
@@ -489,7 +482,14 @@ pub(super) fn write_input_to_terminal(
     previous_key: Option<Key>,
     scroll_amount: f32,
     binding_map: &BindingMap,
-) -> (bool, Option<PreviousMouseState>, Option<Key>, f32, bool) {
+) -> (
+    bool,
+    Option<PreviousMouseState>,
+    Option<Key>,
+    f32,
+    bool,
+    Vec<KeyAction>,
+) {
     if input.raw.events.is_empty() {
         return (
             false,
@@ -497,6 +497,7 @@ pub(super) fn write_input_to_terminal(
             previous_key,
             scroll_amount,
             false,
+            Vec::new(),
         );
     }
 
@@ -506,6 +507,7 @@ pub(super) fn write_input_to_terminal(
     let mut left_mouse_button_pressed = false;
     let mut scroll_amount = scroll_amount;
     let mut clipboard_pending = false;
+    let mut deferred_actions: Vec<KeyAction> = Vec::new();
 
     // When the user is scrolled back into history, suppress mouse forwarding
     // to the PTY — the visible content is historical, not the live terminal
@@ -544,17 +546,16 @@ pub(super) fn write_input_to_terminal(
         {
             let combo = KeyCombo::new(binding_key, egui_mods_to_binding_mods(*modifiers));
             if let Some(action) = binding_map.lookup(&combo) {
-                let consumed = dispatch_binding_action(
+                dispatch_binding_action(
                     action,
                     view_state,
                     input_tx,
                     snap,
                     &mut clipboard_pending,
+                    &mut deferred_actions,
                 );
-                if consumed {
-                    state_changed = true;
-                    continue;
-                }
+                state_changed = true;
+                continue;
             }
         }
         // Event::Copy is the synthetic event fired by egui-winit for
@@ -571,17 +572,16 @@ pub(super) fn write_input_to_terminal(
                 },
             );
             if let Some(action) = binding_map.lookup(&combo) {
-                let consumed = dispatch_binding_action(
+                dispatch_binding_action(
                     action,
                     view_state,
                     input_tx,
                     snap,
                     &mut clipboard_pending,
+                    &mut deferred_actions,
                 );
-                if consumed {
-                    state_changed = true;
-                    continue;
-                }
+                state_changed = true;
+                continue;
             }
         }
 
@@ -1140,5 +1140,6 @@ pub(super) fn write_input_to_terminal(
         previous_key,
         scroll_amount,
         clipboard_pending,
+        deferred_actions,
     )
 }
