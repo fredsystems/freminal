@@ -286,6 +286,9 @@ impl FreminalGui {
 
     /// Render a single tab element with label, optional close button,
     /// and a distinct background color for the active tab.
+    ///
+    /// Inactive tabs with an unacknowledged bell are drawn with an amber
+    /// text color and a warm-tinted background to make them more prominent.
     fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
@@ -300,20 +303,26 @@ impl FreminalGui {
             &tab.title
         };
 
+        let has_bell = tab.bell_active && !is_active;
+
         // Build the display label: prepend a bell indicator when the tab
         // has an unacknowledged bell and is not the active (focused) tab.
-        let display_label = if tab.bell_active && !is_active {
-            format!("* {label}")
+        let display_label = if has_bell {
+            format!("\u{1f514} {label}")
         } else {
             label.to_owned()
         };
 
-        // Wrap the active tab in a filled frame so the background is
-        // painted *behind* the label and close button.  Inactive tabs
-        // use a transparent frame to keep layout consistent.
+        // Tab frame: active gets a gray fill, bell-active inactive tabs
+        // get a warm amber tint, others use a transparent frame.
         let frame = if is_active {
             egui::Frame::NONE
                 .fill(egui::Color32::from_gray(100))
+                .corner_radius(4.0)
+                .inner_margin(0.0)
+        } else if has_bell {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgba_unmultiplied(180, 120, 30, 40))
                 .corner_radius(4.0)
                 .inner_margin(0.0)
         } else {
@@ -322,9 +331,16 @@ impl FreminalGui {
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Pad the label for a roomier feel.
-                let response =
-                    ui.selectable_label(is_active, egui::RichText::new(&display_label).size(13.0));
+                // Bell-active tabs use amber text for visibility.
+                let rich_label = if has_bell {
+                    egui::RichText::new(&display_label)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(255, 180, 50))
+                } else {
+                    egui::RichText::new(&display_label).size(13.0)
+                };
+
+                let response = ui.selectable_label(is_active, rich_label);
                 if response.clicked() && !is_active {
                     action = TabBarAction::SwitchTo(index);
                 }
@@ -717,6 +733,7 @@ fn handle_window_manipulation(
     bell_mode: freminal_common::config::BellMode,
     allow_clipboard_read: bool,
     is_active: bool,
+    window_focused: bool,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -1004,10 +1021,18 @@ fn handle_window_manipulation(
 
             // Terminal bell: mark this tab as having an unacknowledged bell
             // and start the visual flash timer (if bell mode is visual).
+            // When the window is unfocused, request OS-level taskbar attention.
             WindowManipulation::Bell => {
                 *bell_active = true;
                 if bell_mode == freminal_common::config::BellMode::Visual {
                     *bell_since = Some(Instant::now());
+
+                    if !window_focused {
+                        ui.ctx()
+                            .send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                                egui::UserAttentionType::Informational,
+                            ));
+                    }
                 }
             }
         }
@@ -1165,6 +1190,7 @@ impl eframe::App for FreminalGui {
             // fullscreen) are discarded since an inactive tab must not alter the
             // shared window geometry.
             let active_idx = self.tabs.active_index();
+            let window_focused = self.tabs.active_tab().view_state.window_focused;
             for (idx, tab) in self.tabs.iter_mut().enumerate() {
                 handle_window_manipulation(
                     ui,
@@ -1180,6 +1206,7 @@ impl eframe::App for FreminalGui {
                     self.config.bell.mode,
                     self.config.security.allow_clipboard_read,
                     idx == active_idx,
+                    window_focused,
                 );
             }
 

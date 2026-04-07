@@ -105,17 +105,37 @@ const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
 /// Maximum alpha for the bell flash overlay (0–255).
 const BELL_FLASH_MAX_ALPHA: u8 = 60;
 
-/// Paint a semi-transparent white overlay that fades out over
-/// [`BELL_FLASH_DURATION`] milliseconds after a bell event.
+/// Steady-state alpha for the persistent bell overlay shown when the
+/// window is unfocused and a bell has fired (0–255).
+const BELL_PERSISTENT_ALPHA: u8 = 30;
+
+/// Paint a semi-transparent white overlay for the visual bell.
 ///
-/// When the flash duration has elapsed, `view_state.bell_since` is cleared
-/// so no further painting occurs until the next bell.  While the flash is
-/// active, a repaint is requested to animate the fade-out.
+/// **Focused window:** a brief flash that fades from [`BELL_FLASH_MAX_ALPHA`]
+/// to 0 over [`BELL_FLASH_DURATION`] milliseconds. Once elapsed,
+/// `view_state.bell_since` is cleared.
+///
+/// **Unfocused window:** a persistent subtle overlay at
+/// [`BELL_PERSISTENT_ALPHA`] that remains until the window regains focus.
+/// When focus returns, `bell_since` is cleared so the overlay disappears
+/// immediately without a distracting fade.
 fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
     let Some(since) = view_state.bell_since else {
         return;
     };
 
+    if !view_state.window_focused {
+        // Unfocused: show a persistent, non-fading overlay.
+        let alpha = BELL_PERSISTENT_ALPHA;
+        let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
+        ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
+        ui.ctx().request_repaint();
+        return;
+    }
+
+    // Focused: if the bell originally fired while unfocused, clear it now
+    // that focus has returned (the user has seen the persistent tint and
+    // is now looking at the terminal).
     let elapsed = since.elapsed();
     if elapsed >= BELL_FLASH_DURATION {
         view_state.bell_since = None;
