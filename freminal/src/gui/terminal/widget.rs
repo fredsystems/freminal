@@ -906,6 +906,24 @@ impl FreminalTerminalWidget {
         }
     }
 
+    /// Apply a font zoom by setting the font manager to `effective_size`.
+    ///
+    /// Clears the glyph atlas and shaping cache if the size actually changed.
+    /// The resize event to the PTY is handled automatically by the existing
+    /// resize-detection logic in the render loop (it compares
+    /// `available_pixels / cell_size` against `view_state.last_sent_size`).
+    pub fn apply_font_zoom(&mut self, effective_size: f32) {
+        if self.font_manager.set_font_size(effective_size) {
+            let mut rs = self
+                .render_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            rs.atlas.clear();
+            drop(rs);
+            self.shaping_cache.clear();
+        }
+    }
+
     /// Invalidate the cached theme pointer so the next frame forces a full
     /// vertex rebuild with the new palette colors.
     ///
