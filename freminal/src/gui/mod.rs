@@ -281,6 +281,85 @@ impl FreminalGui {
         }
     }
 
+    /// Dispatch a deferred key action that requires full GUI state.
+    ///
+    /// Called from the `ui()` method for each action returned by the terminal
+    /// widget's input handler. Actions that can be handled at the input layer
+    /// (e.g. scrollback, copy/paste) are dispatched there; the remaining
+    /// actions (tab management, settings, zoom, search) land here.
+    fn dispatch_deferred_action(&mut self, action: freminal_common::keybindings::KeyAction) {
+        use freminal_common::keybindings::KeyAction;
+
+        match action {
+            // -- Settings --
+            KeyAction::OpenSettings => {
+                if !self.settings_modal.is_open {
+                    let families = self.terminal_widget.monospace_families();
+                    self.settings_modal.open(&self.config, families);
+                    self.settings_modal
+                        .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
+                }
+            }
+
+            // -- Tab management --
+            KeyAction::NewTab => self.spawn_new_tab(),
+            KeyAction::CloseTab => {
+                if let Err(e) = self.tabs.close_active_tab() {
+                    trace!("Cannot close tab: {e}");
+                }
+            }
+            KeyAction::NextTab => self.tabs.next_tab(),
+            KeyAction::PrevTab => self.tabs.prev_tab(),
+            KeyAction::SwitchToTab1 => self.switch_to_tab_n(0),
+            KeyAction::SwitchToTab2 => self.switch_to_tab_n(1),
+            KeyAction::SwitchToTab3 => self.switch_to_tab_n(2),
+            KeyAction::SwitchToTab4 => self.switch_to_tab_n(3),
+            KeyAction::SwitchToTab5 => self.switch_to_tab_n(4),
+            KeyAction::SwitchToTab6 => self.switch_to_tab_n(5),
+            KeyAction::SwitchToTab7 => self.switch_to_tab_n(6),
+            KeyAction::SwitchToTab8 => self.switch_to_tab_n(7),
+            KeyAction::SwitchToTab9 => self.switch_to_tab_n(8),
+            KeyAction::MoveTabLeft => self.tabs.move_active_left(),
+            KeyAction::MoveTabRight => self.tabs.move_active_right(),
+
+            // -- Not yet implemented --
+            // Consumed (not forwarded to PTY) but silently ignored until
+            // their respective features land.
+            KeyAction::RenameTab
+            | KeyAction::ZoomIn
+            | KeyAction::ZoomOut
+            | KeyAction::ZoomReset
+            | KeyAction::OpenSearch => {
+                trace!("Unhandled deferred key action: {action:?}");
+            }
+
+            // These actions are handled at the input layer and should never
+            // reach the deferred dispatch. Log if they somehow do.
+            KeyAction::Copy
+            | KeyAction::Paste
+            | KeyAction::SelectAll
+            | KeyAction::ToggleMenuBar
+            | KeyAction::ScrollPageUp
+            | KeyAction::ScrollPageDown
+            | KeyAction::ScrollToTop
+            | KeyAction::ScrollToBottom
+            | KeyAction::ScrollLineUp
+            | KeyAction::ScrollLineDown => {
+                trace!(
+                    "Unexpected deferred key action (should be handled at input layer): {action:?}"
+                );
+            }
+        }
+    }
+
+    /// Switch to tab N (0-indexed). Silently does nothing if the index
+    /// is out of bounds (e.g. user presses Ctrl+Shift+5 with only 3 tabs).
+    fn switch_to_tab_n(&mut self, index: usize) {
+        if let Err(e) = self.tabs.switch_to(index) {
+            trace!("Cannot switch to tab {index}: {e}");
+        }
+    }
+
     /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
     #[cfg(feature = "playback")]
     fn show_playback_controls(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
@@ -880,22 +959,7 @@ impl eframe::App for FreminalGui {
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
             for action in deferred_actions {
-                match action {
-                    freminal_common::keybindings::KeyAction::OpenSettings => {
-                        if !self.settings_modal.is_open {
-                            let families = self.terminal_widget.monospace_families();
-                            self.settings_modal.open(&self.config, families);
-                            self.settings_modal
-                                .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
-                        }
-                    }
-                    // Tab actions, zoom, search, etc. are not yet implemented.
-                    // They are consumed (not forwarded to PTY) but silently
-                    // ignored until their respective features land.
-                    _ => {
-                        trace!("Unhandled deferred key action: {:?}", action);
-                    }
-                }
+                self.dispatch_deferred_action(action);
             }
 
             // Only schedule a wakeup when there is work to do:
