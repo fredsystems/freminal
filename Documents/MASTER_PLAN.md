@@ -2,12 +2,24 @@
 
 ## Overview
 
-This document orchestrates thirty-five major development tasks for Freminal. Each task has a dedicated
-planning document with detailed subtasks, acceptance criteria, and affected files. Agents executing
-any of these tasks MUST read this document first for context on dependencies and ordering.
+This document tracks all development work for Freminal: the 35 completed v0.2.0 tasks, 2 pending
+housekeeping tasks, and the versioned roadmap for v0.3.0–v0.5.0. Agents executing any task MUST
+read this document first for context on dependencies and ordering.
 
 All tasks are governed by the rules in `agents.md`, including the mandatory testing, benchmarking,
 and plan document maintenance rules.
+
+### Version Roadmap
+
+| Version | Codename                | Plan Document         | Tasks | Status  |
+| ------- | ----------------------- | --------------------- | ----- | ------- |
+| v0.2.0  | —                       | (Tasks 1–35 below)    | 35    | Done    |
+| v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Pending |
+| v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52 | Pending |
+| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–56 | Pending |
+
+See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
+B.7, B.8, A.2) and remaining Category C housekeeping (Tasks 18, 19).
 
 ---
 
@@ -432,32 +444,11 @@ Update this section as tasks complete:
 ## References
 
 - `agents.md` — Agent rules, architecture, verification suite
-- `Documents/PERFORMANCE_PLAN.md` — Completed performance refactor (Tasks 1-12)
-- `Documents/TODO.md` — Version roadmap
-- `Documents/PLAN_07_ESCAPE_SEQUENCES.md` — Escape sequence audit and implementation plan
-- `Documents/PLAN_08_SCROLLBACK.md` — Primary screen scrollback architecture and wiring
-- `Documents/PLAN_09_TMUX_COMPAT_AND_LOGGING.md` — tmux compatibility fixes and persistent logging
-- `Documents/PLAN_10_VTTEST_CURSOR_MOVEMENT.md` — vttest cursor movement test failures
-- `Documents/PLAN_11_THEMING.md` — Embedded color themes and theme picker
-- `Documents/PLAN_12_TERMINFO.md` — Terminfo audit, build.rs fix, XTGETTCAP audit
-- `Documents/PLAN_13_IMAGE_PROTOCOL.md` — Image protocol support (iTerm2, Kitty, Sixel)
-- `Documents/PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md` — Mode noise, URL hover, scrollback selection
-- `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism
-- `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (separate repo)
-- `Documents/PLAN_20_DEC_MODE_COVERAGE.md` — DEC private mode audit and implementation
-- `Documents/PLAN_21_TAB_STOPS.md` — Tab stop correctness (resize, TBC variants, alt screen)
-- `Documents/PLAN_22_VTTEST_INTEGRATION.md` — vttest golden-file integration test suite
-- `Documents/PLAN_23_BLINKING_TEXT.md` — SGR 5/6 blinking text rendering
-- `Documents/PLAN_24_BENCHMARK_IMPROVEMENTS.md` — Benchmark gaps, CI integration, fragile fixes
-- `Documents/PLAN_25_CODE_QUALITY.md` — Parser split, CSI renames, dead code, doc comments
-- `Documents/PLAN_26_BOOL_TO_ENUM.md` — Bool-to-enum mode refactor
-- `Documents/PLAN_27_FIXME_AUDIT.md` — FIXME/TODO audit (stub)
-- `Documents/PLAN_28_COMMENT_AUDIT.md` — Code comment audit (stub)
-- `Documents/PLAN_29_GOD_FILE_REFACTOR.md` — God file refactoring (stub)
-- `Documents/PLAN_30_CLIPPY_ALLOW_AUDIT.md` — Clippy allow audit, conv2 migration
-- `Documents/PLAN_31_DEAD_CODE_AUDIT.md` — Dead code audit (stub)
-- `Documents/PLAN_32_PLAYBACK_FEATURE_FLAG.md` — Playback feature flag (stub)
-- `Documents/PLAN_33_WEZTERM_GHOSTTY_PALETTES.md` — WezTerm and Ghostty color palettes
-- `Documents/PLAN_34_BACKGROUND_OPACITY.md` — Window background opacity
-- `Documents/PLAN_35_KITTY_KEYBOARD_PROTOCOL.md` — Kitty Keyboard Protocol (KKP)
+- `Documents/DESIGN_DECISIONS.md` — Durable architectural decisions from v0.2.0 tasks
+- `Documents/FUTURE_PLANS.md` — Deferred features not yet assigned to a version
+- `Documents/PLAN_VERSION_030.md` — v0.3.0 "Daily Driver" roadmap (Tasks 36–44)
+- `Documents/PLAN_VERSION_040.md` — v0.4.0 "Search & Protocol" roadmap (Tasks 45–52)
+- `Documents/PLAN_VERSION_050.md` — v0.5.0 "Multi-Instance & Visual" roadmap (Tasks 53–56)
+- `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
+- `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
 - `config_example.toml` — Current config format
