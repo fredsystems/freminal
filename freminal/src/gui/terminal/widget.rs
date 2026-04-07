@@ -264,11 +264,18 @@ fn render_context_menu_area(
 
 /// Truncate a URL for display in the context menu, keeping at most `max_len`
 /// characters and appending an ellipsis if truncated.
+///
+/// Uses `char_indices` to find a safe byte boundary so multi-byte UTF-8
+/// URLs are never split mid-character.
 fn truncate_url(url: &str, max_len: usize) -> String {
-    if url.len() <= max_len {
+    if url.chars().count() <= max_len {
         url.to_string()
     } else {
-        let mut s = url[..max_len].to_string();
+        let byte_end = url
+            .char_indices()
+            .nth(max_len)
+            .map_or(url.len(), |(idx, _)| idx);
+        let mut s = url[..byte_end].to_string();
         s.push('…');
         s
     }
@@ -434,11 +441,12 @@ pub struct FreminalTerminalWidget {
     previous_text_blink_fast_visible: bool,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
-    /// Whether a modal dialog was open on the previous frame.
+    /// Whether a UI overlay (modal dialog or dropdown menu) was open on the
+    /// previous frame.
     ///
-    /// Used to suppress input for one extra frame after the modal closes,
+    /// Used to suppress input for one extra frame after the overlay closes,
     /// preventing the dismiss-click from leaking through to the terminal.
-    modal_was_open_last_frame: bool,
+    overlay_was_open_last_frame: bool,
     /// The base egui `FontDefinitions` (without any preview font registered).
     /// Captured at construction and updated on `apply_config_changes`. Used by
     /// the settings modal to register a temporary preview font without losing
@@ -489,7 +497,7 @@ impl FreminalTerminalWidget {
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
             ligatures: config.font.ligatures,
-            modal_was_open_last_frame: false,
+            overlay_was_open_last_frame: false,
             base_font_defs,
         }
     }
@@ -592,8 +600,8 @@ impl FreminalTerminalWidget {
         // Suppress input for one extra frame after a modal closes.
         // This prevents the dismiss-click (Cancel / X / click-away) from
         // leaking through to the terminal as a pointer event.
-        let suppress_input = ui_overlay_open || self.modal_was_open_last_frame;
-        self.modal_was_open_last_frame = ui_overlay_open;
+        let suppress_input = ui_overlay_open || self.overlay_was_open_last_frame;
+        self.overlay_was_open_last_frame = ui_overlay_open;
 
         // Claim the full available space.
         let available = ui.available_size();
@@ -1252,59 +1260,94 @@ mod subtask_1_7_tests {
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");
     }
+
+    #[test]
+    fn truncate_url_no_truncation_when_short() {
+        let url = "https://example.com";
+        let result = super::truncate_url(url, 40);
+        assert_eq!(result, url);
+    }
+
+    #[test]
+    fn truncate_url_truncates_long_ascii() {
+        let url = "https://example.com/very/long/path/that/exceeds/the/limit";
+        let result = super::truncate_url(url, 20);
+        assert_eq!(result.chars().count(), 21); // 20 chars + ellipsis
+        assert!(result.ends_with('…'));
+        assert!(result.starts_with("https://example.com/"));
+    }
+
+    #[test]
+    fn truncate_url_safe_with_multibyte_utf8() {
+        // Each char here is multi-byte in UTF-8 (3 bytes each for CJK).
+        let url = "https://例え.jp/パス/テスト";
+        // Should not panic when truncation falls on a multi-byte boundary.
+        let result = super::truncate_url(url, 12);
+        assert!(result.ends_with('…'));
+        assert_eq!(result.chars().count(), 13); // 12 chars + ellipsis
+    }
+
+    #[test]
+    fn truncate_url_exact_boundary() {
+        let url = "abcde";
+        // Exactly at the limit — no truncation.
+        assert_eq!(super::truncate_url(url, 5), "abcde");
+        // One over — truncates.
+        assert_eq!(super::truncate_url(url, 4), "abcd…");
+    }
 }
 
 #[cfg(test)]
-mod modal_suppress_input_tests {
-    /// Test the one-frame suppression state machine for modal dismiss.
+mod overlay_suppress_input_tests {
+    /// Test the one-frame suppression state machine for overlay dismiss.
     ///
     /// The `suppress_input` flag is computed as:
-    ///   `modal_is_open || self.modal_was_open_last_frame`
-    /// and `modal_was_open_last_frame` is then set to `modal_is_open`.
+    ///   `ui_overlay_open || self.overlay_was_open_last_frame`
+    /// and `overlay_was_open_last_frame` is then set to `ui_overlay_open`.
     ///
     /// This test verifies the state machine transitions without requiring a
     /// full egui context by exercising the boolean logic directly.
     #[test]
     fn suppress_input_state_machine() {
-        // Simulates `modal_was_open_last_frame` field on the widget.
-        let mut modal_was_open_last_frame = false;
+        // Simulates `overlay_was_open_last_frame` field on the widget.
+        let mut overlay_was_open_last_frame = false;
 
         // Helper: compute suppress_input for one "frame" and update the
         // tracking field.  Returns the suppress_input value for that frame.
-        let mut frame = |modal_is_open: bool| -> bool {
-            let suppress = modal_is_open || modal_was_open_last_frame;
-            modal_was_open_last_frame = modal_is_open;
+        let mut frame = |overlay_is_open: bool| -> bool {
+            let suppress = overlay_is_open || overlay_was_open_last_frame;
+            overlay_was_open_last_frame = overlay_is_open;
             suppress
         };
 
-        // Frame 1: modal not open, never was → input NOT suppressed.
-        assert!(!frame(false), "frame 1: no modal → no suppression");
+        // Frame 1: overlay not open, never was → input NOT suppressed.
+        assert!(!frame(false), "frame 1: no overlay → no suppression");
 
-        // Frame 2: modal opens → input suppressed.
-        assert!(frame(true), "frame 2: modal open → suppressed");
+        // Frame 2: overlay opens → input suppressed.
+        assert!(frame(true), "frame 2: overlay open → suppressed");
 
-        // Frame 3: modal still open → input suppressed.
-        assert!(frame(true), "frame 3: modal still open → suppressed");
+        // Frame 3: overlay still open → input suppressed.
+        assert!(frame(true), "frame 3: overlay still open → suppressed");
 
-        // Frame 4: modal closes (dismiss click) → input STILL suppressed
-        // because modal_was_open_last_frame is true.
+        // Frame 4: overlay closes (dismiss click) → input STILL suppressed
+        // because overlay_was_open_last_frame is true.
         assert!(frame(false), "frame 4: dismiss frame → still suppressed");
 
-        // Frame 5: modal closed, was closed last frame → input allowed.
+        // Frame 5: overlay closed, was closed last frame → input allowed.
         assert!(!frame(false), "frame 5: fully closed → input allowed");
 
         // Frame 6: verify stable — stays unsuppressed.
         assert!(!frame(false), "frame 6: stable → input allowed");
     }
 
-    /// Verify that `modal_was_open_last_frame` starts `false` on a fresh
+    /// Verify that `overlay_was_open_last_frame` starts `false` on a fresh
     /// widget, matching the initializer in `FreminalTerminalWidget::new()`.
     #[test]
     fn initial_state_does_not_suppress() {
         // Simulates the initial state of the field after construction.
-        let modal_was_open_last_frame = false;
-        let modal_is_open = false;
-        let suppress = modal_is_open || modal_was_open_last_frame;
+        let overlay_was_open_last_frame = false;
+        let overlay_is_open = false;
+        let suppress = overlay_is_open || overlay_was_open_last_frame;
         assert!(!suppress, "fresh widget should not suppress input");
     }
 }
