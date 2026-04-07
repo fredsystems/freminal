@@ -44,13 +44,18 @@
 #[macro_use]
 extern crate tracing;
 
-use arc_swap::ArcSwap;
-use crossbeam_channel::{Receiver, Sender, unbounded};
-use freminal_common::pty_write::PtyWrite;
-use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
-use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::sync::{Arc, OnceLock};
+
+#[cfg(feature = "playback")]
+use arc_swap::ArcSwap;
+#[cfg(feature = "playback")]
+use crossbeam_channel::unbounded;
+#[cfg(feature = "playback")]
+use freminal_terminal_emulator::interface::TerminalEmulator;
+#[cfg(feature = "playback")]
+use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+#[cfg(feature = "playback")]
+use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -67,244 +72,9 @@ pub mod playback;
 
 use anyhow::Result;
 use freminal_common::{args::Args, config, config::load_config, themes};
+use gui::pty::spawn_pty_tab;
 
 use clap::Parser;
-
-/// The GUI-side endpoints needed to communicate with a single PTY tab.
-///
-/// Returned by [`spawn_pty_tab`] after the PTY consumer thread has been
-/// launched.  All fields are consumed by `gui::tabs::Tab` (or by `gui::run()`
-/// for the initial single-tab path).
-struct TabChannels {
-    /// Lock-free snapshot handle published by the PTY consumer thread.
-    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
-
-    /// Sender for input events (key, resize, focus) to the PTY thread.
-    input_tx: Sender<InputEvent>,
-
-    /// Sender for raw bytes back to the PTY (Report* responses).
-    pty_write_tx: Sender<PtyWrite>,
-
-    /// Receiver for window commands from the PTY thread.
-    window_cmd_rx: Receiver<WindowCommand>,
-
-    /// Receiver for clipboard text extraction responses from the PTY thread.
-    clipboard_rx: Receiver<String>,
-}
-
-/// Spawn a new PTY-backed terminal and its consumer thread.
-///
-/// Creates a `TerminalEmulator`, sets the given theme, wires all channels,
-/// and spawns the PTY consumer thread.  Returns the GUI-side channel
-/// endpoints as a [`TabChannels`].
-///
-/// The `egui_ctx` handle is shared with the PTY thread so it can request
-/// repaints after publishing new snapshots.
-///
-/// # Errors
-///
-/// Returns an error if `TerminalEmulator::new` fails (e.g. the shell
-/// cannot be started).
-fn spawn_pty_tab(
-    args: &Args,
-    scrollback_limit: usize,
-    theme: &'static freminal_common::themes::ThemePalette,
-    egui_ctx: &Arc<OnceLock<eframe::egui::Context>>,
-) -> Result<TabChannels> {
-    let (mut terminal, pty_read_rx) = TerminalEmulator::new(args, Some(scrollback_limit))?;
-
-    // Apply the configured theme so all snapshots carry the correct palette.
-    terminal.internal.handler.set_theme(theme);
-
-    // Shared snapshot (ArcSwap).
-    let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
-        Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
-    let arc_swap_gui = Arc::clone(&arc_swap);
-
-    let pty_write_tx = terminal.clone_write_tx();
-    let child_exit_rx = terminal.child_exit_rx();
-
-    let (input_tx, input_rx) = unbounded::<InputEvent>();
-    let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
-    let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
-
-    let egui_ctx_pty = Arc::clone(egui_ctx);
-
-    spawn_pty_consumer_thread(
-        terminal,
-        pty_read_rx,
-        input_rx,
-        window_cmd_tx,
-        clipboard_tx,
-        child_exit_rx,
-        arc_swap,
-        egui_ctx_pty,
-    );
-
-    Ok(TabChannels {
-        arc_swap: arc_swap_gui,
-        input_tx,
-        pty_write_tx,
-        window_cmd_rx,
-        clipboard_rx,
-    })
-}
-
-/// Spawn the PTY consumer thread that owns a `TerminalEmulator`.
-///
-/// This thread:
-/// - Receives raw PTY output and feeds it to the emulator
-/// - Receives input events from the GUI and forwards them
-/// - Publishes snapshots via `ArcSwap` after each batch
-/// - Sends window commands back to the GUI
-///
-/// The thread exits when the input channel closes (GUI exited), the PTY
-/// read channel closes (shell exited), or the child-exit signal fires.
-// Inherently large: the PTY consumer thread event loop. Each section handles a different
-// signal (PTY read, GUI input, child exit) and must remain together for clarity.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-fn spawn_pty_consumer_thread(
-    terminal: TerminalEmulator,
-    pty_read_rx: Receiver<freminal_terminal_emulator::io::PtyRead>,
-    input_rx: Receiver<InputEvent>,
-    window_cmd_tx: Sender<WindowCommand>,
-    clipboard_tx: Sender<String>,
-    child_exit_rx: Option<Receiver<()>>,
-    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
-    egui_ctx_pty: Arc<OnceLock<eframe::egui::Context>>,
-) {
-    std::thread::spawn(move || {
-        let mut emulator = terminal;
-
-        let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
-
-        // Helper closure: drain window commands, publish snapshot, request repaint.
-        let post_event = |emulator: &mut TerminalEmulator,
-                          window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
-                          arc_swap: &ArcSwap<TerminalSnapshot>,
-                          egui_ctx_pty: &OnceLock<eframe::egui::Context>| {
-            let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
-            for cmd in cmds {
-                use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-                let wc = match &cmd {
-                    WindowManipulation::ReportWindowState
-                    | WindowManipulation::ReportWindowPositionWholeWindow
-                    | WindowManipulation::ReportWindowPositionTextArea
-                    | WindowManipulation::ReportWindowSizeInPixels
-                    | WindowManipulation::ReportWindowTextAreaSizeInPixels
-                    | WindowManipulation::ReportRootWindowSizeInPixels
-                    | WindowManipulation::ReportIconLabel
-                    | WindowManipulation::ReportTitle
-                    | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
-                    _ => WindowCommand::Viewport(cmd),
-                };
-                if let Err(e) = window_cmd_tx.send(wc) {
-                    error!("Failed to send window command to GUI: {e}");
-                }
-            }
-
-            let snap = emulator.build_snapshot();
-            arc_swap.store(Arc::new(snap));
-
-            if let Some(ctx) = egui_ctx_pty.get() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(8));
-            }
-        };
-
-        // Helper closure: process a single InputEvent.
-        let handle_input = |emulator: &mut TerminalEmulator,
-                            msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
-                            clipboard_tx: &crossbeam_channel::Sender<String>|
-         -> bool {
-            match msg {
-                Ok(InputEvent::Resize(w, h, pw, ph)) => {
-                    emulator.handle_resize_event(w, h, pw, ph);
-                }
-                Ok(InputEvent::Key(bytes)) => {
-                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
-                        error!("Failed to forward key bytes to PTY: {e}");
-                    }
-                }
-                Ok(InputEvent::FocusChange(focused)) => {
-                    emulator.internal.send_focus_event(focused);
-                }
-                Ok(InputEvent::ScrollOffset(offset)) => {
-                    emulator.set_gui_scroll_offset(offset);
-                }
-                Ok(InputEvent::ThemeChange(theme)) => {
-                    emulator.internal.handler.set_theme(theme);
-                }
-                Ok(InputEvent::ExtractSelection {
-                    start_row,
-                    start_col,
-                    end_row,
-                    end_col,
-                }) => {
-                    let text =
-                        emulator.extract_selection_text(start_row, start_col, end_row, end_col);
-                    let _ = clipboard_tx.send(text);
-                }
-                #[cfg(feature = "playback")]
-                Ok(InputEvent::PlaybackControl(_)) => {
-                    // Playback commands are handled by the dedicated playback
-                    // consumer thread, not the normal PTY consumer.  Ignore.
-                }
-                Err(_) => {
-                    info!("Input channel closed; consumer thread exiting");
-                    return false;
-                }
-            }
-            true
-        };
-
-        // Primary loop: service PTY reads, GUI input events, and child-exit signals.
-        loop {
-            crossbeam_channel::select! {
-                recv(pty_read_rx) -> msg => {
-                    if let Ok(read) = msg {
-                        emulator.handle_incoming_data(
-                            &read.buf[0..read.read_amount],
-                        );
-                    } else {
-                        info!("PTY read channel closed; requesting GUI close");
-                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
-                        if let Some(ctx) = egui_ctx_pty.get() {
-                            ctx.send_viewport_cmd(
-                                eframe::egui::ViewportCommand::Close,
-                            );
-                        }
-                        return;
-                    }
-                }
-                recv(input_rx) -> msg => {
-                    if !handle_input(&mut emulator, msg, &clipboard_tx) {
-                        return;
-                    }
-                }
-                recv(child_exit) -> _ => {
-                    info!("Child process exited; draining remaining PTY output");
-                    let drain_deadline = std::time::Duration::from_millis(200);
-                    while let Ok(read) = pty_read_rx.recv_timeout(drain_deadline) {
-                        emulator.handle_incoming_data(
-                            &read.buf[0..read.read_amount],
-                        );
-                    }
-
-                    info!("PTY drain complete; requesting GUI close");
-                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
-                    if let Some(ctx) = egui_ctx_pty.get() {
-                        ctx.send_viewport_cmd(
-                            eframe::egui::ViewportCommand::Close,
-                        );
-                    }
-                    return;
-                }
-            }
-
-            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
-        }
-    });
-}
 
 /// Run the normal (non-playback) PTY terminal path.
 ///
@@ -318,6 +88,8 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
     let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
 
     let channels = spawn_pty_tab(&args, cfg.scrollback.limit, theme, &egui_ctx)?;
+
+    let config_path = args.config.clone();
 
     let initial_tab = gui::tabs::Tab {
         id: gui::tabs::TabId::first(),
@@ -334,7 +106,8 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
     gui::run(
         initial_tab,
         cfg,
-        args.config,
+        args,
+        config_path,
         egui_ctx,
         #[cfg(feature = "playback")]
         false,
@@ -517,9 +290,9 @@ fn main() {
     let is_playback = args.playback.is_some();
 
     #[cfg(feature = "playback")]
-    let res = if let Some(ref playback_path) = args.playback {
+    let res = if let Some(playback_path) = args.playback.clone() {
         // ── Playback mode ───────────────────────────────────────────
-        let file_data = match std::fs::read(playback_path) {
+        let file_data = match std::fs::read(&playback_path) {
             Ok(d) => d,
             Err(e) => {
                 error!(
@@ -581,6 +354,7 @@ fn main() {
             );
         });
 
+        let config_path = args.config.clone();
         gui::run(
             gui::tabs::Tab {
                 id: gui::tabs::TabId::first(),
@@ -594,7 +368,8 @@ fn main() {
                 view_state: gui::view_state::ViewState::new(),
             },
             cfg,
-            args.config,
+            args,
+            config_path,
             egui_ctx,
             is_playback,
         )

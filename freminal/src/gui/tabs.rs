@@ -307,6 +307,15 @@ impl TabManager {
             self.active += 1;
         }
     }
+
+    /// Close the currently active tab, returning the removed `Tab`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TabError::CannotCloseLastTab` if only one tab remains.
+    pub fn close_active_tab(&mut self) -> Result<Tab, TabError> {
+        self.close_tab(self.active)
+    }
 }
 
 #[cfg(test)]

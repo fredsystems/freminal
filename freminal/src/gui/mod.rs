@@ -10,6 +10,7 @@ use anyhow::Result;
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
+use freminal_common::args::Args;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::Config;
 use freminal_common::pty_write::PtyWrite;
@@ -26,6 +27,7 @@ pub mod colors;
 pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
+pub mod pty;
 pub mod renderer;
 pub mod settings;
 pub mod shaping;
@@ -82,6 +84,21 @@ fn update_egui_theme(
     });
 }
 
+/// Action requested by the tab bar UI.
+///
+/// Returned by `show_tab_bar()` and consumed by the main `ui()` method
+/// after the panel finishes rendering.
+enum TabBarAction {
+    /// No tab bar interaction this frame.
+    None,
+    /// User clicked the "+" button — spawn a new tab.
+    NewTab,
+    /// User clicked a tab label — switch to tab at `index`.
+    SwitchTo(usize),
+    /// User clicked the "×" close button — close tab at `index`.
+    Close(usize),
+}
+
 struct FreminalGui {
     /// All open terminal tabs, managed by `TabManager`.
     /// Each tab owns its own PTY channels, snapshot handle, and `ViewState`.
@@ -90,6 +107,13 @@ struct FreminalGui {
     terminal_widget: FreminalTerminalWidget,
     window_title_stack: Vec<String>,
     config: Config,
+
+    /// CLI arguments needed for spawning new PTY tabs.
+    args: Args,
+
+    /// Shared egui context handle used by PTY consumer threads to request
+    /// repaints after publishing new snapshots.
+    egui_ctx: Arc<OnceLock<egui::Context>>,
 
     /// Settings modal state (open/close, draft config, tabs).
     settings_modal: SettingsModal,
@@ -114,6 +138,8 @@ impl FreminalGui {
         cc: &eframe::CreationContext<'_>,
         initial_tab: Tab,
         config: Config,
+        args: Args,
+        egui_ctx: Arc<OnceLock<egui::Context>>,
         config_path: Option<std::path::PathBuf>,
         #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
@@ -128,6 +154,8 @@ impl FreminalGui {
                 freminal_common::keybindings::BindingMap::default()
             }),
             config,
+            args,
+            egui_ctx,
             settings_modal: SettingsModal::new(config_path),
             #[cfg(feature = "playback")]
             is_playback,
@@ -165,6 +193,92 @@ impl FreminalGui {
                 self.show_playback_controls(ui, snap);
             }
         });
+    }
+
+    /// Render the tab bar between the menu bar and the terminal area.
+    ///
+    /// Shows one button per open tab (active tab visually distinguished),
+    /// a close button (×) on each tab when more than one tab is open, and
+    /// a "+" button at the end to create new tabs.
+    ///
+    /// Returns a `TabBarAction` describing what the user did (if anything).
+    fn show_tab_bar(&self, ui: &mut egui::Ui) -> TabBarAction {
+        let mut action = TabBarAction::None;
+
+        ui.horizontal(|ui| {
+            let active = self.tabs.active_index();
+            let count = self.tabs.tab_count();
+
+            for (i, tab) in self.tabs.iter().enumerate() {
+                let is_active = i == active;
+                let label = if tab.title.is_empty() {
+                    "Shell".to_owned()
+                } else {
+                    tab.title.clone()
+                };
+
+                // Use a selectable label for tab switching.
+                let response = ui.selectable_label(is_active, &label);
+                if response.clicked() && !is_active {
+                    action = TabBarAction::SwitchTo(i);
+                }
+
+                // Show close button when more than one tab is open.
+                if count > 1 && ui.small_button("\u{00d7}").clicked() {
+                    action = TabBarAction::Close(i);
+                }
+            }
+
+            // "+" button to create a new tab.
+            if ui.small_button("+").clicked() {
+                action = TabBarAction::NewTab;
+            }
+        });
+
+        action
+    }
+
+    /// Spawn a new PTY-backed tab and add it to the tab manager.
+    ///
+    /// Uses the stored `Args` and `Config` to configure the new terminal.
+    /// Logs an error and does nothing if the PTY fails to start.
+    fn spawn_new_tab(&mut self) {
+        let theme = freminal_common::themes::by_slug(&self.config.theme.name)
+            .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+
+        match pty::spawn_pty_tab(
+            &self.args,
+            self.config.scrollback.limit,
+            theme,
+            &self.egui_ctx,
+        ) {
+            Ok(channels) => {
+                let id = self.tabs.next_tab_id();
+                let tab = Tab {
+                    id,
+                    arc_swap: channels.arc_swap,
+                    input_tx: channels.input_tx,
+                    pty_write_tx: channels.pty_write_tx,
+                    window_cmd_rx: channels.window_cmd_rx,
+                    clipboard_rx: channels.clipboard_rx,
+                    title: "Terminal".to_owned(),
+                    bell_active: false,
+                    view_state: view_state::ViewState::new(),
+                };
+                self.tabs.add_tab(tab);
+            }
+            Err(e) => {
+                error!("Failed to spawn new tab: {e}");
+            }
+        }
+    }
+
+    /// Close the tab at `index`. If it is the last tab, does nothing
+    /// (the window close is handled by the PTY exit path instead).
+    fn close_tab(&mut self, index: usize) {
+        if let Err(e) = self.tabs.close_tab(index) {
+            trace!("Cannot close tab: {e}");
+        }
     }
 
     /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
@@ -637,6 +751,24 @@ impl eframe::App for FreminalGui {
             });
         }
 
+        // Tab bar between menu bar and terminal area.
+        // Hidden when only one tab is open (default; 36.7 will add a config
+        // option `tabs.show_single_tab` to override this).
+        if self.tabs.tab_count() > 1 {
+            let tab_action = Panel::top("tab_bar").show_inside(ui, |ui| self.show_tab_bar(ui));
+
+            match tab_action.inner {
+                TabBarAction::NewTab => self.spawn_new_tab(),
+                TabBarAction::SwitchTo(i) => {
+                    if let Err(e) = self.tabs.switch_to(i) {
+                        error!("Failed to switch tab: {e}");
+                    }
+                }
+                TabBarAction::Close(i) => self.close_tab(i),
+                TabBarAction::None => {}
+            }
+        }
+
         let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
             // Synchronise font metrics with the current display scale *before*
             // reading `cell_size()`.  Without this, the first frame after a DPI
@@ -933,6 +1065,7 @@ impl eframe::App for FreminalGui {
 pub fn run(
     initial_tab: Tab,
     config: Config,
+    args: Args,
     config_path: Option<std::path::PathBuf>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
     #[cfg(feature = "playback")] is_playback: bool,
@@ -989,6 +1122,8 @@ pub fn run(
                 cc,
                 initial_tab,
                 config,
+                args,
+                egui_ctx_lock,
                 config_path,
                 #[cfg(feature = "playback")]
                 is_playback,
