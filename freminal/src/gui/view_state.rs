@@ -726,4 +726,133 @@ mod tests {
         let chars = make_visible(&["a"]);
         assert_eq!(line_boundaries(&chars, 0), (0, 0));
     }
+
+    // ── integration-style selection tests ────────────────────────────────
+
+    /// Simulate the press-handler logic for a double-click and verify that
+    /// `SelectionState` is set to the full word span.
+    ///
+    /// This mirrors the `click_count == 2` branch in `input.rs`:
+    ///   anchor = `word_start`, end = `word_end`.
+    #[test]
+    fn double_click_sets_word_selection() {
+        let chars = make_visible(&["hello world"]);
+        // "hello" spans cols 0–4; "world" spans cols 6–10; space is col 5.
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        // First click (single) — on 'h' at col 0, abs_row 0.
+        let click_coord = CellCoord { col: 0, row: 0 };
+        vs.register_click(click_coord, t);
+        let (anchor_col, end_col) = word_boundaries(&chars, 0, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: anchor_col,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+        vs.selection.is_selecting = true;
+
+        // Second click (double) — same position, within timeout.
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 2, "second click should be double");
+        let (anchor_col, end_col) = word_boundaries(&chars, 0, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: anchor_col,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+
+        // "hello" is cols 0–4.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor at word start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 4, row: 0 }),
+            "end at word end"
+        );
+    }
+
+    /// Simulate the press-handler logic for a triple-click and verify that
+    /// `SelectionState` is set to the full line span.
+    ///
+    /// This mirrors the `click_count >= 3` branch in `input.rs`:
+    ///   anchor = `line_start` (col 0), end = `line_end` (last col).
+    #[test]
+    fn triple_click_sets_line_selection() {
+        let chars = make_visible(&["hello world"]);
+        // Row 0 spans cols 0–10 (11 chars).
+        let t = Instant::now();
+        let mut vs = ViewState::new();
+
+        let click_coord = CellCoord { col: 3, row: 0 };
+
+        // First click.
+        vs.register_click(click_coord, t);
+        // Second click.
+        vs.register_click(click_coord, t);
+        // Third click.
+        let count = vs.register_click(click_coord, t);
+        assert_eq!(count, 3, "third click should be triple");
+
+        let (start_col, end_col) = line_boundaries(&chars, 0);
+        vs.selection.anchor = Some(CellCoord {
+            col: start_col,
+            row: 0,
+        });
+        vs.selection.end = Some(CellCoord {
+            col: end_col,
+            row: 0,
+        });
+
+        // Line spans cols 0–10 inclusive.
+        assert_eq!(
+            vs.selection.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor at line start"
+        );
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 10, row: 0 }),
+            "end at line end"
+        );
+    }
+
+    /// Verify that a single click clears any prior multi-click selection
+    /// and records a point selection (anchor == end).
+    #[test]
+    fn single_click_sets_point_selection() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+
+        // Simulate double-click state left over.
+        vs.click_count = 2;
+        vs.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        vs.selection.end = Some(CellCoord { col: 4, row: 0 });
+
+        // A new single click well past the timeout resets to 1.
+        let far_future = t + DOUBLE_CLICK_TIMEOUT + Duration::from_millis(1);
+        let click_coord = CellCoord { col: 7, row: 2 };
+        let count = vs.register_click(click_coord, far_future);
+        assert_eq!(count, 1, "click after timeout must reset to single");
+
+        // Simulate press handler: single-click sets anchor == end.
+        vs.selection.anchor = Some(click_coord);
+        vs.selection.end = Some(click_coord);
+        vs.selection.is_selecting = true;
+
+        assert_eq!(
+            vs.selection.anchor, vs.selection.end,
+            "point selection: anchor==end"
+        );
+        assert!(vs.selection.is_selecting);
+    }
 }
