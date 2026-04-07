@@ -184,6 +184,26 @@ pub struct ViewState {
     /// - `3` — triple click (expand to line boundaries; capped here).
     pub click_count: u8,
 
+    // ── Context menu ─────────────────────────────────────────────────
+    /// Cell coordinate of the most-recent right-click that should open the
+    /// context menu.
+    ///
+    /// Set to `Some(coord)` when:
+    /// - Mouse tracking is OFF and `PointerButton::Secondary` is pressed, or
+    /// - Mouse tracking is ON but Shift is held (escape hatch).
+    ///
+    /// The widget's `show()` method reads this to decide whether to render
+    /// the context menu and to look up the URL under the clicked cell.
+    /// Cleared when the context menu closes.
+    pub context_menu_cell: Option<CellCoord>,
+
+    /// Pixel position (in egui window coordinates) where the context menu
+    /// should appear.  Captured at the moment of the right-click.
+    ///
+    /// `Some(pos)` means the menu is open; `None` means it is closed.
+    /// Cleared when the user picks a menu item or clicks outside the popup.
+    pub context_menu_pos: Option<egui::Pos2>,
+
     // ── Font zoom ────────────────────────────────────────────────────
     /// Session-only font size delta applied on top of the base font size
     /// from the config.
@@ -215,6 +235,8 @@ impl Default for ViewState {
             last_click_time: None,
             last_click_pos: None,
             click_count: 0,
+            context_menu_cell: None,
+            context_menu_pos: None,
             zoom_delta: 0.0,
         }
     }

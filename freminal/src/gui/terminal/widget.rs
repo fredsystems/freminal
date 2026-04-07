@@ -98,6 +98,240 @@ pub(super) fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui
     painter.rect_filled(thumb_rect, rounding, color);
 }
 
+/// Context menu action produced by the right-click popup.
+///
+/// These actions are dispatched after `render_context_menu` returns because
+/// some (e.g. Copy) need clipboard channel access that is threaded through
+/// the caller.
+enum ContextMenuAction {
+    Copy,
+    Paste,
+    SelectAll,
+    OpenUrl(String),
+}
+
+/// Render the right-click context menu when `view_state.context_menu_pos`
+/// is `Some`.
+///
+/// The menu is drawn as an `egui::Area` at the pixel position captured when
+/// the right-click occurred. Items are:
+///
+/// - **Copy** (enabled only when a selection exists)
+/// - **Paste**
+/// - **Select All**
+/// - **Open URL** (shown only when the right-clicked cell is inside a URL span)
+///
+/// When the user clicks outside the popup or picks an item, the menu closes
+/// and the relevant `ViewState` fields are cleared.
+fn render_context_menu(
+    ui: &Ui,
+    snap: &TerminalSnapshot,
+    view_state: &mut ViewState,
+    input_tx: &Sender<InputEvent>,
+    clipboard_rx: &Receiver<String>,
+) {
+    let Some(menu_pos) = view_state.context_menu_pos else {
+        return;
+    };
+
+    let mut action: Option<ContextMenuAction> = None;
+    let mut close = false;
+
+    let area_id = ui.id().with("terminal_context_menu");
+
+    // Always render the Area so that egui tracks its bounds and interaction
+    // state. The `InnerResponse.response` gives us `clicked_elsewhere()`
+    // which uses egui's own layer-aware hit testing — far more reliable
+    // than manually checking `area_rect` from memory.
+    let area_response = render_context_menu_area(
+        ui,
+        snap,
+        view_state,
+        menu_pos,
+        area_id,
+        &mut action,
+        &mut close,
+    );
+
+    // Use egui's built-in `clicked_elsewhere()` for dismiss detection.
+    // This checks `any_click` (fires on pointer *release*, not press),
+    // so the opening right-click press does not cause a false dismissal
+    // on the same frame.
+    if area_response.response.clicked_elsewhere() {
+        close = true;
+    }
+
+    dispatch_context_menu_action(action, ui, view_state, snap, input_tx, clipboard_rx);
+
+    if close {
+        view_state.context_menu_cell = None;
+        view_state.context_menu_pos = None;
+    }
+}
+
+/// Draw the popup area with menu buttons.
+///
+/// Returns the outer `InnerResponse` from `Area::show()` so the caller can
+/// use `response.clicked_elsewhere()` for dismiss detection.
+///
+/// Separated from [`render_context_menu`] to stay within the 100-line
+/// function limit.
+fn render_context_menu_area(
+    ui: &Ui,
+    snap: &TerminalSnapshot,
+    view_state: &ViewState,
+    menu_pos: Pos2,
+    area_id: egui::Id,
+    action: &mut Option<ContextMenuAction>,
+    close: &mut bool,
+) -> egui::InnerResponse<()> {
+    let has_selection = view_state.selection.has_selection();
+
+    // Look up whether the right-clicked cell sits inside a URL span.
+    let url_under_cursor = view_state.context_menu_cell.and_then(|cell| {
+        // `cell.row` is buffer-absolute; convert to screen-relative for tag
+        // lookup in `visible_tags` (which is indexed by flat visible index).
+        let screen_row = cell
+            .row
+            .checked_sub(super::coords::visible_window_start(snap))?;
+        let flat_idx =
+            super::coords::flat_index_for_cell(&snap.visible_chars, screen_row, cell.col)?;
+        snap.visible_tags
+            .iter()
+            .find(|tag| tag.start <= flat_idx && flat_idx < tag.end)
+            .and_then(|tag| tag.url.as_ref())
+            .map(|u| u.url.clone())
+    });
+
+    egui::Area::new(area_id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu_pos)
+        .interactable(true)
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(120.0);
+
+                // Copy — disabled when no text is selected.
+                if ui
+                    .add_enabled(has_selection, egui::Button::new("Copy"))
+                    .clicked()
+                {
+                    *action = Some(ContextMenuAction::Copy);
+                    *close = true;
+                }
+
+                if ui.button("Paste").clicked() {
+                    *action = Some(ContextMenuAction::Paste);
+                    *close = true;
+                }
+
+                ui.separator();
+
+                if ui.button("Select All").clicked() {
+                    *action = Some(ContextMenuAction::SelectAll);
+                    *close = true;
+                }
+
+                // "Open URL" — only shown when the clicked cell is a URL.
+                if let Some(ref url) = url_under_cursor {
+                    ui.separator();
+                    let label = format!("Open {}", truncate_url(url, 40));
+                    if ui.button(label).clicked() {
+                        *action = Some(ContextMenuAction::OpenUrl(url.clone()));
+                        *close = true;
+                    }
+                }
+            });
+        })
+}
+
+/// Truncate a URL for display in the context menu, keeping at most `max_len`
+/// characters and appending an ellipsis if truncated.
+fn truncate_url(url: &str, max_len: usize) -> String {
+    if url.len() <= max_len {
+        url.to_string()
+    } else {
+        let mut s = url[..max_len].to_string();
+        s.push('…');
+        s
+    }
+}
+
+/// Execute the action chosen from the context menu.
+///
+/// Separated from [`render_context_menu`] to stay within the 100-line
+/// function limit.
+fn dispatch_context_menu_action(
+    action: Option<ContextMenuAction>,
+    ui: &Ui,
+    view_state: &mut ViewState,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
+    clipboard_rx: &Receiver<String>,
+) {
+    let Some(action) = action else {
+        return;
+    };
+
+    match action {
+        ContextMenuAction::Copy => {
+            if let Some((start, end)) = view_state.selection.normalised() {
+                if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
+                    start_row: start.row,
+                    start_col: start.col,
+                    end_row: end.row,
+                    end_col: end.col,
+                }) {
+                    error!("Context menu: failed to send ExtractSelection: {e}");
+                } else if let Ok(text) =
+                    clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                    && !text.is_empty()
+                {
+                    ui.ctx().copy_text(text);
+                    view_state.selection.clear();
+                }
+            }
+        }
+        ContextMenuAction::Paste => {
+            // Ask the platform to inject an Event::Paste on the next frame.
+            // egui-winit reads the system clipboard internally and delivers
+            // the content as Event::Paste, which our existing handler in
+            // input.rs already processes (including bracketed paste mode).
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        ContextMenuAction::SelectAll => {
+            // Select from the first visible cell to the last visible cell.
+            let window_start = super::coords::visible_window_start(snap);
+            let last_row = window_start + snap.height.saturating_sub(1);
+            // Find the last column on the last visible row.
+            let last_col = crate::gui::view_state::line_boundaries(
+                &snap.visible_chars,
+                snap.height.saturating_sub(1),
+            )
+            .1;
+            view_state.selection.anchor = Some(CellCoord {
+                col: 0,
+                row: window_start,
+            });
+            view_state.selection.end = Some(CellCoord {
+                col: last_col,
+                row: last_row,
+            });
+            view_state.selection.is_selecting = false;
+        }
+        ContextMenuAction::OpenUrl(url) => {
+            let url_str = url;
+            std::thread::spawn(move || {
+                if let Err(e) = open::that(&url_str) {
+                    error!("Failed to open URL {url_str}: {e}");
+                }
+            });
+        }
+    }
+}
+
 /// GPU resources shared between the main thread (vertex building) and the
 /// egui `PaintCallback` closure (draw calls).
 ///
@@ -348,7 +582,11 @@ impl FreminalTerminalWidget {
         // When the settings modal is open (or was open last frame) we
         // release focus so that Tab and arrow keys work normally inside the
         // modal's egui widgets, and so the dismiss-click is not forwarded.
-        if !suppress_input {
+        //
+        // Also release focus when the right-click context menu is open so
+        // that egui can deliver click events to the Area's buttons.
+        let context_menu_open = view_state.context_menu_pos.is_some();
+        if !suppress_input && !context_menu_open {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -843,7 +1081,7 @@ impl FreminalTerminalWidget {
                     // the render loop on the system's URL handler.
                     std::thread::spawn(move || {
                         if let Err(e) = open::that(&url_str) {
-                            tracing::error!("Failed to open URL {url_str}: {e}");
+                            error!("Failed to open URL {url_str}: {e}");
                         }
                     });
                 }
@@ -857,6 +1095,9 @@ impl FreminalTerminalWidget {
                 output.cursor_icon = CursorIcon::Default;
             });
         }
+
+        // ── Right-click context menu ─────────────────────────────────
+        render_context_menu(ui, snap, view_state, input_tx, clipboard_rx);
 
         deferred_actions
     }

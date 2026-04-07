@@ -1074,12 +1074,26 @@ pub(super) fn write_input_to_terminal(
                 let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
-                let response = handle_pointer_button(
-                    *button,
-                    &new_mouse_position,
-                    effective_mouse_tracking,
-                    mouse_encoding,
-                );
+
+                // Shift+right-click escape hatch: when mouse tracking is
+                // active, holding Shift overrides PTY forwarding so the user
+                // can access the terminal emulator's context menu even inside
+                // mouse-aware applications (tmux, vim, etc.).
+                let shift_right_click = *button == PointerButton::Secondary
+                    && *pressed
+                    && modifiers.shift
+                    && *effective_mouse_tracking != MouseTrack::NoTracking;
+
+                let response = if shift_right_click {
+                    None
+                } else {
+                    handle_pointer_button(
+                        *button,
+                        &new_mouse_position,
+                        effective_mouse_tracking,
+                        mouse_encoding,
+                    )
+                };
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
@@ -1090,8 +1104,18 @@ pub(super) fn write_input_to_terminal(
                 if let Some(response) = response {
                     response
                 } else {
-                    // Mouse tracking is off — handle text selection.
-                    if *button == PointerButton::Primary {
+                    // Mouse tracking is off (or overridden by Shift) — handle
+                    // text selection and right-click context menu.
+                    if *button == PointerButton::Secondary && *pressed {
+                        // Record the right-clicked cell so the widget layer
+                        // can open the context menu and detect URLs.
+                        let abs_row = visible_window_start(snap) + y;
+                        view_state.context_menu_cell = Some(CellCoord {
+                            col: x,
+                            row: abs_row,
+                        });
+                        view_state.context_menu_pos = Some(*pos);
+                    } else if *button == PointerButton::Primary {
                         if *pressed {
                             // Start a new selection at this cell.
                             // Use buffer-absolute row so the selection
