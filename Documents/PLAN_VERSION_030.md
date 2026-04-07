@@ -113,10 +113,20 @@ tab is created inside `FreminalGui::new()` from the channels passed at startup.
    - Extracted `spawn_pty_consumer_thread()` containing the full PTY event loop
    - Simplified `normal_run()` to a 15-line function calling `spawn_pty_tab()` then `gui::run()`
 
-3. **36.3 — Wire `TabManager` into `FreminalGui`**
+3. **36.3 — Wire `TabManager` into `FreminalGui`** ✅ _Complete (2026-04-07)_
    Replace the single `arc_swap`, `input_tx`, `pty_write_tx`, `window_cmd_rx`, `clipboard_rx`
    fields on `FreminalGui` with a `TabManager`. Update `gui::run()` signature. The `update()`
    loop reads from `tabs.active_tab().arc_swap`. Input events go to `tabs.active_tab().input_tx`.
+   - Replaced 5 individual channel/snapshot fields on `FreminalGui` with a single `tabs: TabManager`
+   - Removed `view_state` field (now lives per-tab in `Tab`)
+   - Changed `gui::run()` signature to accept `Tab` instead of individual channels
+   - Updated `FreminalGui::new()` to accept initial `Tab` and build `TabManager`
+   - Updated all access sites in `ui()`: snapshot load, scroll sync, resize, window manipulation,
+     terminal widget show, blink tick, theme change/preview/revert — all go through
+     `self.tabs.active_tab()` / `self.tabs.active_tab_mut()`
+   - Updated `normal_run()` and playback path in `main.rs` to construct `Tab` from `TabChannels`
+   - Added `TabId::first()` constructor
+   - Removed `#[allow(clippy::too_many_arguments)]` from `gui::run()` (down from 9 to 5 params)
 
 4. **36.4 — Tab bar UI rendering**
    Implement the tab bar as an egui `TopBottomPanel` (or `CentralPanel` child). Render tab

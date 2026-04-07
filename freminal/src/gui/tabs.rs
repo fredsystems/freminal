@@ -27,6 +27,14 @@ use super::view_state::ViewState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
 
+impl TabId {
+    /// The initial `TabId` used for the first tab (id 0).
+    #[must_use]
+    pub const fn first() -> Self {
+        Self(0)
+    }
+}
+
 /// A single terminal tab.
 ///
 /// Each tab owns an independent set of channels to its PTY consumer thread

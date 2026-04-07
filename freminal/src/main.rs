@@ -319,14 +319,22 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
 
     let channels = spawn_pty_tab(&args, cfg.scrollback.limit, theme, &egui_ctx)?;
 
+    let initial_tab = gui::tabs::Tab {
+        id: gui::tabs::TabId::first(),
+        arc_swap: channels.arc_swap,
+        input_tx: channels.input_tx,
+        pty_write_tx: channels.pty_write_tx,
+        window_cmd_rx: channels.window_cmd_rx,
+        clipboard_rx: channels.clipboard_rx,
+        title: "Terminal".to_owned(),
+        bell_active: false,
+        view_state: gui::view_state::ViewState::new(),
+    };
+
     gui::run(
-        channels.arc_swap,
+        initial_tab,
         cfg,
         args.config,
-        channels.input_tx,
-        channels.pty_write_tx,
-        channels.window_cmd_rx,
-        channels.clipboard_rx,
         egui_ctx,
         #[cfg(feature = "playback")]
         false,
@@ -574,13 +582,19 @@ fn main() {
         });
 
         gui::run(
-            arc_swap_gui,
+            gui::tabs::Tab {
+                id: gui::tabs::TabId::first(),
+                arc_swap: arc_swap_gui,
+                input_tx,
+                pty_write_tx,
+                window_cmd_rx,
+                clipboard_rx,
+                title: "Playback".to_owned(),
+                bell_active: false,
+                view_state: gui::view_state::ViewState::new(),
+            },
             cfg,
             args.config,
-            input_tx,
-            pty_write_tx,
-            window_cmd_rx,
-            clipboard_rx,
             egui_ctx,
             is_playback,
         )

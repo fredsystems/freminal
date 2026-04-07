@@ -7,7 +7,6 @@ use std::sync::{Arc, OnceLock};
 
 use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
@@ -19,8 +18,8 @@ use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use settings::{SettingsAction, SettingsModal};
+use tabs::{Tab, TabManager};
 use terminal::FreminalTerminalWidget;
-use view_state::ViewState;
 
 pub mod atlas;
 pub mod colors;
@@ -84,30 +83,16 @@ fn update_egui_theme(
 }
 
 struct FreminalGui {
-    /// The latest terminal snapshot published by the PTY consumer thread.
-    /// Loaded lock-free via a single atomic pointer swap.
-    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+    /// All open terminal tabs, managed by `TabManager`.
+    /// Each tab owns its own PTY channels, snapshot handle, and `ViewState`.
+    tabs: TabManager,
 
     terminal_widget: FreminalTerminalWidget,
-    view_state: ViewState,
     window_title_stack: Vec<String>,
     config: Config,
 
     /// Settings modal state (open/close, draft config, tabs).
     settings_modal: SettingsModal,
-
-    /// Channel sender used to deliver input events (key, resize, focus) to the
-    /// PTY consumer thread.
-    input_tx: Sender<InputEvent>,
-
-    /// Sender used to write raw bytes back to the PTY (for Report* responses).
-    pty_write_tx: Sender<PtyWrite>,
-
-    /// Receiver for window manipulation commands produced by the PTY thread.
-    window_cmd_rx: Receiver<WindowCommand>,
-
-    /// Receiver for clipboard text extraction responses from the PTY thread.
-    clipboard_rx: Receiver<String>,
 
     /// Compiled key-binding map from config. Rebuilt when the user applies
     /// new settings. Passed into the terminal widget on every frame so that
@@ -125,26 +110,18 @@ struct FreminalGui {
 }
 
 impl FreminalGui {
-    // All parameters are required to construct the GUI: channels, snapshot handle, config, and
-    // font settings. Grouping into a builder struct would add complexity without reducing count.
-    #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
-        arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+        initial_tab: Tab,
         config: Config,
         config_path: Option<std::path::PathBuf>,
-        input_tx: Sender<InputEvent>,
-        pty_write_tx: Sender<PtyWrite>,
-        window_cmd_rx: Receiver<WindowCommand>,
-        clipboard_rx: Receiver<String>,
         #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
         set_egui_options(&cc.egui_ctx, config.ui.background_opacity);
 
         Self {
-            arc_swap,
+            tabs: TabManager::new(initial_tab),
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
-            view_state: ViewState::new(),
             window_title_stack: Vec::new(),
             binding_map: config.build_binding_map().unwrap_or_else(|e| {
                 error!("Failed to build binding map from config: {e}. Using defaults.");
@@ -152,10 +129,6 @@ impl FreminalGui {
             }),
             config,
             settings_modal: SettingsModal::new(config_path),
-            input_tx,
-            pty_write_tx,
-            window_cmd_rx,
-            clipboard_rx,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -296,7 +269,12 @@ impl FreminalGui {
     /// Send a playback command to the consumer thread via the input channel.
     #[cfg(feature = "playback")]
     fn send_playback_cmd(&self, cmd: PlaybackCommand) {
-        if let Err(e) = self.input_tx.send(InputEvent::PlaybackControl(cmd)) {
+        if let Err(e) = self
+            .tabs
+            .active_tab()
+            .input_tx
+            .send(InputEvent::PlaybackControl(cmd))
+        {
             error!("Failed to send playback command: {e}");
         }
     }
@@ -642,14 +620,14 @@ impl eframe::App for FreminalGui {
         let now = std::time::Instant::now();
 
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
-        let snap = self.arc_swap.load();
+        let snap = self.tabs.active_tab().arc_swap.load();
 
         // Sync the GUI's scroll offset from the snapshot.  When new PTY output
         // arrives the PTY thread resets its offset to 0, so the snapshot will
         // carry scroll_offset = 0 even if the GUI previously sent a non-zero
         // value.  Adopting the snapshot's value keeps ViewState in sync.
-        if self.view_state.scroll_offset != snap.scroll_offset {
-            self.view_state.scroll_offset = snap.scroll_offset;
+        if self.tabs.active_tab().view_state.scroll_offset != snap.scroll_offset {
+            self.tabs.active_tab_mut().view_state.scroll_offset = snap.scroll_offset;
         }
 
         // Menu bar at the top of the window.
@@ -695,8 +673,8 @@ impl eframe::App for FreminalGui {
             // Debounced resize: only send an InputEvent::Resize when the
             // character-cell dimensions actually change.
             let new_size = (width_chars, height_chars);
-            if new_size != self.view_state.last_sent_size {
-                if let Err(e) = self.input_tx.send(InputEvent::Resize(
+            if new_size != self.tabs.active_tab().view_state.last_sent_size {
+                if let Err(e) = self.tabs.active_tab().input_tx.send(InputEvent::Resize(
                     width_chars,
                     height_chars,
                     font_width,
@@ -704,7 +682,7 @@ impl eframe::App for FreminalGui {
                 )) {
                     error!("Failed to send resize event: {e}");
                 } else {
-                    self.view_state.last_sent_size = new_size;
+                    self.tabs.active_tab_mut().view_state.last_sent_size = new_size;
                 }
             }
 
@@ -712,8 +690,8 @@ impl eframe::App for FreminalGui {
 
             handle_window_manipulation(
                 ui,
-                &self.window_cmd_rx,
-                &self.pty_write_tx,
+                &self.tabs.active_tab().window_cmd_rx,
+                &self.tabs.active_tab().pty_write_tx,
                 font_width,
                 font_height,
                 window_width,
@@ -755,12 +733,13 @@ impl eframe::App for FreminalGui {
                 });
             }
 
+            let tab = self.tabs.active_tab_mut();
             let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
-                &mut self.view_state,
-                &self.input_tx,
-                &self.clipboard_rx,
+                &mut tab.view_state,
+                &tab.input_tx,
+                &tab.clipboard_rx,
                 self.settings_modal.is_open,
                 bg_opacity,
                 &self.binding_map,
@@ -804,7 +783,7 @@ impl eframe::App for FreminalGui {
 
             // Advance the text blink cycle when blinking text is present.
             if snap.has_blinking_text {
-                self.view_state.tick_text_blink();
+                self.tabs.active_tab_mut().view_state.tick_text_blink();
             }
 
             if snap.content_changed || cursor_is_blinking || snap.has_blinking_text {
@@ -854,7 +833,12 @@ impl eframe::App for FreminalGui {
                 if new_cfg.theme.name != self.config.theme.name
                     && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
                 {
-                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    if let Err(e) = self
+                        .tabs
+                        .active_tab()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
                         error!("Failed to send ThemeChange to PTY thread: {e}");
                     }
                     update_egui_theme(ui.ctx(), theme, new_cfg.ui.background_opacity);
@@ -878,7 +862,12 @@ impl eframe::App for FreminalGui {
             }
             SettingsAction::PreviewTheme(ref slug) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    if let Err(e) = self
+                        .tabs
+                        .active_tab()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
                         error!("Failed to send theme preview to PTY thread: {e}");
                     }
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
@@ -886,7 +875,12 @@ impl eframe::App for FreminalGui {
             }
             SettingsAction::RevertTheme(ref slug, original_opacity) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    if let Err(e) = self.input_tx.send(InputEvent::ThemeChange(theme)) {
+                    if let Err(e) = self
+                        .tabs
+                        .active_tab()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
                         error!("Failed to send theme revert to PTY thread: {e}");
                     }
                     // Restore opacity first so update_egui_theme uses the
@@ -936,17 +930,10 @@ impl eframe::App for FreminalGui {
 ///
 /// # Errors
 /// Will return an error if the GUI fails to run
-// All parameters are required to wire the GUI to the PTY thread: snapshot handle, channels,
-// config, and font. Grouping into a struct would hide required coupling without reducing it.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
-    arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+    initial_tab: Tab,
     config: Config,
     config_path: Option<std::path::PathBuf>,
-    input_tx: Sender<InputEvent>,
-    pty_write_tx: Sender<PtyWrite>,
-    window_cmd_rx: Receiver<WindowCommand>,
-    clipboard_rx: Receiver<String>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
     #[cfg(feature = "playback")] is_playback: bool,
 ) -> Result<()> {
@@ -1000,13 +987,9 @@ pub fn run(
 
             Ok(Box::new(FreminalGui::new(
                 cc,
-                arc_swap,
+                initial_tab,
                 config,
                 config_path,
-                input_tx,
-                pty_write_tx,
-                window_cmd_rx,
-                clipboard_rx,
                 #[cfg(feature = "playback")]
                 is_playback,
             )))
