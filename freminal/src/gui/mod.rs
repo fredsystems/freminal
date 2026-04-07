@@ -30,6 +30,7 @@ pub mod mouse;
 pub mod renderer;
 pub mod settings;
 pub mod shaping;
+pub mod tabs;
 pub mod terminal;
 pub mod view_state;
 

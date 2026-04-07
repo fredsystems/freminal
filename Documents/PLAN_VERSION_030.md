@@ -12,7 +12,7 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 
 | #   | Feature                       | Scope        | Status   |
 | --- | ----------------------------- | ------------ | -------- |
-| 36  | Tabs                          | Large        | Pending  |
+| 36  | Tabs                          | Large        | Active   |
 | 37  | Configurable Key Bindings     | Medium-Large | Complete |
 | 38  | Double/Triple-Click Selection | Small-Medium | Pending  |
 | 39  | Right-Click Context Menu      | Small-Medium | Pending  |
@@ -89,10 +89,18 @@ tab is created inside `FreminalGui::new()` from the channels passed at startup.
 
 ### 36 Subtasks
 
-1. **36.1 — Tab data model and `TabManager`**
+1. **36.1 — Tab data model and `TabManager`** ✅ _Complete (2026-04-07)_
    Create `freminal/src/gui/tabs.rs` with `Tab` struct and `TabManager`. Include methods:
    `new_tab()`, `close_tab(index)`, `active_tab()`, `switch_to(index)`, `move_tab(from, to)`.
    Unit tests for all operations.
+   - Created `Tab` struct with `TabId`, `ArcSwap`, channel senders/receivers, title, bell state,
+     and per-tab `ViewState`
+   - Created `TabManager` with `new()`, `next_tab_id()`, `active_tab()`, `active_tab_mut()`,
+     `active_index()`, `tab_count()`, `iter()`, `iter_mut()`, `add_tab()`, `close_tab()`,
+     `switch_to()`, `next_tab()`, `prev_tab()`, `move_tab()`, `move_active_left()`,
+     `move_active_right()`
+   - Created `TabError` enum with `IndexOutOfBounds`, `CannotCloseLastTab`, `MoveToSelf`
+   - 22 unit tests covering all operations, edge cases, and error conditions
 
 2. **36.2 — Extract PTY setup into reusable function**
    Refactor `normal_run()` in `main.rs` to extract the PTY thread creation (TerminalEmulator,
