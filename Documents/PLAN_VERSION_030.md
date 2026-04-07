@@ -259,9 +259,12 @@ are discoverable and configurable.
    - Read-only mode (managed_by) automatically disables all edit fields
    - Tests updated: `all_tabs_present` (7→8), `settings_tab_labels` (+Keybindings)
 
-5. **37.5 — Home-manager module update**
+5. **37.5 — Home-manager module update** ✅ _Complete (2026-04-06)_
    Add `keybindings` options to `nix/home-manager-module.nix` so Nix users can declaratively
    configure keybindings.
+   - Added `keybindings` option as `attrsOf str` with example and full action list in description
+   - Added `keybindingsSection` to config attrset builder with conditional inclusion
+   - Default is empty attrset (no overrides), only included in generated TOML when non-empty
 
 6. **37.6 — Update `agents.md`**
    Add the keybinding mapping rule to `agents.md` under a new "Keybinding Convention" section:
