@@ -1074,12 +1074,26 @@ pub(super) fn write_input_to_terminal(
                 let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
-                let response = handle_pointer_button(
-                    *button,
-                    &new_mouse_position,
-                    effective_mouse_tracking,
-                    mouse_encoding,
-                );
+
+                // Shift+right-click escape hatch: when mouse tracking is
+                // active, holding Shift overrides PTY forwarding so the user
+                // can access the terminal emulator's context menu even inside
+                // mouse-aware applications (tmux, vim, etc.).
+                let shift_right_click = *button == PointerButton::Secondary
+                    && *pressed
+                    && modifiers.shift
+                    && *effective_mouse_tracking != MouseTrack::NoTracking;
+
+                let response = if shift_right_click {
+                    None
+                } else {
+                    handle_pointer_button(
+                        *button,
+                        &new_mouse_position,
+                        effective_mouse_tracking,
+                        mouse_encoding,
+                    )
+                };
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
@@ -1090,9 +1104,31 @@ pub(super) fn write_input_to_terminal(
                 if let Some(response) = response {
                     response
                 } else {
-                    // Mouse tracking is off — handle text selection.
-                    if *button == PointerButton::Primary {
+                    // Mouse tracking is off (or overridden by Shift) — handle
+                    // text selection and right-click context menu.
+                    if *button == PointerButton::Secondary && *pressed {
+                        // Record the right-clicked cell so the widget layer
+                        // can open the context menu and detect URLs.
+                        let abs_row = visible_window_start(snap) + y;
+                        view_state.context_menu_cell = Some(CellCoord {
+                            col: x,
+                            row: abs_row,
+                        });
+                        view_state.context_menu_pos = Some(*pos);
+                    } else if *button == PointerButton::Primary {
                         if *pressed {
+                            // If there is an active selection, this click
+                            // should ONLY clear it — not start a new one.
+                            // The user must click a second time to begin
+                            // selecting again. This matches the behaviour
+                            // of most terminal emulators (iTerm2, kitty,
+                            // Alacritty, GNOME Terminal).
+                            if view_state.selection.has_selection() {
+                                view_state.selection.clear();
+                                view_state.click_count = 0;
+                                continue;
+                            }
+
                             // Start a new selection at this cell.
                             // Use buffer-absolute row so the selection
                             // survives scroll offset changes.
@@ -1144,11 +1180,21 @@ pub(super) fn write_input_to_terminal(
                             // mouse position on release.
                             let abs_row = visible_window_start(snap) + y;
                             let end_col = release_end_col(view_state, snap, x, y, abs_row);
-                            view_state.selection.end = Some(CellCoord {
+                            let end_coord = CellCoord {
                                 col: end_col,
                                 row: abs_row,
-                            });
+                            };
+                            view_state.selection.end = Some(end_coord);
                             view_state.selection.is_selecting = false;
+
+                            // If anchor == end the user clicked without
+                            // dragging — there is no real selection.
+                            // Clear it so the next click starts fresh
+                            // rather than hitting the "clear existing
+                            // selection" path.
+                            if view_state.selection.anchor == Some(end_coord) {
+                                view_state.selection.clear();
+                            }
                         }
                     }
                     continue;

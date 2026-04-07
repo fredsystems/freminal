@@ -15,8 +15,8 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 | 36  | Tabs                          | Large        | Complete |
 | 37  | Configurable Key Bindings     | Medium-Large | Complete |
 | 38  | Double/Triple-Click Selection | Small-Medium | Complete |
-| 39  | Right-Click Context Menu      | Small-Medium | Pending  |
-| 40  | Font Zoom                     | Small-Medium | Pending  |
+| 39  | Right-Click Context Menu      | Small-Medium | Complete |
+| 40  | Font Zoom                     | Small-Medium | Complete |
 | 41  | Bell Handling (Visual Only)   | Small        | Pending  |
 | 42  | Drag-and-Drop                 | Small        | Pending  |
 | 43  | OSC 52 Clipboard Read         | Small        | Pending  |
@@ -425,16 +425,20 @@ Use egui's built-in context menu (`response.context_menu()`). Menu items:
 
 ### 39 Subtasks
 
-1. **39.1 — Context menu rendering**
+1. **39.1 — Context menu rendering** ✅
    Add context menu to the terminal widget in `terminal/widget.rs`. Wire up Copy, Paste,
    Select All, Clear actions.
 
-2. **39.2 — URL detection on right-click**
+2. **39.2 — URL detection on right-click** ✅
    The snapshot already contains URL data. On right-click, determine if the clicked cell is
    within a URL span. If so, add "Open URL" menu item that calls `open::that(url)`.
 
-3. **39.3 — Tests**
+3. **39.3 — Tests** ✅
    Unit tests for URL span detection at a given cell coordinate.
+
+4. **39.4 — New Terminal menu item + Close Tab guard** ✅
+   Add "New Terminal" item to the right-click context menu (propagates `KeyAction::NewTab`
+   through deferred actions). Disable "Close Tab" in the Tab menu bar when only one tab is open.
 
 ### 39 Primary Files
 

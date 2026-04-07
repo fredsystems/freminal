@@ -98,6 +98,271 @@ pub(super) fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui
     painter.rect_filled(thumb_rect, rounding, color);
 }
 
+/// Context menu action produced by the right-click popup.
+///
+/// These actions are dispatched after `render_context_menu` returns because
+/// some (e.g. Copy) need clipboard channel access that is threaded through
+/// the caller.
+enum ContextMenuAction {
+    Copy,
+    Paste,
+    SelectAll,
+    OpenUrl(String),
+    NewTerminal,
+}
+
+/// Render the right-click context menu when `view_state.context_menu_pos`
+/// is `Some`.
+///
+/// The menu is drawn as an `egui::Area` at the pixel position captured when
+/// the right-click occurred. Items are:
+///
+/// - **Copy** (enabled only when a selection exists)
+/// - **Paste**
+/// - **Select All**
+/// - **New Terminal** (opens a new tab)
+/// - **Open URL** (shown only when the right-clicked cell is inside a URL span)
+///
+/// When the user clicks outside the popup or picks an item, the menu closes
+/// and the relevant `ViewState` fields are cleared.
+///
+/// Actions that require full GUI state (e.g. spawning a new tab) are pushed
+/// onto `deferred_actions` so the caller can dispatch them after this returns.
+fn render_context_menu(
+    ui: &Ui,
+    snap: &TerminalSnapshot,
+    view_state: &mut ViewState,
+    input_tx: &Sender<InputEvent>,
+    clipboard_rx: &Receiver<String>,
+    deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
+) {
+    let Some(menu_pos) = view_state.context_menu_pos else {
+        return;
+    };
+
+    let mut action: Option<ContextMenuAction> = None;
+    let mut close = false;
+
+    let area_id = ui.id().with("terminal_context_menu");
+
+    // Always render the Area so that egui tracks its bounds and interaction
+    // state. The `InnerResponse.response` gives us `clicked_elsewhere()`
+    // which uses egui's own layer-aware hit testing — far more reliable
+    // than manually checking `area_rect` from memory.
+    let area_response = render_context_menu_area(
+        ui,
+        snap,
+        view_state,
+        menu_pos,
+        area_id,
+        &mut action,
+        &mut close,
+    );
+
+    // Use egui's built-in `clicked_elsewhere()` for dismiss detection.
+    // This checks `any_click` (fires on pointer *release*, not press),
+    // so the opening right-click press does not cause a false dismissal
+    // on the same frame.
+    if area_response.response.clicked_elsewhere() {
+        close = true;
+    }
+
+    dispatch_context_menu_action(
+        action,
+        ui,
+        view_state,
+        snap,
+        input_tx,
+        clipboard_rx,
+        deferred_actions,
+    );
+
+    if close {
+        view_state.context_menu_cell = None;
+        view_state.context_menu_pos = None;
+    }
+}
+
+/// Draw the popup area with menu buttons.
+///
+/// Returns the outer `InnerResponse` from `Area::show()` so the caller can
+/// use `response.clicked_elsewhere()` for dismiss detection.
+///
+/// Separated from [`render_context_menu`] to stay within the 100-line
+/// function limit.
+fn render_context_menu_area(
+    ui: &Ui,
+    snap: &TerminalSnapshot,
+    view_state: &ViewState,
+    menu_pos: Pos2,
+    area_id: egui::Id,
+    action: &mut Option<ContextMenuAction>,
+    close: &mut bool,
+) -> egui::InnerResponse<()> {
+    let has_selection = view_state.selection.has_selection();
+
+    // Look up whether the right-clicked cell sits inside a URL span.
+    let url_under_cursor = view_state.context_menu_cell.and_then(|cell| {
+        super::coords::url_at_cell(
+            cell.row,
+            cell.col,
+            &snap.visible_chars,
+            &snap.visible_tags,
+            super::coords::visible_window_start(snap),
+        )
+    });
+
+    egui::Area::new(area_id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu_pos)
+        .interactable(true)
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(120.0);
+
+                // Copy — disabled when no text is selected.
+                if ui
+                    .add_enabled(has_selection, egui::Button::new("Copy"))
+                    .clicked()
+                {
+                    *action = Some(ContextMenuAction::Copy);
+                    *close = true;
+                }
+
+                if ui.button("Paste").clicked() {
+                    *action = Some(ContextMenuAction::Paste);
+                    *close = true;
+                }
+
+                ui.separator();
+
+                if ui.button("Select All").clicked() {
+                    *action = Some(ContextMenuAction::SelectAll);
+                    *close = true;
+                }
+
+                ui.separator();
+
+                if ui.button("New Terminal").clicked() {
+                    *action = Some(ContextMenuAction::NewTerminal);
+                    *close = true;
+                }
+
+                // "Open URL" — only shown when the clicked cell is a URL.
+                if let Some(ref url) = url_under_cursor {
+                    ui.separator();
+                    let label = format!("Open {}", truncate_url(url, 40));
+                    if ui.button(label).clicked() {
+                        *action = Some(ContextMenuAction::OpenUrl(url.clone()));
+                        *close = true;
+                    }
+                }
+            });
+        })
+}
+
+/// Truncate a URL for display in the context menu, keeping at most `max_len`
+/// characters and appending an ellipsis if truncated.
+///
+/// Uses `char_indices` to find a safe byte boundary so multi-byte UTF-8
+/// URLs are never split mid-character.
+fn truncate_url(url: &str, max_len: usize) -> String {
+    if url.chars().count() <= max_len {
+        url.to_string()
+    } else {
+        let byte_end = url
+            .char_indices()
+            .nth(max_len)
+            .map_or(url.len(), |(idx, _)| idx);
+        let mut s = url[..byte_end].to_string();
+        s.push('…');
+        s
+    }
+}
+
+/// Execute the action chosen from the context menu.
+///
+/// Separated from [`render_context_menu`] to stay within the 100-line
+/// function limit.
+///
+/// Actions that require full GUI state (e.g. `NewTerminal`) are pushed onto
+/// `deferred_actions` rather than executed directly, because this function
+/// does not have access to `FreminalGui` or `TabManager`.
+fn dispatch_context_menu_action(
+    action: Option<ContextMenuAction>,
+    ui: &Ui,
+    view_state: &mut ViewState,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
+    clipboard_rx: &Receiver<String>,
+    deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
+) {
+    let Some(action) = action else {
+        return;
+    };
+
+    match action {
+        ContextMenuAction::Copy => {
+            if let Some((start, end)) = view_state.selection.normalised() {
+                if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
+                    start_row: start.row,
+                    start_col: start.col,
+                    end_row: end.row,
+                    end_col: end.col,
+                }) {
+                    error!("Context menu: failed to send ExtractSelection: {e}");
+                } else if let Ok(text) =
+                    clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                    && !text.is_empty()
+                {
+                    ui.ctx().copy_text(text);
+                    view_state.selection.clear();
+                }
+            }
+        }
+        ContextMenuAction::Paste => {
+            // Ask the platform to inject an Event::Paste on the next frame.
+            // egui-winit reads the system clipboard internally and delivers
+            // the content as Event::Paste, which our existing handler in
+            // input.rs already processes (including bracketed paste mode).
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        ContextMenuAction::SelectAll => {
+            // Select from the first visible cell to the last visible cell.
+            let window_start = super::coords::visible_window_start(snap);
+            let last_row = window_start + snap.height.saturating_sub(1);
+            // Find the last column on the last visible row.
+            let last_col = crate::gui::view_state::line_boundaries(
+                &snap.visible_chars,
+                snap.height.saturating_sub(1),
+            )
+            .1;
+            view_state.selection.anchor = Some(CellCoord {
+                col: 0,
+                row: window_start,
+            });
+            view_state.selection.end = Some(CellCoord {
+                col: last_col,
+                row: last_row,
+            });
+            view_state.selection.is_selecting = false;
+        }
+        ContextMenuAction::OpenUrl(url) => {
+            let url_str = url;
+            std::thread::spawn(move || {
+                if let Err(e) = open::that(&url_str) {
+                    error!("Failed to open URL {url_str}: {e}");
+                }
+            });
+        }
+        ContextMenuAction::NewTerminal => {
+            deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
+        }
+    }
+}
+
 /// GPU resources shared between the main thread (vertex building) and the
 /// egui `PaintCallback` closure (draw calls).
 ///
@@ -176,11 +441,12 @@ pub struct FreminalTerminalWidget {
     previous_text_blink_fast_visible: bool,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
-    /// Whether a modal dialog was open on the previous frame.
+    /// Whether a UI overlay (modal dialog or dropdown menu) was open on the
+    /// previous frame.
     ///
-    /// Used to suppress input for one extra frame after the modal closes,
+    /// Used to suppress input for one extra frame after the overlay closes,
     /// preventing the dismiss-click from leaking through to the terminal.
-    modal_was_open_last_frame: bool,
+    overlay_was_open_last_frame: bool,
     /// The base egui `FontDefinitions` (without any preview font registered).
     /// Captured at construction and updated on `apply_config_changes`. Used by
     /// the settings modal to register a temporary preview font without losing
@@ -231,7 +497,7 @@ impl FreminalTerminalWidget {
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
             ligatures: config.font.ligatures,
-            modal_was_open_last_frame: false,
+            overlay_was_open_last_frame: false,
             base_font_defs,
         }
     }
@@ -295,7 +561,7 @@ impl FreminalTerminalWidget {
     /// - `view_state` — GUI-local scroll, selection, blink, and focus state.
     /// - `input_tx` — channel to send keyboard/resize/focus events to the PTY.
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
-    /// - `modal_is_open` — suppresses terminal input while a modal is visible.
+    /// - `ui_overlay_open` — suppresses terminal input while a modal or menu dropdown is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
@@ -311,7 +577,7 @@ impl FreminalTerminalWidget {
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
-        modal_is_open: bool,
+        ui_overlay_open: bool,
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
     ) -> Vec<freminal_common::keybindings::KeyAction> {
@@ -334,8 +600,8 @@ impl FreminalTerminalWidget {
         // Suppress input for one extra frame after a modal closes.
         // This prevents the dismiss-click (Cancel / X / click-away) from
         // leaking through to the terminal as a pointer event.
-        let suppress_input = modal_is_open || self.modal_was_open_last_frame;
-        self.modal_was_open_last_frame = modal_is_open;
+        let suppress_input = ui_overlay_open || self.overlay_was_open_last_frame;
+        self.overlay_was_open_last_frame = ui_overlay_open;
 
         // Claim the full available space.
         let available = ui.available_size();
@@ -348,7 +614,11 @@ impl FreminalTerminalWidget {
         // When the settings modal is open (or was open last frame) we
         // release focus so that Tab and arrow keys work normally inside the
         // modal's egui widgets, and so the dismiss-click is not forwarded.
-        if !suppress_input {
+        //
+        // Also release focus when the right-click context menu is open so
+        // that egui can deliver click events to the Area's buttons.
+        let context_menu_open = view_state.context_menu_pos.is_some();
+        if !suppress_input && !context_menu_open {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -380,13 +650,15 @@ impl FreminalTerminalWidget {
         // (e.g. clicks on the tab bar).
         let terminal_rect = ui.available_rect_before_wrap();
 
-        // When a modal dialog (e.g. the settings window) is open — or was
-        // open last frame — do NOT forward keyboard/mouse events to the PTY.
-        // The one-frame delay prevents the dismiss-click from leaking through
-        // as a pointer event, and resets stale inter-frame state so the next
-        // real input starts from a clean slate.
+        // When a modal dialog (e.g. the settings window) or the right-click
+        // context menu is open — or the modal was open last frame — do NOT
+        // forward keyboard/mouse events to the PTY.  For modals, the one-frame
+        // delay prevents the dismiss-click from leaking through as a pointer
+        // event.  For the context menu, suppression ensures that clicking a
+        // menu button (e.g. Copy) is delivered to egui's Area widget instead
+        // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
-        if suppress_input {
+        if suppress_input || context_menu_open {
             self.previous_key = None;
             self.previous_mouse_state = None;
             self.previous_scroll_amount = 0.0;
@@ -843,7 +1115,7 @@ impl FreminalTerminalWidget {
                     // the render loop on the system's URL handler.
                     std::thread::spawn(move || {
                         if let Err(e) = open::that(&url_str) {
-                            tracing::error!("Failed to open URL {url_str}: {e}");
+                            error!("Failed to open URL {url_str}: {e}");
                         }
                     });
                 }
@@ -857,6 +1129,16 @@ impl FreminalTerminalWidget {
                 output.cursor_icon = CursorIcon::Default;
             });
         }
+
+        // ── Right-click context menu ─────────────────────────────────
+        render_context_menu(
+            ui,
+            snap,
+            view_state,
+            input_tx,
+            clipboard_rx,
+            &mut deferred_actions,
+        );
 
         deferred_actions
     }
@@ -921,6 +1203,10 @@ impl FreminalTerminalWidget {
             rs.atlas.clear();
             drop(rs);
             self.shaping_cache.clear();
+            // Force a full vertex rebuild on the next frame.  The existing
+            // VBO data was built for the old cell pixel size and must not be
+            // reused.
+            self.last_rendered_visible = None;
         }
     }
 
@@ -974,59 +1260,94 @@ mod subtask_1_7_tests {
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");
     }
+
+    #[test]
+    fn truncate_url_no_truncation_when_short() {
+        let url = "https://example.com";
+        let result = super::truncate_url(url, 40);
+        assert_eq!(result, url);
+    }
+
+    #[test]
+    fn truncate_url_truncates_long_ascii() {
+        let url = "https://example.com/very/long/path/that/exceeds/the/limit";
+        let result = super::truncate_url(url, 20);
+        assert_eq!(result.chars().count(), 21); // 20 chars + ellipsis
+        assert!(result.ends_with('…'));
+        assert!(result.starts_with("https://example.com/"));
+    }
+
+    #[test]
+    fn truncate_url_safe_with_multibyte_utf8() {
+        // Each char here is multi-byte in UTF-8 (3 bytes each for CJK).
+        let url = "https://例え.jp/パス/テスト";
+        // Should not panic when truncation falls on a multi-byte boundary.
+        let result = super::truncate_url(url, 12);
+        assert!(result.ends_with('…'));
+        assert_eq!(result.chars().count(), 13); // 12 chars + ellipsis
+    }
+
+    #[test]
+    fn truncate_url_exact_boundary() {
+        let url = "abcde";
+        // Exactly at the limit — no truncation.
+        assert_eq!(super::truncate_url(url, 5), "abcde");
+        // One over — truncates.
+        assert_eq!(super::truncate_url(url, 4), "abcd…");
+    }
 }
 
 #[cfg(test)]
-mod modal_suppress_input_tests {
-    /// Test the one-frame suppression state machine for modal dismiss.
+mod overlay_suppress_input_tests {
+    /// Test the one-frame suppression state machine for overlay dismiss.
     ///
     /// The `suppress_input` flag is computed as:
-    ///   `modal_is_open || self.modal_was_open_last_frame`
-    /// and `modal_was_open_last_frame` is then set to `modal_is_open`.
+    ///   `ui_overlay_open || self.overlay_was_open_last_frame`
+    /// and `overlay_was_open_last_frame` is then set to `ui_overlay_open`.
     ///
     /// This test verifies the state machine transitions without requiring a
     /// full egui context by exercising the boolean logic directly.
     #[test]
     fn suppress_input_state_machine() {
-        // Simulates `modal_was_open_last_frame` field on the widget.
-        let mut modal_was_open_last_frame = false;
+        // Simulates `overlay_was_open_last_frame` field on the widget.
+        let mut overlay_was_open_last_frame = false;
 
         // Helper: compute suppress_input for one "frame" and update the
         // tracking field.  Returns the suppress_input value for that frame.
-        let mut frame = |modal_is_open: bool| -> bool {
-            let suppress = modal_is_open || modal_was_open_last_frame;
-            modal_was_open_last_frame = modal_is_open;
+        let mut frame = |overlay_is_open: bool| -> bool {
+            let suppress = overlay_is_open || overlay_was_open_last_frame;
+            overlay_was_open_last_frame = overlay_is_open;
             suppress
         };
 
-        // Frame 1: modal not open, never was → input NOT suppressed.
-        assert!(!frame(false), "frame 1: no modal → no suppression");
+        // Frame 1: overlay not open, never was → input NOT suppressed.
+        assert!(!frame(false), "frame 1: no overlay → no suppression");
 
-        // Frame 2: modal opens → input suppressed.
-        assert!(frame(true), "frame 2: modal open → suppressed");
+        // Frame 2: overlay opens → input suppressed.
+        assert!(frame(true), "frame 2: overlay open → suppressed");
 
-        // Frame 3: modal still open → input suppressed.
-        assert!(frame(true), "frame 3: modal still open → suppressed");
+        // Frame 3: overlay still open → input suppressed.
+        assert!(frame(true), "frame 3: overlay still open → suppressed");
 
-        // Frame 4: modal closes (dismiss click) → input STILL suppressed
-        // because modal_was_open_last_frame is true.
+        // Frame 4: overlay closes (dismiss click) → input STILL suppressed
+        // because overlay_was_open_last_frame is true.
         assert!(frame(false), "frame 4: dismiss frame → still suppressed");
 
-        // Frame 5: modal closed, was closed last frame → input allowed.
+        // Frame 5: overlay closed, was closed last frame → input allowed.
         assert!(!frame(false), "frame 5: fully closed → input allowed");
 
         // Frame 6: verify stable — stays unsuppressed.
         assert!(!frame(false), "frame 6: stable → input allowed");
     }
 
-    /// Verify that `modal_was_open_last_frame` starts `false` on a fresh
+    /// Verify that `overlay_was_open_last_frame` starts `false` on a fresh
     /// widget, matching the initializer in `FreminalTerminalWidget::new()`.
     #[test]
     fn initial_state_does_not_suppress() {
         // Simulates the initial state of the field after construction.
-        let modal_was_open_last_frame = false;
-        let modal_is_open = false;
-        let suppress = modal_is_open || modal_was_open_last_frame;
+        let overlay_was_open_last_frame = false;
+        let overlay_is_open = false;
+        let suppress = overlay_is_open || overlay_was_open_last_frame;
         assert!(!suppress, "fresh widget should not suppress input");
     }
 }
