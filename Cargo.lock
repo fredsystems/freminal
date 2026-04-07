@@ -1557,6 +1557,7 @@ name = "freminal"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "arc-swap",
  "clap",
  "conv2",

@@ -30,6 +30,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+arboard = "3.6.1"
 arc-swap = "1.9.1"
 assert_cmd = "2.2.0"
 bitflags = "2.11.0"

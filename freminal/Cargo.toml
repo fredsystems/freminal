@@ -33,6 +33,7 @@ name = "render_loop_bench"
 
 [dependencies]
 anyhow.workspace = true
+arboard.workspace = true
 arc-swap.workspace = true
 clap.workspace = true
 conv2.workspace = true

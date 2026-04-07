@@ -79,6 +79,14 @@ let
         inherit (s.tabs) show_single_tab position;
       };
 
+      bellSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.bell) mode;
+      };
+
+      securitySection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.security) allow_clipboard_read;
+      };
+
       keybindingsSection = s.keybindings;
 
       result = {
@@ -93,6 +101,8 @@ let
       // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; }
       // lib.optionalAttrs (uiSection != { }) { ui = uiSection; }
       // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
+      // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
+      // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
       // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
     in
     result;
@@ -270,6 +280,35 @@ in
           description = ''
             Position of the tab bar: "top" or "bottom".
             Null uses the default ("top").
+          '';
+        };
+      };
+
+      bell = {
+        mode = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "visual"
+              "none"
+            ]
+          );
+          default = null;
+          description = ''
+            How the terminal responds to a bell character.
+            "visual" flashes the terminal area; "none" ignores it.
+            Null uses the default ("visual").
+          '';
+        };
+      };
+
+      security = {
+        allow_clipboard_read = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Allow applications to read the system clipboard via OSC 52 query.
+            When true, OSC 52 queries return the clipboard contents base64-encoded.
+            Null uses the default (false).
           '';
         };
       };

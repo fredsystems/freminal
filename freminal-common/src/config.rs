@@ -31,6 +31,8 @@ pub struct Config {
     pub scrollback: ScrollbackConfig,
     pub ui: UiConfig,
     pub tabs: TabsConfig,
+    pub bell: BellConfig,
+    pub security: SecurityConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -59,6 +61,8 @@ impl Default for Config {
             scrollback: ScrollbackConfig::default(),
             ui: UiConfig::default(),
             tabs: TabsConfig::default(),
+            bell: BellConfig::default(),
+            security: SecurityConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
         }
@@ -237,6 +241,54 @@ impl Default for TabsConfig {
 }
 
 // ------------------------------------------------------------------------------------------------
+//  Bell
+// ------------------------------------------------------------------------------------------------
+
+/// How the terminal should respond to a bell character (`\x07`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BellMode {
+    /// Flash the terminal area briefly (visual bell).
+    #[default]
+    Visual,
+    /// Do nothing.
+    None,
+}
+
+/// Configuration for the terminal bell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BellConfig {
+    /// Bell mode: `"visual"` (default) or `"none"`.
+    pub mode: BellMode,
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self {
+            mode: BellMode::Visual,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Security
+// ------------------------------------------------------------------------------------------------
+
+/// Security-related configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Allow applications to read the system clipboard via OSC 52 query.
+    ///
+    /// Default: `false` (clipboard reads return an empty response).
+    /// When `true`, OSC 52 queries return the current clipboard contents
+    /// base64-encoded.  This is a potential security risk if untrusted
+    /// programs run inside the terminal.
+    pub allow_clipboard_read: bool,
+}
+
+// ------------------------------------------------------------------------------------------------
 //  Keybindings
 // ------------------------------------------------------------------------------------------------
 
@@ -291,6 +343,8 @@ struct ConfigPartial {
     pub scrollback: Option<ScrollbackConfig>,
     pub ui: Option<UiConfig>,
     pub tabs: Option<TabsConfig>,
+    pub bell: Option<BellConfig>,
+    pub security: Option<SecurityConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
 }
@@ -323,6 +377,12 @@ impl Config {
         }
         if let Some(tabs) = partial.tabs {
             self.tabs = tabs;
+        }
+        if let Some(bell) = partial.bell {
+            self.bell = bell;
+        }
+        if let Some(security) = partial.security {
+            self.security = security;
         }
         if let Some(keybindings) = partial.keybindings {
             // Merge override maps: later layers add to / overwrite earlier ones.
@@ -1346,5 +1406,106 @@ show_single_tab = true
             TabBarPosition::Top,
             "missing position should default to Top"
         );
+    }
+
+    // ── Bell config tests ────────────────────────────────────────────
+
+    #[test]
+    fn bell_config_defaults_to_visual() {
+        let cfg = BellConfig::default();
+        assert_eq!(
+            cfg.mode,
+            BellMode::Visual,
+            "bell mode should default to Visual"
+        );
+    }
+
+    #[test]
+    fn bell_config_deserialize_none() {
+        let toml_str = r#"
+[bell]
+mode = "none"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let bell = partial.bell.expect("bell section should be present");
+        assert_eq!(bell.mode, BellMode::None);
+    }
+
+    #[test]
+    fn bell_config_apply_partial() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.bell.mode, BellMode::Visual);
+
+        let partial: ConfigPartial = toml::from_str(
+            r#"
+[bell]
+mode = "none"
+"#,
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert_eq!(cfg.bell.mode, BellMode::None);
+    }
+
+    #[test]
+    fn bell_config_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.bell.mode = BellMode::None;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert_eq!(deserialized.bell.mode, BellMode::None);
+    }
+
+    // ── Security config tests ────────────────────────────────────────
+
+    #[test]
+    fn security_config_defaults_to_deny_clipboard_read() {
+        let cfg = SecurityConfig::default();
+        assert!(
+            !cfg.allow_clipboard_read,
+            "clipboard read should default to false for security"
+        );
+    }
+
+    #[test]
+    fn security_config_deserialize_allow() {
+        let toml_str = r"
+[security]
+allow_clipboard_read = true
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let security = partial
+            .security
+            .expect("security section should be present");
+        assert!(security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_apply_partial() {
+        let mut cfg = Config::default();
+        assert!(!cfg.security.allow_clipboard_read);
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.security.allow_clipboard_read = true;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.security.allow_clipboard_read);
     }
 }
