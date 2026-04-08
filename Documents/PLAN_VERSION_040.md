@@ -512,7 +512,7 @@ password_indicator = true
 ### 52 Overview
 
 Automatic theme switching based on the OS light/dark mode preference. The theme mode
-should be "auto" (default), "dark", or "light".
+should be "dark" (default), "auto", or "light".
 
 ### 52 Design
 
@@ -526,12 +526,15 @@ pub enum ThemeMode {
 }
 ```
 
+Default is `Dark` — the terminal starts in dark mode unless the user explicitly opts into
+`auto` or `light`.
+
 **Config:**
 
 ```toml
 [theme]
 name = "catppuccin-mocha"         # Used when mode = "dark" or as the dark theme in "auto"
-mode = "auto"                     # "auto", "dark", or "light"
+mode = "dark"                     # "auto", "dark", or "light"
 light_name = "catppuccin-latte"   # Used when mode = "light" or as the light theme in "auto"
 ```
 
@@ -539,8 +542,24 @@ light_name = "catppuccin-latte"   # Used when mode = "light" or as the light the
 preference (when the windowing backend supports it). On each frame, check the OS preference.
 If it has changed and `mode = "auto"`, switch between `name` (dark) and `light_name` (light).
 
-**DECRQM ?2031:** The codebase already has mode `?2031`. Verify that it correctly reports
-the current light/dark state. Applications can query this to adapt their own colors.
+**DEC Private Mode ?2031 and DECRPM Semantics:**
+
+Mode `?2031` reports the current dark/light state. DECRPM (`CSI ? 2031 ; Ps $ y`) response
+semantics depend on the configured `ThemeMode`:
+
+- **`mode = "auto"`:** The terminal respects application requests to change the mode via
+  `DECSET ?2031` / `DECRST ?2031`. DECRPM responds with **Ps=1** (set, light mode active) or
+  **Ps=2** (reset, dark mode active) reflecting the current OS preference.
+- **`mode = "dark"`:** The terminal ignores application mode change requests — dark mode is
+  locked. DECRPM responds with **Ps=4** (permanently reset) to signal that dark mode cannot
+  be changed by the application.
+- **`mode = "light"`:** The terminal ignores application mode change requests — light mode is
+  locked. DECRPM responds with **Ps=3** (permanently set) to signal that light mode cannot
+  be changed by the application.
+
+This uses the standard DECRPM response codes where Ps=3 means "permanently set" and Ps=4
+means "permanently reset" — correctly telling the querying application that the mode is
+locked and `DECSET`/`DECRST` requests will be ignored.
 
 ### 52 Subtasks
 
@@ -555,8 +574,11 @@ the current light/dark state. Applications can query this to adapt their own col
    When `mode = "auto"` and the OS preference changes, send `InputEvent::ThemeChange` with
    the appropriate theme. Update `update_egui_theme()`.
 
-4. **52.4 — DECRQM ?2031 verification**
-   Verify that mode `?2031` correctly reports the current dark/light state. Fix if needed.
+4. **52.4 — DECRPM ?2031 implementation**
+   Implement DECRPM responses for mode `?2031` based on the configured `ThemeMode`:
+   `auto` → Ps=1/2 (dynamic), `dark` → Ps=4 (permanently reset), `light` → Ps=3
+   (permanently set). When `mode = "auto"`, respect `DECSET`/`DECRST` requests from
+   applications. When locked (`dark`/`light`), ignore mode change requests.
 
 5. **52.5 — Config propagation**
    Update `config_example.toml`, `nix/home-manager-module.nix`, Settings Modal theme tab.
@@ -594,7 +616,7 @@ infrastructure from v0.3.0 but could be developed on stubs if needed.
 
 ```toml
 [theme]
-mode = "auto"
+mode = "dark"
 light_name = "catppuccin-latte"
 
 [security]

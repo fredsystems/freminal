@@ -329,16 +329,27 @@ fn egui_key_to_terminal_input(key: Key, mods: Modifiers) -> Option<TerminalInput
         Key::F10 => Some(TerminalInput::FunctionKey(10, km)),
         Key::F11 => Some(TerminalInput::FunctionKey(11, km)),
         Key::F12 => Some(TerminalInput::FunctionKey(12, km)),
+        Key::Space => Some(TerminalInput::Ascii(b' ')),
         k if k >= Key::A && k <= Key::Z => {
             let name = k.name();
             let byte = name.as_bytes()[0];
             if mods.ctrl || mods.command {
                 Some(TerminalInput::Ctrl(byte))
+            } else if mods.shift {
+                Some(TerminalInput::Ascii(byte))
             } else {
                 Some(TerminalInput::Ascii(byte.to_ascii_lowercase()))
             }
         }
-        _ => None,
+        _ => {
+            let name = key.name();
+            let bytes = name.as_bytes();
+            if bytes.len() == 1 && bytes[0].is_ascii() {
+                Some(TerminalInput::Ascii(bytes[0]))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -646,20 +657,21 @@ pub(super) fn write_input_to_terminal(
         } = event
         {
             let kkp = snap.kitty_keyboard_flags;
-            if kkp & 2 != 0 && kkp & (1 | 8) != 0 {
-                if let Some(ti) = egui_key_to_terminal_input(*key, *modifiers) {
-                    let release_meta = KeyEventMeta {
-                        event_type: KeyEventType::Release,
-                        associated_text: None,
-                    };
-                    send_terminal_inputs(
-                        std::slice::from_ref(&ti),
-                        input_tx,
-                        &InputModes::from_snapshot(snap),
-                        &release_meta,
-                    );
-                    state_changed = true;
-                }
+            if kkp & 2 != 0
+                && kkp & (1 | 8) != 0
+                && let Some(ti) = egui_key_to_terminal_input(*key, *modifiers)
+            {
+                let release_meta = KeyEventMeta {
+                    event_type: KeyEventType::Release,
+                    associated_text: None,
+                };
+                send_terminal_inputs(
+                    std::slice::from_ref(&ti),
+                    input_tx,
+                    &InputModes::from_snapshot(snap),
+                    &release_meta,
+                );
+                state_changed = true;
                 continue;
             }
         }

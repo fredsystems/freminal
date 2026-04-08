@@ -490,6 +490,10 @@ pub struct FreminalTerminalWidget {
     /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
     /// where a later snapshot overwrites `content_changed` before the GUI wakes.
     last_rendered_visible: Option<Arc<Vec<TChar>>>,
+    /// Line-width data from the last full vertex rebuild.  When line widths
+    /// change (e.g. DECDWL/DECDHL toggle), we must force a full rebuild so
+    /// glyph scaling is re-applied.
+    last_rendered_line_widths: Option<Arc<Vec<freminal_terminal_emulator::LineWidth>>>,
     /// Theme pointer from the last full vertex rebuild.  When this changes,
     /// we must force a full rebuild so foreground/background vertex colors
     /// are re-resolved against the new palette.
@@ -564,6 +568,7 @@ impl FreminalTerminalWidget {
             previous_show_cursor: false,
             previous_cursor_color_override: None,
             last_rendered_visible: None,
+            last_rendered_line_widths: None,
             previous_theme: None,
             previous_selection: None,
             previous_text_blink_slow_visible: true,
@@ -630,6 +635,7 @@ impl FreminalTerminalWidget {
             // VBO data was built for the old cell pixel size and must not be
             // reused.
             self.last_rendered_visible = None;
+            self.last_rendered_line_widths = None;
         }
     }
 
@@ -906,7 +912,11 @@ impl FreminalTerminalWidget {
                 || self
                     .last_rendered_visible
                     .as_ref()
-                    .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars));
+                    .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars))
+                || self
+                    .last_rendered_line_widths
+                    .as_ref()
+                    .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_line_widths));
 
             // Clear the selection when actual terminal text content changes so
             // stale highlights don't linger over shifted text.  We use
@@ -1189,6 +1199,7 @@ impl FreminalTerminalWidget {
                 // Remember which `visible_chars` allocation we rendered, so
                 // the next frame can detect changes via `Arc::ptr_eq`.
                 self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+                self.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
                 self.previous_theme = Some(snap.theme);
                 self.previous_selection = current_selection;
                 self.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
@@ -1494,6 +1505,7 @@ impl FreminalTerminalWidget {
             // VBO data was built for the old cell pixel size and must not be
             // reused.
             self.last_rendered_visible = None;
+            self.last_rendered_line_widths = None;
         }
     }
 

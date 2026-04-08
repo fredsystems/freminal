@@ -31,15 +31,17 @@ pub enum RowJoin {
 /// Line-width attribute set by DEC escape sequences.
 ///
 /// Controls whether glyphs on this row are rendered at normal size or scaled
-/// 2× horizontally (DECDWL) or 2× in both dimensions (DECDHL).  The renderer
-/// uses this to apply per-row scaling in the vertex builder.
+/// 2× horizontally (DECDWL) or 2× in both dimensions (DECDHL).  This is a
+/// rendering-only attribute: the buffer column count is not modified.  The
+/// renderer uses this to apply per-row glyph scaling in the vertex builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineWidth {
     /// Normal single-width, single-height line (ESC # 5 or default).
     #[default]
     Normal,
-    /// Double-width line (DECDWL, ESC # 6).  Each character occupies two
-    /// cell widths; the effective column count is halved.
+    /// Double-width line (DECDWL, ESC # 6).  Each character is rendered at
+    /// 2× horizontal scale.  The buffer column count is unchanged; the
+    /// renderer displays only the first half of the columns.
     DoubleWidth,
     /// Top half of a double-height line (DECDHL, ESC # 3).  Glyphs are scaled
     /// 2× in both dimensions; only the upper half is visible on this row.
@@ -73,8 +75,8 @@ pub struct Row {
     /// Per-row line-width attribute (DECDWL / DECDHL).
     ///
     /// Defaults to [`LineWidth::Normal`].  Set via `ESC # 3/4/5/6` on the
-    /// current cursor row.  Affects rendering (glyph scaling) and the
-    /// effective column count (halved for double-width modes).
+    /// current cursor row.  This is a rendering attribute only — the renderer
+    /// uses it to apply per-row glyph scaling in the vertex builder.
     pub line_width: LineWidth,
 }
 
