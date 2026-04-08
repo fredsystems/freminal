@@ -454,8 +454,10 @@ impl TerminalEmulator {
     /// Return a shared handle to the atomic flag that tracks whether the PTY
     /// slave has `ECHO` disabled (i.e. a password prompt is active).
     ///
-    /// The writer thread refreshes this flag every 250 ms (and after each
-    /// write/resize) by calling `tcgetattr()` on the master fd.
+    /// Returns a clone of the shared `Arc<AtomicBool>` — the caller reads it
+    /// with a cheap `Relaxed` atomic load each frame.  The underlying flag is
+    /// refreshed by the writer thread every 100 ms via `tcgetattr()` on the
+    /// master fd (Unix only).
     ///
     /// Returns `None` in headless / benchmark / playback mode where there is
     /// no real PTY.

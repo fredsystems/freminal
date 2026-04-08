@@ -58,10 +58,11 @@ pub struct FreminalPtyInputOutput {
     /// Shared atomic flag reflecting whether the PTY slave currently has
     /// `ECHO` disabled (i.e. a password prompt is active).
     ///
-    /// Polled by the writer thread every 250 ms (and after each PTY write or
-    /// resize) via `MasterPty::get_termios()`.  Always `false` on Windows
-    /// (`ConPTY` does not support termios).  Read by `is_echo_off()` without
-    /// any locking overhead.
+    /// Updated by the writer thread every 100 ms (via `recv_timeout`) using
+    /// `MasterPty::get_termios()`.  Compiled only on Unix; on Windows the
+    /// `#[cfg(unix)]` termios block is omitted entirely, so the atomic stays
+    /// at its default `false`.  Read by the GUI via a cheap `Relaxed` load
+    /// without any locking overhead.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
