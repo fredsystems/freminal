@@ -22,7 +22,9 @@ use freminal_common::buffer_states::modes::{
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_terminal_emulator::{
-    input::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text},
+    input::{
+        KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
+    },
     io::InputEvent,
     snapshot::TerminalSnapshot,
 };
@@ -293,6 +295,53 @@ pub(super) fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     }
 }
 
+/// Convert an egui [`Key`] + [`Modifiers`] to a [`TerminalInput`] variant.
+///
+/// Used for KKP flag 2 release-event forwarding: when a key is released we
+/// need to reconstruct the same `TerminalInput` that the press would have
+/// generated so the release can be encoded with the matching codepoint.
+fn egui_key_to_terminal_input(key: Key, mods: Modifiers) -> Option<TerminalInput> {
+    let km = egui_mods_to_key_modifiers(mods);
+    match key {
+        Key::Enter => Some(TerminalInput::Enter),
+        Key::Backspace => Some(TerminalInput::Backspace),
+        Key::Tab => Some(TerminalInput::Tab),
+        Key::Escape => Some(TerminalInput::Escape),
+        Key::ArrowUp => Some(TerminalInput::ArrowUp(km)),
+        Key::ArrowDown => Some(TerminalInput::ArrowDown(km)),
+        Key::ArrowLeft => Some(TerminalInput::ArrowLeft(km)),
+        Key::ArrowRight => Some(TerminalInput::ArrowRight(km)),
+        Key::Home => Some(TerminalInput::Home(km)),
+        Key::End => Some(TerminalInput::End(km)),
+        Key::Delete => Some(TerminalInput::Delete(km)),
+        Key::Insert => Some(TerminalInput::Insert(km)),
+        Key::PageUp => Some(TerminalInput::PageUp(km)),
+        Key::PageDown => Some(TerminalInput::PageDown(km)),
+        Key::F1 => Some(TerminalInput::FunctionKey(1, km)),
+        Key::F2 => Some(TerminalInput::FunctionKey(2, km)),
+        Key::F3 => Some(TerminalInput::FunctionKey(3, km)),
+        Key::F4 => Some(TerminalInput::FunctionKey(4, km)),
+        Key::F5 => Some(TerminalInput::FunctionKey(5, km)),
+        Key::F6 => Some(TerminalInput::FunctionKey(6, km)),
+        Key::F7 => Some(TerminalInput::FunctionKey(7, km)),
+        Key::F8 => Some(TerminalInput::FunctionKey(8, km)),
+        Key::F9 => Some(TerminalInput::FunctionKey(9, km)),
+        Key::F10 => Some(TerminalInput::FunctionKey(10, km)),
+        Key::F11 => Some(TerminalInput::FunctionKey(11, km)),
+        Key::F12 => Some(TerminalInput::FunctionKey(12, km)),
+        k if k >= Key::A && k <= Key::Z => {
+            let name = k.name();
+            let byte = name.as_bytes()[0];
+            if mods.ctrl || mods.command {
+                Some(TerminalInput::Ctrl(byte))
+            } else {
+                Some(TerminalInput::Ascii(byte.to_ascii_lowercase()))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Bundle of terminal mode flags that affect how keyboard input is encoded.
 ///
 /// Extracted from `TerminalSnapshot` once per frame and passed to
@@ -340,6 +389,7 @@ pub(super) fn send_terminal_inputs(
     inputs: &[TerminalInput],
     input_tx: &Sender<InputEvent>,
     modes: &InputModes,
+    meta: &KeyEventMeta,
 ) {
     let bytes: Vec<u8> = inputs
         .iter()
@@ -352,6 +402,7 @@ pub(super) fn send_terminal_inputs(
                 modes.backarrow_sends_bs,
                 modes.line_feed_mode,
                 modes.kitty_keyboard_flags,
+                meta,
             ) {
                 TerminalInputPayload::Single(b) => vec![b],
                 TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -410,6 +461,7 @@ pub(super) fn handle_scroll_fallback(
                 std::slice::from_ref(&key),
                 input_tx,
                 &InputModes::from_snapshot(snap),
+                &KeyEventMeta::PRESS,
             );
         }
     } else {
@@ -582,6 +634,36 @@ pub(super) fn write_input_to_terminal(
             previous_key = None;
         }
 
+        // ── KKP flag 2: forward key release events ───────────────────────
+        // When KKP report-event-types (flag 2) is active together with
+        // DISAMBIGUATE (1) or REPORT_ALL (8), key releases must be
+        // forwarded to the PTY so applications can track key-up.
+        if let Event::Key {
+            key,
+            pressed: false,
+            modifiers,
+            ..
+        } = event
+        {
+            let kkp = snap.kitty_keyboard_flags;
+            if kkp & 2 != 0 && kkp & (1 | 8) != 0 {
+                if let Some(ti) = egui_key_to_terminal_input(*key, *modifiers) {
+                    let release_meta = KeyEventMeta {
+                        event_type: KeyEventType::Release,
+                        associated_text: None,
+                    };
+                    send_terminal_inputs(
+                        std::slice::from_ref(&ti),
+                        input_tx,
+                        &InputModes::from_snapshot(snap),
+                        &release_meta,
+                    );
+                    state_changed = true;
+                }
+                continue;
+            }
+        }
+
         // ── Binding map pre-check ─────────────────────────────────────────
         // Before routing the event to the PTY, check whether the key combo
         // is bound to a terminal action in the user's BindingMap.  Bound
@@ -639,6 +721,34 @@ pub(super) fn write_input_to_terminal(
                 continue;
             }
         }
+
+        // ── Construct KKP event metadata ─────────────────────────────────
+        // Extract event type (press/repeat/release) from egui Key events.
+        // Non-key events default to Press.  For Event::Text the associated
+        // text is the text string itself (used by KKP flag 16).
+        let event_meta = match event {
+            Event::Key {
+                pressed: true,
+                repeat: true,
+                ..
+            } => KeyEventMeta {
+                event_type: KeyEventType::Repeat,
+                associated_text: None,
+            },
+            Event::Key { pressed: false, .. } => KeyEventMeta {
+                event_type: KeyEventType::Release,
+                associated_text: None,
+            },
+            Event::Text(text) => KeyEventMeta {
+                event_type: KeyEventType::Press,
+                associated_text: if text.is_empty() {
+                    None
+                } else {
+                    Some(text.clone())
+                },
+            },
+            _ => KeyEventMeta::PRESS,
+        };
 
         let inputs: Cow<'static, [TerminalInput]> = match event {
             // LIMITATION (egui#3653): egui unifies numpad and main-row keys.
@@ -1312,6 +1422,7 @@ pub(super) fn write_input_to_terminal(
                                     response.as_ref(),
                                     input_tx,
                                     &InputModes::from_snapshot(snap),
+                                    &KeyEventMeta::PRESS,
                                 );
                             }
                         }
@@ -1337,7 +1448,12 @@ pub(super) fn write_input_to_terminal(
 
         if !inputs.is_empty() {
             state_changed = true;
-            send_terminal_inputs(inputs.as_ref(), input_tx, &InputModes::from_snapshot(snap));
+            send_terminal_inputs(
+                inputs.as_ref(),
+                input_tx,
+                &InputModes::from_snapshot(snap),
+                &event_meta,
+            );
         }
     }
 
