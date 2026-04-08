@@ -364,6 +364,7 @@ pub fn run_terminal(
     // when building snapshots.  Using `Arc<AtomicBool>` avoids any lock on the hot
     // snapshot path while keeping ownership safely shared between threads.
     let echo_off = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
     let echo_off_writer = std::sync::Arc::clone(&echo_off);
 
     {
@@ -417,11 +418,19 @@ pub fn run_terminal(
                     }
                 }
 
-                // Poll the slave termios after each PTY event.  `get_termios()` is a
-                // `MasterPty` trait method implemented on Unix via `tcgetattr()` on
-                // the master fd.  When `ECHO` is absent the foreground process (e.g.
-                // `sudo`) has disabled echoing — a reliable password-prompt signal.
-                // On Windows `get_termios()` returns `None`; the atomic stays `false`.
+                // Poll the slave termios after each PTY event.  The writer
+                // thread is the natural place for this because it already owns
+                // `pair.master`.  When `ECHO` is absent the foreground process
+                // (e.g. `sudo`) has disabled echoing — a reliable password-prompt
+                // signal.
+                //
+                // Limitation: echo-off is detected on the next *write* (keystroke
+                // or resize), not immediately when the prompt appears.  In practice
+                // this means the lock icon shows within one frame of the first
+                // keystroke — acceptable for v1.
+                //
+                // This block is compiled only on Unix; on Windows (ConPTY) there
+                // is no termios API, so the atomic stays at its default `false`.
                 #[cfg(unix)]
                 {
                     use nix::sys::termios::LocalFlags;

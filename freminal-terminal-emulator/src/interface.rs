@@ -453,9 +453,11 @@ impl TerminalEmulator {
 
     /// Return `true` when the PTY slave currently has `ECHO` disabled.
     ///
-    /// Delegates to `FreminalPtyInputOutput::is_echo_off()`, which calls
-    /// `tcgetattr()` on the saved master fd.  Returns `false` in headless /
-    /// benchmark / playback mode where there is no real PTY.
+    /// Delegates to `FreminalPtyInputOutput::is_echo_off()`, which reads the
+    /// cached echo state via an atomic load.  The writer thread polling loop
+    /// refreshes that cache by calling `tcgetattr()` on the master fd.
+    /// Returns `false` in headless / benchmark / playback mode where there is
+    /// no real PTY.
     #[must_use]
     pub fn is_echo_off(&self) -> bool {
         self.pty_io

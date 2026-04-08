@@ -268,7 +268,7 @@ impl FreminalGui {
                 }
 
                 // Load the snapshot to determine the echo-off (password prompt) state.
-                // The ArcSwap load is a single atomic pointer read — negligible cost.
+                // The ArcSwap load is cheap (atomic ref-count bump).
                 // Only report echo-off when the password_indicator config option is
                 // enabled (default: true).
                 let is_echo_off =
