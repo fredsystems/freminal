@@ -296,7 +296,26 @@ pub fn build_background_instances(
         }
     }
 
-    // --- Selection highlight quads (decoration pass) ---
+    // --- Search match highlight quads (rendered first so selection overpaints) ---
+    for m in match_highlights {
+        if m.row >= shaped_lines.len() || m.col_start > m.col_end {
+            continue;
+        }
+        let cw = gl_f32_u32(cell_width);
+        let ch = gl_f32_u32(cell_height);
+        let x0 = gl_f32(m.col_start) * cw;
+        let x1 = gl_f32(m.col_end + 1) * cw;
+        let y0 = gl_f32(m.row) * ch;
+        let y1 = y0 + ch;
+        let color = if m.is_current {
+            search_current_bg_f()
+        } else {
+            search_match_bg_f()
+        };
+        push_quad(&mut deco, x0, y0, x1, y1, color);
+    }
+
+    // --- Selection highlight quads (rendered after search so selection is topmost) ---
     if let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection {
         let cw = gl_f32_u32(cell_width);
         let ch = gl_f32_u32(cell_height);
@@ -344,25 +363,6 @@ pub fn build_background_instances(
 
             push_quad(&mut deco, x0, y0, x1, y1, selection_bg_f(theme));
         }
-    }
-
-    // --- Search match highlight quads ---
-    for m in match_highlights {
-        if m.row >= shaped_lines.len() || m.col_start > m.col_end {
-            continue;
-        }
-        let cw = gl_f32_u32(cell_width);
-        let ch = gl_f32_u32(cell_height);
-        let x0 = gl_f32(m.col_start) * cw;
-        let x1 = gl_f32(m.col_end + 1) * cw;
-        let y0 = gl_f32(m.row) * ch;
-        let y1 = y0 + ch;
-        let color = if m.is_current {
-            search_current_bg_f()
-        } else {
-            search_match_bg_f()
-        };
-        push_quad(&mut deco, x0, y0, x1, y1, color);
     }
 
     // --- Cursor quad (always last in deco so cursor-only patches work) ---

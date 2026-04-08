@@ -27,7 +27,8 @@ use super::{
             build_image_verts,
         },
         search::{
-            SearchBarAction, matches_to_highlights, run_search, scroll_to_match, show_search_bar,
+            SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
+            show_search_bar,
         },
         shaping::ShapingCache,
     },
@@ -518,6 +519,11 @@ pub struct FreminalTerminalWidget {
     /// the settings modal to register a temporary preview font without losing
     /// the original font set.
     base_font_defs: eframe::egui::FontDefinitions,
+    /// Number of search matches from the most recently rendered frame.
+    /// Used to detect search state changes that require a full vertex rebuild.
+    previous_search_match_count: usize,
+    /// Current match index from the most recently rendered frame.
+    previous_search_current_match: usize,
 }
 
 impl FreminalTerminalWidget {
@@ -569,6 +575,8 @@ impl FreminalTerminalWidget {
             )),
             overlay_was_open_last_frame: false,
             base_font_defs,
+            previous_search_match_count: 0,
+            previous_search_current_match: 0,
         }
     }
 
@@ -728,7 +736,7 @@ impl FreminalTerminalWidget {
         // menu button (e.g. Copy) is delivered to egui's Area widget instead
         // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
-        if suppress_input || context_menu_open {
+        if suppress_input || context_menu_open || view_state.search_state.is_open {
             self.previous_key = None;
             self.previous_mouse_state = None;
             self.previous_scroll_amount = 0.0;
@@ -795,22 +803,22 @@ impl FreminalTerminalWidget {
             }
         };
 
-        // Search: run (or re-run) the search if the query changed this frame.
-        // We capture any regex error message here so the overlay can display it.
-        let search_error: Option<String> =
-            if view_state.search_state.is_open && view_state.search_state.needs_refresh() {
-                let (found, err) = run_search(
-                    &view_state.search_state.query.clone(),
-                    view_state.search_state.regex_mode,
-                    &snap.visible_chars,
-                );
-                view_state.search_state.matches = found;
-                view_state.search_state.current_match = 0;
-                view_state.search_state.mark_fresh();
-                err
-            } else {
-                None
-            };
+        // Search: run (or re-run) the search if the query, mode, or visible
+        // content changed this frame.  We capture any regex error message here
+        // so the overlay can display it.
+        let search_error: Option<String> = if view_state.search_state.is_open
+            && view_state.search_state.needs_refresh(&snap.visible_chars)
+        {
+            let query = view_state.search_state.query.clone();
+            let regex_mode = view_state.search_state.regex_mode;
+            let (found, err) = run_search(&query, regex_mode, &snap.visible_chars);
+            view_state.search_state.matches = found;
+            view_state.search_state.current_match = 0;
+            view_state.search_state.mark_fresh(&snap.visible_chars);
+            err
+        } else {
+            None
+        };
 
         // Cursor-only state captured before the PaintCallback closure (which
         // requires `Send + Sync + 'static`).  `is_cursor_only` and
@@ -865,6 +873,12 @@ impl FreminalTerminalWidget {
             // Check whether the selection has changed since the last frame.
             let current_selection = view_state.selection.normalised();
             let selection_changed = current_selection != self.previous_selection;
+
+            // Check whether search highlight state has changed since last frame.
+            let search_match_count = view_state.search_state.matches.len();
+            let search_current_match = view_state.search_state.current_match;
+            let search_changed = search_match_count != self.previous_search_match_count
+                || search_current_match != self.previous_search_current_match;
 
             // Convert buffer-absolute selection coordinates to screen-relative
             // for the renderer (which iterates `shaped_lines` by screen row).
@@ -952,6 +966,7 @@ impl FreminalTerminalWidget {
             let cursor_only = !content_changed
                 && !selection_changed
                 && !text_blink_changed
+                && !search_changed
                 && cursor_state_changed
                 && !self
                     .render_state
@@ -997,6 +1012,7 @@ impl FreminalTerminalWidget {
             } else if content_changed
                 || selection_changed
                 || text_blink_changed
+                || search_changed
                 || self
                     .render_state
                     .lock()
@@ -1094,6 +1110,8 @@ impl FreminalTerminalWidget {
                 self.previous_selection = current_selection;
                 self.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                 self.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
+                self.previous_search_match_count = search_match_count;
+                self.previous_search_current_match = search_current_match;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
@@ -1221,13 +1239,11 @@ impl FreminalTerminalWidget {
             match bar_action {
                 SearchBarAction::Next => {
                     view_state.search_state.next_match();
-                    scroll_to_match(view_state, snap);
-                    deferred_actions.push(freminal_common::keybindings::KeyAction::SearchNext);
+                    scroll_to_match_and_send(view_state, snap, input_tx);
                 }
                 SearchBarAction::Prev => {
                     view_state.search_state.prev_match();
-                    scroll_to_match(view_state, snap);
-                    deferred_actions.push(freminal_common::keybindings::KeyAction::SearchPrev);
+                    scroll_to_match_and_send(view_state, snap, input_tx);
                 }
                 SearchBarAction::Close => {
                     view_state.search_state.close();

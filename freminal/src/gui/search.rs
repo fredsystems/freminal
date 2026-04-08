@@ -20,9 +20,10 @@
 //!    `build_background_instances()` so the renderer can highlight the cells.
 //! 5. The current match scroll offset is updated by `scroll_to_match()`.
 
+use crossbeam_channel::Sender;
 use eframe::egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Ui};
 use freminal_common::buffer_states::tchar::TChar;
-use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 use regex::Regex;
 
 use super::{
@@ -52,10 +53,16 @@ pub enum SearchBarAction {
 // ---------------------------------------------------------------------------
 
 /// Extract a plain `String` row from `visible_chars`, stopping at a `NewLine`
-/// or the end of the slice.  Returns the string and the number of `TChar`
-/// elements consumed (including the trailing `NewLine` if present).
-fn extract_row_string(chars: &[TChar]) -> (String, usize) {
+/// or the end of the slice.  Returns the string, the number of `TChar`
+/// elements consumed (including the trailing `NewLine` if present), and a
+/// byte-offset-to-display-column map.
+///
+/// The map has one entry per byte in the returned string.  `byte_to_col[i]`
+/// gives the 0-indexed display column at which byte `i` starts.
+fn extract_row_string(chars: &[TChar]) -> (String, usize, Vec<usize>) {
     let mut s = String::new();
+    let mut byte_to_col: Vec<usize> = Vec::new();
+    let mut display_col = 0usize;
     let mut consumed = 0;
     for tc in chars {
         consumed += 1;
@@ -63,18 +70,43 @@ fn extract_row_string(chars: &[TChar]) -> (String, usize) {
             break;
         }
         if let Ok(text) = std::str::from_utf8(tc.as_bytes()) {
+            let width = tc.display_width();
+            for _ in 0..text.len() {
+                byte_to_col.push(display_col);
+            }
             s.push_str(text);
+            display_col += width;
         }
     }
-    (s, consumed)
+    (s, consumed, byte_to_col)
+}
+
+/// Compute the display width of a substring `s[start..end]` using the
+/// byte-to-display-column map returned by `extract_row_string`.
+///
+/// Returns `(col_start, display_width)`.
+fn byte_range_to_display_cols(
+    byte_to_col: &[usize],
+    row_str: &str,
+    byte_start: usize,
+    byte_end: usize,
+) -> (usize, usize) {
+    let col_start = byte_to_col.get(byte_start).copied().unwrap_or(0);
+    // The display width of the match is the sum of UnicodeWidthChar widths
+    // of the characters in the matched substring.
+    let display_width: usize = row_str[byte_start..byte_end]
+        .chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    (col_start, display_width)
 }
 
 /// Run a substring search over all rows in `visible_chars`.
 ///
 /// Returns a `Vec<MatchSpan>` in document order (top row first, left-to-right
 /// within each row).  Each span's `row` is the 0-indexed visible-window row
-/// and `col_start`/`col_end` are byte-column indices within that row (each
-/// `TChar` is treated as one column for non-wide characters).
+/// and `col_start`/`col_end` are display-column indices within that row
+/// (wide characters such as CJK ideographs occupy two columns).
 ///
 /// When the query is empty the result is always empty.
 ///
@@ -101,49 +133,50 @@ pub fn run_search(
         None
     };
 
+    let needle_lower = query.to_ascii_lowercase();
+
     let mut matches = Vec::new();
     let mut row = 0usize;
     let mut remaining = visible_chars;
 
     while !remaining.is_empty() {
-        let (row_str, consumed) = extract_row_string(remaining);
+        let (row_str, consumed, byte_to_col) = extract_row_string(remaining);
         remaining = &remaining[consumed..];
 
         if regex_mode {
             if let Some(re) = &compiled_regex {
                 for m in re.find_iter(&row_str) {
-                    // Convert byte offset → char column by counting chars.
-                    let col_start = row_str[..m.start()].chars().count();
-                    let match_len = m.as_str().chars().count();
-                    if match_len == 0 {
+                    let (col_start, display_width) =
+                        byte_range_to_display_cols(&byte_to_col, &row_str, m.start(), m.end());
+                    if display_width == 0 {
                         continue;
                     }
                     matches.push(MatchSpan {
                         row,
                         col_start,
-                        col_end: col_start + match_len - 1,
+                        col_end: col_start + display_width - 1,
                     });
                 }
             }
         } else {
             // Case-insensitive substring search.
             let haystack_lower = row_str.to_ascii_lowercase();
-            let needle_lower = query.to_ascii_lowercase();
             let mut search_from = 0usize;
             while let Some(byte_pos) = haystack_lower[search_from..].find(&needle_lower) {
                 let abs_byte = search_from + byte_pos;
-                let col_start = row_str[..abs_byte].chars().count();
-                let match_len = query.chars().count();
-                if match_len == 0 {
+                let match_byte_end = abs_byte + needle_lower.len();
+                let (col_start, display_width) =
+                    byte_range_to_display_cols(&byte_to_col, &row_str, abs_byte, match_byte_end);
+                if display_width == 0 {
                     break;
                 }
                 matches.push(MatchSpan {
                     row,
                     col_start,
-                    col_end: col_start + match_len - 1,
+                    col_end: col_start + display_width - 1,
                 });
                 // Advance past this match (at least 1 byte to avoid infinite loop).
-                search_from = abs_byte + needle_lower.len().max(1);
+                search_from = match_byte_end.max(abs_byte + 1);
                 if search_from > haystack_lower.len() {
                     break;
                 }
@@ -182,11 +215,11 @@ pub fn matches_to_highlights(state: &SearchState) -> Vec<MatchHighlight> {
 /// Adjust `view_state.scroll_offset` so that the current match row is
 /// centred (or at least visible) in the viewport.
 ///
-/// Does nothing when there are no matches.
-pub fn scroll_to_match(view_state: &mut ViewState, snap: &TerminalSnapshot) {
-    let Some(span) = view_state.search_state.current() else {
-        return;
-    };
+/// Returns `Some(new_offset)` when the scroll offset was updated (the caller
+/// should send `InputEvent::ScrollOffset` to the PTY thread), or `None` when
+/// no change was needed (no matches, or the offset did not change).
+pub fn scroll_to_match(view_state: &mut ViewState, snap: &TerminalSnapshot) -> Option<usize> {
+    let span = view_state.search_state.current()?;
     // `span.row` is a visible-window row index (0 = top of current view).
     // We need a buffer-absolute row index to compute the correct scroll_offset.
     let visible_start = snap
@@ -201,8 +234,35 @@ pub fn scroll_to_match(view_state: &mut ViewState, snap: &TerminalSnapshot) {
     // The maximum valid start puts the last `term_height` rows on screen.
     let max_start = snap.total_rows.saturating_sub(snap.term_height);
     let clamped_start = ideal_start.min(max_start);
-    let new_scroll_offset = max_start.saturating_sub(clamped_start);
-    view_state.scroll_offset = new_scroll_offset.min(snap.max_scroll_offset);
+    let new_scroll_offset = max_start
+        .saturating_sub(clamped_start)
+        .min(snap.max_scroll_offset);
+
+    let old = view_state.scroll_offset;
+    view_state.scroll_offset = new_scroll_offset;
+    if new_scroll_offset == old {
+        None
+    } else {
+        Some(new_scroll_offset)
+    }
+}
+
+/// Scroll to the current search match and, if the scroll offset changed,
+/// send the new offset to the PTY thread.
+///
+/// This is a convenience wrapper around [`scroll_to_match`] that eliminates
+/// the repeated `if let Some(offset) … send(ScrollOffset)` pattern at every
+/// call-site.
+pub fn scroll_to_match_and_send(
+    view_state: &mut ViewState,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
+) {
+    if let Some(offset) = scroll_to_match(view_state, snap)
+        && let Err(e) = input_tx.send(InputEvent::ScrollOffset(offset))
+    {
+        error!("Failed to send scroll offset to PTY: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +419,8 @@ pub fn show_search_bar(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use freminal_common::buffer_states::tchar::TChar;
 
     /// Build a `Vec<TChar>` from a slice of row strings.
@@ -441,6 +503,18 @@ mod tests {
         let (matches, err) = run_search("xyz", false, &chars);
         assert!(err.is_none());
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_after_wide_char_uses_display_columns() {
+        // U+4E16 (世) and U+754C (界) are each 2 display columns wide.
+        // "世界hi" → display columns: 世=0-1, 界=2-3, h=4, i=5
+        let chars = make_chars(&["世界hi"]);
+        let (matches, err) = run_search("hi", false, &chars);
+        assert!(err.is_none());
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 4);
+        assert_eq!(matches[0].col_end, 5);
     }
 
     // ── run_search: regex ──────────────────────────────────────────────────
@@ -532,25 +606,41 @@ mod tests {
 
     #[test]
     fn needs_refresh_true_when_query_changed() {
+        let visible = Arc::new(make_chars(&["hello"]));
         let state = SearchState {
             query: "foo".to_string(),
             ..SearchState::default()
         };
-        assert!(state.needs_refresh());
+        assert!(state.needs_refresh(&visible));
     }
 
     #[test]
     fn needs_refresh_false_after_mark_fresh() {
+        let visible = Arc::new(make_chars(&["hello"]));
         let mut state = SearchState {
             query: "foo".to_string(),
             ..SearchState::default()
         };
-        state.mark_fresh();
-        assert!(!state.needs_refresh());
+        state.mark_fresh(&visible);
+        assert!(!state.needs_refresh(&visible));
+    }
+
+    #[test]
+    fn needs_refresh_true_when_visible_changes() {
+        let visible1 = Arc::new(make_chars(&["hello"]));
+        let visible2 = Arc::new(make_chars(&["hello"]));
+        let mut state = SearchState {
+            query: "foo".to_string(),
+            ..SearchState::default()
+        };
+        state.mark_fresh(&visible1);
+        // Same content but different Arc allocation → stale.
+        assert!(state.needs_refresh(&visible2));
     }
 
     #[test]
     fn close_resets_state() {
+        let visible = Arc::new(make_chars(&["foo"]));
         let mut state = SearchState {
             is_open: true,
             query: "foo".to_string(),
@@ -563,6 +653,7 @@ mod tests {
             regex_mode: true,
             last_searched_query: "foo".to_string(),
             last_searched_regex: true,
+            last_searched_visible: Some(visible),
         };
         state.close();
         assert!(!state.is_open);
@@ -570,6 +661,7 @@ mod tests {
         assert_eq!(state.current_match, 0);
         assert!(state.last_searched_query.is_empty());
         assert!(!state.last_searched_regex);
+        assert!(state.last_searched_visible.is_none());
     }
 
     // ── matches_to_highlights ──────────────────────────────────────────────

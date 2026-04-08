@@ -11,7 +11,10 @@
 //!
 //! See `Documents/PERFORMANCE_PLAN.md`, Section 4.5 for the architecture context.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use conv2::ConvUtil;
 use eframe::egui;
@@ -169,19 +172,30 @@ pub struct SearchState {
     pub last_searched_query: String,
     /// Whether `regex_mode` was active when `matches` was last computed.
     pub last_searched_regex: bool,
+    /// The `visible_chars` `Arc` that was searched for the current `matches`
+    /// list.  When a new snapshot arrives with a different `Arc`, the search
+    /// is stale and must be re-run.
+    pub last_searched_visible: Option<Arc<Vec<TChar>>>,
 }
 
 impl SearchState {
-    /// Returns `true` if a re-search is needed (query or mode changed).
+    /// Returns `true` if a re-search is needed (query, mode, or visible
+    /// content changed since the last search).
     #[must_use]
-    pub fn needs_refresh(&self) -> bool {
-        self.query != self.last_searched_query || self.regex_mode != self.last_searched_regex
+    pub fn needs_refresh(&self, current_visible: &Arc<Vec<TChar>>) -> bool {
+        self.query != self.last_searched_query
+            || self.regex_mode != self.last_searched_regex
+            || self
+                .last_searched_visible
+                .as_ref()
+                .is_none_or(|prev| !Arc::ptr_eq(prev, current_visible))
     }
 
-    /// Mark the current matches as up-to-date.
-    pub fn mark_fresh(&mut self) {
+    /// Mark the current matches as up-to-date for the given `visible_chars`.
+    pub fn mark_fresh(&mut self, visible: &Arc<Vec<TChar>>) {
         self.last_searched_query.clone_from(&self.query);
         self.last_searched_regex = self.regex_mode;
+        self.last_searched_visible = Some(Arc::clone(visible));
     }
 
     /// Move to the next match, wrapping around.
@@ -223,6 +237,7 @@ impl SearchState {
         self.current_match = 0;
         self.last_searched_query.clear();
         self.last_searched_regex = false;
+        self.last_searched_visible = None;
     }
 }
 
