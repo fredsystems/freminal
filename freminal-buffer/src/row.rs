@@ -96,15 +96,15 @@ impl Row {
 
     /// Fill this row with blank cells carrying the given format tag (BCE).
     ///
-    /// If the tag is visually default, the row is left sparse (no-op on an
-    /// already-empty row, or clears an existing one).  Otherwise, explicit
-    /// blank cells are written so the renderer picks up the correct colors.
+    /// Always clears existing cell data first.  If the tag is visually default
+    /// the row is left sparse (empty `cells` vec).  Otherwise, explicit blank
+    /// cells are written so the renderer picks up the correct background color.
     pub fn fill_with_tag(&mut self, tag: &FormatTag) {
+        self.clear();
+
         if tag.is_visually_default() {
             return;
         }
-        self.dirty = true;
-        self.cells.clear();
         self.cells
             .resize(self.width, Cell::blank_with_tag(tag.clone()));
     }

@@ -472,6 +472,75 @@ fn bench_erase_display_full(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: LF-heavy scroll with BCE (non-default background)
+// ---------------------------------------------------------------
+fn bench_lf_heavy_bce(c: &mut Criterion) {
+    // Same workload as bench_lf_heavy but with a non-default background
+    // color set, exercising the BCE fill path in push_row / handle_lf.
+    const LF_COUNT: usize = 4_100;
+
+    let bce_tag = FormatTag {
+        colors: StateColors::default().with_background_color(TerminalColor::Blue),
+        ..FormatTag::default()
+    };
+
+    let mut group = c.benchmark_group("bench_lf_heavy_bce");
+    group.throughput(Throughput::Elements(LF_COUNT as u64));
+
+    group.bench_function("lf_4100_times_bce", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(80, 24);
+                buf.set_format(bce_tag.clone());
+                buf
+            },
+            |mut buf| {
+                for i in 0..LF_COUNT {
+                    buf.insert_text(&[TChar::Ascii(b'a' + (i % 26) as u8)]);
+                    buf.handle_lf();
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// Benchmark: erase display with BCE (non-default background)
+// ---------------------------------------------------------------
+fn bench_erase_display_bce(c: &mut Criterion) {
+    // Fill a 80×24 buffer then erase it with a non-default background,
+    // exercising the BCE path in row clearing.
+    let data = gen_ascii_tchars(80 * 24);
+
+    let bce_tag = FormatTag {
+        colors: StateColors::default().with_background_color(TerminalColor::Red),
+        ..FormatTag::default()
+    };
+
+    let mut group = c.benchmark_group("bench_erase_display_bce");
+
+    group.bench_function("erase_display_80x24_bce", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(80, 24);
+                buf.set_format(bce_tag.clone());
+                buf.insert_text(&data);
+                buf
+            },
+            |mut buf| {
+                buf.erase_display();
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -491,6 +560,8 @@ criterion_group!(
         bench_scrollback_render,
         bench_alternate_screen_switch,
         bench_erase_display_full,
+        bench_lf_heavy_bce,
+        bench_erase_display_bce,
 );
 
 criterion_main!(benches);

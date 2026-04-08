@@ -450,7 +450,7 @@ fn clear_with_tag_nondefault_fills_row() {
 }
 
 #[test]
-fn fill_with_tag_default_is_noop() {
+fn fill_with_tag_default_leaves_empty_row_sparse() {
     let mut row = Row::new(10);
 
     row.fill_with_tag(&FormatTag::default());
@@ -458,6 +458,23 @@ fn fill_with_tag_default_is_noop() {
     assert!(
         row.get_characters().is_empty(),
         "fill_with_tag(default) should leave row sparse"
+    );
+}
+
+#[test]
+fn fill_with_tag_default_clears_populated_row() {
+    let mut row = Row::new(10);
+    row.insert_text(0, &[ascii('X'), ascii('Y'), ascii('Z')], &tag());
+    assert!(
+        !row.get_characters().is_empty(),
+        "precondition: row has cells"
+    );
+
+    row.fill_with_tag(&FormatTag::default());
+
+    assert!(
+        row.get_characters().is_empty(),
+        "fill_with_tag(default) on a populated row should clear it to sparse"
     );
 }
 
@@ -506,21 +523,33 @@ fn erase_cells_at_with_bce_tag() {
 }
 
 #[test]
-fn delete_cells_at_bce_tag_for_wide_glyph_cleanup() {
+fn delete_cells_at_bce_tag_for_wide_glyph_boundary_cleanup() {
     let mut row = Row::new(10);
     let bce_tag = blue_bg_tag();
 
-    // Write "A" then a wide emoji then "B"
-    // A at 0, emoji at 1-2, B at 3
-    row.insert_text(0, &[ascii('A'), emoji("🙂"), ascii('B')], &tag());
+    // Write "A", "B", wide emoji (cols 2-3), "C"
+    row.insert_text(
+        0,
+        &[ascii('A'), ascii('B'), emoji("🙂"), ascii('C')],
+        &tag(),
+    );
 
-    // Delete 1 cell at col 1 (the head of the wide emoji) — this should clean
-    // up the wide glyph, using bce_tag for any replacement blanks.
-    row.delete_cells_at(1, 1, &bce_tag);
+    // Delete 2 cells starting at col 1.  The deletion range [1..3) ends on
+    // the emoji's continuation cell at col 3, triggering the wide-glyph
+    // boundary cleanup that replaces the partial glyph with BCE blanks.
+    row.delete_cells_at(1, 2, &bce_tag);
 
-    // After deletion, the wide glyph's cells are replaced and shifted.
-    // The important thing is that any cleanup blanks use the BCE tag.
     let chars = row.get_characters();
-    // The row should still have A at col 0, then B shifted left.
+    // Col 0 should still be 'A'
     assert_eq!(chars[0].tchar(), &ascii('A'), "col 0 should still be A");
+
+    // The boundary-cleanup path should have produced at least one blank
+    // cell carrying the BCE tag (the remnant of the partially-deleted emoji).
+    let has_bce_cell = chars
+        .iter()
+        .any(|cell| cell.tchar() == &TChar::Space && cell.tag() == &bce_tag);
+    assert!(
+        has_bce_cell,
+        "delete_cells_at boundary cleanup should produce a blank with the BCE tag"
+    );
 }
