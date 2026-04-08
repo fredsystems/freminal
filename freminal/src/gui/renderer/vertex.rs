@@ -1931,4 +1931,181 @@ mod tests {
         // Block: middle row 1, col 4 → selected.
         assert!(is_cell_selected(1, 4, sel, true));
     }
+
+    // -----------------------------------------------------------------------
+    //  DECDWL / DECDHL — RowGlyphParams and emit_bg_cells
+    // -----------------------------------------------------------------------
+
+    /// Build a `ShapedLine` with a specific `LineWidth`.
+    fn make_line_with_width(
+        n_glyphs: usize,
+        cell_w: f32,
+        colors: StateColors,
+        decorations: FontDecorationFlags,
+        lw: LineWidth,
+    ) -> Arc<ShapedLine> {
+        use crate::gui::font_manager::FaceId;
+        let glyphs: Vec<ShapedGlyph> = (0..n_glyphs)
+            .map(|i| ShapedGlyph {
+                glyph_id: 36,
+                #[allow(clippy::cast_precision_loss)]
+                x_px: i as f32 * cell_w,
+                y_offset: 0.0,
+                face_id: FaceId::PrimaryRegular,
+                is_color: false,
+                cell_width: 1,
+            })
+            .collect();
+        Arc::new(ShapedLine {
+            runs: vec![ShapedRun {
+                glyphs,
+                col_start: 0,
+                style: crate::gui::font_manager::GlyphStyle::new(false, false),
+                font_weight: FontWeight::Normal,
+                font_decorations: decorations,
+                colors,
+                url: None,
+                blink: BlinkState::None,
+            }],
+            line_width: lw,
+        })
+    }
+
+    #[test]
+    fn x_scale_normal_is_one() {
+        assert!((x_scale(LineWidth::Normal) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn x_scale_double_variants_are_two() {
+        assert!((x_scale(LineWidth::DoubleWidth) - 2.0).abs() < f32::EPSILON);
+        assert!((x_scale(LineWidth::DoubleHeightTop) - 2.0).abs() < f32::EPSILON);
+        assert!((x_scale(LineWidth::DoubleHeightBottom) - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn row_glyph_params_normal_scales_are_one() {
+        let p = RowGlyphParams::new(LineWidth::Normal, 16.0, 0, 14.0);
+        assert!((p.x_scale - 1.0).abs() < f32::EPSILON);
+        assert!((p.y_scale - 1.0).abs() < f32::EPSILON);
+        assert!((p.y_origin_shift - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn row_glyph_params_double_width_no_y_scale() {
+        let p = RowGlyphParams::new(LineWidth::DoubleWidth, 16.0, 0, 14.0);
+        assert!((p.x_scale - 2.0).abs() < f32::EPSILON);
+        assert!((p.y_scale - 1.0).abs() < f32::EPSILON);
+        assert!((p.y_origin_shift - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn row_glyph_params_double_height_top_scales() {
+        let p = RowGlyphParams::new(LineWidth::DoubleHeightTop, 16.0, 0, 14.0);
+        assert!((p.x_scale - 2.0).abs() < f32::EPSILON);
+        assert!((p.y_scale - 2.0).abs() < f32::EPSILON);
+        assert!((p.y_origin_shift - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn row_glyph_params_double_height_bottom_shifts_origin() {
+        let cell_h = 16.0_f32;
+        let p = RowGlyphParams::new(LineWidth::DoubleHeightBottom, cell_h, 0, 14.0);
+        assert!((p.x_scale - 2.0).abs() < f32::EPSILON);
+        assert!((p.y_scale - 2.0).abs() < f32::EPSILON);
+        assert!((p.y_origin_shift - (-cell_h)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn row_glyph_params_row_offset_affects_baseline() {
+        let cell_h = 16.0_f32;
+        let ascent = 14.0_f32;
+        let p0 = RowGlyphParams::new(LineWidth::Normal, cell_h, 0, ascent);
+        let p1 = RowGlyphParams::new(LineWidth::Normal, cell_h, 1, ascent);
+        // Baseline at row 0 = 0 * cell_h + ascent = ascent
+        assert!((p0.baseline_y - ascent).abs() < f32::EPSILON);
+        // Baseline at row 1 = 1 * cell_h + ascent
+        assert!((p1.baseline_y - (cell_h + ascent)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn emit_bg_cells_normal_produces_n_instances() {
+        let mut instances = Vec::new();
+        let color = [1.0, 0.0, 0.0, 1.0];
+        emit_bg_cells(&mut instances, 0, 5, 0, 1.0, color);
+        // Normal scale (1.0): 5 logical cols → 5 instances × 6 floats each.
+        assert_eq!(instances.len(), 5 * 6);
+    }
+
+    #[test]
+    fn emit_bg_cells_double_width_produces_2n_instances() {
+        let mut instances = Vec::new();
+        let color = [0.0, 1.0, 0.0, 1.0];
+        emit_bg_cells(&mut instances, 0, 5, 0, 2.0, color);
+        // Double scale (2.0): 5 logical cols → 10 physical instances × 6 floats.
+        assert_eq!(instances.len(), 10 * 6);
+    }
+
+    #[test]
+    fn emit_bg_cells_double_width_physical_col_indices() {
+        let mut instances = Vec::new();
+        let color = [0.0, 0.0, 1.0, 1.0];
+        // 2 logical columns starting at col_start=1 → physical cols 2,3,4,5
+        emit_bg_cells(&mut instances, 1, 2, 0, 2.0, color);
+        // 4 instances × 6 floats = 24
+        assert_eq!(instances.len(), 24);
+        // First instance: physical col = (1+0)*2 = 2
+        assert!((instances[0] - 2.0).abs() < f32::EPSILON);
+        // Second instance: physical col = (1+0)*2 + 1 = 3
+        assert!((instances[6] - 3.0).abs() < f32::EPSILON);
+        // Third instance: physical col = (1+1)*2 = 4
+        assert!((instances[12] - 4.0).abs() < f32::EPSILON);
+        // Fourth instance: physical col = (1+1)*2 + 1 = 5
+        assert!((instances[18] - 5.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bg_instances_double_width_row_doubles_colored_cells() {
+        // A double-width line with colored BG should produce twice as many
+        // instances as a normal-width line.
+        let colored = StateColors {
+            background_color: TerminalColor::Custom(255, 0, 0),
+            ..StateColors::default()
+        };
+        let normal_line = make_line_with_width(
+            5,
+            8.0,
+            colored,
+            FontDecorationFlags::empty(),
+            LineWidth::Normal,
+        );
+        let dw_line = make_line_with_width(
+            5,
+            8.0,
+            colored,
+            FontDecorationFlags::empty(),
+            LineWidth::DoubleWidth,
+        );
+        let (bg_normal, _) = bg_instances_test(
+            &[normal_line],
+            8,
+            16,
+            false,
+            false,
+            CursorPos::default(),
+            &CursorVisualStyle::BlockCursorSteady,
+        );
+        let (bg_dw, _) = bg_instances_test(
+            &[dw_line],
+            8,
+            16,
+            false,
+            false,
+            CursorPos::default(),
+            &CursorVisualStyle::BlockCursorSteady,
+        );
+        // Each double-width logical column produces 2 physical BG instances,
+        // so the total instance count should be double.
+        assert_eq!(bg_dw.len(), bg_normal.len() * 2);
+    }
 }

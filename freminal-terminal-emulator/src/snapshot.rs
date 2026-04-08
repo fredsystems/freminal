@@ -379,4 +379,9 @@ mod tests {
     fn empty_kitty_keyboard_flags_is_zero() {
         assert_eq!(TerminalSnapshot::empty().kitty_keyboard_flags, 0);
     }
+
+    #[test]
+    fn empty_visible_line_widths_is_empty() {
+        assert!(TerminalSnapshot::empty().visible_line_widths.is_empty());
+    }
 }
