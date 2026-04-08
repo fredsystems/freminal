@@ -498,6 +498,10 @@ pub struct FreminalTerminalWidget {
     previous_text_blink_fast_visible: bool,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
+    /// Whether cursor trail animation is enabled (cursor glides to new position).
+    cursor_trail: bool,
+    /// Duration of the cursor trail animation.
+    cursor_trail_duration: Duration,
     /// Whether a UI overlay (modal dialog or dropdown menu) was open on the
     /// previous frame.
     ///
@@ -554,6 +558,10 @@ impl FreminalTerminalWidget {
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
             ligatures: config.font.ligatures,
+            cursor_trail: config.cursor.trail,
+            cursor_trail_duration: Duration::from_millis(u64::from(
+                config.cursor.trail_duration_ms,
+            )),
             overlay_was_open_last_frame: false,
             base_font_defs,
         }
@@ -865,6 +873,27 @@ impl FreminalTerminalWidget {
                 Some((s_col, s_row, e_col, e_row))
             });
 
+            // ── Cursor trail animation ─────────────────────────────────────
+            // Update the animated cursor position.  When trail is enabled, the
+            // visual position glides from the previous location to the new one.
+            // When disabled, it snaps instantly.
+            let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
+            let target_row = snap.cursor_pos.y.approx_as::<f32>().unwrap_or(0.0);
+            let cursor_animating = view_state.update_cursor_animation(
+                target_col,
+                target_row,
+                self.cursor_trail,
+                self.cursor_trail_duration,
+            );
+
+            // Compute the pixel position from the (possibly animated) visual
+            // cursor coordinates.  These are fractional cell coords, so we
+            // multiply by cell dimensions in pixels.
+            let cursor_pixel_pos = (
+                view_state.cursor_visual_col * cell_w_f,
+                view_state.cursor_visual_row * row_h_f,
+            );
+
             // Determine whether we can take the cursor-only fast path.
             //
             // Cursor-only: content has not changed, the selection has not
@@ -872,10 +901,14 @@ impl FreminalTerminalWidget {
             // since the last frame.  We only need to patch the cursor quad
             // in the background VBO — no re-shaping and no full vertex
             // rebuild required.
+            //
+            // When cursor trail is animating, we also enter the cursor-only
+            // path so the visual position is updated each frame.
             let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
                 || snap.cursor_pos != self.previous_cursor_pos
                 || snap.show_cursor != self.previous_show_cursor
-                || snap.cursor_color_override != self.previous_cursor_color_override;
+                || snap.cursor_color_override != self.previous_cursor_color_override
+                || cursor_animating;
 
             // A text-blink visibility change requires rebuilding the foreground
             // vertex buffer (glyphs are included or excluded per run).  This is
@@ -903,7 +936,7 @@ impl FreminalTerminalWidget {
                     cell_h,
                     snap.show_cursor,
                     cursor_blink_on,
-                    snap.cursor_pos,
+                    cursor_pixel_pos,
                     &snap.cursor_visual_style,
                     snap.theme,
                     snap.cursor_color_override,
@@ -960,7 +993,7 @@ impl FreminalTerminalWidget {
                     self.font_manager.stroke_size(),
                     snap.show_cursor,
                     cursor_blink_on,
-                    snap.cursor_pos,
+                    cursor_pixel_pos,
                     &snap.cursor_visual_style,
                     screen_selection,
                     snap.theme,
@@ -1027,6 +1060,12 @@ impl FreminalTerminalWidget {
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
             // existing VBO data — no CPU work at all.
+
+            // Drive the cursor trail animation: request a repaint on the next
+            // frame so the interpolation continues smoothly until it completes.
+            if cursor_animating {
+                ui.ctx().request_repaint();
+            }
         }
 
         // Update per-frame cursor state for the next frame's comparison.
@@ -1235,6 +1274,9 @@ impl FreminalTerminalWidget {
             self.shaping_cache.clear();
         }
         self.ligatures = new_config.font.ligatures;
+        self.cursor_trail = new_config.cursor.trail;
+        self.cursor_trail_duration =
+            Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
 
         // Keep egui font infrastructure updated for chrome (menu bar, settings
         // modal).  This is retained from the old pipeline; it will be cleaned

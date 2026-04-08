@@ -20,7 +20,7 @@ configurable keybindings, clipboard access, drag-and-drop, and a smooth cursor a
 | 41  | Bell Handling (Visual Only)   | Small        | Complete |
 | 42  | Drag-and-Drop                 | Small        | Complete |
 | 43  | OSC 52 Clipboard Read         | Small        | Complete |
-| 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Pending  |
+| 44  | Cursor Trail / Smooth Cursor  | Small-Medium | Complete |
 
 ---
 
@@ -704,19 +704,19 @@ trail_duration_ms = 100
 
 ### 44 Subtasks
 
-1. **44.1 — Cursor animation state in `ViewState`**
+1. ✅ **44.1 — Cursor animation state in `ViewState`**
    Add animation fields. Implement interpolation logic with configurable duration and
    ease-out curve.
 
-2. **44.2 — Wire animation into render loop**
+2. ✅ **44.2 — Wire animation into render loop**
    In the terminal widget, use `cursor_visual_pos` instead of the snapshot's cursor position
    when rendering the cursor. Request repaints during active animations.
 
-3. **44.3 — Config: cursor trail options**
+3. ✅ **44.3 — Config: cursor trail options**
    Add `trail` and `trail_duration_ms` to `CursorConfig`. Update `config_example.toml`,
    home-manager module, settings modal.
 
-4. **44.4 — Tests**
+4. ✅ **44.4 — Tests**
    Unit tests: interpolation math, animation completion, config parsing.
 
 ### 44 Primary Files

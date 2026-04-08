@@ -10,7 +10,6 @@
 //! GPU by the [`super::gpu`] module.
 
 use conv2::{ApproxFrom, ConvUtil};
-use freminal_common::buffer_states::cursor::CursorPos;
 use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
@@ -168,7 +167,7 @@ pub fn build_background_instances(
     stroke_size: f32,
     show_cursor: bool,
     cursor_blink_on: bool,
-    cursor_pos: CursorPos,
+    cursor_pixel_pos: (f32, f32),
     cursor_visual_style: &CursorVisualStyle,
     selection: Option<(usize, usize, usize, usize)>,
     theme: &ThemePalette,
@@ -288,8 +287,7 @@ pub fn build_background_instances(
 
     // --- Cursor quad (always last in deco so cursor-only patches work) ---
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
-        let cx = gl_f32(cursor_pos.x) * gl_f32_u32(cell_width);
-        let cy = gl_f32(cursor_pos.y) * gl_f32_u32(cell_height);
+        let (cx, cy) = cursor_pixel_pos;
         let cw = gl_f32_u32(cell_width);
         let ch = gl_f32_u32(cell_height);
 
@@ -335,7 +333,7 @@ pub fn build_cursor_verts_only(
     cell_height: u32,
     show_cursor: bool,
     cursor_blink_on: bool,
-    cursor_pos: CursorPos,
+    cursor_pixel_pos: (f32, f32),
     cursor_visual_style: &CursorVisualStyle,
     theme: &ThemePalette,
     cursor_color_override: Option<(u8, u8, u8)>,
@@ -343,8 +341,7 @@ pub fn build_cursor_verts_only(
     let mut verts = Vec::new();
 
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
-        let cx = gl_f32(cursor_pos.x) * gl_f32_u32(cell_width);
-        let cy = gl_f32(cursor_pos.y) * gl_f32_u32(cell_height);
+        let (cx, cy) = cursor_pixel_pos;
         let cw = gl_f32_u32(cell_width);
         let ch = gl_f32_u32(cell_height);
 
@@ -766,6 +763,7 @@ pub(super) fn extract_atlas_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::cursor::CursorPos;
     use freminal_common::buffer_states::fonts::FontDecorationFlags;
     use freminal_common::config::Config;
     use freminal_common::themes;
@@ -837,6 +835,9 @@ mod tests {
 
     /// Shorthand for calling `build_background_instances` with typical test
     /// defaults (no selection, `CATPPUCCIN_MOCHA`, no cursor color override).
+    ///
+    /// Accepts a `CursorPos` (integer cell coordinates) and converts to the
+    /// pixel `(f32, f32)` the production function expects.
     fn bg_instances_test(
         lines: &[Arc<ShapedLine>],
         cell_width: u32,
@@ -846,6 +847,10 @@ mod tests {
         cursor_pos: CursorPos,
         cursor_style: &CursorVisualStyle,
     ) -> (Vec<f32>, Vec<f32>) {
+        let cursor_pixel_pos = (
+            gl_f32(cursor_pos.x) * gl_f32_u32(cell_width),
+            gl_f32(cursor_pos.y) * gl_f32_u32(cell_height),
+        );
         build_background_instances(
             lines,
             cell_width,
@@ -856,7 +861,7 @@ mod tests {
             1.0,
             show_cursor,
             cursor_blink_on,
-            cursor_pos,
+            cursor_pixel_pos,
             cursor_style,
             None,
             &themes::CATPPUCCIN_MOCHA,
@@ -1331,11 +1336,40 @@ mod tests {
     //  build_cursor_verts_only
     // -----------------------------------------------------------------------
 
+    /// Test helper: wraps `build_cursor_verts_only`, converting a `CursorPos`
+    /// to pixel `(f32, f32)` using the same formula the production caller uses.
+    #[allow(clippy::too_many_arguments)]
+    fn cursor_verts_test(
+        cell_width: u32,
+        cell_height: u32,
+        show_cursor: bool,
+        cursor_blink_on: bool,
+        cursor_pos: CursorPos,
+        cursor_visual_style: &CursorVisualStyle,
+        theme: &ThemePalette,
+        cursor_color_override: Option<(u8, u8, u8)>,
+    ) -> Vec<f32> {
+        let cursor_pixel_pos = (
+            gl_f32(cursor_pos.x) * gl_f32_u32(cell_width),
+            gl_f32(cursor_pos.y) * gl_f32_u32(cell_height),
+        );
+        build_cursor_verts_only(
+            cell_width,
+            cell_height,
+            show_cursor,
+            cursor_blink_on,
+            cursor_pixel_pos,
+            cursor_visual_style,
+            theme,
+            cursor_color_override,
+        )
+    }
+
     /// When the cursor is hidden (`show_cursor = false`), the function must
     /// return an empty vec — no geometry at all.
     #[test]
     fn cursor_verts_only_hidden_returns_empty() {
-        let verts = build_cursor_verts_only(
+        let verts = cursor_verts_test(
             8,
             16,
             false,
@@ -1353,7 +1387,7 @@ mod tests {
     #[test]
     fn cursor_verts_only_steady_block_always_visible() {
         for blink_on in [false, true] {
-            let verts = build_cursor_verts_only(
+            let verts = cursor_verts_test(
                 8,
                 16,
                 true,
@@ -1374,7 +1408,7 @@ mod tests {
     /// A blinking cursor with `blink_on = false` must return empty verts.
     #[test]
     fn cursor_verts_only_blink_off_returns_empty() {
-        let verts = build_cursor_verts_only(
+        let verts = cursor_verts_test(
             8,
             16,
             true,
@@ -1420,7 +1454,7 @@ mod tests {
         // Build cursor-only verts with blink_on=false using a *blinking* style.
         // BlockCursorSteady ignores blink_on (always visible); BlockCursorBlink
         // respects it, so blink_on=false correctly produces an empty vec.
-        let cursor_off_verts = build_cursor_verts_only(
+        let cursor_off_verts = cursor_verts_test(
             8,
             16,
             true,

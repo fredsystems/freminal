@@ -50,7 +50,12 @@ let
       };
 
       cursorSection = {
-        inherit (s.cursor) shape blink;
+        inherit (s.cursor)
+          shape
+          blink
+          trail
+          trail_duration_ms
+          ;
       };
 
       themeSection = {
@@ -160,6 +165,18 @@ in
           type = types.bool;
           default = true;
           description = "Whether the cursor should blink.";
+        };
+
+        trail = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Enable smooth cursor trail animation.";
+        };
+
+        trail_duration_ms = mkOption {
+          type = types.ints.unsigned;
+          default = 150;
+          description = "Duration of the cursor trail animation in milliseconds.";
         };
       };
 

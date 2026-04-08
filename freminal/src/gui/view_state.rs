@@ -226,6 +226,34 @@ pub struct ViewState {
     ///
     /// Automatically cleared once the flash duration has elapsed.
     pub bell_since: Option<Instant>,
+
+    // ── Cursor trail animation ───────────────────────────────────────
+    /// Current visual cursor position (fractional cell coordinates).
+    ///
+    /// When cursor trail is enabled, this is the interpolated position
+    /// between the previous snapshot cursor position and the current one.
+    /// Updated each frame by [`Self::update_cursor_animation`].
+    pub cursor_visual_col: f32,
+
+    /// Current visual cursor row (fractional cell coordinates).
+    pub cursor_visual_row: f32,
+
+    /// The target cursor column (from the latest snapshot).
+    ///
+    /// When the snapshot's `cursor_pos` differs from this, a new
+    /// animation is started.
+    pub cursor_target_col: f32,
+
+    /// The target cursor row (from the latest snapshot).
+    pub cursor_target_row: f32,
+
+    /// Timestamp of the last animation frame, used to compute delta time
+    /// for exponential decay interpolation.
+    ///
+    /// `Some(instant)` = cursor was animating on the previous frame.
+    /// `None` = cursor is at rest or trail was just enabled (first frame
+    /// will record the timestamp without moving the cursor).
+    pub cursor_last_frame: Option<Instant>,
 }
 
 impl Default for ViewState {
@@ -250,6 +278,11 @@ impl Default for ViewState {
             context_menu_pos: None,
             zoom_delta: 0.0,
             bell_since: None,
+            cursor_visual_col: 0.0,
+            cursor_visual_row: 0.0,
+            cursor_target_col: 0.0,
+            cursor_target_row: 0.0,
+            cursor_last_frame: None,
         }
     }
 }
@@ -292,6 +325,86 @@ impl ViewState {
     /// Reset the zoom delta to zero (back to the config's base font size).
     pub const fn reset_zoom(&mut self) {
         self.zoom_delta = 0.0;
+    }
+
+    // ── Cursor trail animation ───────────────────────────────────────
+
+    /// Update the cursor animation state for this frame.
+    ///
+    /// `target_col` and `target_row` come from the snapshot's `cursor_pos`.
+    /// `trail_enabled` is the config flag; when `false`, the visual position
+    /// snaps instantly to the target.  `duration` controls the speed of the
+    /// exponential decay: approximately 95% of the remaining distance is
+    /// covered in `duration` (tau = duration / 3).  Every cursor movement
+    /// — including single-column typing — produces a visible glide.
+    ///
+    /// Returns `true` if the animation is still in progress (i.e. the caller
+    /// should `request_repaint()` to continue driving it).
+    pub fn update_cursor_animation(
+        &mut self,
+        target_col: f32,
+        target_row: f32,
+        trail_enabled: bool,
+        duration: Duration,
+    ) -> bool {
+        /// Distance (in cells) below which the visual position snaps to the
+        /// target rather than continuing to interpolate.
+        const SNAP_THRESHOLD: f32 = 0.01;
+
+        self.cursor_target_col = target_col;
+        self.cursor_target_row = target_row;
+
+        if !trail_enabled {
+            // Snap instantly — no animation.
+            self.cursor_visual_col = target_col;
+            self.cursor_visual_row = target_row;
+            self.cursor_last_frame = None;
+            return false;
+        }
+
+        // First observation: snap visual to target so we don't glide
+        // from (0,0) on startup.  Record the timestamp so subsequent
+        // target changes will animate normally.
+        if self.cursor_last_frame.is_none() {
+            self.cursor_visual_col = target_col;
+            self.cursor_visual_row = target_row;
+            self.cursor_last_frame = Some(Instant::now());
+            return false;
+        }
+
+        let dx = self.cursor_target_col - self.cursor_visual_col;
+        let dy = self.cursor_target_row - self.cursor_visual_row;
+
+        // Close enough — snap to target and stop animating.
+        if dx.abs() < SNAP_THRESHOLD && dy.abs() < SNAP_THRESHOLD {
+            self.cursor_visual_col = self.cursor_target_col;
+            self.cursor_visual_row = self.cursor_target_row;
+            return false;
+        }
+
+        let now = Instant::now();
+        // `cursor_last_frame` is always `Some` here — the `None` case
+        // was handled by the first-observation snap above.  The
+        // `unwrap_or` is a defensive fallback that can never fire.
+        let dt = now.duration_since(self.cursor_last_frame.unwrap_or(now));
+        self.cursor_last_frame = Some(now);
+
+        // Exponential decay: ~95% of distance covered in `duration`.
+        // tau = duration / 3  →  e^(-3) ≈ 0.05  →  95% convergence.
+        let tau = duration.as_secs_f32() / 3.0;
+        if tau < f32::EPSILON {
+            // Zero duration — snap immediately.
+            self.cursor_visual_col = self.cursor_target_col;
+            self.cursor_visual_row = self.cursor_target_row;
+            self.cursor_last_frame = None;
+            return false;
+        }
+
+        let factor = 1.0_f32 - (-dt.as_secs_f32() / tau).exp();
+        self.cursor_visual_col = dx.mul_add(factor, self.cursor_visual_col);
+        self.cursor_visual_row = dy.mul_add(factor, self.cursor_visual_row);
+
+        true
     }
 
     /// Advance the text blink cycle if enough time has elapsed.
@@ -1331,6 +1444,182 @@ mod tests {
         assert!(
             (vs.effective_font_size(16.0) - 20.0).abs() < f32::EPSILON,
             "after base change: 16 + 4 = 20"
+        );
+    }
+
+    // ── cursor trail animation tests ─────────────────────────────────
+
+    #[test]
+    fn cursor_animation_disabled_snaps_instantly() {
+        let mut vs = ViewState::new();
+        let animating = vs.update_cursor_animation(10.0, 5.0, false, Duration::from_millis(150));
+
+        assert!(!animating, "should not be animating when trail disabled");
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target"
+        );
+        assert!(vs.cursor_last_frame.is_none());
+    }
+
+    #[test]
+    fn cursor_animation_first_frame_snaps_to_target() {
+        let mut vs = ViewState::new();
+        // First ever call snaps visual to target so we don't glide from (0,0).
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::from_millis(150));
+
+        assert!(!animating, "first observation should snap, not animate");
+        assert!(
+            vs.cursor_last_frame.is_some(),
+            "should record timestamp on first frame"
+        );
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target on first frame"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target on first frame"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_converges_toward_target() {
+        let mut vs = ViewState::new();
+        let duration = Duration::from_millis(150);
+
+        // First call — snaps to (0, 0) as initialization.
+        vs.update_cursor_animation(0.0, 0.0, true, duration);
+
+        // Change target to (10, 5) — should start animating.
+        std::thread::sleep(Duration::from_millis(30));
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, duration);
+        assert!(animating, "should be animating toward new target");
+        assert!(
+            vs.cursor_visual_col > 0.0,
+            "visual col should have moved toward target, got {}",
+            vs.cursor_visual_col
+        );
+        assert!(
+            vs.cursor_visual_col < 10.0,
+            "visual col should not overshoot target, got {}",
+            vs.cursor_visual_col
+        );
+        assert!(
+            vs.cursor_visual_row > 0.0,
+            "visual row should have moved toward target, got {}",
+            vs.cursor_visual_row
+        );
+    }
+
+    #[test]
+    fn cursor_animation_at_target_returns_false() {
+        let mut vs = ViewState::new();
+        // Initialize at (5, 3).
+        vs.update_cursor_animation(5.0, 3.0, true, Duration::from_millis(150));
+
+        // Call again with same target — nothing to animate.
+        let animating = vs.update_cursor_animation(5.0, 3.0, true, Duration::from_millis(150));
+
+        assert!(!animating, "should not be animating when already at target");
+    }
+
+    #[test]
+    fn cursor_animation_retarget_changes_direction() {
+        let mut vs = ViewState::new();
+        let duration = Duration::from_millis(150);
+
+        // Initialize at (0, 0), then move toward (10, 0).
+        vs.update_cursor_animation(0.0, 0.0, true, duration);
+        std::thread::sleep(Duration::from_millis(30));
+        vs.update_cursor_animation(10.0, 0.0, true, duration);
+
+        let mid_col = vs.cursor_visual_col;
+        assert!(
+            mid_col > 0.0 && mid_col < 10.0,
+            "should be mid-animation, got {mid_col}"
+        );
+
+        // Change target to (20, 0) — exponential decay smoothly redirects.
+        std::thread::sleep(Duration::from_millis(30));
+        let animating = vs.update_cursor_animation(20.0, 0.0, true, duration);
+        assert!(animating, "should still be animating after retarget");
+        assert!(
+            vs.cursor_visual_col > mid_col,
+            "visual should have moved further toward new target, got {}",
+            vs.cursor_visual_col
+        );
+        assert!(
+            (vs.cursor_target_col - 20.0).abs() < f32::EPSILON,
+            "target should update to 20.0"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_zero_duration_snaps() {
+        let mut vs = ViewState::new();
+        // Initialize, then move with zero duration.
+        vs.update_cursor_animation(0.0, 0.0, true, Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(5));
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::ZERO);
+
+        assert!(!animating, "zero duration should snap instantly");
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should be at target"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should be at target"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_default_state_at_origin() {
+        let vs = ViewState::new();
+        assert!(
+            vs.cursor_visual_col.abs() < f32::EPSILON,
+            "default visual_col should be 0.0"
+        );
+        assert!(
+            vs.cursor_visual_row.abs() < f32::EPSILON,
+            "default visual_row should be 0.0"
+        );
+        assert!(
+            vs.cursor_target_col.abs() < f32::EPSILON,
+            "default target_col should be 0.0"
+        );
+        assert!(
+            vs.cursor_target_row.abs() < f32::EPSILON,
+            "default target_row should be 0.0"
+        );
+        assert!(
+            vs.cursor_last_frame.is_none(),
+            "default cursor_last_frame should be None"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_snap_threshold() {
+        let mut vs = ViewState::new();
+        // Place visual very close to target (within SNAP_THRESHOLD of 0.01).
+        vs.cursor_visual_col = 9.995;
+        vs.cursor_visual_row = 4.998;
+
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::from_millis(150));
+
+        assert!(!animating, "should snap when within threshold, not animate");
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target"
         );
     }
 }
