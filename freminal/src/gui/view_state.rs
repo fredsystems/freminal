@@ -247,21 +247,23 @@ pub struct ViewState {
     /// The target cursor row (from the latest snapshot).
     pub cursor_target_row: f32,
 
-    /// Timestamp when the current cursor trail animation started.
+    /// Timestamp of the last animation frame, used to compute delta time
+    /// for exponential decay interpolation.
     ///
-    /// `Some(instant)` = animation is in progress.
-    /// `None` = cursor is at rest (visual == target).
-    pub cursor_anim_start: Option<Instant>,
+    /// `Some(instant)` = cursor was animating on the previous frame.
+    /// `None` = cursor is at rest or trail was just enabled (first frame
+    /// will record the timestamp without moving the cursor).
+    pub cursor_last_frame: Option<Instant>,
 
-    /// The cursor column at the start of the current animation.
+    /// The Chebyshev distance (max of |dx|, |dy|) measured at the moment
+    /// the cursor target changed.  Used to scale the exponential-decay
+    /// time constant so that small moves (1–2 cells) complete nearly
+    /// instantly while large jumps (8+ cells) show a visible trail.
     ///
-    /// Captured when a new target is detected so that the interpolation
-    /// always proceeds from a fixed origin to the target, rather than
-    /// from a mid-interpolation visual position.
-    pub cursor_start_col: f32,
-
-    /// The cursor row at the start of the current animation.
-    pub cursor_start_row: f32,
+    /// Re-computed whenever `cursor_target_col` or `cursor_target_row`
+    /// changes.  Stays constant during the animation so the glide speed
+    /// does not accelerate as the cursor converges.
+    pub cursor_anim_initial_distance: f32,
 }
 
 impl Default for ViewState {
@@ -290,9 +292,8 @@ impl Default for ViewState {
             cursor_visual_row: 0.0,
             cursor_target_col: 0.0,
             cursor_target_row: 0.0,
-            cursor_anim_start: None,
-            cursor_start_col: 0.0,
-            cursor_start_row: 0.0,
+            cursor_last_frame: None,
+            cursor_anim_initial_distance: 0.0,
         }
     }
 }
@@ -343,8 +344,15 @@ impl ViewState {
     ///
     /// `target_col` and `target_row` come from the snapshot's `cursor_pos`.
     /// `trail_enabled` is the config flag; when `false`, the visual position
-    /// snaps instantly to the target.  `duration` is the configured animation
-    /// duration (ignored when trail is disabled).
+    /// snaps instantly to the target.  `duration` controls the speed of the
+    /// exponential decay: approximately 95% of the remaining distance is
+    /// covered in `duration` (tau = duration / 3).
+    ///
+    /// The time constant is scaled by move distance: single-cell movements
+    /// complete in 1–2 frames (virtually instant), while large jumps
+    /// (8+ cells) receive the full trail duration.  This prevents the cursor
+    /// from feeling laggy during normal typing while still providing a
+    /// visible trail for Home/End/PgUp/PgDn and mouse-click jumps.
     ///
     /// Returns `true` if the animation is still in progress (i.e. the caller
     /// should `request_repaint()` to continue driving it).
@@ -355,64 +363,93 @@ impl ViewState {
         trail_enabled: bool,
         duration: Duration,
     ) -> bool {
+        /// Distance (in cells) below which the visual position snaps to the
+        /// target rather than continuing to interpolate.
+        const SNAP_THRESHOLD: f32 = 0.01;
+
+        /// Assumed frame delta for the first animation frame, when no
+        /// previous timestamp is available.  Using ~60 fps avoids a
+        /// visible 1-frame stall at animation start.
+        const ASSUMED_FIRST_DT: Duration = Duration::from_millis(16);
+
+        /// Distance (in cells) at which the full trail duration applies.
+        /// Moves shorter than this use a proportionally smaller time
+        /// constant, so single-cell movements appear nearly instant.
+        const FULL_TRAIL_DISTANCE: f32 = 8.0;
+
+        /// Minimum distance scale factor, preventing the effective time
+        /// constant from collapsing to zero for very short moves.
+        const MIN_DISTANCE_SCALE: f32 = 0.05;
+
+        // Detect whether the target has moved since the last call.
+        // When it does, record the initial distance from the current
+        // visual position to the new target — this is used to scale
+        // tau for the entire animation so the glide speed stays constant.
+        let target_changed = (target_col - self.cursor_target_col).abs() > f32::EPSILON
+            || (target_row - self.cursor_target_row).abs() > f32::EPSILON;
+
+        self.cursor_target_col = target_col;
+        self.cursor_target_row = target_row;
+
         if !trail_enabled {
             // Snap instantly — no animation.
             self.cursor_visual_col = target_col;
             self.cursor_visual_row = target_row;
-            self.cursor_target_col = target_col;
-            self.cursor_target_row = target_row;
-            self.cursor_anim_start = None;
+            self.cursor_last_frame = None;
             return false;
         }
-
-        // Detect a new target position.
-        let target_changed = (target_col - self.cursor_target_col).abs() > f32::EPSILON
-            || (target_row - self.cursor_target_row).abs() > f32::EPSILON;
 
         if target_changed {
-            // Capture the current visual position as the animation origin.
-            self.cursor_start_col = self.cursor_visual_col;
-            self.cursor_start_row = self.cursor_visual_row;
-            self.cursor_target_col = target_col;
-            self.cursor_target_row = target_row;
-            self.cursor_anim_start = Some(Instant::now());
+            let delta_col = self.cursor_target_col - self.cursor_visual_col;
+            let delta_row = self.cursor_target_row - self.cursor_visual_row;
+            self.cursor_anim_initial_distance = delta_col.abs().max(delta_row.abs());
         }
 
-        // If no animation is active, nothing to interpolate.
-        let Some(start) = self.cursor_anim_start else {
-            return false;
-        };
+        let dx = self.cursor_target_col - self.cursor_visual_col;
+        let dy = self.cursor_target_row - self.cursor_visual_row;
 
-        let elapsed = start.elapsed();
-        if elapsed >= duration {
-            // Animation complete — snap to target.
+        // Close enough — snap to target and stop animating.
+        if dx.abs() < SNAP_THRESHOLD && dy.abs() < SNAP_THRESHOLD {
             self.cursor_visual_col = self.cursor_target_col;
             self.cursor_visual_row = self.cursor_target_row;
-            self.cursor_anim_start = None;
+            self.cursor_last_frame = None;
             return false;
         }
 
-        // Compute progress [0.0, 1.0] and apply ease-out cubic: 1 - (1 - t)^3
-        let t = elapsed.as_secs_f32() / duration.as_secs_f32();
-        let eased = Self::ease_out_cubic(t);
+        let now = Instant::now();
+        // On the first frame after rest, assume a ~60 fps delta so the
+        // cursor begins moving immediately instead of stalling for one frame.
+        let dt = self
+            .cursor_last_frame
+            .map_or(ASSUMED_FIRST_DT, |last| now.duration_since(last));
+        self.cursor_last_frame = Some(now);
 
-        // Interpolate from the captured start position to the target.
-        self.cursor_visual_col =
-            (self.cursor_target_col - self.cursor_start_col).mul_add(eased, self.cursor_start_col);
-        self.cursor_visual_row =
-            (self.cursor_target_row - self.cursor_start_row).mul_add(eased, self.cursor_start_row);
+        // Exponential decay: ~95% of distance covered in `duration`.
+        // tau = duration / 3  →  e^(-3) ≈ 0.05  →  95% convergence.
+        let base_tau = duration.as_secs_f32() / 3.0;
+        if base_tau < f32::EPSILON {
+            // Zero duration — snap immediately.
+            self.cursor_visual_col = self.cursor_target_col;
+            self.cursor_visual_row = self.cursor_target_row;
+            self.cursor_last_frame = None;
+            return false;
+        }
 
-        true // animation still in progress
-    }
+        // Scale the time constant by the *initial* distance (recorded when
+        // the target changed): small moves (1–2 cells) complete in 1–2
+        // frames, large jumps get the full trail.  Using the initial
+        // distance rather than the remaining distance keeps the glide
+        // speed constant throughout the animation — no late-stage
+        // acceleration.
+        let scale = (self.cursor_anim_initial_distance / FULL_TRAIL_DISTANCE)
+            .clamp(MIN_DISTANCE_SCALE, 1.0);
+        let tau = base_tau * scale;
 
-    /// Ease-out cubic curve: `1 - (1 - t)^3`.
-    ///
-    /// Starts fast and decelerates towards the end.  `t` is clamped to [0, 1].
-    #[must_use]
-    fn ease_out_cubic(t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-        let inv = 1.0 - t;
-        (inv * inv).mul_add(-inv, 1.0)
+        let factor = 1.0_f32 - (-dt.as_secs_f32() / tau).exp();
+        self.cursor_visual_col = dx.mul_add(factor, self.cursor_visual_col);
+        self.cursor_visual_row = dy.mul_add(factor, self.cursor_visual_row);
+
+        true
     }
 
     /// Advance the text blink cycle if enough time has elapsed.
@@ -1455,69 +1492,6 @@ mod tests {
         );
     }
 
-    // ── ease_out_cubic tests ─────────────────────────────────────────
-
-    #[test]
-    fn ease_out_cubic_at_zero() {
-        let val = ViewState::ease_out_cubic(0.0);
-        assert!(
-            val.abs() < f32::EPSILON,
-            "ease_out_cubic(0.0) should be 0.0, got {val}"
-        );
-    }
-
-    #[test]
-    fn ease_out_cubic_at_one() {
-        let val = ViewState::ease_out_cubic(1.0);
-        assert!(
-            (val - 1.0).abs() < f32::EPSILON,
-            "ease_out_cubic(1.0) should be 1.0, got {val}"
-        );
-    }
-
-    #[test]
-    fn ease_out_cubic_at_half() {
-        // 1 - (1 - 0.5)^3 = 1 - 0.125 = 0.875
-        let val = ViewState::ease_out_cubic(0.5);
-        assert!(
-            (val - 0.875).abs() < 1e-6,
-            "ease_out_cubic(0.5) should be 0.875, got {val}"
-        );
-    }
-
-    #[test]
-    fn ease_out_cubic_monotonically_increasing() {
-        let mut prev = 0.0_f32;
-        for i in 1..=100 {
-            #[allow(clippy::cast_precision_loss)]
-            let t = i as f32 / 100.0;
-            let val = ViewState::ease_out_cubic(t);
-            assert!(
-                val >= prev,
-                "ease_out_cubic should be monotonically increasing: f({t}) = {val} < prev = {prev}",
-            );
-            prev = val;
-        }
-    }
-
-    #[test]
-    fn ease_out_cubic_clamps_below_zero() {
-        let val = ViewState::ease_out_cubic(-0.5);
-        assert!(
-            val.abs() < f32::EPSILON,
-            "ease_out_cubic(-0.5) should clamp to 0.0, got {val}"
-        );
-    }
-
-    #[test]
-    fn ease_out_cubic_clamps_above_one() {
-        let val = ViewState::ease_out_cubic(1.5);
-        assert!(
-            (val - 1.0).abs() < f32::EPSILON,
-            "ease_out_cubic(1.5) should clamp to 1.0, got {val}"
-        );
-    }
-
     // ── cursor trail animation tests ─────────────────────────────────
 
     #[test]
@@ -1534,142 +1508,138 @@ mod tests {
             (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
             "visual row should snap to target"
         );
-        assert!(vs.cursor_anim_start.is_none());
+        assert!(vs.cursor_last_frame.is_none());
     }
 
     #[test]
-    fn cursor_animation_starts_on_target_change() {
+    fn cursor_animation_first_frame_records_timestamp() {
         let mut vs = ViewState::new();
-        // Initial position is (0, 0). Move to (10, 5) with trail enabled.
+        // Initial visual is (0, 0). Move to (10, 5) with trail enabled.
         let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::from_millis(150));
 
-        assert!(animating, "should be animating after target change");
-        assert!(vs.cursor_anim_start.is_some());
+        assert!(animating, "should be animating (first frame)");
         assert!(
-            (vs.cursor_target_col - 10.0).abs() < f32::EPSILON,
-            "target col should be set"
+            vs.cursor_last_frame.is_some(),
+            "should record timestamp on first frame"
+        );
+        // The first frame uses an assumed 16ms dt, so the visual position
+        // should have moved toward the target (not stayed at zero).
+        assert!(
+            vs.cursor_visual_col > 0.0,
+            "visual col should advance on first frame (assumed 16ms dt)"
         );
         assert!(
-            (vs.cursor_target_row - 5.0).abs() < f32::EPSILON,
-            "target row should be set"
+            vs.cursor_visual_row > 0.0,
+            "visual row should advance on first frame (assumed 16ms dt)"
+        );
+        // But it should NOT have reached the target yet.
+        assert!(
+            vs.cursor_visual_col < 10.0,
+            "visual col should not have reached target on first frame"
+        );
+        assert!(
+            vs.cursor_visual_row < 5.0,
+            "visual row should not have reached target on first frame"
         );
     }
 
     #[test]
-    fn cursor_animation_completes_after_duration() {
+    fn cursor_animation_converges_toward_target() {
         let mut vs = ViewState::new();
-        let duration = Duration::from_millis(100);
+        let duration = Duration::from_millis(150);
 
-        // Start animation.
+        // First frame — records timestamp.
         vs.update_cursor_animation(10.0, 5.0, true, duration);
 
-        // Artificially set start time to the past so duration has elapsed.
-        vs.cursor_anim_start = Some(
-            Instant::now()
-                .checked_sub(duration + Duration::from_millis(10))
-                .unwrap(),
-        );
+        // Sleep to let real time elapse.
+        std::thread::sleep(Duration::from_millis(30));
 
+        // Second frame — should interpolate toward target.
         let animating = vs.update_cursor_animation(10.0, 5.0, true, duration);
-
-        assert!(!animating, "should not be animating after duration elapsed");
+        assert!(animating, "should still be animating");
         assert!(
-            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
-            "visual col should snap to target on completion"
+            vs.cursor_visual_col > 0.0,
+            "visual col should have moved toward target, got {}",
+            vs.cursor_visual_col
         );
         assert!(
-            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
-            "visual row should snap to target on completion"
+            vs.cursor_visual_col < 10.0,
+            "visual col should not overshoot target, got {}",
+            vs.cursor_visual_col
         );
         assert!(
-            vs.cursor_anim_start.is_none(),
-            "anim_start should be cleared"
+            vs.cursor_visual_row > 0.0,
+            "visual row should have moved toward target, got {}",
+            vs.cursor_visual_row
         );
     }
 
     #[test]
-    fn cursor_animation_no_change_returns_false() {
+    fn cursor_animation_at_target_returns_false() {
         let mut vs = ViewState::new();
-        // Move to (5, 3) and let animation complete.
+        // Place visual exactly at target.
         vs.cursor_visual_col = 5.0;
         vs.cursor_visual_row = 3.0;
         vs.cursor_target_col = 5.0;
         vs.cursor_target_row = 3.0;
-        vs.cursor_anim_start = None;
+        vs.cursor_last_frame = None;
 
-        // Call with same target — nothing changes.
+        // Call with same target — nothing to animate.
         let animating = vs.update_cursor_animation(5.0, 3.0, true, Duration::from_millis(150));
 
-        assert!(
-            !animating,
-            "should not be animating when target unchanged and no active animation"
-        );
+        assert!(!animating, "should not be animating when already at target");
+        assert!(vs.cursor_last_frame.is_none());
     }
 
     #[test]
-    fn cursor_animation_mid_animation_target_change_restarts() {
+    fn cursor_animation_retarget_changes_direction() {
         let mut vs = ViewState::new();
-        let duration = Duration::from_millis(200);
+        let duration = Duration::from_millis(150);
 
-        // Start first animation to (10, 0).
+        // Start animation toward (10, 0).
+        vs.update_cursor_animation(10.0, 0.0, true, duration);
+        std::thread::sleep(Duration::from_millis(30));
         vs.update_cursor_animation(10.0, 0.0, true, duration);
 
-        // Simulate partial progress: set start to 50ms ago.
-        vs.cursor_anim_start = Some(
-            Instant::now()
-                .checked_sub(Duration::from_millis(50))
-                .unwrap(),
-        );
-        // Update once to interpolate visual position partway.
-        vs.update_cursor_animation(10.0, 0.0, true, duration);
         let mid_col = vs.cursor_visual_col;
         assert!(
             mid_col > 0.0 && mid_col < 10.0,
-            "mid-animation visual_col should be between 0 and 10, got {mid_col}"
+            "should be mid-animation, got {mid_col}"
         );
 
-        // Now change target to (20, 0) — should restart from current visual.
+        // Change target to (20, 0) — exponential decay smoothly redirects.
+        std::thread::sleep(Duration::from_millis(30));
         let animating = vs.update_cursor_animation(20.0, 0.0, true, duration);
-        assert!(animating, "should be animating after target change");
+        assert!(animating, "should still be animating after retarget");
         assert!(
-            (vs.cursor_start_col - mid_col).abs() < f32::EPSILON,
-            "start_col should capture the mid-animation visual position"
+            vs.cursor_visual_col > mid_col,
+            "visual should have moved further toward new target, got {}",
+            vs.cursor_visual_col
         );
         assert!(
             (vs.cursor_target_col - 20.0).abs() < f32::EPSILON,
-            "target should update to new position"
+            "target should update to 20.0"
         );
     }
 
     #[test]
-    fn cursor_animation_interpolation_between_start_and_target() {
+    fn cursor_animation_zero_duration_snaps() {
         let mut vs = ViewState::new();
-        let duration = Duration::from_millis(200);
+        // First frame.
+        vs.update_cursor_animation(10.0, 5.0, true, Duration::ZERO);
+        // Even though trail is enabled, zero duration should snap.
+        // (First frame records timestamp; second frame computes tau=0 → snap.)
+        std::thread::sleep(Duration::from_millis(5));
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::ZERO);
 
-        // Start animation from (0, 0) to (20, 10).
-        vs.update_cursor_animation(20.0, 10.0, true, duration);
-
-        // Set start to 100ms ago (halfway through duration).
-        vs.cursor_anim_start = Some(
-            Instant::now()
-                .checked_sub(Duration::from_millis(100))
-                .unwrap(),
-        );
-        let animating = vs.update_cursor_animation(20.0, 10.0, true, duration);
-        assert!(animating, "should still be animating at halfway");
-
-        // At t=0.5, ease_out_cubic(0.5) = 0.875.
-        // Visual should be 0 + (20 - 0) * 0.875 = 17.5 for col.
-        // Allow some tolerance for timing jitter.
+        assert!(!animating, "zero duration should snap instantly");
         assert!(
-            vs.cursor_visual_col > 10.0,
-            "at halfway+ with ease-out, visual col should be well past halfway, got {}",
-            vs.cursor_visual_col
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should be at target"
         );
         assert!(
-            vs.cursor_visual_col <= 20.0,
-            "visual col should not exceed target, got {}",
-            vs.cursor_visual_col
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should be at target"
         );
     }
 
@@ -1693,8 +1663,62 @@ mod tests {
             "default target_row should be 0.0"
         );
         assert!(
-            vs.cursor_anim_start.is_none(),
-            "default anim_start should be None"
+            vs.cursor_last_frame.is_none(),
+            "default cursor_last_frame should be None"
+        );
+        assert!(
+            vs.cursor_anim_initial_distance.abs() < f32::EPSILON,
+            "default cursor_anim_initial_distance should be 0.0"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_snap_threshold() {
+        let mut vs = ViewState::new();
+        // Place visual very close to target (within SNAP_THRESHOLD of 0.01).
+        vs.cursor_visual_col = 9.995;
+        vs.cursor_visual_row = 4.998;
+
+        let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::from_millis(150));
+
+        assert!(!animating, "should snap when within threshold, not animate");
+        assert!(
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target"
+        );
+        assert!(
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target"
+        );
+    }
+
+    #[test]
+    fn cursor_animation_initial_distance_stays_constant() {
+        let mut vs = ViewState::new();
+        let duration = Duration::from_millis(150);
+
+        // Jump from (0,0) to (20,0) — initial distance should be 20.
+        vs.update_cursor_animation(20.0, 0.0, true, duration);
+        let recorded = vs.cursor_anim_initial_distance;
+        assert!(
+            (recorded - 20.0).abs() < f32::EPSILON,
+            "initial distance should be 20.0, got {recorded}"
+        );
+
+        // Subsequent frames with the same target should NOT change the
+        // initial distance, even though the remaining distance shrinks.
+        std::thread::sleep(Duration::from_millis(20));
+        vs.update_cursor_animation(20.0, 0.0, true, duration);
+        assert!(
+            (vs.cursor_anim_initial_distance - recorded).abs() < f32::EPSILON,
+            "initial distance should stay constant during animation"
+        );
+
+        std::thread::sleep(Duration::from_millis(20));
+        vs.update_cursor_animation(20.0, 0.0, true, duration);
+        assert!(
+            (vs.cursor_anim_initial_distance - recorded).abs() < f32::EPSILON,
+            "initial distance should still stay constant"
         );
     }
 }
