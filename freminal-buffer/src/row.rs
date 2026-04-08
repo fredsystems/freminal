@@ -94,6 +94,21 @@ impl Row {
         self.cells.clear();
     }
 
+    /// Fill this row with blank cells carrying the given format tag (BCE).
+    ///
+    /// Always clears existing cell data first.  If the tag is visually default
+    /// the row is left sparse (empty `cells` vec).  Otherwise, explicit blank
+    /// cells are written so the renderer picks up the correct background color.
+    pub fn fill_with_tag(&mut self, tag: &FormatTag) {
+        self.clear();
+
+        if tag.is_visually_default() {
+            return;
+        }
+        self.cells
+            .resize(self.width, Cell::blank_with_tag(tag.clone()));
+    }
+
     /// Mark this row as clean (its flat representation is up-to-date in the cache).
     /// Called by the snapshot machinery after producing a cached flat representation.
     pub const fn mark_clean(&mut self) {
@@ -456,18 +471,30 @@ impl Row {
 
     /// Clear cells from `col` to the end of the row
     pub fn clear_from(&mut self, col: usize, tag: &FormatTag) {
-        if col >= self.cells.len() {
+        // BCE: when the tag has a non-default background, we must write explicit
+        // blank cells all the way to the row width so the renderer picks up the
+        // correct background color.  When the tag is visually default, we only
+        // need to clear existing cells and can rely on the sparse representation.
+        if !tag.is_visually_default() {
+            // Extend the cell vector to the full row width so every column from
+            // `col` to the end has an explicit cell carrying the BCE tag.
+            if self.cells.len() < self.width {
+                self.cells
+                    .resize(self.width, Cell::blank_with_tag(FormatTag::default()));
+            }
+        } else if col >= self.cells.len() {
             return;
         }
 
         self.dirty = true;
-        for i in col..self.cells.len() {
+        let end = self.cells.len();
+        for i in col..end {
             self.cells[i] = Cell::blank_with_tag(tag.clone());
         }
 
         // Trim trailing blanks to maintain sparse invariant
         while let Some(last) = self.cells.last() {
-            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
+            if last.tchar() == &TChar::Space && last.tag().is_visually_default() {
                 self.cells.pop();
             } else {
                 break;
@@ -475,9 +502,19 @@ impl Row {
         }
     }
 
-    /// Clear cells from the beginning up to and including `col`
+    /// Clear cells from the beginning up to (exclusive) `col`.
+    ///
+    /// Callers that want an inclusive clear (e.g. EL 1 — "erase through cursor")
+    /// pass `cursor_x + 1`.
     pub fn clear_to(&mut self, col: usize, tag: &FormatTag) {
-        let end = col.min(self.cells.len());
+        // BCE: when the tag is non-default, extend the cell vector so we can
+        // write explicit blank cells for the full erased range.
+        let limit = col.min(self.width);
+        if !tag.is_visually_default() && self.cells.len() < limit {
+            self.cells
+                .resize(limit, Cell::blank_with_tag(FormatTag::default()));
+        }
+        let end = limit.min(self.cells.len());
         if end > 0 {
             self.dirty = true;
         }
@@ -486,10 +523,19 @@ impl Row {
         }
     }
 
-    /// Clear the entire row with blanks using the given format tag
-    pub fn clear_with_tag(&mut self, _tag: &FormatTag) {
+    /// Clear the entire row with blanks using the given format tag.
+    ///
+    /// When the tag is visually default, the row is left sparse (empty cell vec)
+    /// because implicit blanks already render as default.  When the tag carries
+    /// a non-default background or other SGR attributes (BCE), explicit blank
+    /// cells are written so the renderer can pick up the correct colors.
+    pub fn clear_with_tag(&mut self, tag: &FormatTag) {
         self.dirty = true;
         self.cells.clear();
+        if !tag.is_visually_default() {
+            self.cells
+                .resize(self.width, Cell::blank_with_tag(tag.clone()));
+        }
     }
 
     /// Replace `n` cells starting at `col` with blanks, using `tag` for each blank.
@@ -674,7 +720,9 @@ impl Row {
     /// - Wide-glyph cleanup: if `col` lands on a continuation cell, back up to its
     ///   head and extend the deletion to cover the whole glyph. If `col` lands on a
     ///   head, extend the deletion to include all its trailing continuation cells.
-    pub fn delete_cells_at(&mut self, col: usize, n: usize) {
+    /// - BCE: the `tag` parameter is used for any blank cells created during
+    ///   wide-glyph boundary cleanup (e.g. when a deletion splits a wide glyph).
+    pub fn delete_cells_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
         if n == 0 || col >= self.cells.len() {
             return;
         }
@@ -719,7 +767,7 @@ impl Row {
                 let head_width = self.cells[head].display_width();
                 let replace_end = (head + head_width).min(self.cells.len());
                 for i in head..replace_end {
-                    self.cells[i] = Cell::blank_with_tag(FormatTag::default());
+                    self.cells[i] = Cell::blank_with_tag(tag.clone());
                 }
             }
         }
@@ -730,9 +778,9 @@ impl Row {
         // --- Remove the range [start..end] by draining it ---------------
         self.cells.drain(start..end);
 
-        // Trim trailing default blanks to maintain the sparse-row invariant.
+        // Trim trailing visually-default blanks to maintain the sparse-row invariant.
         while let Some(last) = self.cells.last() {
-            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
+            if last.tchar() == &TChar::Space && last.tag().is_visually_default() {
                 self.cells.pop();
             } else {
                 break;

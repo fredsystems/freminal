@@ -38,7 +38,12 @@ jobs:
             bench-criterion-${{ runner.os }}-
 
       - name: Run benchmarks
-        run: cargo bench --all -- --save-baseline current
+        run: >
+          cargo bench
+          --bench render_loop_bench
+          --bench buffer_row_bench
+          --bench buffer_benches
+          -- --save-baseline current
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

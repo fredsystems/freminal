@@ -10,16 +10,16 @@ and adaptive theming.
 
 ## Task Summary
 
-| #   | Feature                       | Scope        | Status  |
-| --- | ----------------------------- | ------------ | ------- |
-| 45  | Search in Scrollback          | Medium-Large | Pending |
-| 46  | Rectangular / Block Selection | Medium       | Pending |
-| 47  | SGR Underline Styles          | Medium       | Pending |
-| 48  | BCE (Background Color Erase)  | Medium       | Pending |
-| 49  | DECDWL / DECDHL Rendering     | Medium       | Pending |
-| 50  | KKP Flags 2/4/16              | Medium       | Pending |
-| 51  | Password Input Detection      | Small        | Pending |
-| 52  | Adaptive Light/Dark Theming   | Small        | Pending |
+| #   | Feature                       | Scope        | Status   |
+| --- | ----------------------------- | ------------ | -------- |
+| 45  | Search in Scrollback          | Medium-Large | Pending  |
+| 46  | Rectangular / Block Selection | Medium       | Pending  |
+| 47  | SGR Underline Styles          | Medium       | Pending  |
+| 48  | BCE (Background Color Erase)  | Medium       | Complete |
+| 49  | DECDWL / DECDHL Rendering     | Medium       | Pending  |
+| 50  | KKP Flags 2/4/16              | Medium       | Pending  |
+| 51  | Password Input Detection      | Small        | Pending  |
+| 52  | Adaptive Light/Dark Theming   | Small        | Pending  |
 
 ---
 
@@ -260,24 +260,26 @@ to advertise the `bce` capability.
 
 ### 48 Subtasks
 
-1. **48.1 — Pass current format to erase operations**
+1. **48.1 — Pass current format to erase operations** ✅
    Modify `Buffer` erase methods to accept a format/background parameter. Update all callsites
    in `terminal_handler/mod.rs` to pass the current `CursorState`'s background color.
 
-2. **48.2 — Apply background to erased cells**
+2. **48.2 — Apply background to erased cells** ✅
    In each erase method, newly created or cleared cells receive the passed background color
    instead of `DefaultBackground`.
 
-3. **48.3 — Scroll fill with BCE**
+3. **48.3 — Scroll fill with BCE** ✅
    When scroll operations create new blank lines, those lines should also receive the current
    background color.
 
-4. **48.4 — Terminfo update**
+4. **48.4 — Terminfo update** ✅
    Advertise `bce` capability in the terminfo source and XTGETTCAP responses.
+   Note: terminfo already had `bce`; added `ut` to XTGETTCAP `lookup_termcap()`.
 
-5. **48.5 — Tests**
+5. **48.5 — Tests** ✅
    Unit tests: erase with custom background, scroll with custom background, verify cells
    carry the correct color. Integration: `printf '\e[41m\e[2J'` fills screen with red.
+   12 new tests added (6 row-level, 6 buffer-level).
 
 ### 48 Primary Files
 
