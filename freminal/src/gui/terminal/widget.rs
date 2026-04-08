@@ -371,6 +371,7 @@ fn dispatch_context_menu_action(
                     start_col: start.col,
                     end_row: end.row,
                     end_col: end.col,
+                    is_block: view_state.selection.is_block,
                 }) {
                     error!("Context menu: failed to send ExtractSelection: {e}");
                 } else if let Ok(text) =
@@ -881,12 +882,21 @@ impl FreminalTerminalWidget {
                     .row
                     .saturating_sub(win_start)
                     .min(snap.term_height.saturating_sub(1));
-                // If the start row is above the visible window, the selection
-                // begins at column 0 of the first visible row.
-                let s_col = if s.row < win_start { 0 } else { s.col };
-                // If the end row is below the visible window, the selection
-                // extends to the last column of the last visible row.
-                let e_col = if e.row >= win_end {
+
+                let is_block = view_state.selection.is_block;
+
+                // For linear selections, when the start row is above the
+                // visible window the selection begins at column 0 of the first
+                // visible row.  Block selections always preserve the original
+                // column bounds regardless of row clamping.
+                let s_col = if !is_block && s.row < win_start {
+                    0
+                } else {
+                    s.col
+                };
+                // Similarly, linear selections that extend below the window
+                // run to the last column.  Block selections keep their column.
+                let e_col = if !is_block && e.row >= win_end {
                     snap.term_width.saturating_sub(1)
                 } else {
                     e.col
@@ -1021,6 +1031,7 @@ impl FreminalTerminalWidget {
                     cursor_pixel_pos,
                     &snap.cursor_visual_style,
                     screen_selection,
+                    view_state.selection.is_block,
                     &search_highlights,
                     snap.theme,
                     snap.cursor_color_override,
@@ -1043,6 +1054,7 @@ impl FreminalTerminalWidget {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let fg_opts = FgRenderOptions {
                     selection: screen_selection,
+                    selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };

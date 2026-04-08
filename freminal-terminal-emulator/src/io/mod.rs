@@ -55,6 +55,10 @@ pub enum InputEvent {
         start_col: usize,
         end_row: usize,
         end_col: usize,
+        /// When `true` the selection is a rectangular block: every row from
+        /// `start_row` to `end_row` is extracted between `start_col` and
+        /// `end_col` (the same column range on each row).
+        is_block: bool,
     },
     /// A playback control command (mode selection, play/pause, next frame).
     ///

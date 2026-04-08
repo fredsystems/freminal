@@ -200,9 +200,10 @@ fn spawn_pty_consumer_thread(
                     start_col,
                     end_row,
                     end_col,
+                    is_block,
                 }) => {
-                    let text =
-                        emulator.extract_selection_text(start_row, start_col, end_row, end_col);
+                    let text = emulator
+                        .extract_selection_text(start_row, start_col, end_row, end_col, is_block);
                     let _ = clipboard_tx.send(text);
                 }
                 #[cfg(feature = "playback")]

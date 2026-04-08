@@ -242,8 +242,10 @@ fn handle_event(
             start_col,
             end_row,
             end_col,
+            is_block,
         } => {
-            let text = emulator.extract_selection_text(start_row, start_col, end_row, end_col);
+            let text =
+                emulator.extract_selection_text(start_row, start_col, end_row, end_col, is_block);
             let _ = clipboard_tx.send(text);
         }
         InputEvent::FocusChange(_) | InputEvent::Key(_) => {

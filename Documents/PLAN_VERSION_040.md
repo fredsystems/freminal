@@ -13,7 +13,7 @@ and adaptive theming.
 | #   | Feature                       | Scope        | Status   |
 | --- | ----------------------------- | ------------ | -------- |
 | 45  | Search in Scrollback          | Medium-Large | Pending  |
-| 46  | Rectangular / Block Selection | Medium       | Pending  |
+| 46  | Rectangular / Block Selection | Medium       | Complete |
 | 47  | SGR Underline Styles          | Medium       | Pending  |
 | 48  | BCE (Background Color Erase)  | Medium       | Complete |
 | 49  | DECDWL / DECDHL Rendering     | Medium       | Pending  |
@@ -128,24 +128,26 @@ and joined with newlines. This produces columnar text (useful for tabular output
 
 ### 46 Subtasks
 
-1. **46.1 — `SelectionMode` enum and state changes**
-   Add `SelectionMode` to `SelectionState`. Default to `Stream`. Set to `Block` when Alt is
-   held on mouse press.
+1. **46.1 — `is_block` flag and state changes** ✅
+   Add `is_block: bool` to `SelectionState`. Default to `false` (stream mode). Set to `true`
+   when Alt is held on mouse press. (Used `is_block: bool` field instead of an enum to avoid
+   `struct_excessive_bools` — `ViewState` already has 3 bools.)
 
-2. **46.2 — Block selection rendering**
+2. **46.2 — Block selection rendering** ✅
    Modify the selection highlight rendering in the vertex builder to support rectangular
    highlighting: all rows in the range get the same column span.
 
-3. **46.3 — Block selection copy**
+3. **46.3 — Block selection copy** ✅
    Modify the text extraction for clipboard copy to handle block mode: extract the column
-   range from each row independently.
+   range from each row independently. Added `Buffer::extract_block_text()`.
 
-4. **46.4 — Tests**
+4. **46.4 — Tests** ✅
    Unit tests: block selection coordinates, copy produces columnar text, mode transitions.
+   Added 4 `SelectionState` tests, 7 `is_cell_selected` tests, 9 `extract_block_text` tests.
 
 ### 46 Primary Files
 
-- `freminal/src/gui/view_state.rs` (`SelectionState`, `SelectionMode`)
+- `freminal/src/gui/view_state.rs` (`SelectionState`, `is_block: bool`)
 - `freminal/src/gui/terminal/widget.rs` (Alt detection on mouse press)
 - `freminal/src/gui/renderer/vertex.rs` (block highlight rendering)
 

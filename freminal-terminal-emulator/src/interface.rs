@@ -299,7 +299,9 @@ impl TerminalEmulator {
     /// Extract text from the full buffer for a selection range.
     ///
     /// Coordinates are buffer-absolute row indices and 0-indexed columns.
-    /// Delegates to `Buffer::extract_text`.
+    /// When `is_block` is `true` the same `start_col`..=`end_col` column range
+    /// is extracted from every row, producing a rectangular block of text.
+    /// Delegates to `Buffer::extract_text` or `Buffer::extract_block_text`.
     #[must_use]
     pub fn extract_selection_text(
         &self,
@@ -307,11 +309,14 @@ impl TerminalEmulator {
         start_col: usize,
         end_row: usize,
         end_col: usize,
+        is_block: bool,
     ) -> String {
-        self.internal
-            .handler
-            .buffer()
-            .extract_text(start_row, start_col, end_row, end_col)
+        let buf = self.internal.handler.buffer();
+        if is_block {
+            buf.extract_block_text(start_row, start_col, end_row, end_col)
+        } else {
+            buf.extract_text(start_row, start_col, end_row, end_col)
+        }
     }
 
     /// Process a chunk of raw PTY bytes.
