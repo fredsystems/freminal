@@ -341,8 +341,10 @@ fn main() {
         let (input_tx, input_rx) = unbounded::<InputEvent>();
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
         let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
-        let (search_buffer_tx, search_buffer_rx) =
-            crossbeam_channel::bounded::<Vec<freminal_common::buffer_states::tchar::TChar>>(1);
+        let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(
+            usize,
+            Vec<freminal_common::buffer_states::tchar::TChar>,
+        )>(1);
 
         let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
         let egui_ctx_playback = Arc::clone(&egui_ctx);

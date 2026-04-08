@@ -67,7 +67,7 @@ pub fn run_playback_thread(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     egui_ctx: Arc<OnceLock<eframe::egui::Context>>,
     clipboard_tx: Sender<String>,
-    search_buffer_tx: Sender<Vec<TChar>>,
+    search_buffer_tx: Sender<(usize, Vec<TChar>)>,
 ) {
     let total_frames = frames.len();
     let mut current_frame: usize = 0;
@@ -228,7 +228,7 @@ fn handle_event(
     current_frame: &mut usize,
     frames: &[PlaybackFrame],
     clipboard_tx: &Sender<String>,
-    search_buffer_tx: &Sender<Vec<TChar>>,
+    search_buffer_tx: &Sender<(usize, Vec<TChar>)>,
 ) -> bool {
     match *event {
         InputEvent::PlaybackControl(cmd) => {
@@ -258,7 +258,8 @@ fn handle_event(
             let (chars, _tags) = emulator.internal.handler.data_and_format_data_for_gui(0);
             let mut combined = chars.scrollback;
             combined.extend(chars.visible);
-            let _ = search_buffer_tx.send(combined);
+            let total_rows = emulator.internal.handler.buffer().get_rows().len();
+            let _ = search_buffer_tx.send((total_rows, combined));
         }
         InputEvent::FocusChange(_) | InputEvent::Key(_) => {
             // In playback mode, keyboard input and focus changes are ignored

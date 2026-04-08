@@ -297,22 +297,29 @@ pub fn build_background_instances(
     }
 
     // --- Search match highlight quads (rendered first so selection overpaints) ---
-    for m in match_highlights {
-        if m.row >= shaped_lines.len() || m.col_start > m.col_end {
-            continue;
+    // Render non-current matches first, then current matches, so the focused
+    // match is always visible if highlight regions overlap.
+    for &is_current_pass in &[false, true] {
+        for m in match_highlights
+            .iter()
+            .filter(|m| m.is_current == is_current_pass)
+        {
+            if m.row >= shaped_lines.len() || m.col_start > m.col_end {
+                continue;
+            }
+            let cw = gl_f32_u32(cell_width);
+            let ch = gl_f32_u32(cell_height);
+            let x0 = gl_f32(m.col_start) * cw;
+            let x1 = gl_f32(m.col_end + 1) * cw;
+            let y0 = gl_f32(m.row) * ch;
+            let y1 = y0 + ch;
+            let color = if m.is_current {
+                search_current_bg_f()
+            } else {
+                search_match_bg_f()
+            };
+            push_quad(&mut deco, x0, y0, x1, y1, color);
         }
-        let cw = gl_f32_u32(cell_width);
-        let ch = gl_f32_u32(cell_height);
-        let x0 = gl_f32(m.col_start) * cw;
-        let x1 = gl_f32(m.col_end + 1) * cw;
-        let y0 = gl_f32(m.row) * ch;
-        let y1 = y0 + ch;
-        let color = if m.is_current {
-            search_current_bg_f()
-        } else {
-            search_match_bg_f()
-        };
-        push_quad(&mut deco, x0, y0, x1, y1, color);
     }
 
     // --- Selection highlight quads (rendered after search so selection is topmost) ---

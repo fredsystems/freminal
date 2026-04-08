@@ -64,7 +64,9 @@ pub struct Tab {
     ///
     /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
     /// concatenates scrollback + visible `TChar` data and sends it here.
-    pub search_buffer_rx: Receiver<Vec<TChar>>,
+    /// The first element of the tuple is `total_rows` at the time the buffer
+    /// was captured, used by the GUI to detect stale responses.
+    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
 
     /// Signals that this tab's PTY process has exited.
     ///
@@ -356,7 +358,8 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<Vec<TChar>>(1);
+        let (_search_buffer_tx, search_buffer_rx) =
+            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
 
         Tab {

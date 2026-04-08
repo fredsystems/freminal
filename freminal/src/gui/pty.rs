@@ -47,7 +47,9 @@ pub struct TabChannels {
     ///
     /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
     /// concatenates scrollback + visible `TChar` data and sends it here.
-    pub search_buffer_rx: Receiver<Vec<TChar>>,
+    /// The first element of the tuple is `total_rows` at the time the buffer
+    /// was captured, used by the GUI to detect stale responses.
+    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
 
     /// Signals that the PTY process has exited.
     ///
@@ -92,7 +94,7 @@ pub fn spawn_pty_tab(
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
-    let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<Vec<TChar>>(1);
+    let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
 
     let egui_ctx_pty = Arc::clone(egui_ctx);
@@ -140,7 +142,7 @@ fn spawn_pty_consumer_thread(
     input_rx: Receiver<InputEvent>,
     window_cmd_tx: Sender<WindowCommand>,
     clipboard_tx: Sender<String>,
-    search_buffer_tx: Sender<Vec<TChar>>,
+    search_buffer_tx: Sender<(usize, Vec<TChar>)>,
     child_exit_rx: Option<Receiver<()>>,
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     egui_ctx_pty: Arc<OnceLock<eframe::egui::Context>>,
@@ -187,7 +189,7 @@ fn spawn_pty_consumer_thread(
         let handle_input = |emulator: &mut TerminalEmulator,
                             msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
                             clipboard_tx: &crossbeam_channel::Sender<String>,
-                            search_buffer_tx: &crossbeam_channel::Sender<Vec<TChar>>|
+                            search_buffer_tx: &crossbeam_channel::Sender<(usize, Vec<TChar>)>|
          -> bool {
             match msg {
                 Ok(InputEvent::Resize(w, h, pw, ph)) => {
@@ -222,7 +224,8 @@ fn spawn_pty_consumer_thread(
                     let (chars, _tags) = emulator.internal.handler.data_and_format_data_for_gui(0);
                     let mut combined = chars.scrollback;
                     combined.extend(chars.visible);
-                    let _ = search_buffer_tx.send(combined);
+                    let total_rows = emulator.internal.handler.buffer().get_rows().len();
+                    let _ = search_buffer_tx.send((total_rows, combined));
                 }
                 #[cfg(feature = "playback")]
                 Ok(InputEvent::PlaybackControl(_)) => {

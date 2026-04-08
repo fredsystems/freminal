@@ -655,7 +655,7 @@ impl FreminalTerminalWidget {
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
-        search_buffer_rx: &Receiver<Vec<TChar>>,
+        search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
         ui_overlay_open: bool,
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
@@ -825,12 +825,26 @@ impl FreminalTerminalWidget {
                 }
             }
 
-            // Try to receive the full buffer (non-blocking).
-            if let Ok(buf) = search_buffer_rx.try_recv() {
-                view_state.search_state.cached_full_buffer = Some(Arc::new(buf));
-                view_state.search_state.last_known_total_rows = snap.total_rows;
+            // Try to receive the full buffer (non-blocking). Drain queued
+            // responses and only accept a buffer whose version matches the
+            // current snapshot — otherwise re-request a fresh copy.
+            if let Some((buffer_total_rows, buf)) = search_buffer_rx.try_iter().last() {
                 view_state.search_state.buffer_request_state =
                     crate::gui::view_state::BufferRequestState::Idle;
+
+                if buffer_total_rows == snap.total_rows {
+                    view_state.search_state.cached_full_buffer = Some(Arc::new(buf));
+                    view_state.search_state.last_known_total_rows = buffer_total_rows;
+                } else {
+                    // Stale response — discard and re-request.
+                    view_state.search_state.cached_full_buffer = None;
+                    if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
+                        error!("Failed to request search buffer from PTY: {e}");
+                    } else {
+                        view_state.search_state.buffer_request_state =
+                            crate::gui::view_state::BufferRequestState::Pending;
+                    }
+                }
             }
 
             // Run search if query/mode changed or we just got a new buffer.
