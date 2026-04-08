@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 use super::super::{
     atlas::{GlyphAtlas, GlyphKey},
-    colors::{cursor_f, internal_color_to_gl, selection_bg_f, selection_fg_f},
+    colors::{
+        cursor_f, internal_color_to_gl, search_current_bg_f, search_match_bg_f, selection_bg_f,
+        selection_fg_f,
+    },
     font_manager::FontManager,
     shaping::{ShapedGlyph, ShapedLine},
 };
@@ -139,6 +142,22 @@ const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> b
     }
 }
 
+/// A search match span for match-highlight rendering.
+///
+/// Coordinates are in *visible-window* space matching the shaped-line
+/// indices passed to [`build_background_instances`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchHighlight {
+    /// Row index within the visible window (0 = top).
+    pub row: usize,
+    /// First highlighted column (inclusive).
+    pub col_start: usize,
+    /// Last highlighted column (inclusive).
+    pub col_end: usize,
+    /// `true` when this is the current (focused) match.
+    pub is_current: bool,
+}
+
 /// Build the two-pass background data: instanced cell BGs + decoration quads.
 ///
 /// Returns `(bg_instances, deco_verts)`:
@@ -170,6 +189,7 @@ pub fn build_background_instances(
     cursor_pixel_pos: (f32, f32),
     cursor_visual_style: &CursorVisualStyle,
     selection: Option<(usize, usize, usize, usize)>,
+    match_highlights: &[MatchHighlight],
     theme: &ThemePalette,
     cursor_color_override: Option<(u8, u8, u8)>,
 ) -> (Vec<f32>, Vec<f32>) {
@@ -304,6 +324,25 @@ pub fn build_background_instances(
 
             push_quad(&mut deco, x0, y0, x1, y1, selection_bg_f(theme));
         }
+    }
+
+    // --- Search match highlight quads ---
+    for m in match_highlights {
+        if m.row >= shaped_lines.len() || m.col_start > m.col_end {
+            continue;
+        }
+        let cw = gl_f32_u32(cell_width);
+        let ch = gl_f32_u32(cell_height);
+        let x0 = gl_f32(m.col_start) * cw;
+        let x1 = gl_f32(m.col_end + 1) * cw;
+        let y0 = gl_f32(m.row) * ch;
+        let y1 = y0 + ch;
+        let color = if m.is_current {
+            search_current_bg_f()
+        } else {
+            search_match_bg_f()
+        };
+        push_quad(&mut deco, x0, y0, x1, y1, color);
     }
 
     // --- Cursor quad (always last in deco so cursor-only patches work) ---
@@ -1017,6 +1056,7 @@ mod tests {
             cursor_pixel_pos,
             cursor_style,
             None,
+            &[],
             &themes::CATPPUCCIN_MOCHA,
             None,
         )

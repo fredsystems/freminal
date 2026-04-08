@@ -30,6 +30,7 @@ pub mod fonts;
 pub mod mouse;
 pub mod pty;
 pub mod renderer;
+pub mod search;
 pub mod settings;
 pub mod shaping;
 pub mod tabs;
@@ -492,10 +493,37 @@ impl FreminalGui {
                 self.terminal_widget.apply_font_zoom(self.config.font.size);
             }
 
+            // -- Search overlay --
+            KeyAction::OpenSearch => {
+                self.tabs.active_tab_mut().view_state.search_state.is_open = true;
+            }
+            KeyAction::SearchNext => {
+                let tab = self.tabs.active_tab_mut();
+                tab.view_state.search_state.next_match();
+                let snap = tab.arc_swap.load();
+                search::scroll_to_match(&mut tab.view_state, &snap);
+            }
+            KeyAction::SearchPrev => {
+                let tab = self.tabs.active_tab_mut();
+                tab.view_state.search_state.prev_match();
+                let snap = tab.arc_swap.load();
+                search::scroll_to_match(&mut tab.view_state, &snap);
+            }
+            KeyAction::PrevCommand => {
+                let tab = self.tabs.active_tab_mut();
+                let snap = tab.arc_swap.load();
+                search::jump_to_prev_command(&mut tab.view_state, &snap);
+            }
+            KeyAction::NextCommand => {
+                let tab = self.tabs.active_tab_mut();
+                let snap = tab.arc_swap.load();
+                search::jump_to_next_command(&mut tab.view_state, &snap);
+            }
+
             // -- Not yet implemented --
             // Consumed (not forwarded to PTY) but silently ignored until
             // their respective features land.
-            KeyAction::RenameTab | KeyAction::OpenSearch => {
+            KeyAction::RenameTab => {
                 trace!("Unhandled deferred key action: {action:?}");
             }
 

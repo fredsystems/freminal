@@ -451,6 +451,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                         cursor_pixel_pos,
                         &cursor_style,
                         None, // selection
+                        &[],  // match_highlights
                         &CATPPUCCIN_MOCHA,
                         None, // cursor_color_override
                     ));

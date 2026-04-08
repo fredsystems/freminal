@@ -53,6 +53,26 @@ pub const fn cursor_f(
     }
 }
 
+/// Background color for non-current search matches as `[f32; 4]`.
+///
+/// Fixed to a bright yellow (#FFD700) with 70% opacity so the underlying
+/// text remains visible regardless of the active theme.
+#[must_use]
+pub const fn search_match_bg_f() -> [f32; 4] {
+    // #FFD700 at 70% opacity — visible on both light and dark backgrounds.
+    [1.0, 0.843_137_26, 0.0, 0.7]
+}
+
+/// Background color for the *current* (focused) search match as `[f32; 4]`.
+///
+/// Fixed to a vivid orange (#FF8C00) at 85% opacity so the active match
+/// is clearly distinguished from surrounding non-current matches.
+#[must_use]
+pub const fn search_current_bg_f() -> [f32; 4] {
+    // #FF8C00 at 85% opacity.
+    [1.0, 0.549_019_63, 0.0, 0.85]
+}
+
 // ---------------------------------------------------------------------------
 //  Color conversion functions
 // ---------------------------------------------------------------------------
