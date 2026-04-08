@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::colors::TerminalColor;
+use crate::{buffer_states::fonts::UnderlineStyle, colors::TerminalColor};
 use anyhow::Result;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
@@ -15,6 +15,8 @@ pub enum SelectGraphicRendition {
     Bold,
     Italic,
     Underline,
+    /// SGR 4:N — underline with a specific style (single, double, curly, dotted, dashed).
+    UnderlineWithStyle(UnderlineStyle),
     Faint,
     ReverseVideo,
     ResetReverseVideo,

@@ -10,7 +10,7 @@
 //! GPU by the [`super::gpu`] module.
 
 use conv2::{ApproxFrom, ConvUtil};
-use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations};
+use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, UnderlineStyle};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::{ImagePlacement, InlineImage};
@@ -211,32 +211,53 @@ pub fn build_background_instances(
         // --- Underline and strikethrough decoration quads ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let has_underline = run.font_decorations.contains(FontDecorations::Underline);
+            let underline_style = run.font_decorations.underline_style();
             let has_strike = run
                 .font_decorations
                 .contains(FontDecorations::Strikethrough);
 
-            if !has_underline && !has_strike {
+            if !underline_style.is_active() && !has_strike {
                 continue;
             }
 
-            let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
             let col_end = run.col_start + run_col_count(run);
-
             let x0 = gl_f32(run.col_start) * gl_f32_u32(cell_width);
             let x1 = gl_f32(col_end) * gl_f32_u32(cell_width);
 
-            if has_underline {
+            if underline_style.is_active() {
+                // Use underline color if set, otherwise fall back to foreground.
+                let ul_color_raw = run.colors.get_underline_color();
+                let ul_color = if matches!(
+                    ul_color_raw,
+                    freminal_common::colors::TerminalColor::DefaultUnderlineColor
+                ) {
+                    internal_color_to_gl(run.colors.get_color(), is_faint, theme)
+                } else {
+                    internal_color_to_gl(ul_color_raw, is_faint, theme)
+                };
+
                 // underline_offset from swash is negative (below baseline in font
                 // coords).  In top-down pixel coords the baseline is at
                 // y_top + ascent, so subtracting the (negative) offset places the
                 // line below the baseline.
-                let ul_top = y_top + ascent - underline_offset;
-                let ul_bot = ul_top + stroke_size.max(1.0);
-                push_quad(&mut deco, x0, ul_top, x1, ul_bot, fg_color);
+                let ul_y = y_top + ascent - underline_offset;
+
+                push_underline_quads(
+                    &mut deco,
+                    underline_style,
+                    &UnderlineParams {
+                        x0,
+                        x1,
+                        ul_y,
+                        stroke: stroke_size,
+                        cell_width: gl_f32_u32(cell_width),
+                        color: ul_color,
+                    },
+                );
             }
 
             if has_strike {
+                let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
                 // strikeout_offset from OS/2 is positive (above baseline in font
                 // coords).  In top-down pixel coords, subtracting it from the
                 // baseline places the line above the baseline (middle of cell).
@@ -691,6 +712,138 @@ pub(super) fn push_quad(verts: &mut Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32
         g, b, a, x0, y1, r, g, b, a,
     ];
     verts.extend_from_slice(&quad);
+}
+
+// ---------------------------------------------------------------------------
+//  Underline style geometry
+// ---------------------------------------------------------------------------
+
+/// Number of segments used to approximate a sine wave for curly underlines.
+const CURLY_SEGMENTS: u32 = 8;
+
+/// Parameters for underline rendering, bundled to stay within the 7-argument
+/// lint limit.
+struct UnderlineParams {
+    x0: f32,
+    x1: f32,
+    ul_y: f32,
+    stroke: f32,
+    cell_width: f32,
+    color: [f32; 4],
+}
+
+/// Push decoration quads for the given underline style.
+///
+/// All styles share the same vertical anchor (`ul_y`, the font's underline
+/// position below the baseline).  `stroke` is the line thickness (from the
+/// font metrics) and `cell_width` is the cell width in pixels.
+fn push_underline_quads(deco: &mut Vec<f32>, style: UnderlineStyle, p: &UnderlineParams) {
+    let thick = p.stroke.max(1.0);
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => {
+            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + thick, p.color);
+        }
+        UnderlineStyle::Double => {
+            let gap = thick.mul_add(2.0, 1.0);
+            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + thick, p.color);
+            push_quad(
+                deco,
+                p.x0,
+                p.ul_y + gap,
+                p.x1,
+                p.ul_y + gap + thick,
+                p.color,
+            );
+        }
+        UnderlineStyle::Curly => {
+            push_curly_underline(deco, p);
+        }
+        UnderlineStyle::Dotted => {
+            push_dotted_underline(deco, p);
+        }
+        UnderlineStyle::Dashed => {
+            push_dashed_underline(deco, p);
+        }
+    }
+}
+
+/// Push quads approximating a sine-wave curly underline.
+///
+/// The wave amplitude is `2 * stroke` and the period is one cell width.
+/// Each cell is subdivided into [`CURLY_SEGMENTS`] vertical-strip quads whose
+/// top and bottom edges follow the sine curve.
+fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
+    let amplitude = p.stroke * 2.0;
+    let span = p.x1 - p.x0;
+    if span <= 0.0 || p.cell_width <= 0.0 {
+        return;
+    }
+
+    let seg_width = p.cell_width / gl_f32_u32(CURLY_SEGMENTS);
+    let total_segs_f = (span / seg_width).ceil();
+    let total_segs = total_segs_f.approx_as::<usize>().unwrap_or(0);
+
+    for i in 0..total_segs {
+        let sx = seg_width.mul_add(gl_f32(i), p.x0);
+        let ex = (sx + seg_width).min(p.x1);
+
+        // Phase within the sine period (0..2π per cell width).
+        let phase_start = (sx - p.x0) / p.cell_width * std::f32::consts::TAU;
+        let phase_end = (ex - p.x0) / p.cell_width * std::f32::consts::TAU;
+
+        let y_start = amplitude.mul_add(phase_start.sin(), p.ul_y);
+        let y_end = amplitude.mul_add(phase_end.sin(), p.ul_y);
+
+        let y_min = y_start.min(y_end);
+        let y_max = y_start.max(y_end) + p.stroke;
+
+        push_quad(deco, sx, y_min, ex, y_max, p.color);
+    }
+}
+
+/// Push quads for a dotted underline.
+///
+/// Each dot is a square with side = `stroke`, with a gap of `stroke` between
+/// dots.
+fn push_dotted_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
+    let dot_size = p.stroke.max(1.0);
+    let step = dot_size * 2.0;
+    if step <= 0.0 {
+        return;
+    }
+
+    let span = p.x1 - p.x0;
+    let dot_count_f = (span / step).ceil();
+    let dot_count = dot_count_f.approx_as::<usize>().unwrap_or(0);
+
+    for i in 0..dot_count {
+        let x = step.mul_add(gl_f32(i), p.x0);
+        let dot_end = (x + dot_size).min(p.x1);
+        push_quad(deco, x, p.ul_y, dot_end, p.ul_y + dot_size, p.color);
+    }
+}
+
+/// Push quads for a dashed underline.
+///
+/// Each dash is `cell_width / 2` wide with a gap of `cell_width / 4`.
+fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
+    let dash_len = (p.cell_width * 0.5).max(2.0);
+    let gap_len = (p.cell_width * 0.25).max(1.0);
+    let step = dash_len + gap_len;
+    if step <= 0.0 {
+        return;
+    }
+
+    let span = p.x1 - p.x0;
+    let dash_count_f = (span / step).ceil();
+    let dash_count = dash_count_f.approx_as::<usize>().unwrap_or(0);
+
+    for i in 0..dash_count {
+        let x = step.mul_add(gl_f32(i), p.x0);
+        let dash_end = (x + dash_len).min(p.x1);
+        push_quad(deco, x, p.ul_y, dash_end, p.ul_y + p.stroke, p.color);
+    }
 }
 
 // ---------------------------------------------------------------------------
