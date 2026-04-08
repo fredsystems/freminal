@@ -272,7 +272,7 @@ fn test_extract_selection_text() {
     let first_visible_row = total_rows.saturating_sub(snap.term_height);
 
     // Extract columns 0–4 of the first visible row (should include "Hello").
-    let text = emu.extract_selection_text(first_visible_row, 0, first_visible_row, 4);
+    let text = emu.extract_selection_text(first_visible_row, 0, first_visible_row, 4, false);
     assert!(
         text.starts_with("Hello"),
         "extracted text from col 0-4 must start with \"Hello\"; got: {text:?}"
@@ -289,7 +289,7 @@ fn test_extract_selection_empty() {
     let snap = emu.build_snapshot();
     let first_row = snap.total_rows.saturating_sub(snap.term_height);
 
-    let text = emu.extract_selection_text(first_row, 0, first_row, 9);
+    let text = emu.extract_selection_text(first_row, 0, first_row, 9, false);
     assert!(
         text.trim().is_empty(),
         "extracting from an empty buffer region must yield empty/whitespace; got: {text:?}"

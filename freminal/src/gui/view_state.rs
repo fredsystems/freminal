@@ -52,6 +52,11 @@ pub struct CellCoord {
 ///
 /// The selection is "active" when a drag is in progress (`is_selecting`), and
 /// "present" when anchor != end (i.e. something is highlighted).
+///
+/// When `is_block` is `true` the selection is a rectangular block: every row
+/// from `anchor.row` to `end.row` is highlighted from
+/// `min(anchor.col, end.col)` to `max(anchor.col, end.col)`.  Block mode is
+/// activated by holding Alt while starting a drag (Alt+drag).
 #[derive(Debug, Clone, Default)]
 pub struct SelectionState {
     /// The cell where the mouse button was pressed (fixed during drag).
@@ -60,28 +65,56 @@ pub struct SelectionState {
     pub end: Option<CellCoord>,
     /// `true` while the primary button is held down and dragging.
     pub is_selecting: bool,
+    /// `true` when the selection is a rectangular block (Alt+drag).
+    ///
+    /// When `false` the selection is a linear span (normal left-to-right,
+    /// wrapping across rows).  When `true` every row in the range is
+    /// highlighted between the same two column boundaries.
+    pub is_block: bool,
 }
 
 impl SelectionState {
     /// Returns the normalised selection range as `(start, end)` where `start`
     /// is always before or equal to `end` in reading order.
     ///
+    /// For both linear and block selections `start.row <= end.row`.
+    /// For block selections the column ordering is not normalised here —
+    /// renderers use `min`/`max` of the two column values directly.
+    ///
     /// Returns `None` if there is no selection.
     #[must_use]
     pub fn normalised(&self) -> Option<(CellCoord, CellCoord)> {
         let (a, e) = (self.anchor?, self.end?);
-        if a.row < e.row || (a.row == e.row && a.col <= e.col) {
+        if self.is_block {
+            // Block mode: normalise rows only.  Keep the original column
+            // values so renderers use `min`/`max` of the two directly.
+            if a.row <= e.row {
+                Some((a, e))
+            } else {
+                Some((
+                    CellCoord {
+                        row: e.row,
+                        col: a.col,
+                    },
+                    CellCoord {
+                        row: a.row,
+                        col: e.col,
+                    },
+                ))
+            }
+        } else if a.row < e.row || (a.row == e.row && a.col <= e.col) {
             Some((a, e))
         } else {
             Some((e, a))
         }
     }
 
-    /// Clear the selection entirely.
+    /// Clear the selection entirely, including block mode.
     pub const fn clear(&mut self) {
         self.anchor = None;
         self.end = None;
         self.is_selecting = false;
+        self.is_block = false;
     }
 
     /// Returns `true` if there is a visible selection (anchor and end differ).
@@ -1709,6 +1742,60 @@ mod tests {
         );
     }
 
+    // ── SelectionState::is_block tests ───────────────────────────────
+
+    #[test]
+    fn selection_state_default_is_not_block() {
+        let sel = SelectionState::default();
+        assert!(
+            !sel.is_block,
+            "default SelectionState must not be block mode"
+        );
+    }
+
+    #[test]
+    fn selection_state_clear_resets_is_block() {
+        let mut sel = SelectionState {
+            anchor: Some(CellCoord { col: 2, row: 0 }),
+            end: Some(CellCoord { col: 5, row: 3 }),
+            is_selecting: false,
+            is_block: true,
+        };
+        sel.clear();
+        assert!(!sel.is_block, "clear() must reset is_block to false");
+        assert!(sel.anchor.is_none(), "clear() must reset anchor");
+        assert!(sel.end.is_none(), "clear() must reset end");
+        assert!(!sel.is_selecting, "clear() must reset is_selecting");
+    }
+
+    #[test]
+    fn selection_state_has_selection_block_mode() {
+        // has_selection only cares that anchor != end; is_block does not affect it.
+        let sel = SelectionState {
+            anchor: Some(CellCoord { col: 1, row: 0 }),
+            end: Some(CellCoord { col: 3, row: 2 }),
+            is_selecting: false,
+            is_block: true,
+        };
+        assert!(
+            sel.has_selection(),
+            "block selection with anchor != end should report has_selection"
+        );
+    }
+
+    #[test]
+    fn selection_state_block_normalised_puts_earlier_row_first() {
+        // Dragged from row 5 back to row 2 — normalised should flip them.
+        let sel = SelectionState {
+            anchor: Some(CellCoord { col: 4, row: 5 }),
+            end: Some(CellCoord { col: 1, row: 2 }),
+            is_selecting: false,
+            is_block: true,
+        };
+        let (s, e) = sel.normalised().unwrap();
+        assert_eq!(s.row, 2, "normalised start row should be the smaller row");
+        assert_eq!(e.row, 5, "normalised end row should be the larger row");
+    }
     #[test]
     fn cursor_animation_snap_threshold() {
         let mut vs = ViewState::new();

@@ -3008,6 +3008,64 @@ impl Buffer {
         result
     }
 
+    /// Extract a rectangular block of text from the buffer.
+    ///
+    /// Every row from `start_row` to `end_row` (inclusive) is sampled between
+    /// the same `col_min`..=`col_max` column range, where
+    /// `col_min = start_col.min(end_col)` and `col_max = start_col.max(end_col)`.
+    /// Rows are joined with `\n`.  Trailing whitespace is trimmed per row.
+    ///
+    /// This is the copy behaviour for Alt+drag (block/rectangular) selections.
+    #[must_use]
+    pub fn extract_block_text(
+        &self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> String {
+        use std::fmt::Write as _;
+
+        if start_row >= self.rows.len() {
+            return String::new();
+        }
+        let end_row = end_row.min(self.rows.len().saturating_sub(1));
+        let col_min = start_col.min(end_col);
+        let col_max = start_col.max(end_col);
+
+        let mut result = String::new();
+
+        for row_idx in start_row..=end_row {
+            let row = &self.rows[row_idx];
+            let cells = row.get_characters();
+
+            let mut row_text = String::new();
+            for col in col_min..=col_max {
+                if col >= cells.len() {
+                    break;
+                }
+                let cell = &cells[col];
+                if cell.is_continuation() {
+                    continue;
+                }
+                let tc = cell.tchar();
+                if matches!(tc, TChar::NewLine) {
+                    break;
+                }
+                write!(&mut row_text, "{tc}").unwrap_or_default();
+            }
+
+            let trimmed = row_text.trim_end();
+            result.push_str(trimmed);
+
+            if row_idx < end_row {
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+
     /// Set the current format tag for subsequent text insertions
     pub fn set_format(&mut self, tag: FormatTag) {
         self.current_tag = tag;
@@ -6815,6 +6873,133 @@ mod extract_text_tests {
 
         let result = buf.extract_text(0, 0, 0, 9);
         assert_eq!(result, "Ｗx");
+    }
+}
+
+// ============================================================================
+// extract_block_text tests
+// ============================================================================
+
+#[cfg(test)]
+mod extract_block_text_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Helper: insert a line of ASCII text and advance to the next row.
+    fn push_line(buf: &mut Buffer, text: &str) {
+        let chars: Vec<TChar> = text.chars().map(ascii).collect();
+        buf.insert_text(&chars);
+        buf.handle_lf();
+        buf.cursor.pos.x = 0; // carriage return
+    }
+
+    #[test]
+    fn single_row_full_block() {
+        // Single-row block selection: same as a normal extract over that row.
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "hello");
+        let result = buf.extract_block_text(0, 0, 0, 4);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn single_row_partial_cols() {
+        // Extract only columns 1..=3 of "abcde" → "bcd".
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "abcde");
+        let result = buf.extract_block_text(0, 1, 0, 3);
+        assert_eq!(result, "bcd");
+    }
+
+    #[test]
+    fn multi_row_same_col_range() {
+        // Three rows; extract cols 0..=3 from each.
+        // Row 0: "abcd..." → "abcd"
+        // Row 1: "efgh..." → "efgh"
+        // Row 2: "ijkl..." → "ijkl"
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "abcdefghij");
+        push_line(&mut buf, "efghijklmn");
+        push_line(&mut buf, "ijklmnopqr");
+        let result = buf.extract_block_text(0, 0, 2, 3);
+        assert_eq!(
+            result,
+            "abcd
+efgh
+ijkl"
+        );
+    }
+
+    #[test]
+    fn col_range_reversed() {
+        // start_col > end_col: col_min/col_max normalization must apply.
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "abcdefghij");
+        // Passing end_col=1, start_col=3 → should extract cols 1..=3 = "bcd".
+        let result = buf.extract_block_text(0, 3, 0, 1);
+        assert_eq!(result, "bcd");
+    }
+
+    #[test]
+    fn trailing_spaces_trimmed_per_row() {
+        // Each row's trailing spaces are trimmed individually.
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "ab"); // row 0: "ab" + 8 spaces
+        push_line(&mut buf, "cde"); // row 1: "cde" + 7 spaces
+        // Extract cols 0..=9 (full width): trailing spaces must be stripped.
+        let result = buf.extract_block_text(0, 0, 1, 9);
+        assert_eq!(
+            result,
+            "ab
+cde"
+        );
+    }
+
+    #[test]
+    fn start_row_beyond_buffer() {
+        let buf = Buffer::new(10, 5);
+        let result = buf.extract_block_text(100, 0, 105, 9);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn end_row_clamped_to_buffer() {
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "only");
+        // end_row far beyond buffer → clamped, must not panic.
+        let result = buf.extract_block_text(0, 0, 999, 3);
+        assert!(result.contains("only"));
+    }
+
+    #[test]
+    fn col_beyond_row_width() {
+        // Columns beyond the actual row width produce no characters (no panic).
+        let mut buf = Buffer::new(5, 3);
+        push_line(&mut buf, "hi");
+        let result = buf.extract_block_text(0, 10, 0, 20);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn block_does_not_bleed_into_adjacent_cols() {
+        // A narrow block in the middle of wide content: only the specified
+        // columns are extracted from every row.
+        let mut buf = Buffer::new(10, 5);
+        push_line(&mut buf, "0123456789");
+        push_line(&mut buf, "abcdefghij");
+        push_line(&mut buf, "ABCDEFGHIJ");
+        // Extract cols 3..=5 → "345", "def", "DEF".
+        let result = buf.extract_block_text(0, 3, 2, 5);
+        assert_eq!(
+            result,
+            "345
+def
+DEF"
+        );
     }
 }
 

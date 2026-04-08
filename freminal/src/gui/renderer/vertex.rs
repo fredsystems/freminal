@@ -91,6 +91,11 @@ pub struct FgRenderOptions {
     /// Normalised selection region `(start_col, start_row, end_col, end_row)`,
     /// or `None` when no selection is active.
     pub selection: Option<(usize, usize, usize, usize)>,
+    /// `true` when the selection is a rectangular block (Alt+drag).
+    ///
+    /// When `false` the selection is a linear span.  When `true` every row in
+    /// the range uses the same column boundaries (`start_col`..=`end_col`).
+    pub selection_is_block: bool,
     /// Whether slow-blink (SGR 5) text is currently in its visible phase.
     pub text_blink_slow_visible: bool,
     /// Whether fast-blink (SGR 6) text is currently in its visible phase.
@@ -104,6 +109,7 @@ impl FgRenderOptions {
     pub const fn all_visible(selection: Option<(usize, usize, usize, usize)>) -> Self {
         Self {
             selection,
+            selection_is_block: false,
             text_blink_slow_visible: true,
             text_blink_fast_visible: true,
         }
@@ -189,6 +195,7 @@ pub fn build_background_instances(
     cursor_pixel_pos: (f32, f32),
     cursor_visual_style: &CursorVisualStyle,
     selection: Option<(usize, usize, usize, usize)>,
+    selection_is_block: bool,
     match_highlights: &[MatchHighlight],
     theme: &ThemePalette,
     cursor_color_override: Option<(u8, u8, u8)>,
@@ -293,24 +300,36 @@ pub fn build_background_instances(
         let cw = gl_f32_u32(cell_width);
         let ch = gl_f32_u32(cell_height);
 
+        // For block selections the same column span applies to every row.
+        let block_col_begin = sel_start_col.min(sel_end_col);
+        let block_col_end = sel_start_col.max(sel_end_col);
+
         for (row, line) in shaped_lines
             .iter()
             .enumerate()
             .take(sel_end_row + 1)
             .skip(sel_start_row)
         {
-            let col_begin = if row == sel_start_row {
-                sel_start_col
+            let (col_begin, col_end) = if selection_is_block {
+                // Block selection: same column range on every row.
+                (block_col_begin, block_col_end)
             } else {
-                0
-            };
-            let col_end = if row == sel_end_row {
-                sel_end_col
-            } else {
-                line.runs
-                    .last()
-                    .map_or(0, |r| r.col_start + run_col_count(r))
-                    .saturating_sub(1)
+                // Linear selection: first row starts at anchor col, last row
+                // ends at end col, middle rows span the full line width.
+                let begin = if row == sel_start_row {
+                    sel_start_col
+                } else {
+                    0
+                };
+                let end = if row == sel_end_row {
+                    sel_end_col
+                } else {
+                    line.runs
+                        .last()
+                        .map_or(0, |r| r.col_start + run_col_count(r))
+                        .saturating_sub(1)
+                };
+                (begin, end)
             };
 
             if col_end < col_begin {
@@ -477,11 +496,12 @@ pub fn build_foreground_instances(
             };
 
             for glyph in &run.glyphs {
-                let fg_color = if is_cell_selected(row_idx, col, opts.selection) {
-                    selection_fg_f(theme)
-                } else {
-                    normal_fg
-                };
+                let fg_color =
+                    if is_cell_selected(row_idx, col, opts.selection, opts.selection_is_block) {
+                        selection_fg_f(theme)
+                    } else {
+                        normal_fg
+                    };
 
                 if run_visible {
                     emit_glyph_instance(
@@ -896,10 +916,16 @@ pub(super) fn run_col_count(run: &super::super::shaping::ShapedRun) -> usize {
 
 /// Check whether a cell at `(row, col)` falls within the normalised selection
 /// `(start_col, start_row, end_col, end_row)`.
-pub(super) const fn is_cell_selected(
+///
+/// When `is_block` is `true` the selection is rectangular: every row in the
+/// range is considered selected between `start_col` and `end_col` (inclusive).
+/// When `is_block` is `false` the standard linear (stream) selection logic
+/// applies.
+pub(super) fn is_cell_selected(
     row: usize,
     col: usize,
     selection: Option<(usize, usize, usize, usize)>,
+    is_block: bool,
 ) -> bool {
     let Some((sel_start_col, sel_start_row, sel_end_col, sel_end_row)) = selection else {
         return false;
@@ -907,6 +933,13 @@ pub(super) const fn is_cell_selected(
 
     if row < sel_start_row || row > sel_end_row {
         return false;
+    }
+
+    if is_block {
+        // Block selection: same column range on every row.
+        let col_min = sel_start_col.min(sel_end_col);
+        let col_max = sel_start_col.max(sel_end_col);
+        return col >= col_min && col <= col_max;
     }
 
     if sel_start_row == sel_end_row {
@@ -1056,6 +1089,7 @@ mod tests {
             cursor_pixel_pos,
             cursor_style,
             None,
+            false,
             &[],
             &themes::CATPPUCCIN_MOCHA,
             None,
@@ -1682,5 +1716,102 @@ mod tests {
             patched[cursor_float_offset..].iter().all(|&f| f == 0.0),
             "cursor region must be zeroed after blink-off patch"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    //  is_cell_selected tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_cell_selected_no_selection() {
+        // No selection → always false.
+        assert!(!is_cell_selected(0, 0, None, false));
+        assert!(!is_cell_selected(5, 5, None, true));
+    }
+
+    #[test]
+    fn is_cell_selected_linear_single_row() {
+        // Linear selection on row 2, cols 3..=6.
+        let sel = Some((3, 2, 6, 2));
+        assert!(is_cell_selected(2, 3, sel, false));
+        assert!(is_cell_selected(2, 5, sel, false));
+        assert!(is_cell_selected(2, 6, sel, false));
+        assert!(!is_cell_selected(2, 2, sel, false));
+        assert!(!is_cell_selected(2, 7, sel, false));
+        assert!(!is_cell_selected(1, 4, sel, false));
+        assert!(!is_cell_selected(3, 4, sel, false));
+    }
+
+    #[test]
+    fn is_cell_selected_linear_multirow() {
+        // Linear selection: start row 1 col 3, end row 3 col 5.
+        let sel = Some((3, 1, 5, 3));
+        // Start row: only cols >= 3 are selected.
+        assert!(is_cell_selected(1, 3, sel, false));
+        assert!(is_cell_selected(1, 9, sel, false));
+        assert!(!is_cell_selected(1, 2, sel, false));
+        // Middle row: entire row is selected.
+        assert!(is_cell_selected(2, 0, sel, false));
+        assert!(is_cell_selected(2, 99, sel, false));
+        // End row: only cols <= 5 are selected.
+        assert!(is_cell_selected(3, 0, sel, false));
+        assert!(is_cell_selected(3, 5, sel, false));
+        assert!(!is_cell_selected(3, 6, sel, false));
+        // Row outside range.
+        assert!(!is_cell_selected(0, 0, sel, false));
+        assert!(!is_cell_selected(4, 0, sel, false));
+    }
+
+    #[test]
+    fn is_cell_selected_block_same_cols_every_row() {
+        // Block selection: rows 1..=3, cols 2..=5.
+        let sel = Some((2, 1, 5, 3));
+        for row in 1..=3_usize {
+            assert!(is_cell_selected(row, 2, sel, true), "row {row} col 2");
+            assert!(is_cell_selected(row, 4, sel, true), "row {row} col 4");
+            assert!(is_cell_selected(row, 5, sel, true), "row {row} col 5");
+            assert!(!is_cell_selected(row, 1, sel, true), "row {row} col 1");
+            assert!(!is_cell_selected(row, 6, sel, true), "row {row} col 6");
+        }
+        // Row outside range is never selected.
+        assert!(!is_cell_selected(0, 3, sel, true));
+        assert!(!is_cell_selected(4, 3, sel, true));
+    }
+
+    #[test]
+    fn is_cell_selected_block_reversed_cols() {
+        // Block selection dragged right-to-left: start_col > end_col.
+        let sel = Some((7, 0, 3, 2)); // cols 7 to 3 → col_min=3, col_max=7
+        for row in 0..=2_usize {
+            assert!(is_cell_selected(row, 3, sel, true));
+            assert!(is_cell_selected(row, 5, sel, true));
+            assert!(is_cell_selected(row, 7, sel, true));
+            assert!(!is_cell_selected(row, 2, sel, true));
+            assert!(!is_cell_selected(row, 8, sel, true));
+        }
+    }
+
+    #[test]
+    fn is_cell_selected_block_single_row() {
+        // Block mode on a single row: column bounds apply like any row.
+        let sel = Some((2, 4, 5, 4)); // row 4, cols 2..=5
+        assert!(is_cell_selected(4, 2, sel, true));
+        assert!(is_cell_selected(4, 5, sel, true));
+        assert!(!is_cell_selected(4, 1, sel, true));
+        assert!(!is_cell_selected(4, 6, sel, true));
+        assert!(!is_cell_selected(3, 3, sel, true));
+    }
+
+    #[test]
+    fn is_cell_selected_block_middle_rows_respect_col_bounds() {
+        // In LINEAR mode, middle rows (between start and end) are fully selected.
+        // In BLOCK mode, middle rows respect the column bounds just like edge rows.
+        let sel = Some((3, 0, 5, 2));
+        // Linear: middle row 1, col 0 → selected (full row).
+        assert!(is_cell_selected(1, 0, sel, false));
+        // Block: middle row 1, col 0 → NOT selected (col 0 < col_min=3).
+        assert!(!is_cell_selected(1, 0, sel, true));
+        // Block: middle row 1, col 4 → selected.
+        assert!(is_cell_selected(1, 4, sel, true));
     }
 }

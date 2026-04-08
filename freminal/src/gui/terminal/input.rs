@@ -170,6 +170,7 @@ pub(super) fn dispatch_binding_action(
                     start_col: start.col,
                     end_row: end.row,
                     end_col: end.col,
+                    is_block: view_state.selection.is_block,
                 }) {
                     error!("Failed to send ExtractSelection to PTY consumer: {e}");
                 } else {
@@ -1046,6 +1047,11 @@ pub(super) fn write_input_to_terminal(
                             col: end_col,
                             row: abs_row,
                         });
+                        // Keep block mode in sync with the current Alt state so
+                        // releasing or pressing Alt mid-drag switches mode live.
+                        if view_state.click_count <= 1 {
+                            view_state.selection.is_block = input.modifiers.alt;
+                        }
                         state_changed = true;
                     }
                     continue;
@@ -1169,8 +1175,10 @@ pub(super) fn write_input_to_terminal(
                                 });
                             } else {
                                 // Single click — start point selection.
+                                // Alt+drag activates rectangular block selection.
                                 view_state.selection.anchor = Some(coord);
                                 view_state.selection.end = Some(coord);
+                                view_state.selection.is_block = modifiers.alt;
                             }
                             view_state.selection.is_selecting = true;
                         } else if view_state.selection.is_selecting {
