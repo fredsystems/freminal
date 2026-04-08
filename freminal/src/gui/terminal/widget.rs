@@ -997,8 +997,22 @@ impl FreminalTerminalWidget {
             // Compute the pixel position from the (possibly animated) visual
             // cursor coordinates.  These are fractional cell coords, so we
             // multiply by cell dimensions in pixels.
+            //
+            // For double-width / double-height rows (DECDWL / DECDHL), the
+            // cursor x-position is scaled by the row's horizontal scale factor
+            // so it aligns with the magnified glyphs.
+            let cursor_row_lw = snap
+                .visible_line_widths
+                .get(snap.cursor_pos.y)
+                .copied()
+                .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
+            let cursor_x_scale = if cursor_row_lw.is_double_width() {
+                2.0
+            } else {
+                1.0
+            };
             let cursor_pixel_pos = (
-                view_state.cursor_visual_col * cell_w_f,
+                view_state.cursor_visual_col * cell_w_f * cursor_x_scale,
                 view_state.cursor_visual_row * row_h_f,
             );
 
@@ -1046,6 +1060,7 @@ impl FreminalTerminalWidget {
                     effective_show_cursor,
                     cursor_blink_on,
                     cursor_pixel_pos,
+                    cursor_x_scale,
                     &snap.cursor_visual_style,
                     snap.theme,
                     snap.cursor_color_override,
@@ -1091,6 +1106,7 @@ impl FreminalTerminalWidget {
                     &mut self.font_manager,
                     cell_w_f,
                     self.ligatures,
+                    &snap.visible_line_widths,
                 );
 
                 // Build search match highlights from the current search state.
@@ -1111,6 +1127,7 @@ impl FreminalTerminalWidget {
                     effective_show_cursor,
                     cursor_blink_on,
                     cursor_pixel_pos,
+                    cursor_x_scale,
                     &snap.cursor_visual_style,
                     screen_selection,
                     view_state.selection.is_block,

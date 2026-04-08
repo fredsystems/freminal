@@ -28,6 +28,35 @@ pub enum RowJoin {
     ContinueLogicalLine,
 }
 
+/// Line-width attribute set by DEC escape sequences.
+///
+/// Controls whether glyphs on this row are rendered at normal size or scaled
+/// 2× horizontally (DECDWL) or 2× in both dimensions (DECDHL).  The renderer
+/// uses this to apply per-row scaling in the vertex builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineWidth {
+    /// Normal single-width, single-height line (ESC # 5 or default).
+    #[default]
+    Normal,
+    /// Double-width line (DECDWL, ESC # 6).  Each character occupies two
+    /// cell widths; the effective column count is halved.
+    DoubleWidth,
+    /// Top half of a double-height line (DECDHL, ESC # 3).  Glyphs are scaled
+    /// 2× in both dimensions; only the upper half is visible on this row.
+    DoubleHeightTop,
+    /// Bottom half of a double-height line (DECDHL, ESC # 4).  Glyphs are
+    /// scaled 2× in both dimensions; only the lower half is visible on this row.
+    DoubleHeightBottom,
+}
+
+impl LineWidth {
+    /// Returns `true` if this line uses double-width rendering (DECDWL or DECDHL).
+    #[must_use]
+    pub const fn is_double_width(self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+}
+
 /// A single row of terminal cells with a fixed logical width.
 ///
 /// Cells are stored sparsely: trailing default-blank cells are not allocated.
@@ -41,6 +70,12 @@ pub struct Row {
     pub origin: RowOrigin,
     pub join: RowJoin,
     pub dirty: bool,
+    /// Per-row line-width attribute (DECDWL / DECDHL).
+    ///
+    /// Defaults to [`LineWidth::Normal`].  Set via `ESC # 3/4/5/6` on the
+    /// current cursor row.  Affects rendering (glyph scaling) and the
+    /// effective column count (halved for double-width modes).
+    pub line_width: LineWidth,
 }
 
 impl Row {
@@ -53,6 +88,7 @@ impl Row {
             origin: RowOrigin::ScrollFill,
             join: RowJoin::NewLogicalLine,
             dirty: true,
+            line_width: LineWidth::Normal,
         }
     }
 
@@ -65,6 +101,7 @@ impl Row {
             origin,
             join,
             dirty: true,
+            line_width: LineWidth::Normal,
         }
     }
 
@@ -85,6 +122,7 @@ impl Row {
             origin,
             join,
             dirty: true,
+            line_width: LineWidth::Normal,
         }
     }
 

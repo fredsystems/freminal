@@ -13,6 +13,7 @@ use conv2::{ApproxFrom, ConvUtil};
 use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, UnderlineStyle};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
+use freminal_terminal_emulator::LineWidth;
 use freminal_terminal_emulator::{ImagePlacement, InlineImage};
 use std::sync::Arc;
 
@@ -53,6 +54,17 @@ pub(super) fn gl_f32_u32(val: u32) -> f32 {
         error!("gl_f32_u32: u32 {val} cannot be approximated as f32");
         0.0
     })
+}
+
+/// Horizontal scale factor for a given `LineWidth`.
+///
+/// DECDWL and DECDHL rows render at 2× horizontal width; normal rows are 1×.
+#[inline]
+const fn x_scale(lw: LineWidth) -> f32 {
+    match lw {
+        LineWidth::Normal => 1.0,
+        LineWidth::DoubleWidth | LineWidth::DoubleHeightTop | LineWidth::DoubleHeightBottom => 2.0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +205,7 @@ pub fn build_background_instances(
     show_cursor: bool,
     cursor_blink_on: bool,
     cursor_pixel_pos: (f32, f32),
+    cursor_width_scale: f32,
     cursor_visual_style: &CursorVisualStyle,
     selection: Option<(usize, usize, usize, usize)>,
     selection_is_block: bool,
@@ -205,6 +218,8 @@ pub fn build_background_instances(
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         let y_top = gl_f32(row_idx) * gl_f32_u32(cell_height);
+        let lw = line.line_width;
+        let scale = x_scale(lw);
 
         // --- Per-cell background instances ---
         for run in &line.runs {
@@ -223,16 +238,17 @@ pub fn build_background_instances(
             let [r, g, b, a] = internal_color_to_gl(bg_color_raw, is_faint, theme);
 
             // Emit one instance per cell in this run.
+            // For double-width/height rows, each logical column is 2 physical
+            // cells wide, so emit 2 adjacent instances per column.
             let col_count = run_col_count(run);
-            for c in 0..col_count {
-                let col = run.col_start + c;
-                instances.push(gl_f32(col));
-                instances.push(gl_f32(row_idx));
-                instances.push(r);
-                instances.push(g);
-                instances.push(b);
-                instances.push(a);
-            }
+            emit_bg_cells(
+                &mut instances,
+                run.col_start,
+                col_count,
+                row_idx,
+                scale,
+                [r, g, b, a],
+            );
         }
 
         // --- Underline and strikethrough decoration quads ---
@@ -248,8 +264,8 @@ pub fn build_background_instances(
             }
 
             let col_end = run.col_start + run_col_count(run);
-            let x0 = gl_f32(run.col_start) * gl_f32_u32(cell_width);
-            let x1 = gl_f32(col_end) * gl_f32_u32(cell_width);
+            let x0 = gl_f32(run.col_start) * gl_f32_u32(cell_width) * scale;
+            let x1 = gl_f32(col_end) * gl_f32_u32(cell_width) * scale;
 
             if underline_style.is_active() {
                 // Use underline color if set, otherwise fall back to foreground.
@@ -309,8 +325,9 @@ pub fn build_background_instances(
             }
             let cw = gl_f32_u32(cell_width);
             let ch = gl_f32_u32(cell_height);
-            let x0 = gl_f32(m.col_start) * cw;
-            let x1 = gl_f32(m.col_end + 1) * cw;
+            let row_scale = x_scale(shaped_lines[m.row].line_width);
+            let x0 = gl_f32(m.col_start) * cw * row_scale;
+            let x1 = gl_f32(m.col_end + 1) * cw * row_scale;
             let y0 = gl_f32(m.row) * ch;
             let y1 = y0 + ch;
             let color = if m.is_current {
@@ -363,8 +380,9 @@ pub fn build_background_instances(
                 continue;
             }
 
-            let x0 = gl_f32(col_begin) * cw;
-            let x1 = gl_f32(col_end + 1) * cw;
+            let row_scale = x_scale(line.line_width);
+            let x0 = gl_f32(col_begin) * cw * row_scale;
+            let x1 = gl_f32(col_end + 1) * cw * row_scale;
             let y0 = gl_f32(row) * ch;
             let y1 = y0 + ch;
 
@@ -375,7 +393,7 @@ pub fn build_background_instances(
     // --- Cursor quad (always last in deco so cursor-only patches work) ---
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
         let (cx, cy) = cursor_pixel_pos;
-        let cw = gl_f32_u32(cell_width);
+        let cw = gl_f32_u32(cell_width) * cursor_width_scale;
         let ch = gl_f32_u32(cell_height);
 
         let color = cursor_f(theme, cursor_color_override);
@@ -421,6 +439,7 @@ pub fn build_cursor_verts_only(
     show_cursor: bool,
     cursor_blink_on: bool,
     cursor_pixel_pos: (f32, f32),
+    cursor_width_scale: f32,
     cursor_visual_style: &CursorVisualStyle,
     theme: &ThemePalette,
     cursor_color_override: Option<(u8, u8, u8)>,
@@ -429,7 +448,7 @@ pub fn build_cursor_verts_only(
 
     if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
         let (cx, cy) = cursor_pixel_pos;
-        let cw = gl_f32_u32(cell_width);
+        let cw = gl_f32_u32(cell_width) * cursor_width_scale;
         let ch = gl_f32_u32(cell_height);
 
         let color = cursor_f(theme, cursor_color_override);
@@ -480,13 +499,8 @@ pub fn build_foreground_instances(
     let mut instances: Vec<f32> = Vec::new();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
-        let row_f = gl_f32(row_idx);
         let cell_h_f = gl_f32_u32(cell_height);
-        let baseline_y = row_f.mul_add(cell_h_f, ascent);
-
-        // Cell vertical extent for this row (used to clip oversized glyphs).
-        let cell_top = row_f * cell_h_f;
-        let cell_bottom = cell_top + cell_h_f;
+        let row_params = RowGlyphParams::new(line.line_width, cell_h_f, row_idx, ascent);
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
@@ -517,9 +531,8 @@ pub fn build_foreground_instances(
                         glyph,
                         atlas,
                         font_manager,
-                        baseline_y,
                         fg_color,
-                        [cell_top, cell_bottom],
+                        &row_params,
                     );
                 }
 
@@ -670,21 +683,63 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
     ]
 }
 
+/// Per-row rendering parameters for glyph emission: scaling factors,
+/// baseline position, and cell vertical extent.  Bundled to keep
+/// [`emit_glyph_instance`] within the 7-argument lint limit.
+struct RowGlyphParams {
+    /// Horizontal scale factor (1.0 for normal, 2.0 for double-width/height).
+    x_scale: f32,
+    /// Vertical scale factor (1.0 for normal, 2.0 for DECDHL).
+    y_scale: f32,
+    /// Vertical offset applied to the baseline before scaling.  For DECDHL
+    /// bottom halves this shifts the virtual origin up by one cell height so
+    /// the cell-boundary clip keeps the lower half of the 2× glyph.
+    y_origin_shift: f32,
+    /// Baseline y-coordinate for this row (in pixels).
+    baseline_y: f32,
+    /// Cell vertical extent `[top, bottom]` for clipping oversized glyphs.
+    cell_y_range: [f32; 2],
+}
+
+impl RowGlyphParams {
+    /// Build row parameters from a `LineWidth`, cell height, and row index.
+    fn new(lw: LineWidth, cell_h_f: f32, row_idx: usize, ascent: f32) -> Self {
+        let row_f = gl_f32(row_idx);
+        let baseline_y = row_f.mul_add(cell_h_f, ascent);
+        let cell_top = row_f * cell_h_f;
+        let cell_bottom = cell_top + cell_h_f;
+        let (y_scale, y_origin_shift) = match lw {
+            LineWidth::Normal | LineWidth::DoubleWidth => (1.0, 0.0),
+            LineWidth::DoubleHeightTop => (2.0, 0.0),
+            LineWidth::DoubleHeightBottom => (2.0, -cell_h_f),
+        };
+        let x_scale_val = x_scale(lw);
+
+        Self {
+            x_scale: x_scale_val,
+            y_scale,
+            y_origin_shift,
+            baseline_y,
+            cell_y_range: [cell_top, cell_bottom],
+        }
+    }
+}
+
 /// Emit a single foreground glyph instance (13 floats).
 ///
 /// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
 /// instance into `instances`.  Glyphs that extend beyond the cell's vertical
-/// extent (`cell_y_range[0]`..`cell_y_range[1]`) are clipped, and their UV
-/// and position are adjusted proportionally so the visible portion of the
-/// atlas texture is correct.
+/// extent are clipped, and their UV and position are adjusted proportionally
+/// so the visible portion of the atlas texture is correct.
+///
+/// `row_params` carries per-row scaling and baseline data for DECDWL / DECDHL.
 fn emit_glyph_instance(
     instances: &mut Vec<f32>,
     glyph: &ShapedGlyph,
     atlas: &mut GlyphAtlas,
     font_manager: &FontManager,
-    baseline_y: f32,
     fg_color: [f32; 4],
-    cell_y_range: [f32; 2],
+    row_params: &RowGlyphParams,
 ) {
     use conv2::ValueFrom;
 
@@ -711,10 +766,19 @@ fn emit_glyph_instance(
     let [u0, v0, u1, v1] = entry.uv_rect;
 
     // Pixel position: cell-grid x + bearing, baseline_y - bearing_y.
-    let x0 = glyph.x_px + f32::from(entry.bearing_x);
-    let raw_y0 = baseline_y - f32::from(entry.bearing_y);
-    let x1 = x0 + f32::from(entry.width);
-    let raw_y1 = raw_y0 + f32::from(entry.height);
+    // Apply horizontal and vertical scaling for DECDWL / DECDHL rows.
+    let x0 = (glyph.x_px + f32::from(entry.bearing_x)) * row_params.x_scale;
+    let x1 = f32::from(entry.width).mul_add(row_params.x_scale, x0);
+
+    // Vertical position: scale the glyph's offset from the cell top, then
+    // apply `y_origin_shift` (negative for DECDHL bottom half to show the
+    // lower half of the 2× glyph).
+    let cell_top = row_params.cell_y_range[0];
+    let relative_y = row_params.baseline_y - cell_top - f32::from(entry.bearing_y);
+    let raw_y0 = row_params
+        .y_scale
+        .mul_add(relative_y, cell_top + row_params.y_origin_shift);
+    let raw_y1 = f32::from(entry.height).mul_add(row_params.y_scale, raw_y0);
 
     // --- Cell-boundary clipping ---
     //
@@ -722,8 +786,7 @@ fn emit_glyph_instance(
     // above or below the cell.  Clamp the quad to the cell's vertical
     // extent and adjust the UV coordinates proportionally so only the
     // visible portion of the atlas texture is sampled.
-    let cell_top = cell_y_range[0];
-    let cell_bottom = cell_y_range[1];
+    let cell_bottom = row_params.cell_y_range[1];
     let glyph_h = raw_y1 - raw_y0;
     let (y0, v0_adj) = if raw_y0 < cell_top {
         // Glyph extends above the cell — clip the top.
@@ -918,6 +981,47 @@ fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
 // ---------------------------------------------------------------------------
 
 /// Return the total column count covered by a `ShapedRun`.
+/// Emit background cell instances for a run, applying horizontal scaling.
+///
+/// For normal rows (`scale == 1.0`), emits one instance per logical column.
+/// For double-width rows (`scale == 2.0`), each logical column maps to 2
+/// physical cell slots so the background spans the correct width.
+fn emit_bg_cells(
+    instances: &mut Vec<f32>,
+    col_start: usize,
+    col_count: usize,
+    row_idx: usize,
+    scale: f32,
+    color: [f32; 4],
+) {
+    let row_f = gl_f32(row_idx);
+    let [r, g, b, a] = color;
+
+    if scale > 1.5 {
+        // Double-width: each logical column produces 2 physical instances.
+        for c in 0..col_count {
+            let base = (col_start + c) * 2;
+            for phys in 0..2_usize {
+                instances.push(gl_f32(base + phys));
+                instances.push(row_f);
+                instances.push(r);
+                instances.push(g);
+                instances.push(b);
+                instances.push(a);
+            }
+        }
+    } else {
+        for c in 0..col_count {
+            instances.push(gl_f32(col_start + c));
+            instances.push(row_f);
+            instances.push(r);
+            instances.push(g);
+            instances.push(b);
+            instances.push(a);
+        }
+    }
+}
+
 pub(super) fn run_col_count(run: &super::super::shaping::ShapedRun) -> usize {
     run.glyphs.iter().map(|g| g.cell_width).sum()
 }
@@ -1043,6 +1147,7 @@ mod tests {
                 url: None,
                 blink: BlinkState::None,
             }],
+            line_width: LineWidth::Normal,
         })
     }
 
@@ -1095,6 +1200,7 @@ mod tests {
             show_cursor,
             cursor_blink_on,
             cursor_pixel_pos,
+            1.0, // cursor_width_scale (normal for tests)
             cursor_style,
             None,
             false,
@@ -1193,6 +1299,7 @@ mod tests {
                     blink: BlinkState::None,
                 },
             ],
+            line_width: LineWidth::Normal,
         });
 
         let (bg, deco) = bg_instances_test(
@@ -1259,6 +1366,7 @@ mod tests {
                     blink: BlinkState::None,
                 },
             ],
+            line_width: LineWidth::Normal,
         });
 
         let (bg, _deco) = bg_instances_test(
@@ -1448,7 +1556,7 @@ mod tests {
             .map(|&b| freminal_common::buffer_states::tchar::TChar::Ascii(b))
             .collect();
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
-        let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
+        let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
 
         let instances = build_foreground_instances(
             &lines,
@@ -1594,6 +1702,7 @@ mod tests {
             show_cursor,
             cursor_blink_on,
             cursor_pixel_pos,
+            1.0, // cursor_width_scale (normal for tests)
             cursor_visual_style,
             theme,
             cursor_color_override,

@@ -20,6 +20,7 @@ use freminal_common::buffer_states::{
     format_tag::FormatTag,
     tchar::TChar,
 };
+use freminal_terminal_emulator::LineWidth;
 
 use super::font_manager::{FaceId, FontManager, GlyphStyle};
 
@@ -103,6 +104,10 @@ pub struct ShapedRun {
 pub struct ShapedLine {
     /// All shaped runs for this line.
     pub runs: Vec<ShapedRun>,
+    /// Line-width attribute from the buffer row (DECDWL / DECDHL).
+    ///
+    /// The renderer uses this to apply horizontal and/or vertical scaling.
+    pub line_width: LineWidth,
 }
 
 /// Per-line shaping cache.
@@ -143,6 +148,9 @@ impl ShapingCache {
     ///
     /// Returns a `Vec<Arc<ShapedLine>>` with one entry per visible line.
     /// Cache hits are cheap `Arc` refcount bumps — no deep clone.
+    // `visible_line_widths` must accompany per-line data for correct shaping;
+    // bundling it into a struct would just wrap an existing slice parameter.
+    #[allow(clippy::too_many_arguments)]
     pub fn shape_visible(
         &mut self,
         visible_chars: &[TChar],
@@ -151,6 +159,7 @@ impl ShapingCache {
         font_manager: &mut FontManager,
         cell_width: f32,
         ligatures: bool,
+        visible_line_widths: &[LineWidth],
     ) -> Vec<Arc<ShapedLine>> {
         let lines = split_into_lines(visible_chars);
         let line_count = lines.len();
@@ -167,7 +176,19 @@ impl ShapingCache {
         let mut global_offset: usize = 0;
 
         for (line_idx, line_chars) in lines.iter().enumerate() {
-            let line_hash = hash_line(line_chars, visible_tags, global_offset);
+            let lw = visible_line_widths
+                .get(line_idx)
+                .copied()
+                .unwrap_or_default();
+
+            // Include line_width in hash so cache invalidates when DECDWL/DECDHL changes.
+            let mut line_hash = hash_line(line_chars, visible_tags, global_offset);
+            {
+                let mut h = DefaultHasher::new();
+                line_hash.hash(&mut h);
+                std::mem::discriminant(&lw).hash(&mut h);
+                line_hash = h.finish();
+            }
 
             let shaped = if let Some((_h, shaped_line)) = self
                 .entries
@@ -187,7 +208,10 @@ impl ShapingCache {
                     font_manager,
                 );
                 let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
-                let shaped_line = Arc::new(ShapedLine { runs: shaped_runs });
+                let shaped_line = Arc::new(ShapedLine {
+                    runs: shaped_runs,
+                    line_width: lw,
+                });
                 self.entries[line_idx] = Some((line_hash, Arc::clone(&shaped_line)));
                 shaped_line
             };
@@ -863,11 +887,11 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         // First call — cache miss.
-        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
+        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
         assert_eq!(r1.len(), 1);
 
         // Second call with identical input — cache hit.
-        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false);
+        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
         assert_eq!(r2.len(), 1);
 
         // Results should be identical (same glyph count).
@@ -884,11 +908,11 @@ mod tests {
         let chars1 = vec![TChar::Ascii(b'X')];
         let tags = vec![make_tag(0, 10)];
 
-        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w, false);
+        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w, false, &[]);
 
         // Change content.
         let chars2 = vec![TChar::Ascii(b'Y')];
-        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w, false);
+        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w, false, &[]);
 
         // Should still produce valid output (cache miss, re-shaped).
         assert_eq!(r2.len(), 1);

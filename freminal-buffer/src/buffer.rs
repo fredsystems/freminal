@@ -416,6 +416,35 @@ impl Buffer {
         // next character insertion handle wrap/scroll as normal.
     }
 
+    /// Set the [`LineWidth`] attribute on the row under the cursor.
+    ///
+    /// This is the buffer-level primitive called by the terminal handler in
+    /// response to `ESC # 3` (double-height top), `ESC # 4` (double-height
+    /// bottom), `ESC # 5` (single-width), and `ESC # 6` (double-width).
+    ///
+    /// The row is marked dirty so the next snapshot rebuild re-flattens it.
+    pub fn set_cursor_line_width(&mut self, lw: crate::row::LineWidth) {
+        let row_idx = self.cursor.pos.y;
+        if let Some(row) = self.rows.get_mut(row_idx)
+            && row.line_width != lw
+        {
+            row.line_width = lw;
+            row.dirty = true;
+        }
+    }
+
+    /// Return the [`LineWidth`] for each row in the visible window.
+    ///
+    /// The returned vector has `min(term_height, row_count)` entries, one per
+    /// visible row in top-to-bottom order.  Used by `build_snapshot` to thread
+    /// per-row line-width data through to the renderer.
+    #[must_use]
+    pub fn visible_line_widths(&self, scroll_offset: usize) -> Vec<crate::row::LineWidth> {
+        let start = self.visible_window_start(scroll_offset);
+        let end = (start + self.height).min(self.rows.len());
+        self.rows[start..end].iter().map(|r| r.line_width).collect()
+    }
+
     /// Set an image cell at a specific (row, col) position in the buffer.
     ///
     /// Also invalidates the corresponding row cache entry.  Used by
