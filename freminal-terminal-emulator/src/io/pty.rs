@@ -20,6 +20,7 @@ use freminal_common::{
     terminfo::TERMINFO,
 };
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+
 use sys_locale::get_locale;
 use tempfile::TempDir;
 use thiserror::Error;
@@ -54,6 +55,13 @@ pub struct FreminalPtyInputOutput {
     /// and sends `()` here when the child exits, giving the consumer thread a
     /// reliable cross-platform shutdown signal.
     pub child_exit_rx: Receiver<()>,
+    /// Shared atomic flag reflecting whether the PTY slave currently has
+    /// `ECHO` disabled (i.e. a password prompt is active).
+    ///
+    /// Updated by the writer thread after each PTY write or resize event via
+    /// `MasterPty::get_termios()`.  Always `false` on Windows (`ConPTY` does not
+    /// support termios).  Read by `is_echo_off()` without any locking overhead.
+    pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -118,6 +126,21 @@ enum ExtractTerminfoError {
     },
 }
 
+/// The result of [`run_terminal`], bundling all values that the caller
+/// needs after the PTY threads are launched.
+pub struct RunTerminalResult {
+    /// Receives `()` when the child process exits.
+    pub child_exit_rx: Receiver<()>,
+    /// Shared atomic flag reflecting whether the PTY slave currently has
+    /// `ECHO` disabled.
+    ///
+    /// The writer thread updates this flag after each write or resize by
+    /// calling `pair.master.get_termios()` (a `MasterPty` trait method).
+    /// The PTY consumer thread reads it atomically when building snapshots.
+    /// `Arc` lets both threads share ownership without a lock.
+    pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 // Inherently large: the PTY thread event loop integrating the PTY reader, input channel, and
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
@@ -130,7 +153,7 @@ pub fn run_terminal(
     command: Option<(String, Vec<String>)>,
     shell: Option<String>,
     termcaps: Option<&Path>,
-) -> Result<Receiver<()>> {
+) -> Result<RunTerminalResult> {
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
@@ -336,6 +359,13 @@ pub fn run_terminal(
         }
     });
 
+    // Shared atomic flag updated by the writer thread after each PTY event.
+    // The PTY consumer thread reads this via `FreminalPtyInputOutput::is_echo_off()`
+    // when building snapshots.  Using `Arc<AtomicBool>` avoids any lock on the hot
+    // snapshot path while keeping ownership safely shared between threads.
+    let echo_off = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let echo_off_writer = std::sync::Arc::clone(&echo_off);
+
     {
         std::thread::spawn(move || {
             if cfg!(target_os = "macos") {
@@ -386,11 +416,29 @@ pub fn run_terminal(
                         }
                     }
                 }
+
+                // Poll the slave termios after each PTY event.  `get_termios()` is a
+                // `MasterPty` trait method implemented on Unix via `tcgetattr()` on
+                // the master fd.  When `ECHO` is absent the foreground process (e.g.
+                // `sudo`) has disabled echoing — a reliable password-prompt signal.
+                // On Windows `get_termios()` returns `None`; the atomic stays `false`.
+                #[cfg(unix)]
+                {
+                    use nix::sys::termios::LocalFlags;
+                    let is_off = pair
+                        .master
+                        .get_termios()
+                        .is_some_and(|t| !t.local_flags.contains(LocalFlags::ECHO));
+                    echo_off_writer.store(is_off, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         });
     }
 
-    Ok(child_exit_rx)
+    Ok(RunTerminalResult {
+        child_exit_rx,
+        echo_off,
+    })
 }
 
 impl FreminalPtyInputOutput {
@@ -420,7 +468,7 @@ impl FreminalPtyInputOutput {
         #[cfg(not(feature = "playback"))]
         let _ = recording;
 
-        let child_exit_rx = run_terminal(
+        let result = run_terminal(
             write_rx,
             send_tx,
             recording,
@@ -430,8 +478,24 @@ impl FreminalPtyInputOutput {
         )?;
         Ok(Self {
             _termcaps: termcaps,
-            child_exit_rx,
+            child_exit_rx: result.child_exit_rx,
+            echo_off: result.echo_off,
         })
+    }
+
+    /// Return `true` when the PTY slave currently has the `ECHO` flag disabled.
+    ///
+    /// This is the standard signal that a password prompt is active — the slave
+    /// process (e.g. `sudo`, `ssh`) called `tcsetattr()` to turn off echoing so
+    /// the typed password does not appear on screen.
+    ///
+    /// On Unix the writer thread polls `MasterPty::get_termios()` after each PTY
+    /// event and updates the shared atomic; this method simply reads that atomic.
+    ///
+    /// Always returns `false` on Windows where `ConPTY` does not support termios.
+    #[must_use]
+    pub fn is_echo_off(&self) -> bool {
+        self.echo_off.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

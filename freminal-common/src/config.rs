@@ -282,7 +282,7 @@ impl Default for BellConfig {
 // ------------------------------------------------------------------------------------------------
 
 /// Security-related configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
     /// Allow applications to read the system clipboard via OSC 52 query.
@@ -292,6 +292,21 @@ pub struct SecurityConfig {
     /// base64-encoded.  This is a potential security risk if untrusted
     /// programs run inside the terminal.
     pub allow_clipboard_read: bool,
+
+    /// Show a lock icon in the tab bar when the foreground process disables
+    /// terminal echo (e.g. password prompts from `sudo`, `ssh`, `passwd`).
+    ///
+    /// Default: `true`.
+    pub password_indicator: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            allow_clipboard_read: false,
+            password_indicator: true,
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1476,6 +1491,15 @@ mode = "none"
     }
 
     #[test]
+    fn security_config_password_indicator_defaults_to_true() {
+        let cfg = SecurityConfig::default();
+        assert!(
+            cfg.password_indicator,
+            "password_indicator should default to true"
+        );
+    }
+
+    #[test]
     fn security_config_deserialize_allow() {
         let toml_str = r"
 [security]
@@ -1486,6 +1510,23 @@ allow_clipboard_read = true
             .security
             .expect("security section should be present");
         assert!(security.allow_clipboard_read);
+        // password_indicator should still be its default (true) when omitted.
+        assert!(security.password_indicator);
+    }
+
+    #[test]
+    fn security_config_deserialize_password_indicator_disabled() {
+        let toml_str = r"
+[security]
+password_indicator = false
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let security = partial
+            .security
+            .expect("security section should be present");
+        assert!(!security.password_indicator);
+        // allow_clipboard_read should still be its default (false) when omitted.
+        assert!(!security.allow_clipboard_read);
     }
 
     #[test]
@@ -1505,6 +1546,22 @@ allow_clipboard_read = true
     }
 
     #[test]
+    fn security_config_apply_partial_password_indicator() {
+        let mut cfg = Config::default();
+        assert!(cfg.security.password_indicator);
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+password_indicator = false
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(!cfg.security.password_indicator);
+    }
+
+    #[test]
     fn security_config_roundtrip() {
         let mut cfg = Config::default();
         cfg.security.allow_clipboard_read = true;
@@ -1513,6 +1570,17 @@ allow_clipboard_read = true
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_roundtrip_password_indicator() {
+        let mut cfg = Config::default();
+        cfg.security.password_indicator = false;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(!deserialized.security.password_indicator);
     }
 
     // -----------------------------------------------------------------

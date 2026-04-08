@@ -687,6 +687,20 @@ impl SettingsModal {
              This is a potential security risk if untrusted programs run \
              inside the terminal.",
         );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.draft.security.password_indicator,
+            "Password Indicator",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Show a \u{1f510} lock icon in the tab bar when the foreground \
+             process disables terminal echo (e.g. password prompts from \
+             sudo, ssh, passwd).",
+        );
     }
 
     fn show_keybindings_tab(&mut self, ui: &mut Ui) {

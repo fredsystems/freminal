@@ -267,7 +267,14 @@ impl FreminalGui {
                     ui.separator();
                 }
 
-                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count);
+                // Load the snapshot to determine the echo-off (password prompt) state.
+                // The ArcSwap load is a single atomic pointer read — negligible cost.
+                // Only report echo-off when the password_indicator config option is
+                // enabled (default: true).
+                let is_echo_off =
+                    self.config.security.password_indicator && tab.arc_swap.load().is_echo_off;
+
+                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
                 if !matches!(tab_action, TabBarAction::None) {
                     action = tab_action;
                 }
@@ -290,12 +297,17 @@ impl FreminalGui {
     ///
     /// Inactive tabs with an unacknowledged bell are drawn with an amber
     /// text color and a warm-tinted background to make them more prominent.
+    ///
+    /// A 🔐 lock icon is prepended to the label when `is_echo_off` is `true`,
+    /// indicating that the foreground process has disabled terminal echo (i.e.
+    /// a password prompt such as `sudo` or `ssh` is waiting for input).
     fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
         index: usize,
         is_active: bool,
         count: usize,
+        is_echo_off: bool,
     ) -> TabBarAction {
         let mut action = TabBarAction::None;
         let label = if tab.title.is_empty() {
@@ -306,12 +318,14 @@ impl FreminalGui {
 
         let has_bell = tab.bell_active && !is_active;
 
-        // Build the display label: prepend a bell indicator when the tab
-        // has an unacknowledged bell and is not the active (focused) tab.
-        let display_label = if has_bell {
-            format!("\u{1f514} {label}")
-        } else {
-            label.to_owned()
+        // Build the display label: prepend a lock indicator when echo is disabled
+        // (password prompt active), and a bell indicator when the tab has an
+        // unacknowledged bell and is not the active (focused) tab.
+        let display_label = match (is_echo_off, has_bell) {
+            (true, true) => format!("\u{1f510} \u{1f514} {label}"),
+            (true, false) => format!("\u{1f510} {label}"),
+            (false, true) => format!("\u{1f514} {label}"),
+            (false, false) => label.to_owned(),
         };
 
         // Tab frame: active gets a gray fill, bell-active inactive tabs
