@@ -693,10 +693,11 @@ impl FreminalTerminalWidget {
         // release focus so that Tab and arrow keys work normally inside the
         // modal's egui widgets, and so the dismiss-click is not forwarded.
         //
-        // Also release focus when the right-click context menu is open so
-        // that egui can deliver click events to the Area's buttons.
+        // Also release focus when the right-click context menu or the search
+        // overlay is open so that egui can deliver events to those widgets.
         let context_menu_open = view_state.context_menu_pos.is_some();
-        if !suppress_input && !context_menu_open {
+        let search_open = view_state.search_state.is_open;
+        if !suppress_input && !context_menu_open && !search_open {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
