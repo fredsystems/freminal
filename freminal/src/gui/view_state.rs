@@ -130,15 +130,17 @@ impl SelectionState {
     }
 }
 
-/// A single search match span within the visible terminal window.
+/// A single search match span within the terminal buffer.
 ///
-/// Coordinates are in *visible-window* space: `row` is 0-indexed from the
-/// top of the current viewport, `col_start` and `col_end` are inclusive
-/// column indices within that row.  The span is guaranteed to fit within
-/// the visible window at the moment the search was run.
+/// Coordinates are in *buffer-absolute* space: `row` is 0-indexed from the
+/// first scrollback row (row 0 = oldest scrollback line).  `col_start` and
+/// `col_end` are inclusive display-column indices within that row.
+///
+/// When rendering highlights, only matches whose row falls within the
+/// visible window are converted to screen-relative coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchSpan {
-    /// Row index within the visible window (0 = top row).
+    /// Buffer-absolute row index (0 = first scrollback row).
     pub row: usize,
     /// First matching column (inclusive).
     pub col_start: usize,
@@ -146,18 +148,32 @@ pub struct MatchSpan {
     pub col_end: usize,
 }
 
+/// Tracks whether a `RequestSearchBuffer` message is in-flight.
+///
+/// Used instead of a bare `bool` to satisfy `clippy::struct_excessive_bools`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum BufferRequestState {
+    /// No request is pending — the GUI can send a new one.
+    #[default]
+    Idle,
+    /// A request has been sent; waiting for the PTY thread to respond.
+    Pending,
+}
+
 /// State owned by the GUI for the search-in-scrollback overlay.
 ///
 /// All fields are private-to-GUI — the PTY thread never reads them.
-/// Searching is done purely against the snapshot's `visible_chars` data.
+/// Searching is done against the full buffer (scrollback + visible), which
+/// is fetched on-demand from the PTY thread via `InputEvent::RequestSearchBuffer`.
 #[derive(Debug, Default)]
 pub struct SearchState {
     /// Whether the search overlay is currently visible.
     pub is_open: bool,
     /// The current query string (UTF-8).
     pub query: String,
-    /// All matches found for the current query in the visible window.
+    /// All matches found for the current query in the full buffer.
     ///
+    /// Match rows are buffer-absolute (0 = first scrollback row).
     /// Empty when `query` is empty or no matches were found.
     pub matches: Vec<MatchSpan>,
     /// Index into `matches` indicating the "current" (focused) match.
@@ -172,30 +188,34 @@ pub struct SearchState {
     pub last_searched_query: String,
     /// Whether `regex_mode` was active when `matches` was last computed.
     pub last_searched_regex: bool,
-    /// The `visible_chars` `Arc` that was searched for the current `matches`
-    /// list.  When a new snapshot arrives with a different `Arc`, the search
-    /// is stale and must be re-run.
-    pub last_searched_visible: Option<Arc<Vec<TChar>>>,
+    /// The full-buffer `TChar` corpus that was searched for the current
+    /// `matches` list.  When a new corpus is fetched from the PTY thread
+    /// (because `total_rows` changed), the search is stale and must be re-run.
+    pub cached_full_buffer: Option<Arc<Vec<TChar>>>,
+    /// The `total_rows` value when the cached buffer was fetched.
+    ///
+    /// When the snapshot's `total_rows` changes, the cached buffer is stale
+    /// and a new `RequestSearchBuffer` should be sent to the PTY thread.
+    pub last_known_total_rows: usize,
+    /// Whether a `RequestSearchBuffer` has been sent and the response is
+    /// still pending.  Prevents sending duplicate requests.
+    pub buffer_request_state: BufferRequestState,
 }
 
 impl SearchState {
-    /// Returns `true` if a re-search is needed (query, mode, or visible
-    /// content changed since the last search).
+    /// Returns `true` if a re-search is needed (query or mode changed since
+    /// the last search, or no cached buffer is available yet).
     #[must_use]
-    pub fn needs_refresh(&self, current_visible: &Arc<Vec<TChar>>) -> bool {
-        self.query != self.last_searched_query
+    pub fn needs_refresh(&self) -> bool {
+        self.cached_full_buffer.is_none()
+            || self.query != self.last_searched_query
             || self.regex_mode != self.last_searched_regex
-            || self
-                .last_searched_visible
-                .as_ref()
-                .is_none_or(|prev| !Arc::ptr_eq(prev, current_visible))
     }
 
-    /// Mark the current matches as up-to-date for the given `visible_chars`.
-    pub fn mark_fresh(&mut self, visible: &Arc<Vec<TChar>>) {
+    /// Mark the current matches as up-to-date.
+    pub fn mark_fresh(&mut self) {
         self.last_searched_query.clone_from(&self.query);
         self.last_searched_regex = self.regex_mode;
-        self.last_searched_visible = Some(Arc::clone(visible));
     }
 
     /// Move to the next match, wrapping around.
@@ -237,7 +257,9 @@ impl SearchState {
         self.current_match = 0;
         self.last_searched_query.clear();
         self.last_searched_regex = false;
-        self.last_searched_visible = None;
+        self.cached_full_buffer = None;
+        self.last_known_total_rows = 0;
+        self.buffer_request_state = BufferRequestState::Idle;
     }
 }
 

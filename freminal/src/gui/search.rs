@@ -5,20 +5,24 @@
 
 //! Search-in-scrollback: text search logic and overlay UI.
 //!
-//! The search is performed purely in the GUI thread against the snapshot's
-//! `visible_chars` buffer.  No PTY-thread interaction is required — the PTY
-//! thread publishes the complete visible window on each snapshot, which is
-//! sufficient for substring and regex matching.
+//! The search runs on the GUI thread against a full-buffer `TChar` corpus
+//! (scrollback + visible) fetched on demand from the PTY thread via
+//! `InputEvent::RequestSearchBuffer`.  The cached corpus is stored in
+//! `SearchState::cached_full_buffer` and refreshed whenever `total_rows`
+//! changes (indicating new PTY output).
 //!
 //! # Data flow
 //!
 //! 1. The user opens the search overlay (`Ctrl+Shift+F` → `KeyAction::OpenSearch`).
 //! 2. The overlay is rendered as an `egui::Area` on top of the terminal area.
-//! 3. On each frame where `SearchState::needs_refresh()` is true, `run_search()`
-//!    is called and the results are stored in `SearchState::matches`.
-//! 4. The `MatchHighlight` list derived from `matches` is passed to
-//!    `build_background_instances()` so the renderer can highlight the cells.
-//! 5. The current match scroll offset is updated by `scroll_to_match()`.
+//! 3. The widget sends `InputEvent::RequestSearchBuffer` to the PTY thread,
+//!    which responds with the concatenated scrollback + visible `TChar` data.
+//! 4. On each frame where `SearchState::needs_refresh()` is true, `run_search()`
+//!    is called against the cached full buffer and results stored in
+//!    `SearchState::matches`.  Match rows are buffer-absolute.
+//! 5. `matches_to_highlights()` filters to the visible window and converts
+//!    rows to screen-relative for the renderer vertex builder.
+//! 6. The current match scroll offset is updated by `scroll_to_match()`.
 
 use crossbeam_channel::Sender;
 use eframe::egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Ui};
@@ -101,12 +105,15 @@ fn byte_range_to_display_cols(
     (col_start, display_width)
 }
 
-/// Run a substring search over all rows in `visible_chars`.
+/// Run a substring search over all rows in the provided `TChar` buffer.
 ///
 /// Returns a `Vec<MatchSpan>` in document order (top row first, left-to-right
-/// within each row).  Each span's `row` is the 0-indexed visible-window row
-/// and `col_start`/`col_end` are display-column indices within that row
+/// within each row).  Each span's `row` is the 0-indexed row within the input
+/// buffer and `col_start`/`col_end` are display-column indices within that row
 /// (wide characters such as CJK ideographs occupy two columns).
+///
+/// When the input is the full scrollback + visible corpus, `row` values are
+/// buffer-absolute (0 = first scrollback row).
 ///
 /// When the query is empty the result is always empty.
 ///
@@ -192,15 +199,25 @@ pub fn run_search(
 /// Convert `SearchState::matches` into `MatchHighlight` instances suitable
 /// for the renderer vertex builder.
 ///
+/// Only matches whose row falls within the visible window
+/// `[visible_window_start, visible_window_start + term_height)` are included.
+/// Buffer-absolute rows are converted to screen-relative rows for rendering.
+///
 /// The current match uses `is_current = true`; all others use `is_current = false`.
 #[must_use]
-pub fn matches_to_highlights(state: &SearchState) -> Vec<MatchHighlight> {
+pub fn matches_to_highlights(
+    state: &SearchState,
+    visible_window_start: usize,
+    term_height: usize,
+) -> Vec<MatchHighlight> {
+    let win_end = visible_window_start + term_height;
     state
         .matches
         .iter()
         .enumerate()
+        .filter(|(_, span)| span.row >= visible_window_start && span.row < win_end)
         .map(|(i, span)| MatchHighlight {
-            row: span.row,
+            row: span.row - visible_window_start,
             col_start: span.col_start,
             col_end: span.col_end,
             is_current: i == state.current_match,
@@ -220,13 +237,8 @@ pub fn matches_to_highlights(state: &SearchState) -> Vec<MatchHighlight> {
 /// no change was needed (no matches, or the offset did not change).
 pub fn scroll_to_match(view_state: &mut ViewState, snap: &TerminalSnapshot) -> Option<usize> {
     let span = view_state.search_state.current()?;
-    // `span.row` is a visible-window row index (0 = top of current view).
-    // We need a buffer-absolute row index to compute the correct scroll_offset.
-    let visible_start = snap
-        .total_rows
-        .saturating_sub(snap.term_height)
-        .saturating_sub(view_state.scroll_offset);
-    let abs_row = visible_start + span.row;
+    // `span.row` is buffer-absolute (0 = first scrollback row).
+    let abs_row = span.row;
 
     // We want abs_row to be visible. Compute the scroll_offset that centres it.
     let half_height = snap.term_height / 2;
@@ -609,9 +621,10 @@ mod tests {
         let visible = Arc::new(make_chars(&["hello"]));
         let state = SearchState {
             query: "foo".to_string(),
+            cached_full_buffer: Some(visible),
             ..SearchState::default()
         };
-        assert!(state.needs_refresh(&visible));
+        assert!(state.needs_refresh());
     }
 
     #[test]
@@ -619,23 +632,22 @@ mod tests {
         let visible = Arc::new(make_chars(&["hello"]));
         let mut state = SearchState {
             query: "foo".to_string(),
+            cached_full_buffer: Some(visible),
             ..SearchState::default()
         };
-        state.mark_fresh(&visible);
-        assert!(!state.needs_refresh(&visible));
+        state.mark_fresh();
+        assert!(!state.needs_refresh());
     }
 
     #[test]
-    fn needs_refresh_true_when_visible_changes() {
-        let visible1 = Arc::new(make_chars(&["hello"]));
-        let visible2 = Arc::new(make_chars(&["hello"]));
-        let mut state = SearchState {
+    fn needs_refresh_true_when_no_cached_buffer() {
+        let state = SearchState {
             query: "foo".to_string(),
+            last_searched_query: "foo".to_string(),
             ..SearchState::default()
         };
-        state.mark_fresh(&visible1);
-        // Same content but different Arc allocation → stale.
-        assert!(state.needs_refresh(&visible2));
+        // No cached buffer → always needs refresh.
+        assert!(state.needs_refresh());
     }
 
     #[test]
@@ -653,7 +665,9 @@ mod tests {
             regex_mode: true,
             last_searched_query: "foo".to_string(),
             last_searched_regex: true,
-            last_searched_visible: Some(visible),
+            cached_full_buffer: Some(visible),
+            last_known_total_rows: 10,
+            buffer_request_state: crate::gui::view_state::BufferRequestState::Idle,
         };
         state.close();
         assert!(!state.is_open);
@@ -661,7 +675,12 @@ mod tests {
         assert_eq!(state.current_match, 0);
         assert!(state.last_searched_query.is_empty());
         assert!(!state.last_searched_regex);
-        assert!(state.last_searched_visible.is_none());
+        assert!(state.cached_full_buffer.is_none());
+        assert_eq!(state.last_known_total_rows, 0);
+        assert_eq!(
+            state.buffer_request_state,
+            crate::gui::view_state::BufferRequestState::Idle
+        );
     }
 
     // ── matches_to_highlights ──────────────────────────────────────────────
@@ -684,9 +703,59 @@ mod tests {
             current_match: 1,
             ..SearchState::default()
         };
-        let highlights = matches_to_highlights(&state);
+        // Both matches are within the visible window [0, 10).
+        let highlights = matches_to_highlights(&state, 0, 10);
         assert_eq!(highlights.len(), 2);
         assert!(!highlights[0].is_current);
         assert!(highlights[1].is_current);
+    }
+
+    #[test]
+    fn highlights_filters_to_visible_window() {
+        let state = SearchState {
+            matches: vec![
+                MatchSpan {
+                    row: 5,
+                    col_start: 0,
+                    col_end: 2,
+                },
+                MatchSpan {
+                    row: 15,
+                    col_start: 0,
+                    col_end: 3,
+                },
+                MatchSpan {
+                    row: 25,
+                    col_start: 1,
+                    col_end: 4,
+                },
+            ],
+            current_match: 1,
+            ..SearchState::default()
+        };
+        // Visible window: rows [10, 20). Only match at row 15 is visible.
+        let highlights = matches_to_highlights(&state, 10, 10);
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].row, 5); // 15 - 10 = screen row 5
+        assert!(highlights[0].is_current); // match index 1 is current
+    }
+
+    #[test]
+    fn highlights_converts_absolute_to_screen_relative() {
+        let state = SearchState {
+            matches: vec![MatchSpan {
+                row: 100,
+                col_start: 3,
+                col_end: 7,
+            }],
+            current_match: 0,
+            ..SearchState::default()
+        };
+        // Visible window starts at row 90, height 24.
+        let highlights = matches_to_highlights(&state, 90, 24);
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].row, 10); // 100 - 90 = screen row 10
+        assert_eq!(highlights[0].col_start, 3);
+        assert_eq!(highlights[0].col_end, 7);
     }
 }

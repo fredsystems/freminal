@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::Sender;
+use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, PlaybackCommand, PlaybackMode, WindowCommand};
@@ -66,6 +67,7 @@ pub fn run_playback_thread(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     egui_ctx: Arc<OnceLock<eframe::egui::Context>>,
     clipboard_tx: Sender<String>,
+    search_buffer_tx: Sender<Vec<TChar>>,
 ) {
     let total_frames = frames.len();
     let mut current_frame: usize = 0;
@@ -98,6 +100,7 @@ pub fn run_playback_thread(
                             &mut current_frame,
                             &frames,
                             &clipboard_tx,
+                            &search_buffer_tx,
                         ) {
                             return;
                         }
@@ -160,6 +163,7 @@ pub fn run_playback_thread(
                                 &mut current_frame,
                                 &frames,
                                 &clipboard_tx,
+                                &search_buffer_tx,
                             ) {
                                 return;
                             }
@@ -193,6 +197,7 @@ pub fn run_playback_thread(
                             &mut current_frame,
                             &frames,
                             &clipboard_tx,
+                            &search_buffer_tx,
                         ) {
                             return;
                         }
@@ -223,6 +228,7 @@ fn handle_event(
     current_frame: &mut usize,
     frames: &[PlaybackFrame],
     clipboard_tx: &Sender<String>,
+    search_buffer_tx: &Sender<Vec<TChar>>,
 ) -> bool {
     match *event {
         InputEvent::PlaybackControl(cmd) => {
@@ -247,6 +253,12 @@ fn handle_event(
             let text =
                 emulator.extract_selection_text(start_row, start_col, end_row, end_col, is_block);
             let _ = clipboard_tx.send(text);
+        }
+        InputEvent::RequestSearchBuffer => {
+            let (chars, _tags) = emulator.internal.handler.data_and_format_data_for_gui(0);
+            let mut combined = chars.scrollback;
+            combined.extend(chars.visible);
+            let _ = search_buffer_tx.send(combined);
         }
         InputEvent::FocusChange(_) | InputEvent::Key(_) => {
             // In playback mode, keyboard input and focus changes are ignored

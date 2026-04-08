@@ -655,6 +655,7 @@ impl FreminalTerminalWidget {
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
+        search_buffer_rx: &Receiver<Vec<TChar>>,
         ui_overlay_open: bool,
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
@@ -804,19 +805,61 @@ impl FreminalTerminalWidget {
             }
         };
 
-        // Search: run (or re-run) the search if the query, mode, or visible
-        // content changed this frame.  We capture any regex error message here
-        // so the overlay can display it.
-        let search_error: Option<String> = if view_state.search_state.is_open
-            && view_state.search_state.needs_refresh(&snap.visible_chars)
-        {
-            let query = view_state.search_state.query.clone();
-            let regex_mode = view_state.search_state.regex_mode;
-            let (found, err) = run_search(&query, regex_mode, &snap.visible_chars);
-            view_state.search_state.matches = found;
-            view_state.search_state.current_match = 0;
-            view_state.search_state.mark_fresh(&snap.visible_chars);
-            err
+        // Search: request the full buffer from the PTY thread when needed,
+        // then run (or re-run) the search against the cached corpus.
+        let search_error: Option<String> = if view_state.search_state.is_open {
+            // Detect staleness: if total_rows changed, the cached buffer is out
+            // of date and we need a fresh copy from the PTY thread.
+            let total_rows_changed =
+                snap.total_rows != view_state.search_state.last_known_total_rows;
+            if total_rows_changed
+                && view_state.search_state.buffer_request_state
+                    == crate::gui::view_state::BufferRequestState::Idle
+            {
+                view_state.search_state.cached_full_buffer = None;
+                if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
+                    error!("Failed to request search buffer from PTY: {e}");
+                } else {
+                    view_state.search_state.buffer_request_state =
+                        crate::gui::view_state::BufferRequestState::Pending;
+                }
+            }
+
+            // Try to receive the full buffer (non-blocking).
+            if let Ok(buf) = search_buffer_rx.try_recv() {
+                view_state.search_state.cached_full_buffer = Some(Arc::new(buf));
+                view_state.search_state.last_known_total_rows = snap.total_rows;
+                view_state.search_state.buffer_request_state =
+                    crate::gui::view_state::BufferRequestState::Idle;
+            }
+
+            // Run search if query/mode changed or we just got a new buffer.
+            if view_state.search_state.needs_refresh() {
+                if let Some(ref buffer) = view_state.search_state.cached_full_buffer {
+                    let query = view_state.search_state.query.clone();
+                    let regex_mode = view_state.search_state.regex_mode;
+                    let (found, err) = run_search(&query, regex_mode, buffer);
+                    view_state.search_state.matches = found;
+                    view_state.search_state.current_match = 0;
+                    view_state.search_state.mark_fresh();
+                    err
+                } else {
+                    // No cached buffer yet — request one if we haven't already.
+                    if view_state.search_state.buffer_request_state
+                        == crate::gui::view_state::BufferRequestState::Idle
+                    {
+                        if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
+                            error!("Failed to request search buffer from PTY: {e}");
+                        } else {
+                            view_state.search_state.buffer_request_state =
+                                crate::gui::view_state::BufferRequestState::Pending;
+                        }
+                    }
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1032,8 +1075,11 @@ impl FreminalTerminalWidget {
                 );
 
                 // Build search match highlights from the current search state.
+                // Only matches within the visible window are included, with
+                // rows converted from buffer-absolute to screen-relative.
+                let win_start = visible_window_start(snap);
                 let search_highlights: Vec<MatchHighlight> =
-                    matches_to_highlights(&view_state.search_state);
+                    matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
 
                 let (bg_instances, deco_verts) = build_background_instances(
                     &shaped_lines,
