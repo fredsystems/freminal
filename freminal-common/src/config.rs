@@ -129,16 +129,86 @@ pub enum CursorShapeConfig {
 /// ---------------------------------------------------------------------------------------------
 ///  Theme
 /// ---------------------------------------------------------------------------------------------
+/// Controls how the terminal selects between a dark and light theme.
+///
+/// Serialized as a kebab-case string in TOML: `"dark"`, `"light"`, `"auto"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeMode {
+    /// Always use the dark theme (`dark_name`). Default.
+    #[default]
+    Dark,
+    /// Always use the light theme (`light_name`).
+    Light,
+    /// Automatically follow the OS light/dark preference.
+    /// Uses `dark_name` when the OS is in dark mode, `light_name` in light mode.
+    Auto,
+}
+
+/// Theme configuration: which palette(s) to use and how to select between them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {
-    pub name: String,
+    /// Theme to use when `mode = "dark"` or as the dark variant when `mode = "auto"`.
+    pub dark_name: String,
+
+    /// Theme to use when `mode = "light"` or as the light variant when `mode = "auto"`.
+    pub light_name: String,
+
+    /// How to choose between `dark_name` and `light_name`.
+    /// `"dark"` (default), `"light"`, or `"auto"` (follow OS preference).
+    pub mode: ThemeMode,
+
+    /// **Deprecated.** Alias for `dark_name`. Supported for backward compatibility:
+    /// a config file that only sets `name` will continue to work, with `name` used
+    /// as the dark theme name. Ignored when `dark_name` is also set explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            name: "catppuccin-mocha".to_string(),
+            dark_name: "catppuccin-mocha".to_string(),
+            light_name: "catppuccin-latte".to_string(),
+            mode: ThemeMode::Dark,
+            name: None,
+        }
+    }
+}
+
+impl ThemeConfig {
+    /// Return the effective dark theme slug, accounting for the deprecated `name` alias.
+    ///
+    /// If the deprecated `name` field is set and `dark_name` is still its default value,
+    /// the `name` field takes precedence (backward-compat for old config files).
+    #[must_use]
+    pub fn effective_dark_name(&self) -> &str {
+        const DEFAULT_DARK: &str = "catppuccin-mocha";
+        if let Some(ref legacy) = self.name
+            && self.dark_name == DEFAULT_DARK
+        {
+            return legacy.as_str();
+        }
+        &self.dark_name
+    }
+
+    /// Return the active theme slug based on `mode` and the OS preference.
+    ///
+    /// `os_is_dark` reflects the current OS dark/light state; it is only
+    /// consulted when `mode = "auto"`.
+    #[must_use]
+    pub fn active_slug(&self, os_is_dark: bool) -> &str {
+        match self.mode {
+            ThemeMode::Dark => self.effective_dark_name(),
+            ThemeMode::Light => &self.light_name,
+            ThemeMode::Auto => {
+                if os_is_dark {
+                    self.effective_dark_name()
+                } else {
+                    &self.light_name
+                }
+            }
         }
     }
 }
@@ -491,10 +561,18 @@ impl Config {
             )));
         }
 
-        if themes::by_slug(&self.theme.name).is_none() {
+        // Validate the effective dark theme slug (also covers the deprecated `name` alias).
+        let dark_slug = self.theme.effective_dark_name();
+        if themes::by_slug(dark_slug).is_none() {
             return Err(ConfigError::Validation(format!(
-                "theme.name=\"{}\" is not a recognized theme slug",
-                self.theme.name
+                "theme.dark_name=\"{dark_slug}\" is not a recognized theme slug"
+            )));
+        }
+
+        if themes::by_slug(&self.theme.light_name).is_none() {
+            return Err(ConfigError::Validation(format!(
+                "theme.light_name=\"{}\" is not a recognized theme slug",
+                self.theme.light_name
             )));
         }
 
@@ -905,9 +983,21 @@ size = 14.0
     }
 
     #[test]
-    fn validate_rejects_unknown_theme_slug() {
+    fn validate_rejects_unknown_dark_theme_slug() {
         let mut cfg = Config::default();
-        cfg.theme.name = "nonexistent-theme".to_string();
+        cfg.theme.dark_name = "nonexistent-theme".to_string();
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nonexistent-theme"),
+            "error should mention the bad slug: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_light_theme_slug() {
+        let mut cfg = Config::default();
+        cfg.theme.light_name = "nonexistent-theme".to_string();
         let err = cfg.validate().unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -920,9 +1010,17 @@ size = 14.0
     fn validate_accepts_all_builtin_themes() {
         for theme in themes::all_themes() {
             let mut cfg = Config::default();
-            cfg.theme.name = theme.slug.to_string();
-            cfg.validate()
-                .unwrap_or_else(|e| panic!("theme '{}' should be valid: {e}", theme.slug));
+            cfg.theme.dark_name = theme.slug.to_string();
+            cfg.validate().unwrap_or_else(|e| {
+                panic!("theme '{}' should be valid as dark_name: {e}", theme.slug)
+            });
+        }
+        for theme in themes::all_themes() {
+            let mut cfg = Config::default();
+            cfg.theme.light_name = theme.slug.to_string();
+            cfg.validate().unwrap_or_else(|e| {
+                panic!("theme '{}' should be valid as light_name: {e}", theme.slug)
+            });
         }
     }
 
@@ -1655,5 +1753,220 @@ trail_duration_ms = 250
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.cursor.trail);
         assert_eq!(deserialized.cursor.trail_duration_ms, 300);
+    }
+
+    // =================================================================
+    //  Task 52 — Adaptive Light/Dark Theming (ThemeMode + ThemeConfig)
+    // =================================================================
+
+    // ── ThemeMode TOML serialization ─────────────────────────────────
+
+    #[test]
+    fn theme_mode_dark_serializes_to_kebab_case() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            mode: ThemeMode,
+        }
+        let w = Wrapper {
+            mode: ThemeMode::Dark,
+        };
+        let s = toml::to_string(&w).expect("serialize");
+        assert!(s.contains("mode = \"dark\""), "got: {s}");
+    }
+
+    #[test]
+    fn theme_mode_light_serializes_to_kebab_case() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            mode: ThemeMode,
+        }
+        let w = Wrapper {
+            mode: ThemeMode::Light,
+        };
+        let s = toml::to_string(&w).expect("serialize");
+        assert!(s.contains("mode = \"light\""), "got: {s}");
+    }
+
+    #[test]
+    fn theme_mode_auto_serializes_to_kebab_case() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            mode: ThemeMode,
+        }
+        let w = Wrapper {
+            mode: ThemeMode::Auto,
+        };
+        let s = toml::to_string(&w).expect("serialize");
+        assert!(s.contains("mode = \"auto\""), "got: {s}");
+    }
+
+    #[test]
+    fn theme_mode_round_trips_all_variants() {
+        for (input, expected) in [
+            (r#"mode = "dark""#, ThemeMode::Dark),
+            (r#"mode = "light""#, ThemeMode::Light),
+            (r#"mode = "auto""#, ThemeMode::Auto),
+        ] {
+            #[derive(Serialize, Deserialize)]
+            struct Wrapper {
+                mode: ThemeMode,
+            }
+            let w: Wrapper = toml::from_str(input).expect("deserialize");
+            assert_eq!(w.mode, expected, "for input: {input}");
+        }
+    }
+
+    // ── ThemeConfig::active_slug ──────────────────────────────────────
+
+    #[test]
+    fn active_slug_dark_mode_always_returns_dark_name() {
+        let cfg = ThemeConfig {
+            dark_name: "solarized-dark".to_string(),
+            light_name: "solarized-light".to_string(),
+            mode: ThemeMode::Dark,
+            name: None,
+        };
+        assert_eq!(cfg.active_slug(true), "solarized-dark");
+        assert_eq!(cfg.active_slug(false), "solarized-dark");
+    }
+
+    #[test]
+    fn active_slug_light_mode_always_returns_light_name() {
+        let cfg = ThemeConfig {
+            dark_name: "solarized-dark".to_string(),
+            light_name: "solarized-light".to_string(),
+            mode: ThemeMode::Light,
+            name: None,
+        };
+        assert_eq!(cfg.active_slug(true), "solarized-light");
+        assert_eq!(cfg.active_slug(false), "solarized-light");
+    }
+
+    #[test]
+    fn active_slug_auto_mode_follows_os_preference() {
+        let cfg = ThemeConfig {
+            dark_name: "catppuccin-mocha".to_string(),
+            light_name: "catppuccin-latte".to_string(),
+            mode: ThemeMode::Auto,
+            name: None,
+        };
+        assert_eq!(
+            cfg.active_slug(true),
+            "catppuccin-mocha",
+            "os dark => dark_name"
+        );
+        assert_eq!(
+            cfg.active_slug(false),
+            "catppuccin-latte",
+            "os light => light_name"
+        );
+    }
+
+    // ── ThemeConfig::effective_dark_name (backward compat) ──────────
+
+    #[test]
+    fn effective_dark_name_returns_dark_name_when_no_legacy_name() {
+        let cfg = ThemeConfig {
+            dark_name: "dracula".to_string(),
+            light_name: "catppuccin-latte".to_string(),
+            mode: ThemeMode::Dark,
+            name: None,
+        };
+        assert_eq!(cfg.effective_dark_name(), "dracula");
+    }
+
+    #[test]
+    fn effective_dark_name_prefers_legacy_name_when_dark_name_is_default() {
+        // Old config file: only set `name = "gruvbox-dark"`, not `dark_name`.
+        let cfg = ThemeConfig {
+            dark_name: "catppuccin-mocha".to_string(), // still the default
+            light_name: "catppuccin-latte".to_string(),
+            mode: ThemeMode::Dark,
+            name: Some("gruvbox-dark".to_string()),
+        };
+        assert_eq!(
+            cfg.effective_dark_name(),
+            "gruvbox-dark",
+            "legacy name field should take priority when dark_name is still default"
+        );
+    }
+
+    #[test]
+    fn effective_dark_name_prefers_dark_name_when_explicitly_overridden() {
+        // Config with both `name` and `dark_name` set explicitly.
+        let cfg = ThemeConfig {
+            dark_name: "nord".to_string(), // explicitly overridden
+            light_name: "catppuccin-latte".to_string(),
+            mode: ThemeMode::Dark,
+            name: Some("gruvbox-dark".to_string()),
+        };
+        assert_eq!(
+            cfg.effective_dark_name(),
+            "nord",
+            "explicit dark_name should win over legacy name when dark_name differs from default"
+        );
+    }
+
+    // ── active_slug + effective_dark_name backward compat ─────────────
+
+    #[test]
+    fn active_slug_dark_mode_with_legacy_name() {
+        // Old config: name = "gruvbox-dark", no dark_name set.
+        let cfg = ThemeConfig {
+            dark_name: "catppuccin-mocha".to_string(), // default
+            light_name: "catppuccin-latte".to_string(),
+            mode: ThemeMode::Dark,
+            name: Some("gruvbox-dark".to_string()),
+        };
+        assert_eq!(cfg.active_slug(true), "gruvbox-dark");
+        assert_eq!(cfg.active_slug(false), "gruvbox-dark");
+    }
+
+    // ── ThemeConfig validation ─────────────────────────────────────────
+
+    #[test]
+    fn validate_accepts_valid_dark_and_light_names() {
+        let cfg = {
+            let mut c = Config::default();
+            c.theme.dark_name = "catppuccin-mocha".to_string();
+            c.theme.light_name = "catppuccin-latte".to_string();
+            c.theme.mode = ThemeMode::Auto;
+            c
+        };
+        cfg.validate()
+            .expect("valid dark+light theme config should pass validation");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_light_name() {
+        let cfg = {
+            let mut c = Config::default();
+            c.theme.light_name = "not-a-real-theme".to_string();
+            c
+        };
+        let err = cfg
+            .validate()
+            .expect_err("invalid light name should fail validation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("light_name"),
+            "error message should mention light_name, got: {msg}"
+        );
+    }
+
+    // ── ThemeMode default ─────────────────────────────────────────────
+
+    #[test]
+    fn theme_mode_default_is_dark() {
+        assert_eq!(ThemeMode::default(), ThemeMode::Dark);
+    }
+
+    #[test]
+    fn theme_config_default_has_dark_mode() {
+        let cfg = ThemeConfig::default();
+        assert_eq!(cfg.mode, ThemeMode::Dark);
+        assert_eq!(cfg.dark_name, "catppuccin-mocha");
+        assert_eq!(cfg.light_name, "catppuccin-latte");
+        assert!(cfg.name.is_none());
     }
 }

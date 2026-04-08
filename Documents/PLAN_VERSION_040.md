@@ -16,10 +16,10 @@ and adaptive theming.
 | 46  | Rectangular / Block Selection | Medium       | Complete |
 | 47  | SGR Underline Styles          | Medium       | Complete |
 | 48  | BCE (Background Color Erase)  | Medium       | Complete |
-| 49  | DECDWL / DECDHL Rendering     | Medium       | Pending  |
-| 50  | KKP Flags 2/4/16              | Medium       | Pending  |
+| 49  | DECDWL / DECDHL Rendering     | Medium       | Complete |
+| 50  | KKP Flags 2/4/16              | Medium       | Complete |
 | 51  | Password Input Detection      | Small        | Complete |
-| 52  | Adaptive Light/Dark Theming   | Small        | Pending  |
+| 52  | Adaptive Light/Dark Theming   | Small        | Complete |
 
 ---
 
@@ -563,28 +563,28 @@ locked and `DECSET`/`DECRST` requests will be ignored.
 
 ### 52 Subtasks
 
-1. **52.1 — `ThemeMode` enum and config extension**
+1. **52.1 — `ThemeMode` enum and config extension** ✅
    Add `ThemeMode` to `ThemeConfig`. Rename `name` to `dark_name`, add `mode` and
    `light_name` fields. Update defaults, validation, config parsing. Support the
    existing `name` field as a deprecated alias for backward compatibility.
 
-2. **52.2 — OS preference detection**
+2. **52.2 — OS preference detection** ✅
    Detect the OS dark/light preference via egui's visuals API. Track changes between frames.
 
-3. **52.3 — Automatic theme switching**
+3. **52.3 — Automatic theme switching** ✅
    When `mode = "auto"` and the OS preference changes, send `InputEvent::ThemeChange` with
    the appropriate theme. Update `update_egui_theme()`.
 
-4. **52.4 — DECRPM ?2031 implementation**
+4. **52.4 — DECRPM ?2031 implementation** ✅
    Implement DECRPM responses for mode `?2031` based on the configured `ThemeMode`:
    `auto` → Ps=1/2 (dynamic), `dark` → Ps=4 (permanently reset), `light` → Ps=3
    (permanently set). When `mode = "auto"`, respect `DECSET`/`DECRST` requests from
    applications. When locked (`dark`/`light`), ignore mode change requests.
 
-5. **52.5 — Config propagation**
+5. **52.5 — Config propagation** ✅
    Update `config_example.toml`, `nix/home-manager-module.nix`, Settings Modal theme tab.
 
-6. **52.6 — Tests**
+6. **52.6 — Tests** ✅
    Unit tests: config parsing for all mode values, theme selection logic.
 
 ### 52 Primary Files

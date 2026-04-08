@@ -81,7 +81,7 @@ use clap::Parser;
 /// Spawns a PTY-backed terminal tab via [`spawn_pty_tab`] and starts the
 /// GUI event loop.
 fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
-    let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
+    let theme = themes::by_slug(cfg.theme.active_slug(false)).unwrap_or(&themes::CATPPUCCIN_MOCHA);
 
     // Shared egui context handle so the PTY consumer thread can request
     // repaints after publishing new snapshots.
@@ -325,7 +325,8 @@ fn main() {
             TerminalEmulator::new_headless(Some(cfg.scrollback.limit));
 
         // Apply the configured theme.
-        let theme = themes::by_slug(&cfg.theme.name).unwrap_or(&themes::CATPPUCCIN_MOCHA);
+        let theme =
+            themes::by_slug(cfg.theme.active_slug(false)).unwrap_or(&themes::CATPPUCCIN_MOCHA);
         terminal.internal.handler.set_theme(theme);
 
         // Shared snapshot published by the playback thread.

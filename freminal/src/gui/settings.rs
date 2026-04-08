@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use eframe::egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
-use freminal_common::config::{self, Config, CursorShapeConfig, TabBarPosition};
+use freminal_common::config::{self, Config, CursorShapeConfig, TabBarPosition, ThemeMode};
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
 use std::path::PathBuf;
@@ -143,9 +143,15 @@ pub struct SettingsModal {
     /// string is displayed as a banner explaining why editing is disabled.
     read_only_reason: Option<String>,
 
-    /// Theme slug when the modal was opened.  Used to detect whether a
+    /// Active theme slug when the modal was opened (computed from the live
+    /// config's `active_slug(os_dark_mode)`).  Used to detect whether a
     /// preview is active and to revert on Cancel.
     original_theme_slug: String,
+
+    /// The OS dark/light preference at the time the modal was last opened or
+    /// `show()` was called.  Used to resolve `ThemeMode::Auto` to the correct
+    /// active slug for preview/revert comparison.
+    os_dark_mode: bool,
 
     /// Background opacity when the modal was opened.  Used to detect
     /// whether opacity preview is active and to revert on Cancel.
@@ -181,6 +187,7 @@ impl SettingsModal {
             log_dir_display: String::new(),
             read_only_reason: None,
             original_theme_slug: String::new(),
+            os_dark_mode: false,
             original_opacity: 1.0,
             monospace_families: Vec::new(),
             base_font_defs: None,
@@ -193,12 +200,21 @@ impl SettingsModal {
     ///
     /// `monospace_families` is the sorted, deduplicated list of monospaced font
     /// family names available on the system (from `FontManager::enumerate_monospace_families`).
-    pub fn open(&mut self, live_config: &Config, monospace_families: Vec<String>) {
+    ///
+    /// `os_dark_mode` reflects the current OS light/dark preference and is used to
+    /// resolve `ThemeMode::Auto` to the correct active slug for preview/revert.
+    pub fn open(
+        &mut self,
+        live_config: &Config,
+        monospace_families: Vec<String>,
+        os_dark_mode: bool,
+    ) {
         self.draft = live_config.clone();
         self.active_tab = SettingsTab::Font;
         self.status_message = None;
         self.monospace_families = monospace_families;
-        self.original_theme_slug.clone_from(&live_config.theme.name);
+        self.os_dark_mode = os_dark_mode;
+        self.original_theme_slug = live_config.theme.active_slug(os_dark_mode).to_string();
         self.original_opacity = live_config.ui.background_opacity;
         self.log_dir_display = config::log_dir().map_or_else(
             || "(unable to determine log directory)".to_string(),
@@ -228,7 +244,10 @@ impl SettingsModal {
     /// When `SettingsAction::Applied` is returned, the caller should:
     ///   1. Replace its live config with `self.applied_config()`.
     ///   2. Hot-reload any settings that can change at runtime.
-    pub fn show(&mut self, ctx: &egui::Context) -> SettingsAction {
+    ///
+    /// `os_dark_mode` is used to resolve `ThemeMode::Auto` for preview/revert.
+    pub fn show(&mut self, ctx: &egui::Context, os_dark_mode: bool) -> SettingsAction {
+        self.os_dark_mode = os_dark_mode;
         if !self.is_open {
             return SettingsAction::None;
         }
@@ -236,9 +255,9 @@ impl SettingsModal {
         let mut action = SettingsAction::None;
         let mut open = self.is_open;
 
-        // Snapshot the draft theme slug and opacity before rendering so we
+        // Snapshot the active theme slug and opacity before rendering so we
         // can detect whether the user changed either this frame.
-        let theme_before = self.draft.theme.name.clone();
+        let theme_before = self.draft.theme.active_slug(self.os_dark_mode).to_string();
         let opacity_before = self.draft.ui.background_opacity;
 
         // Build an opaque window frame so the settings modal is never
@@ -350,9 +369,10 @@ impl SettingsModal {
             return SettingsAction::PreviewOpacity(self.draft.ui.background_opacity);
         }
 
-        // If the theme dropdown changed this frame, signal a live preview.
-        if self.draft.theme.name != theme_before && action != SettingsAction::Applied {
-            return SettingsAction::PreviewTheme(self.draft.theme.name.clone());
+        // If the active theme slug changed this frame, signal a live preview.
+        let theme_after = self.draft.theme.active_slug(self.os_dark_mode).to_string();
+        if theme_after != theme_before && action != SettingsAction::Applied {
+            return SettingsAction::PreviewTheme(theme_after);
         }
 
         action
@@ -504,26 +524,73 @@ impl SettingsModal {
     }
 
     fn show_theme_tab(&mut self, ui: &mut Ui) {
-        // Look up the display name for the currently selected slug.
-        let selected_display = themes::by_slug(&self.draft.theme.name)
-            .map_or_else(|| self.draft.theme.name.clone(), |t| t.name.to_string());
+        // ── Mode selector ──────────────────────────────────────────────────
+        ui.label("Theme Mode:");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Dark, "Dark");
+            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Light, "Light");
+            ui.selectable_value(
+                &mut self.draft.theme.mode,
+                ThemeMode::Auto,
+                "Auto (follow OS)",
+            );
+        });
+        ui.add_space(4.0);
+        if self.draft.theme.mode == ThemeMode::Auto {
+            ui.colored_label(
+                egui::Color32::GRAY,
+                "Auto mode uses the dark theme when the OS is in dark mode,
+                 and the light theme when the OS is in light mode.",
+            );
+        }
+        ui.add_space(8.0);
 
-        ui.label("Theme:");
-        ComboBox::from_id_salt("theme_name")
-            .selected_text(&selected_display)
+        // ── Dark theme picker ──────────────────────────────────────────────
+        let dark_display = themes::by_slug(&self.draft.theme.dark_name).map_or_else(
+            || self.draft.theme.dark_name.clone(),
+            |t| t.name.to_string(),
+        );
+        ui.label("Dark Theme:");
+        ComboBox::from_id_salt("theme_dark_name")
+            .selected_text(&dark_display)
             .show_ui(ui, |ui| {
                 for theme in themes::all_themes() {
                     ui.selectable_value(
-                        &mut self.draft.theme.name,
+                        &mut self.draft.theme.dark_name,
                         theme.slug.to_string(),
                         theme.name,
                     );
                 }
             });
+        ui.add_space(4.0);
+        if let Some(theme) = themes::by_slug(&self.draft.theme.dark_name)
+            && self.draft.theme.mode != ThemeMode::Light
+        {
+            show_theme_preview(ui, theme);
+        }
         ui.add_space(8.0);
 
-        // Color preview strip: show the selected theme's palette.
-        if let Some(theme) = themes::by_slug(&self.draft.theme.name) {
+        // ── Light theme picker ─────────────────────────────────────────────
+        let light_display = themes::by_slug(&self.draft.theme.light_name).map_or_else(
+            || self.draft.theme.light_name.clone(),
+            |t| t.name.to_string(),
+        );
+        ui.label("Light Theme:");
+        ComboBox::from_id_salt("theme_light_name")
+            .selected_text(&light_display)
+            .show_ui(ui, |ui| {
+                for theme in themes::all_themes() {
+                    ui.selectable_value(
+                        &mut self.draft.theme.light_name,
+                        theme.slug.to_string(),
+                        theme.name,
+                    );
+                }
+            });
+        ui.add_space(4.0);
+        if let Some(theme) = themes::by_slug(&self.draft.theme.light_name)
+            && self.draft.theme.mode == ThemeMode::Light
+        {
             show_theme_preview(ui, theme);
         }
     }
@@ -1174,7 +1241,7 @@ mod tests {
         let mut live = Config::default();
         live.font.size = 20.0;
         live.scrollback.limit = 500;
-        modal.open(&live, Vec::new());
+        modal.open(&live, Vec::new(), false);
 
         assert!(modal.is_open);
         assert!((modal.draft.font.size - 20.0).abs() < f32::EPSILON);
@@ -1186,7 +1253,7 @@ mod tests {
         let mut modal = SettingsModal::new(None);
         let mut live = Config::default();
         live.font.size = 42.0;
-        modal.open(&live, Vec::new());
+        modal.open(&live, Vec::new(), false);
 
         // Simulate clicking "Reset to Defaults" by resetting the draft.
         modal.draft = Config::default();
@@ -1244,7 +1311,7 @@ mod tests {
             managed_by: Some("home-manager".to_string()),
             ..Config::default()
         };
-        modal.open(&live, Vec::new());
+        modal.open(&live, Vec::new(), false);
 
         assert!(modal.is_open);
         assert!(modal.read_only_reason.is_some());
@@ -1266,7 +1333,7 @@ mod tests {
 
         let mut modal = SettingsModal::new(Some(path.clone()));
         let live = Config::default();
-        modal.open(&live, Vec::new());
+        modal.open(&live, Vec::new(), false);
 
         assert!(modal.is_open);
         assert!(
@@ -1292,7 +1359,7 @@ mod tests {
 
         let mut modal = SettingsModal::new(Some(path.clone()));
         let live = Config::default();
-        modal.open(&live, Vec::new());
+        modal.open(&live, Vec::new(), false);
 
         assert!(modal.is_open);
         assert!(
@@ -1320,7 +1387,7 @@ mod tests {
             "Fira Code".to_string(),
             "JetBrains Mono".to_string(),
         ];
-        modal.open(&live, families.clone());
+        modal.open(&live, families.clone(), false);
 
         assert_eq!(modal.monospace_families, families);
     }
