@@ -370,7 +370,11 @@ impl Buffer {
     fn debug_assert_invariants(&self) {}
 
     fn push_row(&mut self, origin: RowOrigin, join: RowJoin) {
-        let row = Row::new_with_origin(self.width, origin, join);
+        let mut row = Row::new_with_origin(self.width, origin, join);
+        // BCE: if the current SGR has a non-default background, fill the new
+        // row with blank cells carrying that background color.  For the common
+        // case (default tag) this is a no-op.
+        row.fill_with_tag(&self.current_tag);
         self.rows.push(row);
         self.row_cache.push(None);
     }
@@ -1351,11 +1355,14 @@ impl Buffer {
 
                     if self.cursor.pos.y >= self.rows.len() {
                         // Row doesn't exist yet — always create it fresh.
-                        self.rows.push(Row::new_with_origin(
+                        // BCE: fill with current SGR background.
+                        let mut new_row = Row::new_with_origin(
                             self.width,
                             RowOrigin::HardBreak,
                             RowJoin::NewLogicalLine,
-                        ));
+                        );
+                        new_row.fill_with_tag(&self.current_tag);
+                        self.rows.push(new_row);
                         self.row_cache.push(None);
                     } else {
                         let row = &mut self.rows[self.cursor.pos.y];
@@ -1367,11 +1374,11 @@ impl Buffer {
                         } else if sy == self.height.saturating_sub(1) {
                             // Cursor was at the bottom of the visible window and the
                             // next slot already has content from old scrollback — this
-                            // is the newly-scrolled-in line, so wipe it.
+                            // is the newly-scrolled-in line, so wipe it (BCE).
                             self.image_cell_count -= row.count_image_cells();
                             row.origin = RowOrigin::HardBreak;
                             row.join = RowJoin::NewLogicalLine;
-                            row.clear();
+                            row.clear_with_tag(&self.current_tag);
                         }
                         // Otherwise (cursor was above the bottom, row has real
                         // content): leave the row completely untouched.
@@ -1404,11 +1411,13 @@ impl Buffer {
                     if self.cursor.pos.y + 1 < self.rows.len() {
                         self.cursor.pos.y += 1;
                     } else {
-                        self.rows.push(Row::new_with_origin(
+                        let mut new_row = Row::new_with_origin(
                             self.width,
                             RowOrigin::HardBreak,
                             RowJoin::NewLogicalLine,
-                        ));
+                        );
+                        new_row.fill_with_tag(&self.current_tag);
+                        self.rows.push(new_row);
                         self.row_cache.push(None);
                         self.cursor.pos.y = self.rows.len() - 1;
                     }
@@ -1748,7 +1757,8 @@ impl Buffer {
                 &self.current_tag.clone(),
             );
         } else {
-            self.rows[row].delete_cells_at(col, n);
+            let tag = self.current_tag.clone();
+            self.rows[row].delete_cells_at(col, n, &tag);
         }
 
         self.image_cell_count -= remaining_images;
@@ -2113,7 +2123,9 @@ impl Buffer {
         // rows[row_idx+1] into rows[row_idx] for row_idx in first..last).
         // It is now replaced with a blank row; deduct any image cells it held.
         self.image_cell_count -= self.rows[last].count_image_cells();
-        self.rows[last] = Row::new(self.width);
+        let mut new_row = Row::new(self.width);
+        new_row.fill_with_tag(&self.current_tag);
+        self.rows[last] = new_row;
         // New blank row at `last` — no cached representation yet.
         self.row_cache[last] = None;
     }
@@ -2139,7 +2151,9 @@ impl Buffer {
         // rows[row_idx-1] into rows[row_idx] for row_idx in first+1..=last).
         // It is now replaced with a blank row; deduct any image cells it held.
         self.image_cell_count -= self.rows[first].count_image_cells();
-        self.rows[first] = Row::new(self.width);
+        let mut new_row = Row::new(self.width);
+        new_row.fill_with_tag(&self.current_tag);
+        self.rows[first] = new_row;
         // New blank row at `first` — no cached representation yet.
         self.row_cache[first] = None;
     }
@@ -2350,8 +2364,10 @@ impl Buffer {
         self.rows.remove(0);
         self.row_cache.remove(0);
 
-        // add a new empty row at the bottom
-        self.rows.push(Row::new(self.width));
+        // add a new empty row at the bottom (BCE: fill with current SGR background)
+        let mut new_row = Row::new(self.width);
+        new_row.fill_with_tag(&self.current_tag);
+        self.rows.push(new_row);
         self.row_cache.push(None);
 
         // DO NOT move the cursor in alternate buffer

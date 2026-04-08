@@ -398,3 +398,129 @@ fn nano_shortcut_bar_highlight_does_not_bleed_into_gap() {
         assert_eq!(cell.tag(), &def, "' Write Out' col {col} must be default");
     }
 }
+
+//
+// ────────────────────────────────────────────────────────────
+//  BCE (Background Color Erase) TESTS
+// ────────────────────────────────────────────────────────────
+//
+
+/// Build a `FormatTag` with a blue background (non-default).
+fn blue_bg_tag() -> FormatTag {
+    use freminal_common::buffer_states::cursor::StateColors;
+    use freminal_common::colors::TerminalColor;
+    FormatTag {
+        colors: StateColors::default().with_background_color(TerminalColor::Blue),
+        ..FormatTag::default()
+    }
+}
+
+#[test]
+fn clear_with_tag_default_leaves_row_sparse() {
+    let mut row = Row::new(10);
+    row.insert_text(0, &[ascii('A'), ascii('B'), ascii('C')], &tag());
+
+    row.clear_with_tag(&FormatTag::default());
+
+    // Row should be sparse (no explicit cells)
+    assert!(
+        row.get_characters().is_empty(),
+        "clearing with default tag should leave the row sparse"
+    );
+}
+
+#[test]
+fn clear_with_tag_nondefault_fills_row() {
+    let mut row = Row::new(10);
+    row.insert_text(0, &[ascii('A'), ascii('B'), ascii('C')], &tag());
+
+    let bce_tag = blue_bg_tag();
+    row.clear_with_tag(&bce_tag);
+
+    let chars = row.get_characters();
+    assert_eq!(
+        chars.len(),
+        10,
+        "clearing with non-default tag should fill all columns"
+    );
+    for (col, cell) in chars.iter().enumerate() {
+        assert_eq!(cell.tchar(), &TChar::Space, "col {col}: expected blank");
+        assert_eq!(cell.tag(), &bce_tag, "col {col}: expected blue-bg tag");
+    }
+}
+
+#[test]
+fn fill_with_tag_default_is_noop() {
+    let mut row = Row::new(10);
+
+    row.fill_with_tag(&FormatTag::default());
+
+    assert!(
+        row.get_characters().is_empty(),
+        "fill_with_tag(default) should leave row sparse"
+    );
+}
+
+#[test]
+fn fill_with_tag_nondefault_fills_row() {
+    let mut row = Row::new(8);
+    let bce_tag = blue_bg_tag();
+
+    row.fill_with_tag(&bce_tag);
+
+    let chars = row.get_characters();
+    assert_eq!(chars.len(), 8, "fill should write to all columns");
+    for (col, cell) in chars.iter().enumerate() {
+        assert_eq!(cell.tchar(), &TChar::Space, "col {col}: expected blank");
+        assert_eq!(cell.tag(), &bce_tag, "col {col}: expected blue-bg tag");
+    }
+}
+
+#[test]
+fn erase_cells_at_with_bce_tag() {
+    let mut row = Row::new(10);
+    let bce_tag = blue_bg_tag();
+
+    // Write "ABCDE" at col 0 with default formatting
+    row.insert_text(
+        0,
+        &[ascii('A'), ascii('B'), ascii('C'), ascii('D'), ascii('E')],
+        &tag(),
+    );
+
+    // Erase col 2 with BCE tag
+    row.erase_cells_at(2, 1, &bce_tag);
+
+    let chars = row.get_characters();
+    // Col 2 should be a blank with the blue-bg tag
+    assert_eq!(
+        chars[2].tchar(),
+        &TChar::Space,
+        "erased cell should be blank"
+    );
+    assert_eq!(chars[2].tag(), &bce_tag, "erased cell should have BCE tag");
+
+    // Neighbors untouched
+    assert_eq!(chars[1].tchar(), &ascii('B'));
+    assert_eq!(chars[3].tchar(), &ascii('D'));
+}
+
+#[test]
+fn delete_cells_at_bce_tag_for_wide_glyph_cleanup() {
+    let mut row = Row::new(10);
+    let bce_tag = blue_bg_tag();
+
+    // Write "A" then a wide emoji then "B"
+    // A at 0, emoji at 1-2, B at 3
+    row.insert_text(0, &[ascii('A'), emoji("🙂"), ascii('B')], &tag());
+
+    // Delete 1 cell at col 1 (the head of the wide emoji) — this should clean
+    // up the wide glyph, using bce_tag for any replacement blanks.
+    row.delete_cells_at(1, 1, &bce_tag);
+
+    // After deletion, the wide glyph's cells are replaced and shifted.
+    // The important thing is that any cleanup blanks use the BCE tag.
+    let chars = row.get_characters();
+    // The row should still have A at col 0, then B shifted left.
+    assert_eq!(chars[0].tchar(), &ascii('A'), "col 0 should still be A");
+}

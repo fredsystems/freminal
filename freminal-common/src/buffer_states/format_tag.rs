@@ -46,6 +46,27 @@ pub struct FormatTag {
     pub blink: BlinkState,
 }
 
+impl FormatTag {
+    /// Returns `true` if this tag's visual attributes (colors, weight, decorations,
+    /// URL, and blink) are all at their default values.
+    ///
+    /// The positional fields `start` and `end` are ignored because they are only
+    /// meaningful in the flat `TChar` representation and have no bearing on the
+    /// visual appearance of a cell.
+    ///
+    /// Used by BCE (Background Color Erase) to decide whether a row can remain
+    /// sparse (empty `Vec<Cell>`) or must be explicitly filled with blank cells
+    /// carrying the current SGR background color.
+    #[must_use]
+    pub fn is_visually_default(&self) -> bool {
+        self.colors == StateColors::default()
+            && self.font_weight == FontWeight::Normal
+            && self.font_decorations == FontDecorationFlags::empty()
+            && self.url.is_none()
+            && self.blink == BlinkState::None
+    }
+}
+
 impl Default for FormatTag {
     fn default() -> Self {
         Self {

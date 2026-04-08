@@ -686,7 +686,8 @@ impl TerminalHandler {
             // RGB — terminal supports direct-color (24-bit) via SGR 38/48;2;R;G;B
             "RGB" => Some("8/8/8"),
             // Tc — tmux extension: true color support
-            "Tc" => Some(""),
+            // ut — terminal uses background color erase (BCE)
+            "Tc" | "ut" => Some(""),
             // setrgbf — SGR sequence to set RGB foreground
             "setrgbf" => Some("\x1b[38;2;%p1%d;%p2%d;%p3%dm"),
             // setrgbb — SGR sequence to set RGB background
