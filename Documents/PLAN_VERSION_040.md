@@ -197,30 +197,32 @@ renderer and used for all underline styles.
 
 ### 47 Subtasks
 
-1. **47.1 — `UnderlineStyle` enum and `FontDecorationFlags` encoding**
+1. **47.1 — `UnderlineStyle` enum and `FontDecorationFlags` encoding** ✅
    Add `UnderlineStyle` to `freminal-common/src/buffer_states/fonts.rs`. Modify
    `FontDecorationFlags` to store the style. Update all callsites.
 
-2. **47.2 — SGR 4:N parsing**
+2. **47.2 — SGR 4:N parsing** ✅
    Update `apply_sgr()` to parse the colon-separated subparameter `4:N` and set the
    appropriate underline style. Handle edge cases: `4` alone = `Single`, `4:0` = off,
    `4:1` through `4:5`.
 
-3. **47.3 — Thread underline style through FormatTag and snapshot**
+3. **47.3 — Thread underline style through FormatTag and snapshot** ✅
    Ensure `FormatTag` carries the `UnderlineStyle`. The snapshot builder and the vertex
    builder must have access to it.
 
-4. **47.4 — Renderer: distinct underline drawing**
+4. **47.4 — Renderer: distinct underline drawing** ✅
    Implement each underline style as distinct geometry in the vertex builder. Curly underline
    requires a sine-wave approximation (4-8 quad segments per cell width).
 
-5. **47.5 — Underline color verification**
+5. **47.5 — Underline color verification** ✅
    Verify that `underline_color` from `CursorState` is correctly threaded through `FormatTag`
    → snapshot → renderer and used as the color for all underline styles. Fix if not.
 
-6. **47.6 — Tests**
+6. **47.6 — Tests** ✅
    Unit tests: SGR 4:N parsing, `FontDecorationFlags` encoding/decoding, format tag
    propagation. Visual verification: render each style and confirm distinct appearance.
+   Added 18 integration tests in `sgr_underline_styles.rs` covering colon-form styles,
+   mixed delimiter handling, underline color, and real-world sequences.
 
 ### 47 Primary Files
 

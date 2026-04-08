@@ -20,7 +20,7 @@
 use freminal_common::{
     buffer_states::{
         cursor::ReverseVideo,
-        fonts::{BlinkState, FontDecorations, FontWeight},
+        fonts::{BlinkState, FontDecorations, FontWeight, UnderlineStyle},
         format_tag::FormatTag,
     },
     colors::TerminalColor,
@@ -74,7 +74,14 @@ impl TerminalHandler {
             match dec {
                 FontDecorations::Faint => parts.push("2".to_string()),
                 FontDecorations::Italic => parts.push("3".to_string()),
-                FontDecorations::Underline => parts.push("4".to_string()),
+                FontDecorations::Underline => match fmt.font_decorations.underline_style() {
+                    UnderlineStyle::None => {}
+                    UnderlineStyle::Single => parts.push("4".to_string()),
+                    UnderlineStyle::Double => parts.push("4:2".to_string()),
+                    UnderlineStyle::Curly => parts.push("4:3".to_string()),
+                    UnderlineStyle::Dotted => parts.push("4:4".to_string()),
+                    UnderlineStyle::Dashed => parts.push("4:5".to_string()),
+                },
                 FontDecorations::Strikethrough => parts.push("9".to_string()),
             }
         }
@@ -204,6 +211,9 @@ pub(super) fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
         // Underline
         SelectGraphicRendition::Underline => {
             tag.font_decorations.insert(FontDecorations::Underline);
+        }
+        SelectGraphicRendition::UnderlineWithStyle(style) => {
+            tag.font_decorations.set_underline_style(*style);
         }
         SelectGraphicRendition::NotUnderlined => {
             tag.font_decorations.remove(FontDecorations::Underline);
