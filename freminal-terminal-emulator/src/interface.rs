@@ -451,6 +451,23 @@ impl TerminalEmulator {
             .map_err(|e| anyhow::anyhow!("Failed to send raw bytes to PTY: {e}"))
     }
 
+    /// Return a shared handle to the atomic flag that tracks whether the PTY
+    /// slave has `ECHO` disabled (i.e. a password prompt is active).
+    ///
+    /// Returns a clone of the shared `Arc<AtomicBool>` — the caller reads it
+    /// with a cheap `Relaxed` atomic load each frame.  The underlying flag is
+    /// refreshed by the writer thread every 100 ms via `tcgetattr()` on the
+    /// master fd (Unix only).
+    ///
+    /// Returns `None` in headless / benchmark / playback mode where there is
+    /// no real PTY.
+    #[must_use]
+    pub fn echo_off_atomic(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.pty_io
+            .as_ref()
+            .map(|io| std::sync::Arc::clone(&io.echo_off))
+    }
+
     /// Build a point-in-time snapshot of the terminal state.
     ///
     /// This is cheap to call: the visible content is flattened here on the

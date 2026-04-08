@@ -68,7 +68,7 @@ pub struct PlaybackInfo {
 /// `visible_chars` and `visible_tags` are wrapped in `Arc` so that cloning a
 /// snapshot (or handing the same content to a second snapshot on the clean
 /// path) is a cheap atomic refcount increment rather than a full `Vec` copy.
-#[allow(clippy::struct_excessive_bools)] // Seven independent rendering/bookkeeping bools; enums would add noise
+#[allow(clippy::struct_excessive_bools)] // Eight independent rendering/bookkeeping bools; enums would add noise
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {
     /// Flattened visible character content, already converted from `Row`/`Cell`.

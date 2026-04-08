@@ -125,6 +125,13 @@ struct FreminalGui {
     /// bound key combos are intercepted before PTY dispatch.
     binding_map: freminal_common::keybindings::BindingMap,
 
+    /// The last title sent to the OS window title bar via
+    /// `ViewportCommand::Title`.  Compared each frame so we only issue
+    /// the viewport command when the title actually changes — avoiding
+    /// an unconditional `send_viewport_cmd` that would trigger an
+    /// infinite repaint loop.
+    last_window_title: String,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -158,6 +165,7 @@ impl FreminalGui {
             args,
             egui_ctx,
             settings_modal: SettingsModal::new(config_path),
+            last_window_title: String::from("Freminal"),
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -243,6 +251,23 @@ impl FreminalGui {
             if self.is_playback {
                 self.show_playback_controls(ui, snap);
             }
+
+            // Password-prompt lock indicator: shown in the menu bar (which is
+            // always visible) so it works regardless of tab bar visibility.
+            if self.config.security.password_indicator
+                && self
+                    .tabs
+                    .active_tab()
+                    .echo_off
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("\u{1F512}")
+                            .color(egui::Color32::from_rgb(255, 200, 50)),
+                    );
+                });
+            }
         });
         (menu_action, any_menu_open)
     }
@@ -267,7 +292,15 @@ impl FreminalGui {
                     ui.separator();
                 }
 
-                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count);
+                // Read the echo-off state directly from the live atomic flag on
+                // the Tab, not from the snapshot.  Snapshots are only published
+                // when new PTY output arrives, so they go stale when the shell
+                // is idle at a password prompt.  The atomic is updated by the
+                // writer thread every 250 ms regardless of PTY activity.
+                let is_echo_off = self.config.security.password_indicator
+                    && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
+
+                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
                 if !matches!(tab_action, TabBarAction::None) {
                     action = tab_action;
                 }
@@ -290,12 +323,17 @@ impl FreminalGui {
     ///
     /// Inactive tabs with an unacknowledged bell are drawn with an amber
     /// text color and a warm-tinted background to make them more prominent.
+    ///
+    /// A 🔐 lock icon is prepended to the label when `is_echo_off` is `true`,
+    /// indicating that the foreground process has disabled terminal echo (i.e.
+    /// a password prompt such as `sudo` or `ssh` is waiting for input).
     fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
         index: usize,
         is_active: bool,
         count: usize,
+        is_echo_off: bool,
     ) -> TabBarAction {
         let mut action = TabBarAction::None;
         let label = if tab.title.is_empty() {
@@ -306,12 +344,14 @@ impl FreminalGui {
 
         let has_bell = tab.bell_active && !is_active;
 
-        // Build the display label: prepend a bell indicator when the tab
-        // has an unacknowledged bell and is not the active (focused) tab.
-        let display_label = if has_bell {
-            format!("\u{1f514} {label}")
-        } else {
-            label.to_owned()
+        // Build the display label: prepend a lock indicator when echo is disabled
+        // (password prompt active), and a bell indicator when the tab has an
+        // unacknowledged bell and is not the active (focused) tab.
+        let display_label = match (is_echo_off, has_bell) {
+            (true, true) => format!("\u{1f510} \u{1f514} {label}"),
+            (true, false) => format!("\u{1f510} {label}"),
+            (false, true) => format!("\u{1f514} {label}"),
+            (false, false) => label.to_owned(),
         };
 
         // Tab frame: active gets a gray fill, bell-active inactive tabs
@@ -392,6 +432,7 @@ impl FreminalGui {
                     bell_active: false,
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
+                    echo_off: channels.echo_off,
                 };
                 self.tabs.add_tab(tab);
             }
@@ -1291,6 +1332,8 @@ impl eframe::App for FreminalGui {
             }
 
             let tab = self.tabs.active_tab_mut();
+            let is_echo_off = self.config.security.password_indicator
+                && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
             let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
@@ -1301,6 +1344,7 @@ impl eframe::App for FreminalGui {
                 self.settings_modal.is_open || any_menu_open,
                 bg_opacity,
                 &self.binding_map,
+                is_echo_off,
             );
 
             // Handle key actions that couldn't be dispatched at the input
@@ -1312,14 +1356,22 @@ impl eframe::App for FreminalGui {
             // Keep the window title bar in sync with the active tab's title.
             // This handles tab switches, OSC 0/2 title changes, and restore
             // from the title stack — all in one place.
+            //
+            // Only issue the viewport command when the title actually changed;
+            // calling `send_viewport_cmd` unconditionally every frame triggers
+            // an infinite repaint loop (~3 % idle CPU).
             let active_title = &self.tabs.active_tab().title;
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
                 active_title.as_str()
             };
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Title(window_title.to_owned()));
+            if window_title != self.last_window_title {
+                window_title.clone_into(&mut self.last_window_title);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                    self.last_window_title.clone(),
+                ));
+            }
 
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)

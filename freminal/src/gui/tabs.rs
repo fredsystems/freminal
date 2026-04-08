@@ -11,6 +11,7 @@
 //! shared with the PTY thread.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
@@ -92,6 +93,15 @@ pub struct Tab {
 
     /// Per-tab GUI view state (scroll offset, selection, blink, mouse).
     pub view_state: ViewState,
+
+    /// Shared atomic flag reflecting whether the PTY slave currently has
+    /// `ECHO` disabled (i.e. a password prompt is active).
+    ///
+    /// Read directly every frame by the GUI (cheap `Relaxed` atomic load)
+    /// instead of going through `TerminalSnapshot`, because snapshots are
+    /// only published on PTY output — if the shell is idle waiting for a
+    /// password, the snapshot would be stale.
+    pub echo_off: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Tab {
@@ -375,6 +385,7 @@ mod tests {
             bell_active: false,
             title_stack: Vec::new(),
             view_state: ViewState::new(),
+            echo_off: Arc::new(AtomicBool::new(false)),
         }
     }
 

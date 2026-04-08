@@ -104,6 +104,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         bell_active: false,
         title_stack: Vec::new(),
         view_state: gui::view_state::ViewState::new(),
+        echo_off: channels.echo_off,
     };
 
     gui::run(
@@ -378,6 +379,7 @@ fn main() {
                 bell_active: false,
                 title_stack: Vec::new(),
                 view_state: gui::view_state::ViewState::new(),
+                echo_off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             cfg,
             args,

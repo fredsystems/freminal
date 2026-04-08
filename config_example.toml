@@ -147,6 +147,11 @@ limit = 4000
 # run inside the terminal.
 # allow_clipboard_read = false
 
+# Show a lock icon in the tab bar when the foreground process disables
+# terminal echo (e.g. password prompts from sudo, ssh, passwd).
+# Default: true.
+# password_indicator = true
+
 ## ##############################################################################
 # KEY BINDINGS
 ## ##############################################################################

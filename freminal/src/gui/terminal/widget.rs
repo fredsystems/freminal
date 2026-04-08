@@ -659,6 +659,7 @@ impl FreminalTerminalWidget {
         ui_overlay_open: bool,
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
+        is_echo_off: bool,
     ) -> Vec<freminal_common::keybindings::KeyAction> {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -884,6 +885,10 @@ impl FreminalTerminalWidget {
         let mut is_cursor_only = false;
         let mut cursor_only_verts: Vec<f32> = Vec::new();
 
+        // When a password prompt is active (echo-off), suppress the
+        // normal cursor — the lock icon overlay replaces it.
+        let effective_show_cursor = snap.show_cursor && !is_echo_off;
+
         if !snap.skip_draw {
             // Detect content changes via `Arc::ptr_eq` — this is immune to the
             // race where the PTY thread overwrites a "changed" snapshot with a
@@ -1009,7 +1014,7 @@ impl FreminalTerminalWidget {
             // path so the visual position is updated each frame.
             let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
                 || snap.cursor_pos != self.previous_cursor_pos
-                || snap.show_cursor != self.previous_show_cursor
+                || effective_show_cursor != self.previous_show_cursor
                 || snap.cursor_color_override != self.previous_cursor_color_override
                 || cursor_animating;
 
@@ -1038,7 +1043,7 @@ impl FreminalTerminalWidget {
                 let cursor_verts = build_cursor_verts_only(
                     cell_w,
                     cell_h,
-                    snap.show_cursor,
+                    effective_show_cursor,
                     cursor_blink_on,
                     cursor_pixel_pos,
                     &snap.cursor_visual_style,
@@ -1103,7 +1108,7 @@ impl FreminalTerminalWidget {
                     self.font_manager.underline_offset(),
                     self.font_manager.strikeout_offset(),
                     self.font_manager.stroke_size(),
-                    snap.show_cursor,
+                    effective_show_cursor,
                     cursor_blink_on,
                     cursor_pixel_pos,
                     &snap.cursor_visual_style,
@@ -1117,7 +1122,7 @@ impl FreminalTerminalWidget {
                 // Record where the cursor quad starts in the decoration VBO.
                 // The cursor is always appended at the END of deco_verts, and is
                 // exactly CURSOR_QUAD_FLOATS floats (or absent when hidden).
-                let cursor_vert_float_offset = if snap.show_cursor {
+                let cursor_vert_float_offset = if effective_show_cursor {
                     deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
                 } else {
                     deco_verts.len()
@@ -1188,7 +1193,7 @@ impl FreminalTerminalWidget {
         // Update per-frame cursor state for the next frame's comparison.
         self.previous_cursor_blink_on = cursor_blink_on;
         self.previous_cursor_pos = snap.cursor_pos;
-        self.previous_show_cursor = snap.show_cursor;
+        self.previous_show_cursor = effective_show_cursor;
         self.previous_cursor_color_override = snap.cursor_color_override;
 
         // Allocate the exact terminal rect (in logical points for egui).
@@ -1290,6 +1295,27 @@ impl FreminalTerminalWidget {
 
         // ── Visual bell flash overlay ────────────────────────────────
         paint_bell_flash(ui, rect, view_state);
+
+        // ── Password-prompt lock indicator ───────────────────────────
+        // When echo-off is detected (password prompt), paint a lock icon
+        // at the cursor position.  The normal cursor is suppressed (via
+        // `effective_show_cursor`) so only the lock icon is visible.
+        if is_echo_off {
+            let cursor_logical_x = view_state
+                .cursor_visual_col
+                .mul_add(logical_cell_w, terminal_rect.min.x);
+            let cursor_logical_y = view_state
+                .cursor_visual_row
+                .mul_add(logical_cell_h, terminal_rect.min.y);
+            let lock_pos = egui::pos2(cursor_logical_x, cursor_logical_y);
+            ui.painter().text(
+                lock_pos,
+                egui::Align2::LEFT_TOP,
+                "\u{1F512}",
+                egui::FontId::proportional(logical_cell_h),
+                egui::Color32::from_rgb(255, 200, 50),
+            );
+        }
 
         // ── Search overlay ───────────────────────────────────────────
         // Run search refresh when query changed (outside the !snap.skip_draw block

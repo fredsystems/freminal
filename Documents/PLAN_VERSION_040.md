@@ -18,7 +18,7 @@ and adaptive theming.
 | 48  | BCE (Background Color Erase)  | Medium       | Complete |
 | 49  | DECDWL / DECDHL Rendering     | Medium       | Pending  |
 | 50  | KKP Flags 2/4/16              | Medium       | Pending  |
-| 51  | Password Input Detection      | Small        | Pending  |
+| 51  | Password Input Detection      | Small        | Complete |
 | 52  | Adaptive Light/Dark Theming   | Small        | Pending  |
 
 ---
@@ -477,21 +477,27 @@ password_indicator = true
 
 ### 51 Subtasks
 
-1. **51.1 — Echo-off detection**
-   Implement TTY echo-off detection. Either query the PTY attributes from the consumer thread,
-   or add a mechanism to detect when the child process changes the terminal's echo setting.
+1. **51.1 — Echo-off detection** ✅
+   Implemented TTY echo-off detection via `nix::sys::termios::tcgetattr()` through
+   `portable_pty`'s `MasterPty::get_termios()`. The PTY writer thread polls the ECHO flag
+   after each write/resize event and stores the result in an `Arc<AtomicBool>` shared with
+   the snapshot builder.
 
-2. **51.2 — Visual indicator**
-   Add a password mode indicator to the GUI. Show in the tab bar (if tabs exist) or title bar.
-   Use a lock icon or colored label.
+2. **51.2 — Visual indicator** ✅
+   Lock icon (`🔐`) prepended to tab labels in `show_single_tab()` when echo-off is detected.
+   Handles all 4 combinations of (echo_off, bell_active).
 
-3. **51.3 — Scrollback suppression (optional)**
-   When `suppress_password_scrollback` is enabled and echo-off is detected, stop appending to
-   the scrollback buffer. Resume when echo is re-enabled.
+3. **51.3 — Config option** ✅
+   Added `password_indicator: bool` (default `true`) to `SecurityConfig` with manual `Default`
+   impl. Checkbox in Settings Modal Security tab. Example config updated. Lock icon only shows
+   when `password_indicator` is enabled.
 
-4. **51.4 — Config and tests**
-   Add config options to `[security]` section. Tests for echo-off detection and indicator
-   state transitions.
+   _Scrollback suppression (originally 51.3) deferred — requires architectural changes to the
+   buffer layer and is of lower priority._
+
+4. **51.4 — Tests** ✅
+   Config tests: defaults, deserialization (both fields independently), apply_partial,
+   round-trip. Snapshot test: `empty_is_echo_off_is_false`.
 
 ### 51 Primary Files
 
