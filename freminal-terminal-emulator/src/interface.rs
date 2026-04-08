@@ -551,6 +551,14 @@ impl TerminalEmulator {
         // ── Inline image data ────────────────────────────────────────────────
         let (images, visible_image_placements) = self.collect_visible_images(scroll_offset);
 
+        // ── Per-row line-width attributes (DECDWL / DECDHL) ──────────────────
+        let visible_line_widths = Arc::new(
+            self.internal
+                .handler
+                .buffer()
+                .visible_line_widths(scroll_offset),
+        );
+
         let total_rows = self.internal.handler.buffer().get_rows().len();
 
         TerminalSnapshot {
@@ -589,6 +597,7 @@ impl TerminalEmulator {
             theme,
             images,
             visible_image_placements,
+            visible_line_widths,
             #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),

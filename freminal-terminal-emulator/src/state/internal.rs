@@ -35,7 +35,7 @@ use std::{fmt::Write as _, time::Instant};
 
 use crate::{
     ansi::FreminalAnsiParser,
-    input::{TerminalInput, TerminalInputPayload},
+    input::{KeyEventMeta, TerminalInput, TerminalInputPayload},
     io::PtyWrite,
 };
 
@@ -620,6 +620,7 @@ impl TerminalState {
             backarrow_sends_bs,
             line_feed_mode,
             kitty_keyboard_flags,
+            &KeyEventMeta::PRESS,
         ) {
             TerminalInputPayload::Single(c) => {
                 self.write_tx.send(PtyWrite::Write(vec![c]))?;

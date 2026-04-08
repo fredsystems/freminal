@@ -286,6 +286,13 @@ pub struct TerminalSnapshot {
     /// Wrapped in `Arc` so the clean-path snapshot reuse is cheap.
     pub visible_image_placements: Arc<Vec<Option<ImagePlacement>>>,
 
+    /// Per-row line-width attribute for the visible window.
+    ///
+    /// One entry per visible row, in top-to-bottom order.  The renderer uses
+    /// this to apply 2× horizontal scaling for DECDWL rows and 2× scaling in
+    /// both dimensions (with top/bottom clipping) for DECDHL rows.
+    pub visible_line_widths: Arc<Vec<freminal_buffer::row::LineWidth>>,
+
     /// Playback status, present only when the application is in playback mode.
     ///
     /// The GUI uses this to render playback controls and frame progress.
@@ -336,6 +343,7 @@ impl TerminalSnapshot {
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
+            visible_line_widths: Arc::new(Vec::new()),
             #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: None,
@@ -370,5 +378,10 @@ mod tests {
     #[test]
     fn empty_kitty_keyboard_flags_is_zero() {
         assert_eq!(TerminalSnapshot::empty().kitty_keyboard_flags, 0);
+    }
+
+    #[test]
+    fn empty_visible_line_widths_is_empty() {
+        assert!(TerminalSnapshot::empty().visible_line_widths.is_empty());
     }
 }

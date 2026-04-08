@@ -2003,16 +2003,20 @@ impl TerminalHandler {
                 tracing::warn!("AnsiConformanceLevelThree not yet implemented (ignored)");
             }
             TerminalOutput::DoubleLineHeightTop => {
-                tracing::warn!("DoubleLineHeightTop not yet implemented (ignored)");
+                self.buffer
+                    .set_cursor_line_width(crate::row::LineWidth::DoubleHeightTop);
             }
             TerminalOutput::DoubleLineHeightBottom => {
-                tracing::warn!("DoubleLineHeightBottom not yet implemented (ignored)");
+                self.buffer
+                    .set_cursor_line_width(crate::row::LineWidth::DoubleHeightBottom);
             }
             TerminalOutput::SingleWidthLine => {
-                tracing::warn!("SingleWidthLine not yet implemented (ignored)");
+                self.buffer
+                    .set_cursor_line_width(crate::row::LineWidth::Normal);
             }
             TerminalOutput::DoubleWidthLine => {
-                tracing::warn!("DoubleWidthLine not yet implemented (ignored)");
+                self.buffer
+                    .set_cursor_line_width(crate::row::LineWidth::DoubleWidth);
             }
             TerminalOutput::ScreenAlignmentTest => {
                 self.buffer.screen_alignment_test();

@@ -19,7 +19,9 @@ use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
     keypad::KeypadMode, lnm::Lnm,
 };
-use freminal_terminal_emulator::input::{KeyModifiers, TerminalInput, TerminalInputPayload};
+use freminal_terminal_emulator::input::{
+    KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload,
+};
 
 /// Convenience: call `to_payload` with both mode flags in normal/default state
 /// and unwrap the result as a `Vec<u8>`.
@@ -32,6 +34,7 @@ fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -363,6 +366,7 @@ fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -575,6 +579,7 @@ fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -622,6 +627,7 @@ fn ctrl_a_modify_other_keys_level_1() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
@@ -651,6 +657,7 @@ fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -714,6 +721,7 @@ fn ctrl_b_modify_other_keys_level_1() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x02),
         other => panic!("Expected Single(0x02), got {other:?}"),
@@ -731,6 +739,7 @@ fn ctrl_z_modify_other_keys_level_1() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x1A),
         other => panic!("Expected Single(0x1A), got {other:?}"),
@@ -793,6 +802,7 @@ fn escape_with_both_mok2_and_aek() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;1;27~");
@@ -814,6 +824,7 @@ fn ctrl_c_with_both_mok2_and_aek() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;5;99~");
@@ -833,6 +844,7 @@ fn ctrl_a_with_aek_and_mok0() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
         other => panic!("Expected Single(0x01), got {other:?}"),
@@ -854,6 +866,7 @@ fn backspace_decbkm_set_sends_bs() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x08, "DECBKM set: Backspace must send BS (0x08)")
@@ -873,6 +886,7 @@ fn backspace_decbkm_reset_sends_del() {
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x7F, "DECBKM reset: Backspace must send DEL (0x7F)")
@@ -899,6 +913,7 @@ fn enter_lnm_reset_sends_cr() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(b, 0x0D, "LNM reset: Enter must send bare CR (0x0D)");
@@ -923,6 +938,7 @@ fn enter_lnm_set_sends_cr_lf() {
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Many(bs) => {
             assert_eq!(
@@ -948,6 +964,7 @@ fn linefeed_unaffected_by_lnm_set() {
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
             assert_eq!(
@@ -973,6 +990,7 @@ fn payload_bytes_kkp(input: &TerminalInput, flags: u32) -> Vec<u8> {
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         flags,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
         TerminalInputPayload::Many(bs) => bs.to_vec(),
@@ -1183,12 +1201,339 @@ fn kkp_flag_2_plus_disambiguate_ctrl_a() {
     );
 }
 
-/// KKP flag 4 + REPORT_ALL (12): plain ASCII gets CSI u encoding (flag 8 wins).
+/// KKP flag 4 + REPORT_ALL (12): plain ASCII gets CSI u encoding with
+/// alternate key fields: `CSI 97:65:97 u` (codepoint:shifted:base).
 #[test]
 fn kkp_flag_4_plus_report_all_ascii() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b'a'), 4 | 8),
+        b"\x1b[97:65:97u"
+    );
+}
+
+// ===========================================================================
+// KKP flag 2 (REPORT_EVENT_TYPES) — event type metadata
+// ===========================================================================
+//
+// When flag 2 is active (along with flag 1 or 8 to enable CSI u), the
+// modifier parameter gets a `:event-type` suffix:
+//   - Press = 1 (elided since it's the default)
+//   - Repeat = 2
+//   - Release = 3
+//
+// Format: CSI codepoint ; modifiers[:event_type] u
+
+/// Convenience: call `to_payload` with KKP flags and custom `KeyEventMeta`.
+fn payload_bytes_kkp_meta(input: &TerminalInput, flags: u32, meta: &KeyEventMeta) -> Vec<u8> {
+    match input.to_payload(
+        Decckm::Ansi,
+        KeypadMode::Numeric,
+        0,
+        ApplicationEscapeKey::Reset,
+        Decbkm::BackarrowSendsDel,
+        Lnm::LineFeed,
+        flags,
+        meta,
+    ) {
+        TerminalInputPayload::Single(b) => vec![b],
+        TerminalInputPayload::Many(bs) => bs.to_vec(),
+        TerminalInputPayload::Owned(bs) => bs,
+    }
+}
+
+/// Flag 2 + flag 8: plain 'a' press → CSI 97u (event_type 1 is elided).
+#[test]
+fn kkp_flag_2_press_ascii_elides_event_type() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2, &meta),
         b"\x1b[97u"
+    );
+}
+
+/// Flag 2 + flag 8: plain 'a' repeat → CSI 97;1:2u (modifier=1, event=2).
+#[test]
+fn kkp_flag_2_repeat_ascii() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Repeat,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2, &meta),
+        b"\x1b[97;1:2u"
+    );
+}
+
+/// Flag 2 + flag 8: plain 'a' release → CSI 97;1:3u (modifier=1, event=3).
+#[test]
+fn kkp_flag_2_release_ascii() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Release,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2, &meta),
+        b"\x1b[97;1:3u"
+    );
+}
+
+/// Flag 2 + flag 8: Ctrl+A repeat → CSI 97;5:2u (modifier=5, event=2).
+#[test]
+fn kkp_flag_2_repeat_ctrl_a() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Repeat,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ctrl(b'A'), 8 | 2, &meta),
+        b"\x1b[97;5:2u"
+    );
+}
+
+/// Flag 2 + flag 8: Ctrl+A release → CSI 97;5:3u (modifier=5, event=3).
+#[test]
+fn kkp_flag_2_release_ctrl_a() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Release,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ctrl(b'A'), 8 | 2, &meta),
+        b"\x1b[97;5:3u"
+    );
+}
+
+/// Flag 2 + flag 1: Escape release → CSI 27;1:3u.
+#[test]
+fn kkp_flag_2_release_escape() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Release,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Escape, 1 | 2, &meta),
+        b"\x1b[27;1:3u"
+    );
+}
+
+/// Flag 2 + flag 8: Enter repeat → CSI 13;1:2u.
+#[test]
+fn kkp_flag_2_repeat_enter() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Repeat,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Enter, 8 | 2, &meta),
+        b"\x1b[13;1:2u"
+    );
+}
+
+// ===========================================================================
+// KKP flag 4 (REPORT_ALTERNATE_KEYS) — shifted/base codepoint fields
+// ===========================================================================
+//
+// When flag 4 is active along with flag 1 or 8, the codepoint field becomes
+// `codepoint:shifted:base`. Shifted is the US QWERTY shifted form if it
+// differs from the base; otherwise the extra fields are omitted.
+
+/// Flag 4 + flag 8: uppercase 'A' → CSI 97:65:97;2u
+/// (lowercase 97, shifted 65='A', base 97, modifier 2=Shift).
+#[test]
+fn kkp_flag_4_uppercase_a() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b'A'), 4 | 8),
+        b"\x1b[97:65:97;2u"
+    );
+}
+
+/// Flag 4 + flag 8: digit '1' → CSI 49:33:49u
+/// (codepoint 49='1', shifted 33='!', base 49).
+#[test]
+fn kkp_flag_4_digit_1() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b'1'), 4 | 8),
+        b"\x1b[49:33:49u"
+    );
+}
+
+/// Flag 4 + flag 8: semicolon ';' → CSI 59:58:59u
+/// (codepoint 59=';', shifted 58=':', base 59).
+#[test]
+fn kkp_flag_4_semicolon() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b';'), 4 | 8),
+        b"\x1b[59:58:59u"
+    );
+}
+
+/// Flag 4 + flag 8: Ctrl+A → CSI 97;5u (no shifted form for Ctrl).
+/// Ctrl+letter codepoint is lowercase letter — same shifted mapping as ASCII.
+#[test]
+fn kkp_flag_4_ctrl_a() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 4 | 8),
+        b"\x1b[97:65:97;5u"
+    );
+}
+
+/// Flag 4 + flag 8: space (0x20) has no distinct shifted form → just `32`.
+#[test]
+fn kkp_flag_4_space_no_shifted() {
+    // Space shifted is still space on US QWERTY — us_qwerty_shifted returns None
+    // so no :shifted:base suffix.
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ascii(b' '), 4 | 8),
+        b"\x1b[32u"
+    );
+}
+
+/// Flag 4 + flag 1 (no report_all): Ctrl+C → CSI 99:67:99;5u.
+#[test]
+fn kkp_flag_4_disambiguate_ctrl_c() {
+    assert_eq!(
+        payload_bytes_kkp(&TerminalInput::Ctrl(b'C'), 1 | 4),
+        b"\x1b[99:67:99;5u"
+    );
+}
+
+// ===========================================================================
+// KKP flag 16 (REPORT_ASSOCIATED_TEXT) — text as codepoints
+// ===========================================================================
+//
+// When flag 16 is active along with flag 1 or 8, the associated text
+// (if present) is appended as a third parameter: colon-separated codepoints.
+//
+// Format: CSI codepoint ; modifiers ; text_cp1:text_cp2:... u
+
+/// Flag 16 + flag 8: ASCII 'a' with associated text "a" → CSI 97;1;97u.
+#[test]
+fn kkp_flag_16_ascii_a_with_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: Some("a".to_owned()),
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 16, &meta),
+        b"\x1b[97;1;97u"
+    );
+}
+
+/// Flag 16 + flag 8: Enter with no associated text → CSI 13u (no text field).
+#[test]
+fn kkp_flag_16_enter_no_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Enter, 8 | 16, &meta),
+        b"\x1b[13u"
+    );
+}
+
+/// Flag 16 + flag 8: Enter with empty string → CSI 13u (empty string = no text).
+#[test]
+fn kkp_flag_16_enter_empty_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: Some(String::new()),
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Enter, 8 | 16, &meta),
+        b"\x1b[13u"
+    );
+}
+
+/// Flag 16 + flag 8: Ctrl+A with no text → CSI 97;5u (no text field).
+#[test]
+fn kkp_flag_16_ctrl_a_no_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ctrl(b'A'), 8 | 16, &meta),
+        b"\x1b[97;5u"
+    );
+}
+
+/// Flag 16 + flag 8: multi-char text "ab" → text field has two codepoints.
+#[test]
+fn kkp_flag_16_multi_char_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: Some("ab".to_owned()),
+    };
+    // 'a'=97, 'b'=98
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 16, &meta),
+        b"\x1b[97;1;97:98u"
+    );
+}
+
+// ===========================================================================
+// KKP combined flags (2+4+16 with activating flags)
+// ===========================================================================
+
+/// All flags (1|2|4|16): Ctrl+A repeat with text "x" → full CSI u encoding.
+/// CSI 97:65:97 ; 5:2 ; 120 u
+///   codepoint=97, shifted=65, base=97, modifier=5 (Ctrl), event=2 (repeat),
+///   text codepoint=120 ('x').
+#[test]
+fn kkp_all_flags_ctrl_a_repeat_with_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Repeat,
+        associated_text: Some("x".to_owned()),
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ctrl(b'A'), 1 | 2 | 4 | 16, &meta),
+        b"\x1b[97:65:97;5:2;120u"
+    );
+}
+
+/// Flags 8|2|16: plain 'a' release with text "a".
+/// CSI 97 ; 1:3 ; 97 u
+#[test]
+fn kkp_flags_8_2_16_release_with_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Release,
+        associated_text: Some("a".to_owned()),
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2 | 16, &meta),
+        b"\x1b[97;1:3;97u"
+    );
+}
+
+/// Flags 8|4|16: uppercase 'A' with text "A".
+/// CSI 97:65:97 ; 2 ; 65 u
+///   (lowercase=97, shifted=65, base=97, modifier=2=Shift, text=65='A')
+#[test]
+fn kkp_flags_8_4_16_uppercase_a_with_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Press,
+        associated_text: Some("A".to_owned()),
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'A'), 8 | 4 | 16, &meta),
+        b"\x1b[97:65:97;2;65u"
+    );
+}
+
+/// Flags 8|2|4: 'a' repeat, no text → CSI 97:65:97;1:2u.
+#[test]
+fn kkp_flags_8_2_4_repeat_no_text() {
+    let meta = KeyEventMeta {
+        event_type: KeyEventType::Repeat,
+        associated_text: None,
+    };
+    assert_eq!(
+        payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2 | 4, &meta),
+        b"\x1b[97:65:97;1:2u"
     );
 }
 
@@ -1284,6 +1629,7 @@ fn kkp_takes_precedence_over_mok2() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         1, // KKP flag 1
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[97;5u", "KKP must take precedence over MOK2");
@@ -1303,6 +1649,7 @@ fn ctrl_a_with_aek_and_mok2() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
             assert_eq!(bs, b"\x1b[27;5;97~");

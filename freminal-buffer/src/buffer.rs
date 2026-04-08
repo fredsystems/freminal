@@ -416,6 +416,35 @@ impl Buffer {
         // next character insertion handle wrap/scroll as normal.
     }
 
+    /// Set the [`LineWidth`] attribute on the row under the cursor.
+    ///
+    /// This is the buffer-level primitive called by the terminal handler in
+    /// response to `ESC # 3` (double-height top), `ESC # 4` (double-height
+    /// bottom), `ESC # 5` (single-width), and `ESC # 6` (double-width).
+    ///
+    /// The row is marked dirty so the next snapshot rebuild re-flattens it.
+    pub fn set_cursor_line_width(&mut self, lw: crate::row::LineWidth) {
+        let row_idx = self.cursor.pos.y;
+        if let Some(row) = self.rows.get_mut(row_idx)
+            && row.line_width != lw
+        {
+            row.line_width = lw;
+            row.dirty = true;
+        }
+    }
+
+    /// Return the [`LineWidth`] for each row in the visible window.
+    ///
+    /// The returned vector has `min(term_height, row_count)` entries, one per
+    /// visible row in top-to-bottom order.  Used by `build_snapshot` to thread
+    /// per-row line-width data through to the renderer.
+    #[must_use]
+    pub fn visible_line_widths(&self, scroll_offset: usize) -> Vec<crate::row::LineWidth> {
+        let start = self.visible_window_start(scroll_offset);
+        let end = (start + self.height).min(self.rows.len());
+        self.rows[start..end].iter().map(|r| r.line_width).collect()
+    }
+
     /// Set an image cell at a specific (row, col) position in the buffer.
     ///
     /// Also invalidates the corresponding row cache entry.  Used by
@@ -7265,5 +7294,94 @@ mod declrmm_tests {
         buf.full_reset();
         assert_eq!(buf.is_declrmm_enabled(), Declrmm::Disabled);
         assert_eq!(buf.left_right_margins(), (0, 9));
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  DECDWL / DECDHL — set_cursor_line_width + visible_line_widths
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod line_width_tests {
+    use super::*;
+    use crate::row::LineWidth;
+
+    #[test]
+    fn default_rows_have_normal_line_width() {
+        let buf = Buffer::new(10, 3);
+        let widths = buf.visible_line_widths(0);
+        assert_eq!(widths.len(), 1, "fresh buffer has 1 row");
+        assert_eq!(widths[0], LineWidth::Normal);
+    }
+
+    #[test]
+    fn set_cursor_line_width_changes_current_row() {
+        let mut buf = Buffer::new(10, 3);
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        assert_eq!(buf.rows[0].line_width, LineWidth::DoubleWidth);
+    }
+
+    #[test]
+    fn set_cursor_line_width_marks_row_dirty() {
+        let mut buf = Buffer::new(10, 3);
+        buf.rows[0].dirty = false;
+        buf.set_cursor_line_width(LineWidth::DoubleHeightTop);
+        assert!(buf.rows[0].dirty);
+    }
+
+    #[test]
+    fn set_cursor_line_width_noop_when_same() {
+        let mut buf = Buffer::new(10, 3);
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        // Clear dirty flag, then set the same width again.
+        buf.rows[0].dirty = false;
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        assert!(!buf.rows[0].dirty, "should not mark dirty on no-op");
+    }
+
+    #[test]
+    fn set_cursor_line_width_on_non_first_row() {
+        let mut buf = Buffer::new(10, 3);
+        // Create 3 rows by issuing LFs.
+        buf.handle_lf();
+        buf.handle_lf();
+        assert_eq!(buf.cursor.pos.y, 2);
+        buf.set_cursor_line_width(LineWidth::DoubleHeightBottom);
+        assert_eq!(buf.rows[2].line_width, LineWidth::DoubleHeightBottom);
+        // Other rows remain Normal.
+        assert_eq!(buf.rows[0].line_width, LineWidth::Normal);
+        assert_eq!(buf.rows[1].line_width, LineWidth::Normal);
+    }
+
+    #[test]
+    fn visible_line_widths_returns_correct_count() {
+        let mut buf = Buffer::new(10, 3);
+        buf.handle_lf();
+        buf.handle_lf();
+        let widths = buf.visible_line_widths(0);
+        assert_eq!(widths.len(), 3);
+    }
+
+    #[test]
+    fn visible_line_widths_reflects_set_width() {
+        let mut buf = Buffer::new(10, 3);
+        buf.handle_lf();
+        buf.handle_lf();
+        // Set middle row to double width.
+        buf.cursor.pos.y = 1;
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        let widths = buf.visible_line_widths(0);
+        assert_eq!(widths[0], LineWidth::Normal);
+        assert_eq!(widths[1], LineWidth::DoubleWidth);
+        assert_eq!(widths[2], LineWidth::Normal);
+    }
+
+    #[test]
+    fn single_width_resets_to_normal() {
+        let mut buf = Buffer::new(10, 3);
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        assert_eq!(buf.rows[0].line_width, LineWidth::DoubleWidth);
+        buf.set_cursor_line_width(LineWidth::Normal);
+        assert_eq!(buf.rows[0].line_width, LineWidth::Normal);
     }
 }

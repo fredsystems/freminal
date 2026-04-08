@@ -360,9 +360,15 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
                 |(mut fm, mut cache)| {
                     #[allow(clippy::cast_precision_loss)]
                     let cell_w = fm.cell_width() as f32;
-                    std::hint::black_box(
-                        cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, ligatures),
-                    );
+                    std::hint::black_box(cache.shape_visible(
+                        &chars,
+                        &tags,
+                        width,
+                        &mut fm,
+                        cell_w,
+                        ligatures,
+                        &[],
+                    ));
                 },
                 BatchSize::SmallInput,
             );
@@ -376,10 +382,18 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
         // Prime the cache.
-        let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false);
+        let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
 
         b.iter(|| {
-            std::hint::black_box(cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false));
+            std::hint::black_box(cache.shape_visible(
+                &chars,
+                &tags,
+                width,
+                &mut fm,
+                cell_w,
+                false,
+                &[],
+            ));
         });
     });
 
@@ -406,7 +420,7 @@ fn build_shaped_lines_for_size(
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;
-    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false);
+    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
     (lines, fm)
 }
 
@@ -449,6 +463,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                         true, // show_cursor
                         true, // cursor_blink_on
                         cursor_pixel_pos,
+                        1.0, // cursor_width_scale
                         &cursor_style,
                         None,  // selection
                         false, // selection_is_block

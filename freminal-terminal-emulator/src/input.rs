@@ -16,6 +16,58 @@ use freminal_common::buffer_states::modes::{
     keypad::KeypadMode, lnm::Lnm,
 };
 
+/// Key event type for KKP flag 2 (report event types).
+///
+/// Maps to the `:event-type` field in CSI u sequences:
+/// - `1` = key press (default, omitted when flag 2 is not active)
+/// - `2` = key repeat
+/// - `3` = key release
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum KeyEventType {
+    #[default]
+    Press,
+    Repeat,
+    Release,
+}
+
+impl KeyEventType {
+    /// The KKP numeric event type code, or `None` for press (the default
+    /// that can be elided from the sequence).
+    const fn kkp_code(self) -> Option<u8> {
+        match self {
+            Self::Press => None,
+            Self::Repeat => Some(2),
+            Self::Release => Some(3),
+        }
+    }
+}
+
+/// Optional metadata attached to a key event for KKP flags 2/4/16.
+///
+/// When the Kitty Keyboard Protocol is active with flags beyond the basic
+/// disambiguation (flag 1) and report-all (flag 8), this struct carries
+/// the additional fields that get appended to CSI u sequences.
+///
+/// For callers that don't have this metadata (e.g. internal replay), use
+/// [`KeyEventMeta::PRESS`].
+#[derive(Clone, Debug, Default)]
+pub struct KeyEventMeta {
+    /// Press / repeat / release state (flag 2).
+    pub event_type: KeyEventType,
+    /// The Unicode text that this key produces, if any (flag 16).
+    /// For printable keys this is the character itself; for function
+    /// keys and modifiers this is empty/`None`.
+    pub associated_text: Option<String>,
+}
+
+impl KeyEventMeta {
+    /// A default key-press with no extra metadata.
+    pub const PRESS: Self = Self {
+        event_type: KeyEventType::Press,
+        associated_text: None,
+    };
+}
+
 const fn char_to_ctrl_code(c: u8) -> u8 {
     // https://catern.com/posts/terminal_quirks.html
     // man ascii
@@ -46,6 +98,41 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
 /// Reference: xterm ctlseqs §`modifyOtherKeys`.
 fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[27;{modifier};{code}~").into_bytes())
+}
+
+/// US QWERTY shifted-key mapping for KKP flag 4.
+///
+/// Given a lowercase ASCII byte, returns the Unicode codepoint of the shifted
+/// key on a US QWERTY layout. For letters, shifted is the uppercase form.
+/// For digits and punctuation, returns the Shift symbol (e.g. `1` → `!`).
+/// Returns `None` for bytes outside the printable ASCII range or that have
+/// no distinct shifted form.
+const fn us_qwerty_shifted(c: u8) -> Option<u32> {
+    match c {
+        b'a'..=b'z' => Some((c - 32) as u32), // lowercase → uppercase
+        b'1' => Some(b'!' as u32),
+        b'2' => Some(b'@' as u32),
+        b'3' => Some(b'#' as u32),
+        b'4' => Some(b'$' as u32),
+        b'5' => Some(b'%' as u32),
+        b'6' => Some(b'^' as u32),
+        b'7' => Some(b'&' as u32),
+        b'8' => Some(b'*' as u32),
+        b'9' => Some(b'(' as u32),
+        b'0' => Some(b')' as u32),
+        b'-' => Some(b'_' as u32),
+        b'=' => Some(b'+' as u32),
+        b'[' => Some(b'{' as u32),
+        b']' => Some(b'}' as u32),
+        b'\\' => Some(b'|' as u32),
+        b';' => Some(b':' as u32),
+        b'\'' => Some(b'"' as u32),
+        b',' => Some(b'<' as u32),
+        b'.' => Some(b'>' as u32),
+        b'/' => Some(b'?' as u32),
+        b'`' => Some(b'~' as u32),
+        _ => None,
+    }
 }
 
 /// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
@@ -183,6 +270,7 @@ impl TerminalInput {
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
         kitty_keyboard_flags: u32,
+        meta: &KeyEventMeta,
     ) -> TerminalInputPayload {
         // KKP encoding is only activated when the flags that actually change
         // key encoding are set: DISAMBIGUATE (bit 0 = 1) or REPORT_ALL (bit
@@ -196,6 +284,7 @@ impl TerminalInput {
                 keypad_mode,
                 backarrow_sends_bs,
                 line_feed_mode,
+                meta,
             );
         }
 
@@ -390,6 +479,96 @@ impl TerminalInput {
         }
     }
 
+    /// Build a CSI u KKP sequence with optional metadata fields.
+    ///
+    /// Full KKP CSI u format:
+    /// ```text
+    /// CSI codepoint[:shifted[:base]] ; modifiers[:event_type] [; text_codepoints] u
+    /// ```
+    ///
+    /// Trailing default fields and sub-fields are omitted.
+    fn build_csi_u(
+        codepoint: u32,
+        modifier_param: Option<u8>,
+        flags: u32,
+        meta: &KeyEventMeta,
+    ) -> TerminalInputPayload {
+        let report_event = flags & 2 != 0;
+        let report_alt = flags & 4 != 0;
+        let report_text = flags & 16 != 0;
+
+        let event_code = if report_event {
+            meta.event_type.kkp_code()
+        } else {
+            None
+        };
+
+        // Build the codepoint field: `codepoint[:shifted[:base]]`
+        let codepoint_field = if report_alt {
+            // Only ASCII codepoints have meaningful shifted forms in US QWERTY.
+            let shifted = if codepoint <= 127 {
+                #[allow(clippy::cast_possible_truncation)]
+                let byte = codepoint as u8;
+                us_qwerty_shifted(byte)
+            } else {
+                None
+            };
+            let base = codepoint; // US QWERTY assumption
+            match shifted {
+                Some(s) if s != codepoint => format!("{codepoint}:{s}:{base}"),
+                _ => codepoint.to_string(),
+            }
+        } else {
+            codepoint.to_string()
+        };
+
+        // Build the text field (flag 16): colon-separated codepoints
+        let text_field = if report_text {
+            meta.associated_text.as_ref().and_then(|t| {
+                if t.is_empty() {
+                    None
+                } else {
+                    let cps: Vec<String> = t.chars().map(|ch| (ch as u32).to_string()).collect();
+                    Some(cps.join(":"))
+                }
+            })
+        } else {
+            None
+        };
+
+        // Build the modifier field: `modifiers[:event_type]`
+        let has_modifier = modifier_param.is_some();
+        let has_event = event_code.is_some();
+        let has_text = text_field.is_some();
+
+        // Assemble: need modifier param if we have event_type or text_field
+        // (to avoid ambiguous omission of the second param).
+        let needs_mod = has_modifier || has_event || has_text;
+
+        let mut seq = format!("\x1b[{codepoint_field}");
+
+        if needs_mod {
+            let mod_val = modifier_param.unwrap_or(1); // 1 = no modifiers
+            seq.push(';');
+            seq.push_str(&mod_val.to_string());
+            if let Some(et) = event_code {
+                seq.push(':');
+                seq.push_str(&et.to_string());
+            }
+        }
+
+        if let Some(ref tf) = text_field {
+            // `needs_mod` is always true when `text_field` is present (since
+            // `has_text` feeds into `needs_mod`), so the modifier parameter
+            // has already been written above.
+            seq.push(';');
+            seq.push_str(tf);
+        }
+
+        seq.push('u');
+        TerminalInputPayload::Owned(seq.into_bytes())
+    }
+
     /// Kitty Keyboard Protocol encoding path.
     ///
     /// Called when `DISAMBIGUATE` (bit 0) or `REPORT_ALL` (bit 3) is set in the
@@ -408,13 +587,18 @@ impl TerminalInput {
     ///   including Enter → `CSI 13u`, Tab → `CSI 9u`, Backspace → `CSI 127u`,
     ///   plain ASCII → `CSI codepoint u`.
     ///
-    /// Flags 2, 4, 16 are parsed and stored on the KKP stack but do not yet
-    /// produce additional output fields (event-type, alternate keys, associated
-    /// text).  They require key event metadata not currently threaded through
-    /// `TerminalInput`.
+    /// Flags 2, 4, 16 append metadata to CSI u sequences when the base encoding
+    /// is already CSI u (i.e. when flag 1 or 8 activates the KKP path):
+    ///
+    /// - Flag 2 (report event types): appends `:event-type` to the modifier
+    ///   parameter.
+    /// - Flag 4 (alternate keys): appends `:shifted-key:base-layout-key` to the
+    ///   codepoint field. Best-effort US QWERTY only.
+    /// - Flag 16 (associated text): appends `;text-as-codepoints` as a third
+    ///   parameter.
     // The KKP encoding path is inherently large: it must cover every variant
     // for a complete implementation.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn to_payload_kkp(
         &self,
         flags: u32,
@@ -422,6 +606,7 @@ impl TerminalInput {
         keypad_mode: KeypadMode,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
+        meta: &KeyEventMeta,
     ) -> TerminalInputPayload {
         let report_all = flags & 8 != 0;
         let disambiguate = flags & 1 != 0;
@@ -435,10 +620,10 @@ impl TerminalInput {
                     // with Shift modifier.
                     if c.is_ascii_uppercase() {
                         let lower = u32::from(c.to_ascii_lowercase());
-                        TerminalInputPayload::Owned(format!("\x1b[{lower};2u").into_bytes())
+                        Self::build_csi_u(lower, Some(2), flags, meta)
                     } else {
                         let code = u32::from(*c);
-                        TerminalInputPayload::Owned(format!("\x1b[{code}u").into_bytes())
+                        Self::build_csi_u(code, None, flags, meta)
                     }
                 } else {
                     // Flags 1/2/4/16 alone don't affect plain ASCII.
@@ -451,7 +636,7 @@ impl TerminalInput {
                 if disambiguate || report_all {
                     // KKP: Ctrl+letter → CSI lowercase_code ; 5 u
                     let code = u32::from(c.to_ascii_lowercase());
-                    TerminalInputPayload::Owned(format!("\x1b[{code};5u").into_bytes())
+                    Self::build_csi_u(code, Some(5), flags, meta)
                 } else {
                     // Flags 2/4/16 alone: legacy C0 encoding.
                     TerminalInputPayload::Single(char_to_ctrl_code(*c))
@@ -461,7 +646,7 @@ impl TerminalInput {
             // ── Enter ───────────────────────────────────────────────────
             Self::Enter => {
                 if report_all {
-                    TerminalInputPayload::Owned(b"\x1b[13u".to_vec())
+                    Self::build_csi_u(13, None, flags, meta)
                 } else {
                     // Flag 1 exception: Enter still sends legacy bytes.
                     if line_feed_mode == Lnm::NewLine {
@@ -478,7 +663,7 @@ impl TerminalInput {
             // ── Backspace ───────────────────────────────────────────────
             Self::Backspace => {
                 if report_all {
-                    TerminalInputPayload::Owned(b"\x1b[127u".to_vec())
+                    Self::build_csi_u(127, None, flags, meta)
                 } else {
                     // Flag 1 exception: Backspace still sends legacy bytes.
                     if backarrow_sends_bs == Decbkm::BackarrowSendsBs {
@@ -492,7 +677,7 @@ impl TerminalInput {
             // ── Tab ─────────────────────────────────────────────────────
             Self::Tab => {
                 if report_all {
-                    TerminalInputPayload::Owned(b"\x1b[9u".to_vec())
+                    Self::build_csi_u(9, None, flags, meta)
                 } else {
                     // Flag 1 exception: Tab still sends legacy byte.
                     TerminalInputPayload::Single(char_to_ctrl_code(b'i'))
@@ -503,7 +688,7 @@ impl TerminalInput {
             Self::Escape => {
                 if disambiguate || report_all {
                     // KKP: Escape is disambiguated as CSI 27 u.
-                    TerminalInputPayload::Owned(b"\x1b[27u".to_vec())
+                    Self::build_csi_u(27, None, flags, meta)
                 } else {
                     // Flags 2/4/16 alone: legacy bare ESC byte.
                     TerminalInputPayload::Single(b'\x1b')
