@@ -269,6 +269,7 @@ pub fn build_background_instances(
                 // line below the baseline.
                 let ul_y = y_top + ascent - underline_offset;
 
+                let cw = gl_f32_u32(cell_width);
                 push_underline_quads(
                     &mut deco,
                     underline_style,
@@ -276,8 +277,8 @@ pub fn build_background_instances(
                         x0,
                         x1,
                         ul_y,
-                        stroke: stroke_size,
-                        cell_width: gl_f32_u32(cell_width),
+                        thick: stroke_size.max(1.0),
+                        cell_width: cw,
                         color: ul_color,
                     },
                 );
@@ -786,7 +787,9 @@ struct UnderlineParams {
     x0: f32,
     x1: f32,
     ul_y: f32,
-    stroke: f32,
+    /// Clamped stroke thickness: `stroke.max(1.0)`.  Computed once at
+    /// construction so style-specific helpers share a single clamp.
+    thick: f32,
     cell_width: f32,
     color: [f32; 4],
 }
@@ -794,24 +797,23 @@ struct UnderlineParams {
 /// Push decoration quads for the given underline style.
 ///
 /// All styles share the same vertical anchor (`ul_y`, the font's underline
-/// position below the baseline).  `stroke` is the line thickness (from the
-/// font metrics) and `cell_width` is the cell width in pixels.
+/// position below the baseline).  `thick` is the clamped line thickness
+/// (`stroke.max(1.0)`) and `cell_width` is the cell width in pixels.
 fn push_underline_quads(deco: &mut Vec<f32>, style: UnderlineStyle, p: &UnderlineParams) {
-    let thick = p.stroke.max(1.0);
     match style {
         UnderlineStyle::None => {}
         UnderlineStyle::Single => {
-            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + thick, p.color);
+            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + p.thick, p.color);
         }
         UnderlineStyle::Double => {
-            let gap = thick.mul_add(2.0, 1.0);
-            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + thick, p.color);
+            let gap = p.thick.mul_add(2.0, 1.0);
+            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + p.thick, p.color);
             push_quad(
                 deco,
                 p.x0,
                 p.ul_y + gap,
                 p.x1,
-                p.ul_y + gap + thick,
+                p.ul_y + gap + p.thick,
                 p.color,
             );
         }
@@ -829,11 +831,11 @@ fn push_underline_quads(deco: &mut Vec<f32>, style: UnderlineStyle, p: &Underlin
 
 /// Push quads approximating a sine-wave curly underline.
 ///
-/// The wave amplitude is `2 * stroke` and the period is one cell width.
+/// The wave amplitude is `2 * thick` and the period is one cell width.
 /// Each cell is subdivided into [`CURLY_SEGMENTS`] vertical-strip quads whose
 /// top and bottom edges follow the sine curve.
 fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
-    let amplitude = p.stroke * 2.0;
+    let amplitude = p.thick * 2.0;
     let span = p.x1 - p.x0;
     if span <= 0.0 || p.cell_width <= 0.0 {
         return;
@@ -855,7 +857,7 @@ fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
         let y_end = amplitude.mul_add(phase_end.sin(), p.ul_y);
 
         let y_min = y_start.min(y_end);
-        let y_max = y_start.max(y_end) + p.stroke;
+        let y_max = y_start.max(y_end) + p.thick;
 
         push_quad(deco, sx, y_min, ex, y_max, p.color);
     }
@@ -863,11 +865,10 @@ fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
 
 /// Push quads for a dotted underline.
 ///
-/// Each dot is a square with side = `stroke`, with a gap of `stroke` between
+/// Each dot is a square with side = `thick`, with a gap of `thick` between
 /// dots.
 fn push_dotted_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
-    let dot_size = p.stroke.max(1.0);
-    let step = dot_size * 2.0;
+    let step = p.thick * 2.0;
     if step <= 0.0 {
         return;
     }
@@ -878,8 +879,8 @@ fn push_dotted_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
 
     for i in 0..dot_count {
         let x = step.mul_add(gl_f32(i), p.x0);
-        let dot_end = (x + dot_size).min(p.x1);
-        push_quad(deco, x, p.ul_y, dot_end, p.ul_y + dot_size, p.color);
+        let dot_end = (x + p.thick).min(p.x1);
+        push_quad(deco, x, p.ul_y, dot_end, p.ul_y + p.thick, p.color);
     }
 }
 
@@ -901,7 +902,7 @@ fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
     for i in 0..dash_count {
         let x = step.mul_add(gl_f32(i), p.x0);
         let dash_end = (x + dash_len).min(p.x1);
-        push_quad(deco, x, p.ul_y, dash_end, p.ul_y + p.stroke, p.color);
+        push_quad(deco, x, p.ul_y, dash_end, p.ul_y + p.thick, p.color);
     }
 }
 

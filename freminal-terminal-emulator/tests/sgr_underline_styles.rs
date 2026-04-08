@@ -245,3 +245,30 @@ fn sgr_multiple_colon_segments() {
         ]
     );
 }
+
+#[test]
+fn sgr_semicolon_color_followed_by_colon_segment_not_dropped() {
+    // Regression: a semicolon-form color sequence (38;2;R;G;B) followed by a
+    // colon-form segment (4:3) must not drop the colon segment.  Previously
+    // `consume_color_params` would consume and discard a Colon segment if it
+    // appeared where a Simple value was expected.
+    let sgrs = extract_sgrs("\x1b[38;2;100;200;50;4:3m");
+    assert_eq!(
+        sgrs,
+        vec![
+            SelectGraphicRendition::Foreground(TerminalColor::Custom(100, 200, 50)),
+            SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Curly),
+        ]
+    );
+}
+
+#[test]
+fn sgr_malformed_semicolon_color_preserves_following_params() {
+    // Semicolon-form 38;9 (invalid mode) followed by bold.
+    // The 38;9 should fail gracefully and bold should still be applied.
+    let sgrs = extract_sgrs("\x1b[38;9;1m");
+    assert!(
+        sgrs.contains(&SelectGraphicRendition::Bold),
+        "Bold should not be swallowed after malformed color: {sgrs:?}",
+    );
+}
