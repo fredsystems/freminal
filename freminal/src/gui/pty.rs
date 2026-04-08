@@ -15,6 +15,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use freminal_common::args::Args;
+use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::interface::TerminalEmulator;
@@ -41,6 +42,14 @@ pub struct TabChannels {
 
     /// Receiver for clipboard text extraction responses from the PTY thread.
     pub clipboard_rx: Receiver<String>,
+
+    /// Receiver for full-buffer search content from the PTY thread.
+    ///
+    /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
+    /// concatenates scrollback + visible `TChar` data and sends it here.
+    /// The first element of the tuple is `total_rows` at the time the buffer
+    /// was captured, used by the GUI to detect stale responses.
+    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
 
     /// Signals that the PTY process has exited.
     ///
@@ -85,6 +94,7 @@ pub fn spawn_pty_tab(
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+    let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
 
     let egui_ctx_pty = Arc::clone(egui_ctx);
@@ -95,6 +105,7 @@ pub fn spawn_pty_tab(
         input_rx,
         window_cmd_tx,
         clipboard_tx,
+        search_buffer_tx,
         child_exit_rx,
         arc_swap,
         egui_ctx_pty,
@@ -107,6 +118,7 @@ pub fn spawn_pty_tab(
         pty_write_tx,
         window_cmd_rx,
         clipboard_rx,
+        search_buffer_rx,
         pty_dead_rx,
     })
 }
@@ -130,6 +142,7 @@ fn spawn_pty_consumer_thread(
     input_rx: Receiver<InputEvent>,
     window_cmd_tx: Sender<WindowCommand>,
     clipboard_tx: Sender<String>,
+    search_buffer_tx: Sender<(usize, Vec<TChar>)>,
     child_exit_rx: Option<Receiver<()>>,
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     egui_ctx_pty: Arc<OnceLock<eframe::egui::Context>>,
@@ -175,7 +188,8 @@ fn spawn_pty_consumer_thread(
         // Helper closure: process a single InputEvent.
         let handle_input = |emulator: &mut TerminalEmulator,
                             msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
-                            clipboard_tx: &crossbeam_channel::Sender<String>|
+                            clipboard_tx: &crossbeam_channel::Sender<String>,
+                            search_buffer_tx: &crossbeam_channel::Sender<(usize, Vec<TChar>)>|
          -> bool {
             match msg {
                 Ok(InputEvent::Resize(w, h, pw, ph)) => {
@@ -205,6 +219,13 @@ fn spawn_pty_consumer_thread(
                     let text = emulator
                         .extract_selection_text(start_row, start_col, end_row, end_col, is_block);
                     let _ = clipboard_tx.send(text);
+                }
+                Ok(InputEvent::RequestSearchBuffer) => {
+                    let (chars, _tags) = emulator.internal.handler.data_and_format_data_for_gui(0);
+                    let mut combined = chars.scrollback;
+                    combined.extend(chars.visible);
+                    let total_rows = emulator.internal.handler.buffer().get_rows().len();
+                    let _ = search_buffer_tx.send((total_rows, combined));
                 }
                 #[cfg(feature = "playback")]
                 Ok(InputEvent::PlaybackControl(_)) => {
@@ -238,7 +259,7 @@ fn spawn_pty_consumer_thread(
                     }
                 }
                 recv(input_rx) -> msg => {
-                    if !handle_input(&mut emulator, msg, &clipboard_tx) {
+                    if !handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
                         return;
                     }
                 }

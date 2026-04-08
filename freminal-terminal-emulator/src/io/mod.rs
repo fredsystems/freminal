@@ -45,6 +45,13 @@ pub enum InputEvent {
     /// carry the new palette. All embedded themes are `'static` so this is
     /// a zero-cost pointer update.
     ThemeChange(&'static ThemePalette),
+    /// Request the full buffer content (scrollback + visible) for search.
+    ///
+    /// The PTY thread concatenates `scrollback_chars` and `visible_chars`
+    /// into a single `Vec<TChar>` and sends it back through the dedicated
+    /// search buffer response channel.  The GUI caches this and runs search
+    /// across the complete history rather than just the visible window.
+    RequestSearchBuffer,
     /// Request text extraction from the full buffer for clipboard copy.
     ///
     /// Coordinates are buffer-absolute row indices and 0-indexed columns.

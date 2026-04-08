@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
+use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
@@ -58,6 +59,14 @@ pub struct Tab {
 
     /// Receiver for clipboard text extraction responses from this tab's PTY thread.
     pub clipboard_rx: Receiver<String>,
+
+    /// Receiver for full-buffer search content from this tab's PTY thread.
+    ///
+    /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
+    /// concatenates scrollback + visible `TChar` data and sends it here.
+    /// The first element of the tuple is `total_rows` at the time the buffer
+    /// was captured, used by the GUI to detect stale responses.
+    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
 
     /// Signals that this tab's PTY process has exited.
     ///
@@ -349,6 +358,8 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_search_buffer_tx, search_buffer_rx) =
+            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
 
         Tab {
@@ -358,6 +369,7 @@ mod tests {
             pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
+            search_buffer_rx,
             pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,

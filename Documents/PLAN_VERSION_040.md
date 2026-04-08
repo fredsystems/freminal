@@ -12,9 +12,9 @@ and adaptive theming.
 
 | #   | Feature                       | Scope        | Status   |
 | --- | ----------------------------- | ------------ | -------- |
-| 45  | Search in Scrollback          | Medium-Large | Pending  |
+| 45  | Search in Scrollback          | Medium-Large | Complete |
 | 46  | Rectangular / Block Selection | Medium       | Complete |
-| 47  | SGR Underline Styles          | Medium       | Pending  |
+| 47  | SGR Underline Styles          | Medium       | Complete |
 | 48  | BCE (Background Color Erase)  | Medium       | Complete |
 | 49  | DECDWL / DECDHL Rendering     | Medium       | Pending  |
 | 50  | KKP Flags 2/4/16              | Medium       | Pending  |
@@ -49,39 +49,39 @@ scrollback. This is independent of text search — it navigates between shell co
 
 ### 45 Subtasks
 
-1. **45.1 — Search overlay UI**
+1. **45.1 — Search overlay UI** ✅
    Create `freminal/src/gui/search.rs` with the search bar widget. Render as an overlay on
    top of the terminal area. Handle text input, navigation buttons, Escape to close.
 
-2. **45.2 — Buffer text search**
+2. **45.2 — Buffer text search** ✅
    Implement substring search across the terminal buffer. The search must work on the full
    scrollback. Options: send a search query to the PTY thread (which has buffer access) and
    receive match positions back, or search the snapshot's text data directly.
 
-3. **45.3 — Regex search toggle**
+3. **45.3 — Regex search toggle** ✅
    When the "Regex" toggle is active, compile the search string as a regex. Use the `regex`
    crate. Handle invalid regex gracefully (show error in the search bar, no panic).
 
-4. **45.4 — Match highlighting in renderer**
+4. **45.4 — Match highlighting in renderer** ✅
    Thread match positions through to the vertex builder. Matched cells get a highlight
    background color. The "current" match gets a distinct color.
 
-5. **45.5 — Scroll-to-match navigation**
+5. **45.5 — Scroll-to-match navigation** ✅
    "Next" scrolls forward to the next match, "Prev" scrolls backward. Wrap around when
    reaching the end/start. Update `scroll_offset` in `ViewState` to bring the match into view.
 
-6. **45.6 — Command jump navigation**
+6. **45.6 — Command jump navigation** ✅
    Parse OSC 133 markers (command prompt boundaries) from the buffer. Add keybindings:
    Ctrl+Shift+Up (previous command), Ctrl+Shift+Down (next command). Scroll to the command
    boundary.
 
-7. **45.7 — Keybinding integration**
+7. **45.7 — Keybinding integration** ✅
    Add `KeyAction::OpenSearch`, `KeyAction::SearchNext`, `KeyAction::SearchPrev`,
    `KeyAction::PrevCommand`, `KeyAction::NextCommand` to the keybinding system (Task 37).
    Default bindings: Ctrl+Shift+F (open), Enter (next), Shift+Enter (prev),
    Ctrl+Shift+Up/Down (command jump).
 
-8. **45.8 — Tests**
+8. **45.8 — Tests** ✅
    Unit tests: substring search, regex search, match indexing, command boundary detection.
    Integration: search + scroll + highlight end-to-end.
 

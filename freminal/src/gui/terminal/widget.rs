@@ -27,7 +27,8 @@ use super::{
             build_image_verts,
         },
         search::{
-            SearchBarAction, matches_to_highlights, run_search, scroll_to_match, show_search_bar,
+            SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
+            show_search_bar,
         },
         shaping::ShapingCache,
     },
@@ -518,6 +519,11 @@ pub struct FreminalTerminalWidget {
     /// the settings modal to register a temporary preview font without losing
     /// the original font set.
     base_font_defs: eframe::egui::FontDefinitions,
+    /// Number of search matches from the most recently rendered frame.
+    /// Used to detect search state changes that require a full vertex rebuild.
+    previous_search_match_count: usize,
+    /// Current match index from the most recently rendered frame.
+    previous_search_current_match: usize,
 }
 
 impl FreminalTerminalWidget {
@@ -569,6 +575,8 @@ impl FreminalTerminalWidget {
             )),
             overlay_was_open_last_frame: false,
             base_font_defs,
+            previous_search_match_count: 0,
+            previous_search_current_match: 0,
         }
     }
 
@@ -647,6 +655,7 @@ impl FreminalTerminalWidget {
         view_state: &mut ViewState,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
+        search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
         ui_overlay_open: bool,
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
@@ -685,10 +694,11 @@ impl FreminalTerminalWidget {
         // release focus so that Tab and arrow keys work normally inside the
         // modal's egui widgets, and so the dismiss-click is not forwarded.
         //
-        // Also release focus when the right-click context menu is open so
-        // that egui can deliver click events to the Area's buttons.
+        // Also release focus when the right-click context menu or the search
+        // overlay is open so that egui can deliver events to those widgets.
         let context_menu_open = view_state.context_menu_pos.is_some();
-        if !suppress_input && !context_menu_open {
+        let search_open = view_state.search_state.is_open;
+        if !suppress_input && !context_menu_open && !search_open {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -728,7 +738,7 @@ impl FreminalTerminalWidget {
         // menu button (e.g. Copy) is delivered to egui's Area widget instead
         // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
-        if suppress_input || context_menu_open {
+        if suppress_input || context_menu_open || view_state.search_state.is_open {
             self.previous_key = None;
             self.previous_mouse_state = None;
             self.previous_scroll_amount = 0.0;
@@ -795,22 +805,78 @@ impl FreminalTerminalWidget {
             }
         };
 
-        // Search: run (or re-run) the search if the query changed this frame.
-        // We capture any regex error message here so the overlay can display it.
-        let search_error: Option<String> =
-            if view_state.search_state.is_open && view_state.search_state.needs_refresh() {
-                let (found, err) = run_search(
-                    &view_state.search_state.query.clone(),
-                    view_state.search_state.regex_mode,
-                    &snap.visible_chars,
-                );
-                view_state.search_state.matches = found;
-                view_state.search_state.current_match = 0;
-                view_state.search_state.mark_fresh();
-                err
+        // Search: request the full buffer from the PTY thread when needed,
+        // then run (or re-run) the search against the cached corpus.
+        let search_error: Option<String> = if view_state.search_state.is_open {
+            // Detect staleness: if total_rows changed, the cached buffer is out
+            // of date and we need a fresh copy from the PTY thread.
+            let total_rows_changed =
+                snap.total_rows != view_state.search_state.last_known_total_rows;
+            if total_rows_changed
+                && view_state.search_state.buffer_request_state
+                    == crate::gui::view_state::BufferRequestState::Idle
+            {
+                view_state.search_state.cached_full_buffer = None;
+                if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
+                    error!("Failed to request search buffer from PTY: {e}");
+                } else {
+                    view_state.search_state.buffer_request_state =
+                        crate::gui::view_state::BufferRequestState::Pending;
+                }
+            }
+
+            // Try to receive the full buffer (non-blocking). Drain queued
+            // responses and only accept a buffer whose version matches the
+            // current snapshot — otherwise re-request a fresh copy.
+            if let Some((buffer_total_rows, buf)) = search_buffer_rx.try_iter().last() {
+                view_state.search_state.buffer_request_state =
+                    crate::gui::view_state::BufferRequestState::Idle;
+
+                if buffer_total_rows == snap.total_rows {
+                    view_state.search_state.cached_full_buffer = Some(Arc::new(buf));
+                    view_state.search_state.last_known_total_rows = buffer_total_rows;
+                } else {
+                    // Stale response — discard and re-request.
+                    view_state.search_state.cached_full_buffer = None;
+                    if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
+                        error!("Failed to request search buffer from PTY: {e}");
+                    } else {
+                        view_state.search_state.buffer_request_state =
+                            crate::gui::view_state::BufferRequestState::Pending;
+                    }
+                }
+            }
+
+            // Run search if query/mode changed or we just got a new buffer.
+            if view_state.search_state.needs_refresh() {
+                if let Some(ref buffer) = view_state.search_state.cached_full_buffer {
+                    let query = view_state.search_state.query.clone();
+                    let regex_mode = view_state.search_state.regex_mode;
+                    let (found, err) = run_search(&query, regex_mode, buffer);
+                    view_state.search_state.matches = found;
+                    view_state.search_state.current_match = 0;
+                    view_state.search_state.mark_fresh();
+                    err
+                } else {
+                    // No cached buffer yet — request one if we haven't already.
+                    if view_state.search_state.buffer_request_state
+                        == crate::gui::view_state::BufferRequestState::Idle
+                    {
+                        if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
+                            error!("Failed to request search buffer from PTY: {e}");
+                        } else {
+                            view_state.search_state.buffer_request_state =
+                                crate::gui::view_state::BufferRequestState::Pending;
+                        }
+                    }
+                    None
+                }
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // Cursor-only state captured before the PaintCallback closure (which
         // requires `Send + Sync + 'static`).  `is_cursor_only` and
@@ -865,6 +931,12 @@ impl FreminalTerminalWidget {
             // Check whether the selection has changed since the last frame.
             let current_selection = view_state.selection.normalised();
             let selection_changed = current_selection != self.previous_selection;
+
+            // Check whether search highlight state has changed since last frame.
+            let search_match_count = view_state.search_state.matches.len();
+            let search_current_match = view_state.search_state.current_match;
+            let search_changed = search_match_count != self.previous_search_match_count
+                || search_current_match != self.previous_search_current_match;
 
             // Convert buffer-absolute selection coordinates to screen-relative
             // for the renderer (which iterates `shaped_lines` by screen row).
@@ -952,6 +1024,7 @@ impl FreminalTerminalWidget {
             let cursor_only = !content_changed
                 && !selection_changed
                 && !text_blink_changed
+                && !search_changed
                 && cursor_state_changed
                 && !self
                     .render_state
@@ -997,6 +1070,7 @@ impl FreminalTerminalWidget {
             } else if content_changed
                 || selection_changed
                 || text_blink_changed
+                || search_changed
                 || self
                     .render_state
                     .lock()
@@ -1015,8 +1089,11 @@ impl FreminalTerminalWidget {
                 );
 
                 // Build search match highlights from the current search state.
+                // Only matches within the visible window are included, with
+                // rows converted from buffer-absolute to screen-relative.
+                let win_start = visible_window_start(snap);
                 let search_highlights: Vec<MatchHighlight> =
-                    matches_to_highlights(&view_state.search_state);
+                    matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
 
                 let (bg_instances, deco_verts) = build_background_instances(
                     &shaped_lines,
@@ -1094,6 +1171,8 @@ impl FreminalTerminalWidget {
                 self.previous_selection = current_selection;
                 self.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                 self.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
+                self.previous_search_match_count = search_match_count;
+                self.previous_search_current_match = search_current_match;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
@@ -1221,13 +1300,11 @@ impl FreminalTerminalWidget {
             match bar_action {
                 SearchBarAction::Next => {
                     view_state.search_state.next_match();
-                    scroll_to_match(view_state, snap);
-                    deferred_actions.push(freminal_common::keybindings::KeyAction::SearchNext);
+                    scroll_to_match_and_send(view_state, snap, input_tx);
                 }
                 SearchBarAction::Prev => {
                     view_state.search_state.prev_match();
-                    scroll_to_match(view_state, snap);
-                    deferred_actions.push(freminal_common::keybindings::KeyAction::SearchPrev);
+                    scroll_to_match_and_send(view_state, snap, input_tx);
                 }
                 SearchBarAction::Close => {
                     view_state.search_state.close();

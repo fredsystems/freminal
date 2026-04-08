@@ -386,6 +386,7 @@ impl FreminalGui {
                     pty_write_tx: channels.pty_write_tx,
                     window_cmd_rx: channels.window_cmd_rx,
                     clipboard_rx: channels.clipboard_rx,
+                    search_buffer_rx: channels.search_buffer_rx,
                     pty_dead_rx: channels.pty_dead_rx,
                     title: "Terminal".to_owned(),
                     bell_active: false,
@@ -472,22 +473,9 @@ impl FreminalGui {
             KeyAction::SwitchToTab9 => self.switch_to_tab_n(8),
             KeyAction::MoveTabLeft => self.tabs.move_active_left(),
             KeyAction::MoveTabRight => self.tabs.move_active_right(),
-
             // -- Font zoom --
-            KeyAction::ZoomIn => {
-                let base = self.config.font.size;
-                let vs = &mut self.tabs.active_tab_mut().view_state;
-                vs.adjust_zoom(base, 1.0);
-                let effective = vs.effective_font_size(base);
-                self.terminal_widget.apply_font_zoom(effective);
-            }
-            KeyAction::ZoomOut => {
-                let base = self.config.font.size;
-                let vs = &mut self.tabs.active_tab_mut().view_state;
-                vs.adjust_zoom(base, -1.0);
-                let effective = vs.effective_font_size(base);
-                self.terminal_widget.apply_font_zoom(effective);
-            }
+            KeyAction::ZoomIn => self.apply_zoom(1.0),
+            KeyAction::ZoomOut => self.apply_zoom(-1.0),
             KeyAction::ZoomReset => {
                 self.tabs.active_tab_mut().view_state.reset_zoom();
                 self.terminal_widget.apply_font_zoom(self.config.font.size);
@@ -501,13 +489,13 @@ impl FreminalGui {
                 let tab = self.tabs.active_tab_mut();
                 tab.view_state.search_state.next_match();
                 let snap = tab.arc_swap.load();
-                search::scroll_to_match(&mut tab.view_state, &snap);
+                search::scroll_to_match_and_send(&mut tab.view_state, &snap, &tab.input_tx);
             }
             KeyAction::SearchPrev => {
                 let tab = self.tabs.active_tab_mut();
                 tab.view_state.search_state.prev_match();
                 let snap = tab.arc_swap.load();
-                search::scroll_to_match(&mut tab.view_state, &snap);
+                search::scroll_to_match_and_send(&mut tab.view_state, &snap, &tab.input_tx);
             }
             KeyAction::PrevCommand => {
                 let tab = self.tabs.active_tab_mut();
@@ -544,6 +532,16 @@ impl FreminalGui {
                 );
             }
         }
+    }
+
+    /// Adjust font zoom by `delta` points and apply the new effective size
+    /// to the terminal widget.
+    fn apply_zoom(&mut self, delta: f32) {
+        let base = self.config.font.size;
+        let vs = &mut self.tabs.active_tab_mut().view_state;
+        vs.adjust_zoom(base, delta);
+        let effective = vs.effective_font_size(base);
+        self.terminal_widget.apply_font_zoom(effective);
     }
 
     /// Switch to tab N (0-indexed). Silently does nothing if the index
@@ -1299,6 +1297,7 @@ impl eframe::App for FreminalGui {
                 &mut tab.view_state,
                 &tab.input_tx,
                 &tab.clipboard_rx,
+                &tab.search_buffer_rx,
                 self.settings_modal.is_open || any_menu_open,
                 bg_opacity,
                 &self.binding_map,

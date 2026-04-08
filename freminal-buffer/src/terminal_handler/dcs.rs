@@ -687,7 +687,10 @@ impl TerminalHandler {
             "RGB" => Some("8/8/8"),
             // Tc — tmux extension: true color support
             // ut — terminal uses background color erase (BCE)
-            "Tc" | "ut" => Some(""),
+            // Su — boolean: terminal supports styled (extended) underlines.
+            // Advertised by kitty, WezTerm, foot. nvim checks this to enable
+            // underline color support.
+            "Tc" | "ut" | "Su" => Some(""),
             // setrgbf — SGR sequence to set RGB foreground
             "setrgbf" => Some("\x1b[38;2;%p1%d;%p2%d;%p3%dm"),
             // setrgbb — SGR sequence to set RGB background
@@ -704,8 +707,9 @@ impl TerminalHandler {
             "Ss" => Some("\x1b[%p1%d q"),
             // Smulx — extended underline (SGR 4:N for curly, dotted, etc.)
             "Smulx" => Some("\x1b[4:%p1%dm"),
-            // Setulc — set underline color
-            "Setulc" => Some("\x1b[58;2;%p1%d;%p2%d;%p3%dm"),
+            // Setulc — set underline color (colon sub-parameter syntax per
+            // ITU T.416, single packed-integer RGB like kitty/WezTerm).
+            "Setulc" => Some("\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m"),
             // khome — Home key
             "khome" => Some("\x1bOH"),
             // kend — End key
@@ -1517,7 +1521,31 @@ mod tests {
         handler.handle_device_control_string(&dcs);
 
         let response = recv_pty_response(&rx);
-        let expected_val_hex = TerminalHandler::hex_encode("\x1b[58;2;%p1%d;%p2%d;%p3%dm");
+        let expected_val_hex = TerminalHandler::hex_encode(
+            "\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
+        );
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_su() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("Su");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Su is a boolean capability — empty value string.
+        let expected_val_hex = TerminalHandler::hex_encode("");
         assert_eq!(
             response,
             format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")

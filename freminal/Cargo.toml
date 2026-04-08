@@ -52,6 +52,7 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 regex = "1"
+unicode-width.workspace = true
 
 # dev dependencies
 [dev-dependencies]
