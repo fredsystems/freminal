@@ -94,6 +94,105 @@ impl SelectionState {
     }
 }
 
+/// A single search match span within the visible terminal window.
+///
+/// Coordinates are in *visible-window* space: `row` is 0-indexed from the
+/// top of the current viewport, `col_start` and `col_end` are inclusive
+/// column indices within that row.  The span is guaranteed to fit within
+/// the visible window at the moment the search was run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchSpan {
+    /// Row index within the visible window (0 = top row).
+    pub row: usize,
+    /// First matching column (inclusive).
+    pub col_start: usize,
+    /// Last matching column (inclusive).
+    pub col_end: usize,
+}
+
+/// State owned by the GUI for the search-in-scrollback overlay.
+///
+/// All fields are private-to-GUI — the PTY thread never reads them.
+/// Searching is done purely against the snapshot's `visible_chars` data.
+#[derive(Debug, Default)]
+pub struct SearchState {
+    /// Whether the search overlay is currently visible.
+    pub is_open: bool,
+    /// The current query string (UTF-8).
+    pub query: String,
+    /// All matches found for the current query in the visible window.
+    ///
+    /// Empty when `query` is empty or no matches were found.
+    pub matches: Vec<MatchSpan>,
+    /// Index into `matches` indicating the "current" (focused) match.
+    ///
+    /// Wraps around: navigating forward from the last match returns to 0.
+    pub current_match: usize,
+    /// When `true`, the query is compiled as a regular expression.
+    pub regex_mode: bool,
+    /// The query string that was used to produce the current `matches` list.
+    ///
+    /// Used to detect when the query changed and a re-search is needed.
+    pub last_searched_query: String,
+    /// Whether `regex_mode` was active when `matches` was last computed.
+    pub last_searched_regex: bool,
+}
+
+impl SearchState {
+    /// Returns `true` if a re-search is needed (query or mode changed).
+    #[must_use]
+    pub fn needs_refresh(&self) -> bool {
+        self.query != self.last_searched_query || self.regex_mode != self.last_searched_regex
+    }
+
+    /// Mark the current matches as up-to-date.
+    pub fn mark_fresh(&mut self) {
+        self.last_searched_query.clone_from(&self.query);
+        self.last_searched_regex = self.regex_mode;
+    }
+
+    /// Move to the next match, wrapping around.
+    ///
+    /// Does nothing when there are no matches.
+    #[allow(clippy::missing_const_for_fn)] // Vec::is_empty() / Vec::len() are not const
+    pub fn next_match(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        self.current_match = (self.current_match + 1) % self.matches.len();
+    }
+
+    /// Move to the previous match, wrapping around.
+    ///
+    /// Does nothing when there are no matches.
+    #[allow(clippy::missing_const_for_fn)] // Vec::is_empty() / Vec::len() are not const
+    pub fn prev_match(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        if self.current_match == 0 {
+            self.current_match = self.matches.len() - 1;
+        } else {
+            self.current_match -= 1;
+        }
+    }
+
+    /// Returns the currently focused match, if any.
+    #[must_use]
+    pub fn current(&self) -> Option<MatchSpan> {
+        self.matches.get(self.current_match).copied()
+    }
+
+    /// Reset matches and navigation when the search overlay closes.
+    pub fn close(&mut self) {
+        self.is_open = false;
+        self.matches.clear();
+        self.current_match = 0;
+        self.last_searched_query.clear();
+        self.last_searched_regex = false;
+    }
+}
+
 /// GUI-local view state for the terminal widget.
 ///
 /// Everything here belongs to the render thread only.  The PTY thread never
@@ -254,6 +353,12 @@ pub struct ViewState {
     /// `None` = cursor is at rest or trail was just enabled (first frame
     /// will record the timestamp without moving the cursor).
     pub cursor_last_frame: Option<Instant>,
+
+    // ── Search overlay ───────────────────────────────────────────────
+    /// Search overlay state: open/closed, query, matches, navigation.
+    ///
+    /// All search interaction is GUI-local and never touches the PTY thread.
+    pub search_state: SearchState,
 }
 
 impl Default for ViewState {
@@ -283,6 +388,7 @@ impl Default for ViewState {
             cursor_target_col: 0.0,
             cursor_target_row: 0.0,
             cursor_last_frame: None,
+            search_state: SearchState::default(),
         }
     }
 }

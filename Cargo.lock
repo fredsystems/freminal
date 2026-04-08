@@ -1570,6 +1570,7 @@ dependencies = [
  "freminal-terminal-emulator",
  "glow",
  "open",
+ "regex",
  "rustybuzz",
  "swash",
  "thiserror 2.0.18",

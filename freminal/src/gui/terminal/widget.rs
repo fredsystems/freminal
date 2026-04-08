@@ -22,8 +22,12 @@ use super::{
         atlas::GlyphAtlas,
         font_manager::FontManager,
         renderer::{
-            CURSOR_QUAD_FLOATS, FgRenderOptions, TerminalRenderer, build_background_instances,
-            build_cursor_verts_only, build_foreground_instances, build_image_verts,
+            CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, TerminalRenderer,
+            build_background_instances, build_cursor_verts_only, build_foreground_instances,
+            build_image_verts,
+        },
+        search::{
+            SearchBarAction, matches_to_highlights, run_search, scroll_to_match, show_search_bar,
         },
         shaping::ShapingCache,
     },
@@ -790,6 +794,23 @@ impl FreminalTerminalWidget {
             }
         };
 
+        // Search: run (or re-run) the search if the query changed this frame.
+        // We capture any regex error message here so the overlay can display it.
+        let search_error: Option<String> =
+            if view_state.search_state.is_open && view_state.search_state.needs_refresh() {
+                let (found, err) = run_search(
+                    &view_state.search_state.query.clone(),
+                    view_state.search_state.regex_mode,
+                    &snap.visible_chars,
+                );
+                view_state.search_state.matches = found;
+                view_state.search_state.current_match = 0;
+                view_state.search_state.mark_fresh();
+                err
+            } else {
+                None
+            };
+
         // Cursor-only state captured before the PaintCallback closure (which
         // requires `Send + Sync + 'static`).  `is_cursor_only` and
         // `cursor_only_verts` are moved into the closure below.
@@ -983,6 +1004,10 @@ impl FreminalTerminalWidget {
                     self.ligatures,
                 );
 
+                // Build search match highlights from the current search state.
+                let search_highlights: Vec<MatchHighlight> =
+                    matches_to_highlights(&view_state.search_state);
+
                 let (bg_instances, deco_verts) = build_background_instances(
                     &shaped_lines,
                     cell_w,
@@ -996,6 +1021,7 @@ impl FreminalTerminalWidget {
                     cursor_pixel_pos,
                     &snap.cursor_visual_style,
                     screen_selection,
+                    &search_highlights,
                     snap.theme,
                     snap.cursor_color_override,
                 );
@@ -1173,6 +1199,30 @@ impl FreminalTerminalWidget {
 
         // ── Visual bell flash overlay ────────────────────────────────
         paint_bell_flash(ui, rect, view_state);
+
+        // ── Search overlay ───────────────────────────────────────────
+        // Run search refresh when query changed (outside the !snap.skip_draw block
+        // to ensure it fires even on identical content frames).
+        if view_state.search_state.is_open {
+            let bar_action =
+                show_search_bar(ui, view_state, terminal_rect, search_error.as_deref());
+            match bar_action {
+                SearchBarAction::Next => {
+                    view_state.search_state.next_match();
+                    scroll_to_match(view_state, snap);
+                    deferred_actions.push(freminal_common::keybindings::KeyAction::SearchNext);
+                }
+                SearchBarAction::Prev => {
+                    view_state.search_state.prev_match();
+                    scroll_to_match(view_state, snap);
+                    deferred_actions.push(freminal_common::keybindings::KeyAction::SearchPrev);
+                }
+                SearchBarAction::Close => {
+                    view_state.search_state.close();
+                }
+                SearchBarAction::None => {}
+            }
+        }
 
         // URL hover detection: convert mouse pixel position to a cell
         // coordinate, find the FormatTag covering that cell in the snapshot,

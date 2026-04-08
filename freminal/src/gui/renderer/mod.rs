@@ -18,6 +18,6 @@ pub mod vertex;
 
 pub use gpu::TerminalRenderer;
 pub use vertex::{
-    CURSOR_QUAD_FLOATS, FgRenderOptions, build_background_instances, build_cursor_verts_only,
-    build_foreground_instances, build_image_verts,
+    CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, build_background_instances,
+    build_cursor_verts_only, build_foreground_instances, build_image_verts,
 };

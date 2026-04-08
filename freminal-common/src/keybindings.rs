@@ -650,6 +650,14 @@ pub enum KeyAction {
     // -- Search -------------------------------------------------------------
     /// Open the search overlay.
     OpenSearch,
+    /// Navigate to the next search match.
+    SearchNext,
+    /// Navigate to the previous search match.
+    SearchPrev,
+    /// Jump to the previous command prompt boundary (OSC 133).
+    PrevCommand,
+    /// Jump to the next command prompt boundary (OSC 133).
+    NextCommand,
 
     // -- Font zoom ----------------------------------------------------------
     /// Increase font size.
@@ -707,6 +715,10 @@ impl KeyAction {
             Self::Paste => "paste",
             Self::SelectAll => "select_all",
             Self::OpenSearch => "open_search",
+            Self::SearchNext => "search_next",
+            Self::SearchPrev => "search_prev",
+            Self::PrevCommand => "prev_command",
+            Self::NextCommand => "next_command",
             Self::ZoomIn => "zoom_in",
             Self::ZoomOut => "zoom_out",
             Self::ZoomReset => "zoom_reset",
@@ -749,6 +761,10 @@ impl KeyAction {
             Self::Paste => "Paste",
             Self::SelectAll => "Select All",
             Self::OpenSearch => "Open Search",
+            Self::SearchNext => "Search Next",
+            Self::SearchPrev => "Search Previous",
+            Self::PrevCommand => "Previous Command",
+            Self::NextCommand => "Next Command",
             Self::ZoomIn => "Zoom In",
             Self::ZoomOut => "Zoom Out",
             Self::ZoomReset => "Zoom Reset",
@@ -788,6 +804,10 @@ impl KeyAction {
         Self::Paste,
         Self::SelectAll,
         Self::OpenSearch,
+        Self::SearchNext,
+        Self::SearchPrev,
+        Self::PrevCommand,
+        Self::NextCommand,
         Self::ZoomIn,
         Self::ZoomOut,
         Self::ZoomReset,
@@ -839,6 +859,10 @@ impl FromStr for KeyAction {
             "paste" => Ok(Self::Paste),
             "select_all" => Ok(Self::SelectAll),
             "open_search" => Ok(Self::OpenSearch),
+            "search_next" => Ok(Self::SearchNext),
+            "search_prev" => Ok(Self::SearchPrev),
+            "prev_command" => Ok(Self::PrevCommand),
+            "next_command" => Ok(Self::NextCommand),
             "zoom_in" => Ok(Self::ZoomIn),
             "zoom_out" => Ok(Self::ZoomOut),
             "zoom_reset" => Ok(Self::ZoomReset),
@@ -1066,6 +1090,20 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::Comma, BindingModifiers::CTRL_SHIFT),
         KeyAction::OpenSettings,
+    );
+
+    // -- Search --
+    map.bind(
+        KeyCombo::new(BindingKey::F, BindingModifiers::CTRL_SHIFT),
+        KeyAction::OpenSearch,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::ArrowUp, BindingModifiers::CTRL_SHIFT),
+        KeyAction::PrevCommand,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::ArrowDown, BindingModifiers::CTRL_SHIFT),
+        KeyAction::NextCommand,
     );
 
     // -- Scrollback --
@@ -1412,7 +1450,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            31,
+            35,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -1767,13 +1805,14 @@ mod tests {
         let map = BindingMap::default();
         // Count: Copy(1) + Paste(1) + NewTab(1) + CloseTab(1) + NextTab(1)
         //        + PrevTab(1) + SwitchToTab1-9(9) + ZoomIn(2) + ZoomOut(1)
-        //        + ZoomReset(1) + OpenSettings(1) + ScrollPageUp(1)
+        //        + ZoomReset(1) + OpenSettings(1) + OpenSearch(1)
+        //        + PrevCommand(1) + NextCommand(1) + ScrollPageUp(1)
         //        + ScrollPageDown(1) + ScrollToTop(1) + ScrollToBottom(1)
-        //        + ScrollLineUp(1) + ScrollLineDown(1) = 26
+        //        + ScrollLineUp(1) + ScrollLineDown(1) = 29
         assert_eq!(
             map.len(),
-            26,
-            "default binding map should have exactly 26 bindings"
+            29,
+            "default binding map should have exactly 29 bindings"
         );
     }
 
@@ -1786,7 +1825,8 @@ mod tests {
             KeyAction::MoveTabRight,
             KeyAction::RenameTab,
             KeyAction::SelectAll,
-            KeyAction::OpenSearch,
+            KeyAction::SearchNext,
+            KeyAction::SearchPrev,
             KeyAction::ToggleMenuBar,
         ];
         for action in unbound {

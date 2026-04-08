@@ -175,7 +175,11 @@ limit = 4000
 #     select_all      = (unbound)
 #
 #   Search:
-#     open_search     = (unbound)
+#     open_search     = "Ctrl+Shift+F"
+#     search_next     = (unbound, Enter in search bar)
+#     search_prev     = (unbound, Shift+Enter in search bar)
+#     prev_command    = "Ctrl+Shift+Up"
+#     next_command    = "Ctrl+Shift+Down"
 #
 #   Font zoom:
 #     zoom_in         = "Ctrl+Equals"  (also "Ctrl+Plus")
