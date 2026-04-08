@@ -403,7 +403,7 @@ pub fn run_terminal(
             // Poll interval for checking slave termios echo state.
             // Used with `recv_timeout` so we detect password prompts
             // even when no keystrokes are arriving.
-            const ECHO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+            const ECHO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
             if cfg!(target_os = "macos") {
                 // macOS quirk: the child and reader must be started and

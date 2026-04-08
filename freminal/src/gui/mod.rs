@@ -125,6 +125,13 @@ struct FreminalGui {
     /// bound key combos are intercepted before PTY dispatch.
     binding_map: freminal_common::keybindings::BindingMap,
 
+    /// The last title sent to the OS window title bar via
+    /// `ViewportCommand::Title`.  Compared each frame so we only issue
+    /// the viewport command when the title actually changes — avoiding
+    /// an unconditional `send_viewport_cmd` that would trigger an
+    /// infinite repaint loop.
+    last_window_title: String,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -158,6 +165,7 @@ impl FreminalGui {
             args,
             egui_ctx,
             settings_modal: SettingsModal::new(config_path),
+            last_window_title: String::from("Freminal"),
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -1348,14 +1356,22 @@ impl eframe::App for FreminalGui {
             // Keep the window title bar in sync with the active tab's title.
             // This handles tab switches, OSC 0/2 title changes, and restore
             // from the title stack — all in one place.
+            //
+            // Only issue the viewport command when the title actually changed;
+            // calling `send_viewport_cmd` unconditionally every frame triggers
+            // an infinite repaint loop (~3 % idle CPU).
             let active_title = &self.tabs.active_tab().title;
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
                 active_title.as_str()
             };
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Title(window_title.to_owned()));
+            if window_title != self.last_window_title {
+                window_title.clone_into(&mut self.last_window_title);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                    self.last_window_title.clone(),
+                ));
+            }
 
             // Only schedule a wakeup when there is work to do:
             //  - new content arrived (`content_changed`)
