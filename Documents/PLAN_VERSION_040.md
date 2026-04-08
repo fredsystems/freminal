@@ -533,7 +533,7 @@ Default is `Dark` — the terminal starts in dark mode unless the user explicitl
 
 ```toml
 [theme]
-name = "catppuccin-mocha"         # Used when mode = "dark" or as the dark theme in "auto"
+dark_name = "catppuccin-mocha"    # Used when mode = "dark" or as the dark theme in "auto"
 mode = "dark"                     # "auto", "dark", or "light"
 light_name = "catppuccin-latte"   # Used when mode = "light" or as the light theme in "auto"
 ```
@@ -564,8 +564,9 @@ locked and `DECSET`/`DECRST` requests will be ignored.
 ### 52 Subtasks
 
 1. **52.1 — `ThemeMode` enum and config extension**
-   Add `ThemeMode` to `ThemeConfig`. Add `mode` and `light_name` fields. Update defaults,
-   validation, config parsing.
+   Add `ThemeMode` to `ThemeConfig`. Rename `name` to `dark_name`, add `mode` and
+   `light_name` fields. Update defaults, validation, config parsing. Support the
+   existing `name` field as a deprecated alias for backward compatibility.
 
 2. **52.2 — OS preference detection**
    Detect the OS dark/light preference via egui's visuals API. Track changes between frames.
@@ -616,6 +617,7 @@ infrastructure from v0.3.0 but could be developed on stubs if needed.
 
 ```toml
 [theme]
+dark_name = "catppuccin-mocha"
 mode = "dark"
 light_name = "catppuccin-latte"
 
