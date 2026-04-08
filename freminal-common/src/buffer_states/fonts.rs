@@ -24,7 +24,7 @@ pub enum FontDecorations {
 ///
 /// - `None`   — no underline (SGR 4:0 or SGR 24).
 /// - `Single` — plain underline (SGR 4 or SGR 4:1).
-/// - `Double` — double underline (SGR 4:2 or SGR 21).
+/// - `Double` — double underline (SGR 4:2).
 /// - `Curly`  — wavy/curly underline (SGR 4:3).
 /// - `Dotted` — dotted underline (SGR 4:4).
 /// - `Dashed` — dashed underline (SGR 4:5).

@@ -829,11 +829,12 @@ fn push_underline_quads(deco: &mut Vec<f32>, style: UnderlineStyle, p: &Underlin
 
 /// Push quads approximating a sine-wave curly underline.
 ///
-/// The wave amplitude is `2 * stroke` and the period is one cell width.
+/// The wave amplitude is `2 * max(stroke, 1.0)` and the period is one cell width.
 /// Each cell is subdivided into [`CURLY_SEGMENTS`] vertical-strip quads whose
 /// top and bottom edges follow the sine curve.
 fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
-    let amplitude = p.stroke * 2.0;
+    let thick = p.stroke.max(1.0);
+    let amplitude = thick * 2.0;
     let span = p.x1 - p.x0;
     if span <= 0.0 || p.cell_width <= 0.0 {
         return;
@@ -855,7 +856,7 @@ fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
         let y_end = amplitude.mul_add(phase_end.sin(), p.ul_y);
 
         let y_min = y_start.min(y_end);
-        let y_max = y_start.max(y_end) + p.stroke;
+        let y_max = y_start.max(y_end) + thick;
 
         push_quad(deco, sx, y_min, ex, y_max, p.color);
     }
@@ -887,6 +888,7 @@ fn push_dotted_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
 ///
 /// Each dash is `cell_width / 2` wide with a gap of `cell_width / 4`.
 fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
+    let thick = p.stroke.max(1.0);
     let dash_len = (p.cell_width * 0.5).max(2.0);
     let gap_len = (p.cell_width * 0.25).max(1.0);
     let step = dash_len + gap_len;
@@ -901,7 +903,7 @@ fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
     for i in 0..dash_count {
         let x = step.mul_add(gl_f32(i), p.x0);
         let dash_end = (x + dash_len).min(p.x1);
-        push_quad(deco, x, p.ul_y, dash_end, p.ul_y + p.stroke, p.color);
+        push_quad(deco, x, p.ul_y, dash_end, p.ul_y + thick, p.color);
     }
 }
 

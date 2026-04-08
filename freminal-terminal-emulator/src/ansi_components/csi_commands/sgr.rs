@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::iter::Peekable;
 use std::vec::IntoIter;
 
 use crate::ansi::{ParserOutcome, parse_param_as};
@@ -43,7 +44,7 @@ pub fn ansi_parser_inner_csi_finished_sgr(
     // Use an index-based loop because some SGR codes (38, 48, 58) consume
     // multiple subsequent semicolon-separated segments as their parameters.
     let parsed = parse_all_segments(&segments);
-    let mut iter = parsed.into_iter();
+    let mut iter = parsed.into_iter().peekable();
 
     while let Some(val) = iter.next() {
         dispatch_sgr_value(val, &mut iter, output);
@@ -85,7 +86,7 @@ enum SegmentValue {
 /// multi-param codes (38, 48, 58 in semicolon form).
 fn dispatch_sgr_value(
     value: SegmentValue,
-    iter: &mut std::vec::IntoIter<SegmentValue>,
+    iter: &mut Peekable<IntoIter<SegmentValue>>,
     output: &mut Vec<TerminalOutput>,
 ) {
     match value {
@@ -101,7 +102,7 @@ fn dispatch_sgr_value(
 /// segments from the iterator as color subparameters (semicolon form).
 fn dispatch_simple_param(
     param: usize,
-    iter: &mut std::vec::IntoIter<SegmentValue>,
+    iter: &mut Peekable<IntoIter<SegmentValue>>,
     output: &mut Vec<TerminalOutput>,
 ) {
     match param {
@@ -122,15 +123,16 @@ fn dispatch_simple_param(
 
 /// Consume subsequent `Simple` segments from the iterator that belong to a
 /// semicolon-form color specification (mode + up to 4 values).
-fn consume_color_params(iter: &mut std::vec::IntoIter<SegmentValue>, out: &mut Vec<Option<usize>>) {
-    // First, read the color mode (2 or 5)
-    let Some(mode_seg) = iter.next() else {
-        return;
+fn consume_color_params(iter: &mut Peekable<IntoIter<SegmentValue>>, out: &mut Vec<Option<usize>>) {
+    // Peek at the next segment to get the color mode.  If it's not a simple
+    // value, bail without consuming — the segment will be dispatched normally
+    // by the caller's main loop.
+    let mode = match iter.peek() {
+        Some(SegmentValue::Simple(v)) => *v,
+        _ => return,
     };
-    let mode = match mode_seg {
-        SegmentValue::Simple(v) => v,
-        SegmentValue::Colon(_) => return, // unexpected colon segment
-    };
+    // Safe to consume after peeking.
+    iter.next();
     out.push(mode);
 
     // Determine how many more values to consume based on the mode
@@ -141,12 +143,13 @@ fn consume_color_params(iter: &mut std::vec::IntoIter<SegmentValue>, out: &mut V
     };
 
     for _ in 0..count {
-        let Some(seg) = iter.next() else {
-            break;
-        };
-        match seg {
-            SegmentValue::Simple(v) => out.push(v),
-            SegmentValue::Colon(_) => break, // unexpected colon segment
+        match iter.peek() {
+            Some(SegmentValue::Simple(_)) => {
+                if let Some(SegmentValue::Simple(v)) = iter.next() {
+                    out.push(v);
+                }
+            }
+            _ => break, // colon segment or end — stop without consuming
         }
     }
 }
