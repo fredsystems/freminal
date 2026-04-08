@@ -243,6 +243,23 @@ impl FreminalGui {
             if self.is_playback {
                 self.show_playback_controls(ui, snap);
             }
+
+            // Password-prompt lock indicator: shown in the menu bar (which is
+            // always visible) so it works regardless of tab bar visibility.
+            if self.config.security.password_indicator
+                && self
+                    .tabs
+                    .active_tab()
+                    .echo_off
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("\u{1F512}")
+                            .color(egui::Color32::from_rgb(255, 200, 50)),
+                    );
+                });
+            }
         });
         (menu_action, any_menu_open)
     }
@@ -267,12 +284,13 @@ impl FreminalGui {
                     ui.separator();
                 }
 
-                // Load the snapshot to determine the echo-off (password prompt) state.
-                // The ArcSwap load is cheap (atomic ref-count bump).
-                // Only report echo-off when the password_indicator config option is
-                // enabled (default: true).
-                let is_echo_off =
-                    self.config.security.password_indicator && tab.arc_swap.load().is_echo_off;
+                // Read the echo-off state directly from the live atomic flag on
+                // the Tab, not from the snapshot.  Snapshots are only published
+                // when new PTY output arrives, so they go stale when the shell
+                // is idle at a password prompt.  The atomic is updated by the
+                // writer thread every 250 ms regardless of PTY activity.
+                let is_echo_off = self.config.security.password_indicator
+                    && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
 
                 let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
                 if !matches!(tab_action, TabBarAction::None) {
@@ -406,6 +424,7 @@ impl FreminalGui {
                     bell_active: false,
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
+                    echo_off: channels.echo_off,
                 };
                 self.tabs.add_tab(tab);
             }
@@ -1305,6 +1324,8 @@ impl eframe::App for FreminalGui {
             }
 
             let tab = self.tabs.active_tab_mut();
+            let is_echo_off = self.config.security.password_indicator
+                && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
             let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
@@ -1315,6 +1336,7 @@ impl eframe::App for FreminalGui {
                 self.settings_modal.is_open || any_menu_open,
                 bg_opacity,
                 &self.binding_map,
+                is_echo_off,
             );
 
             // Handle key actions that couldn't be dispatched at the input

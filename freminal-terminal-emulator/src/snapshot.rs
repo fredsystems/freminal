@@ -286,16 +286,6 @@ pub struct TerminalSnapshot {
     /// Wrapped in `Arc` so the clean-path snapshot reuse is cheap.
     pub visible_image_placements: Arc<Vec<Option<ImagePlacement>>>,
 
-    /// `true` when the PTY slave currently has the `ECHO` flag disabled.
-    ///
-    /// This is the standard signal that a password prompt is active: the foreground
-    /// process (e.g. `sudo`, `ssh`) called `tcsetattr()` to suppress echoing so the
-    /// typed password does not appear on screen.  The GUI uses this to show a lock
-    /// indicator in the tab bar.
-    ///
-    /// Always `false` on Windows (`ConPTY` does not expose a POSIX fd).
-    pub is_echo_off: bool,
-
     /// Playback status, present only when the application is in playback mode.
     ///
     /// The GUI uses this to render playback controls and frame progress.
@@ -346,7 +336,6 @@ impl TerminalSnapshot {
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
-            is_echo_off: false,
             #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: None,
@@ -381,10 +370,5 @@ mod tests {
     #[test]
     fn empty_kitty_keyboard_flags_is_zero() {
         assert_eq!(TerminalSnapshot::empty().kitty_keyboard_flags, 0);
-    }
-
-    #[test]
-    fn empty_is_echo_off_is_false() {
-        assert!(!TerminalSnapshot::empty().is_echo_off);
     }
 }

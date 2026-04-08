@@ -9,6 +9,7 @@
 //! wires all channels, spawns the PTY consumer thread, and returns the
 //! GUI-side channel endpoints as a [`TabChannels`].
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -57,6 +58,15 @@ pub struct TabChannels {
     /// process exits or the PTY read channel closes.  The GUI polls this
     /// to close the tab (or the whole app if it was the last tab).
     pub pty_dead_rx: Receiver<()>,
+
+    /// Shared atomic flag reflecting whether the PTY slave currently has
+    /// `ECHO` disabled (i.e. a password prompt is active).
+    ///
+    /// The GUI reads this directly every frame (via `Relaxed` atomic load)
+    /// instead of going through `TerminalSnapshot`, because snapshots are
+    /// only published on PTY output — if the shell is idle waiting for a
+    /// password, the snapshot would be stale.
+    pub echo_off: Arc<AtomicBool>,
 }
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
@@ -90,6 +100,9 @@ pub fn spawn_pty_tab(
 
     let pty_write_tx = terminal.clone_write_tx();
     let child_exit_rx = terminal.child_exit_rx();
+    let echo_off = terminal
+        .echo_off_atomic()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
@@ -120,6 +133,7 @@ pub fn spawn_pty_tab(
         clipboard_rx,
         search_buffer_rx,
         pty_dead_rx,
+        echo_off,
     })
 }
 

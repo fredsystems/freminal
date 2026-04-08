@@ -451,18 +451,19 @@ impl TerminalEmulator {
             .map_err(|e| anyhow::anyhow!("Failed to send raw bytes to PTY: {e}"))
     }
 
-    /// Return `true` when the PTY slave currently has `ECHO` disabled.
+    /// Return a shared handle to the atomic flag that tracks whether the PTY
+    /// slave has `ECHO` disabled (i.e. a password prompt is active).
     ///
-    /// Delegates to `FreminalPtyInputOutput::is_echo_off()`, which reads the
-    /// cached echo state via an atomic load.  The writer thread polling loop
-    /// refreshes that cache by calling `tcgetattr()` on the master fd.
-    /// Returns `false` in headless / benchmark / playback mode where there is
+    /// The writer thread refreshes this flag every 250 ms (and after each
+    /// write/resize) by calling `tcgetattr()` on the master fd.
+    ///
+    /// Returns `None` in headless / benchmark / playback mode where there is
     /// no real PTY.
     #[must_use]
-    pub fn is_echo_off(&self) -> bool {
+    pub fn echo_off_atomic(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
         self.pty_io
             .as_ref()
-            .is_some_and(FreminalPtyInputOutput::is_echo_off)
+            .map(|io| std::sync::Arc::clone(&io.echo_off))
     }
 
     /// Build a point-in-time snapshot of the terminal state.
@@ -549,7 +550,6 @@ impl TerminalEmulator {
         let (images, visible_image_placements) = self.collect_visible_images(scroll_offset);
 
         let total_rows = self.internal.handler.buffer().get_rows().len();
-        let is_echo_off = self.is_echo_off();
 
         TerminalSnapshot {
             visible_chars,
@@ -587,7 +587,6 @@ impl TerminalEmulator {
             theme,
             images,
             visible_image_placements,
-            is_echo_off,
             #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),
