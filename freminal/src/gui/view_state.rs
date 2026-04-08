@@ -254,16 +254,6 @@ pub struct ViewState {
     /// `None` = cursor is at rest or trail was just enabled (first frame
     /// will record the timestamp without moving the cursor).
     pub cursor_last_frame: Option<Instant>,
-
-    /// The Chebyshev distance (max of |dx|, |dy|) measured at the moment
-    /// the cursor target changed.  Used to scale the exponential-decay
-    /// time constant so that small moves (1–2 cells) complete nearly
-    /// instantly while large jumps (8+ cells) show a visible trail.
-    ///
-    /// Re-computed whenever `cursor_target_col` or `cursor_target_row`
-    /// changes.  Stays constant during the animation so the glide speed
-    /// does not accelerate as the cursor converges.
-    pub cursor_anim_initial_distance: f32,
 }
 
 impl Default for ViewState {
@@ -293,7 +283,6 @@ impl Default for ViewState {
             cursor_target_col: 0.0,
             cursor_target_row: 0.0,
             cursor_last_frame: None,
-            cursor_anim_initial_distance: 0.0,
         }
     }
 }
@@ -346,13 +335,8 @@ impl ViewState {
     /// `trail_enabled` is the config flag; when `false`, the visual position
     /// snaps instantly to the target.  `duration` controls the speed of the
     /// exponential decay: approximately 95% of the remaining distance is
-    /// covered in `duration` (tau = duration / 3).
-    ///
-    /// The time constant is scaled by move distance: single-cell movements
-    /// complete in 1–2 frames (virtually instant), while large jumps
-    /// (8+ cells) receive the full trail duration.  This prevents the cursor
-    /// from feeling laggy during normal typing while still providing a
-    /// visible trail for Home/End/PgUp/PgDn and mouse-click jumps.
+    /// covered in `duration` (tau = duration / 3).  Every cursor movement
+    /// — including single-column typing — produces a visible glide.
     ///
     /// Returns `true` if the animation is still in progress (i.e. the caller
     /// should `request_repaint()` to continue driving it).
@@ -372,22 +356,6 @@ impl ViewState {
         /// visible 1-frame stall at animation start.
         const ASSUMED_FIRST_DT: Duration = Duration::from_millis(16);
 
-        /// Distance (in cells) at which the full trail duration applies.
-        /// Moves shorter than this use a proportionally smaller time
-        /// constant, so single-cell movements appear nearly instant.
-        const FULL_TRAIL_DISTANCE: f32 = 8.0;
-
-        /// Minimum distance scale factor, preventing the effective time
-        /// constant from collapsing to zero for very short moves.
-        const MIN_DISTANCE_SCALE: f32 = 0.05;
-
-        // Detect whether the target has moved since the last call.
-        // When it does, record the initial distance from the current
-        // visual position to the new target — this is used to scale
-        // tau for the entire animation so the glide speed stays constant.
-        let target_changed = (target_col - self.cursor_target_col).abs() > f32::EPSILON
-            || (target_row - self.cursor_target_row).abs() > f32::EPSILON;
-
         self.cursor_target_col = target_col;
         self.cursor_target_row = target_row;
 
@@ -397,12 +365,6 @@ impl ViewState {
             self.cursor_visual_row = target_row;
             self.cursor_last_frame = None;
             return false;
-        }
-
-        if target_changed {
-            let delta_col = self.cursor_target_col - self.cursor_visual_col;
-            let delta_row = self.cursor_target_row - self.cursor_visual_row;
-            self.cursor_anim_initial_distance = delta_col.abs().max(delta_row.abs());
         }
 
         let dx = self.cursor_target_col - self.cursor_visual_col;
@@ -426,24 +388,14 @@ impl ViewState {
 
         // Exponential decay: ~95% of distance covered in `duration`.
         // tau = duration / 3  →  e^(-3) ≈ 0.05  →  95% convergence.
-        let base_tau = duration.as_secs_f32() / 3.0;
-        if base_tau < f32::EPSILON {
+        let tau = duration.as_secs_f32() / 3.0;
+        if tau < f32::EPSILON {
             // Zero duration — snap immediately.
             self.cursor_visual_col = self.cursor_target_col;
             self.cursor_visual_row = self.cursor_target_row;
             self.cursor_last_frame = None;
             return false;
         }
-
-        // Scale the time constant by the *initial* distance (recorded when
-        // the target changed): small moves (1–2 cells) complete in 1–2
-        // frames, large jumps get the full trail.  Using the initial
-        // distance rather than the remaining distance keeps the glide
-        // speed constant throughout the animation — no late-stage
-        // acceleration.
-        let scale = (self.cursor_anim_initial_distance / FULL_TRAIL_DISTANCE)
-            .clamp(MIN_DISTANCE_SCALE, 1.0);
-        let tau = base_tau * scale;
 
         let factor = 1.0_f32 - (-dt.as_secs_f32() / tau).exp();
         self.cursor_visual_col = dx.mul_add(factor, self.cursor_visual_col);
@@ -1666,10 +1618,6 @@ mod tests {
             vs.cursor_last_frame.is_none(),
             "default cursor_last_frame should be None"
         );
-        assert!(
-            vs.cursor_anim_initial_distance.abs() < f32::EPSILON,
-            "default cursor_anim_initial_distance should be 0.0"
-        );
     }
 
     #[test]
@@ -1689,36 +1637,6 @@ mod tests {
         assert!(
             (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
             "visual row should snap to target"
-        );
-    }
-
-    #[test]
-    fn cursor_animation_initial_distance_stays_constant() {
-        let mut vs = ViewState::new();
-        let duration = Duration::from_millis(150);
-
-        // Jump from (0,0) to (20,0) — initial distance should be 20.
-        vs.update_cursor_animation(20.0, 0.0, true, duration);
-        let recorded = vs.cursor_anim_initial_distance;
-        assert!(
-            (recorded - 20.0).abs() < f32::EPSILON,
-            "initial distance should be 20.0, got {recorded}"
-        );
-
-        // Subsequent frames with the same target should NOT change the
-        // initial distance, even though the remaining distance shrinks.
-        std::thread::sleep(Duration::from_millis(20));
-        vs.update_cursor_animation(20.0, 0.0, true, duration);
-        assert!(
-            (vs.cursor_anim_initial_distance - recorded).abs() < f32::EPSILON,
-            "initial distance should stay constant during animation"
-        );
-
-        std::thread::sleep(Duration::from_millis(20));
-        vs.update_cursor_animation(20.0, 0.0, true, duration);
-        assert!(
-            (vs.cursor_anim_initial_distance - recorded).abs() < f32::EPSILON,
-            "initial distance should still stay constant"
         );
     }
 }
