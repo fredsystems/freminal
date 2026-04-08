@@ -351,11 +351,6 @@ impl ViewState {
         /// target rather than continuing to interpolate.
         const SNAP_THRESHOLD: f32 = 0.01;
 
-        /// Assumed frame delta for the first animation frame, when no
-        /// previous timestamp is available.  Using ~60 fps avoids a
-        /// visible 1-frame stall at animation start.
-        const ASSUMED_FIRST_DT: Duration = Duration::from_millis(16);
-
         self.cursor_target_col = target_col;
         self.cursor_target_row = target_row;
 
@@ -367,6 +362,16 @@ impl ViewState {
             return false;
         }
 
+        // First observation: snap visual to target so we don't glide
+        // from (0,0) on startup.  Record the timestamp so subsequent
+        // target changes will animate normally.
+        if self.cursor_last_frame.is_none() {
+            self.cursor_visual_col = target_col;
+            self.cursor_visual_row = target_row;
+            self.cursor_last_frame = Some(Instant::now());
+            return false;
+        }
+
         let dx = self.cursor_target_col - self.cursor_visual_col;
         let dy = self.cursor_target_row - self.cursor_visual_row;
 
@@ -374,16 +379,14 @@ impl ViewState {
         if dx.abs() < SNAP_THRESHOLD && dy.abs() < SNAP_THRESHOLD {
             self.cursor_visual_col = self.cursor_target_col;
             self.cursor_visual_row = self.cursor_target_row;
-            self.cursor_last_frame = None;
             return false;
         }
 
         let now = Instant::now();
-        // On the first frame after rest, assume a ~60 fps delta so the
-        // cursor begins moving immediately instead of stalling for one frame.
-        let dt = self
-            .cursor_last_frame
-            .map_or(ASSUMED_FIRST_DT, |last| now.duration_since(last));
+        // `cursor_last_frame` is always `Some` here — the `None` case
+        // was handled by the first-observation snap above.  The
+        // `unwrap_or` is a defensive fallback that can never fire.
+        let dt = now.duration_since(self.cursor_last_frame.unwrap_or(now));
         self.cursor_last_frame = Some(now);
 
         // Exponential decay: ~95% of distance covered in `duration`.
@@ -1464,34 +1467,23 @@ mod tests {
     }
 
     #[test]
-    fn cursor_animation_first_frame_records_timestamp() {
+    fn cursor_animation_first_frame_snaps_to_target() {
         let mut vs = ViewState::new();
-        // Initial visual is (0, 0). Move to (10, 5) with trail enabled.
+        // First ever call snaps visual to target so we don't glide from (0,0).
         let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::from_millis(150));
 
-        assert!(animating, "should be animating (first frame)");
+        assert!(!animating, "first observation should snap, not animate");
         assert!(
             vs.cursor_last_frame.is_some(),
             "should record timestamp on first frame"
         );
-        // The first frame uses an assumed 16ms dt, so the visual position
-        // should have moved toward the target (not stayed at zero).
         assert!(
-            vs.cursor_visual_col > 0.0,
-            "visual col should advance on first frame (assumed 16ms dt)"
+            (vs.cursor_visual_col - 10.0).abs() < f32::EPSILON,
+            "visual col should snap to target on first frame"
         );
         assert!(
-            vs.cursor_visual_row > 0.0,
-            "visual row should advance on first frame (assumed 16ms dt)"
-        );
-        // But it should NOT have reached the target yet.
-        assert!(
-            vs.cursor_visual_col < 10.0,
-            "visual col should not have reached target on first frame"
-        );
-        assert!(
-            vs.cursor_visual_row < 5.0,
-            "visual row should not have reached target on first frame"
+            (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
+            "visual row should snap to target on first frame"
         );
     }
 
@@ -1500,15 +1492,13 @@ mod tests {
         let mut vs = ViewState::new();
         let duration = Duration::from_millis(150);
 
-        // First frame — records timestamp.
-        vs.update_cursor_animation(10.0, 5.0, true, duration);
+        // First call — snaps to (0, 0) as initialization.
+        vs.update_cursor_animation(0.0, 0.0, true, duration);
 
-        // Sleep to let real time elapse.
+        // Change target to (10, 5) — should start animating.
         std::thread::sleep(Duration::from_millis(30));
-
-        // Second frame — should interpolate toward target.
         let animating = vs.update_cursor_animation(10.0, 5.0, true, duration);
-        assert!(animating, "should still be animating");
+        assert!(animating, "should be animating toward new target");
         assert!(
             vs.cursor_visual_col > 0.0,
             "visual col should have moved toward target, got {}",
@@ -1529,18 +1519,13 @@ mod tests {
     #[test]
     fn cursor_animation_at_target_returns_false() {
         let mut vs = ViewState::new();
-        // Place visual exactly at target.
-        vs.cursor_visual_col = 5.0;
-        vs.cursor_visual_row = 3.0;
-        vs.cursor_target_col = 5.0;
-        vs.cursor_target_row = 3.0;
-        vs.cursor_last_frame = None;
+        // Initialize at (5, 3).
+        vs.update_cursor_animation(5.0, 3.0, true, Duration::from_millis(150));
 
-        // Call with same target — nothing to animate.
+        // Call again with same target — nothing to animate.
         let animating = vs.update_cursor_animation(5.0, 3.0, true, Duration::from_millis(150));
 
         assert!(!animating, "should not be animating when already at target");
-        assert!(vs.cursor_last_frame.is_none());
     }
 
     #[test]
@@ -1548,8 +1533,8 @@ mod tests {
         let mut vs = ViewState::new();
         let duration = Duration::from_millis(150);
 
-        // Start animation toward (10, 0).
-        vs.update_cursor_animation(10.0, 0.0, true, duration);
+        // Initialize at (0, 0), then move toward (10, 0).
+        vs.update_cursor_animation(0.0, 0.0, true, duration);
         std::thread::sleep(Duration::from_millis(30));
         vs.update_cursor_animation(10.0, 0.0, true, duration);
 
@@ -1577,10 +1562,8 @@ mod tests {
     #[test]
     fn cursor_animation_zero_duration_snaps() {
         let mut vs = ViewState::new();
-        // First frame.
-        vs.update_cursor_animation(10.0, 5.0, true, Duration::ZERO);
-        // Even though trail is enabled, zero duration should snap.
-        // (First frame records timestamp; second frame computes tau=0 → snap.)
+        // Initialize, then move with zero duration.
+        vs.update_cursor_animation(0.0, 0.0, true, Duration::from_millis(150));
         std::thread::sleep(Duration::from_millis(5));
         let animating = vs.update_cursor_animation(10.0, 5.0, true, Duration::ZERO);
 
