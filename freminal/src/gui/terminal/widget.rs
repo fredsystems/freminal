@@ -529,6 +529,13 @@ pub struct FreminalTerminalWidget {
     previous_search_match_count: usize,
     /// Current match index from the most recently rendered frame.
     previous_search_current_match: usize,
+    /// The terminal cell `(col, row)` the mouse was hovering over in the
+    /// previous frame.  URL hover detection is skipped when the cell has not
+    /// changed, turning per-pixel mouse-move events into per-cell events.
+    previous_hover_cell: Option<(usize, usize)>,
+    /// The cursor icon that was last written via `output_mut`.  The egui call
+    /// is skipped when the icon has not changed.
+    previous_cursor_icon: CursorIcon,
 }
 
 impl FreminalTerminalWidget {
@@ -583,6 +590,8 @@ impl FreminalTerminalWidget {
             base_font_defs,
             previous_search_match_count: 0,
             previous_search_current_match: 0,
+            previous_hover_cell: None,
+            previous_cursor_icon: CursorIcon::Default,
         }
     }
 
@@ -1368,60 +1377,89 @@ impl FreminalTerminalWidget {
             }
         }
 
-        // URL hover detection: convert mouse pixel position to a cell
-        // coordinate, find the FormatTag covering that cell in the snapshot,
-        // and check whether it carries a URL.
-        if let Some(mouse_position) = view_state.mouse_position {
-            let (col, row) = encode_egui_mouse_pos_as_usize(
-                mouse_position,
-                (logical_cell_w, logical_cell_h),
-                terminal_rect.min,
-            );
+        // ── URL hover detection ───────────────────────────────────────
+        //
+        // Three gates to minimise work:
+        //   1. has_urls — skip everything when no URLs exist (common case).
+        //   2. Cell-change — skip URL lookup when the mouse is still over the
+        //      same terminal cell as last frame.
+        //   3. Icon-change — skip `output_mut(cursor_icon)` when the icon has
+        //      not changed.
+        if snap.has_urls {
+            if let Some(mouse_position) = view_state.mouse_position {
+                let (col, row) = encode_egui_mouse_pos_as_usize(
+                    mouse_position,
+                    (logical_cell_w, logical_cell_h),
+                    terminal_rect.min,
+                );
 
-            // Convert the mouse's display-column position to a flat index
-            // into visible_chars.  This correctly handles wide characters
-            // (CJK, emoji) whose continuation cells are stripped during
-            // flattening, making the per-row TChar count smaller than
-            // term_width.
-            let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
+                let cell = (col, row);
+                let cell_changed = self.previous_hover_cell != Some(cell);
+                self.previous_hover_cell = Some(cell);
 
-            let hovered_url = flat_idx.and_then(|idx| {
-                snap.url_tag_indices
-                    .iter()
-                    .filter_map(|&ti| snap.visible_tags.get(ti))
-                    .find(|tag| tag.start <= idx && idx < tag.end)
-                    .and_then(|tag| tag.url.as_ref())
-            });
+                if cell_changed {
+                    // Convert the mouse's display-column position to a flat
+                    // index into visible_chars, using the O(1) row-offset
+                    // table.
+                    let flat_idx =
+                        flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
 
-            if let Some(url) = hovered_url {
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = CursorIcon::PointingHand;
-                });
-
-                // Ctrl+click (Cmd+click on macOS) opens the URL.
-                let clicked = ui.input(|i| {
-                    i.pointer.button_clicked(egui::PointerButton::Primary)
-                        && (i.modifiers.ctrl || i.modifiers.mac_cmd)
-                });
-                if clicked {
-                    let url_str = url.url.clone();
-                    // Spawn the open on a background thread to avoid blocking
-                    // the render loop on the system's URL handler.
-                    std::thread::spawn(move || {
-                        if let Err(e) = open::that(&url_str) {
-                            error!("Failed to open URL {url_str}: {e}");
-                        }
+                    let hovered_url = flat_idx.and_then(|idx| {
+                        snap.url_tag_indices
+                            .iter()
+                            .filter_map(|&ti| snap.visible_tags.get(ti))
+                            .find(|tag| tag.start <= idx && idx < tag.end)
+                            .and_then(|tag| tag.url.as_ref())
                     });
+
+                    let new_icon = if hovered_url.is_some() {
+                        CursorIcon::PointingHand
+                    } else {
+                        CursorIcon::Default
+                    };
+
+                    if new_icon != self.previous_cursor_icon {
+                        self.previous_cursor_icon = new_icon;
+                        ui.ctx().output_mut(|output| {
+                            output.cursor_icon = new_icon;
+                        });
+                    }
+
+                    // Ctrl+click (Cmd+click on macOS) opens the URL.
+                    if let Some(url) = hovered_url {
+                        let clicked = ui.input(|i| {
+                            i.pointer.button_clicked(egui::PointerButton::Primary)
+                                && (i.modifiers.ctrl || i.modifiers.mac_cmd)
+                        });
+                        if clicked {
+                            let url_str = url.url.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = open::that(&url_str) {
+                                    error!("Failed to open URL {url_str}: {e}");
+                                }
+                            });
+                        }
+                    }
                 }
             } else {
+                // Mouse left the terminal area.
+                self.previous_hover_cell = None;
+                if self.previous_cursor_icon != CursorIcon::Default {
+                    self.previous_cursor_icon = CursorIcon::Default;
+                    ui.ctx().output_mut(|output| {
+                        output.cursor_icon = CursorIcon::Default;
+                    });
+                }
+            }
+        } else {
+            // No URLs — reset tracking state and ensure default cursor.
+            self.previous_hover_cell = None;
+            if self.previous_cursor_icon != CursorIcon::Default {
+                self.previous_cursor_icon = CursorIcon::Default;
                 ui.ctx().output_mut(|output| {
                     output.cursor_icon = CursorIcon::Default;
                 });
             }
-        } else {
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = CursorIcon::Default;
-            });
         }
 
         // ── Drag-and-drop ────────────────────────────────────────────
