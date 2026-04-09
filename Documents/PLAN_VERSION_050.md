@@ -776,8 +776,8 @@ how tmux's `prefix x` works.
    _Commit: `8f8fc06` — `PaneId`, `PaneIdGenerator`, `Pane` struct, custom `Debug` impl,
    11 unit tests._
 
-2. **58.2 — `PaneTree` data structure**
-   Implement `PaneTree` enum (`Leaf`/`Split`) in `freminal/src/gui/panes.rs`. Core
+2. **58.2 — `PaneTree` data structure** — **COMPLETE** (2026-04-09)
+   Implement `PaneTree` enum (`Leaf`/`Split`) in `freminal/src/gui/panes/mod.rs`. Core
    operations:
    - `layout(rect) -> Vec<(PaneId, Rect)>` — recursive layout computation
    - `find(id) -> Option<&Pane>` / `find_mut(id) -> Option<&mut Pane>`
@@ -789,6 +789,8 @@ how tmux's `prefix x` works.
      ancestor split in the given direction
      Thorough unit tests: split, close, layout math, nested trees, edge cases (close last
      pane, deep nesting, unbalanced trees).
+     _Commit: `333dcb4` — PaneTree with PaneNode (Leaf/Split), SplitDirection, PaneError,
+     ClosedPaneResult, split_rect helper, 35+ unit tests. Pane module converted to directory._
 
 3. **58.3 — Refactor `Tab` to use `PaneTree`**
    Replace `Tab`'s direct channel/view-state fields with a `PaneTree` and `active_pane:
