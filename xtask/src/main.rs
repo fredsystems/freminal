@@ -74,6 +74,10 @@ impl Args {
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
     /// Run CI checks (lint, deny, machete, build, test, bench compile)
+    ///
+    /// This is the **full** CI pipeline intended for GitHub Actions.  For
+    /// pre-commit hooks, use `cargo xtask precommit` instead — it skips checks
+    /// already covered by separate pre-commit hooks (clippy, rustfmt, etc.).
     CI,
 
     /// Build the project
@@ -151,6 +155,14 @@ enum Command {
     /// Compile all benchmarks without running them
     #[command(visible_alias = "bc")]
     BenchCompile,
+
+    /// Lightweight pre-commit check (test + machete + default-features test)
+    ///
+    /// Runs only the checks that are NOT already covered by separate
+    /// pre-commit hooks (clippy, rustfmt, codespell, markdownlint, prettier).
+    /// Use this instead of `ci` in the pre-commit hook for faster commits.
+    #[command(visible_alias = "pc")]
+    Precommit,
 }
 
 impl Command {
@@ -176,6 +188,7 @@ impl Command {
             Self::TestDocs => test_docs(),
             Self::TestLibs => test_libs(),
             Self::BenchCompile => bench_compile(),
+            Self::Precommit => precommit(),
         }
     }
 }
@@ -388,6 +401,31 @@ fn test_default_features() -> Result<()> {
     run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
     run_cargo_no_features(vec!["test", "--all-targets"])?;
     run_cargo_no_features(vec!["test", "--doc"])?;
+    Ok(())
+}
+
+/// Lightweight pre-commit check.
+///
+/// The separate pre-commit hooks already cover clippy, rustfmt, codespell,
+/// markdownlint, and prettier.  This subcommand runs only the checks that
+/// those hooks do NOT cover:
+///
+/// 1. `test` — lib + doc tests with all features.
+/// 2. `machete` — unused dependency detection (fast).
+///
+/// Skipped (handled by other hooks or too slow for pre-commit):
+/// - clippy (separate hook)
+/// - rustfmt (separate hook)
+/// - typos / codespell (separate hook)
+/// - markdownlint (separate hook)
+/// - `lint_docs` / docs-rs (slow, CI-only)
+/// - cargo-deny (slow, CI-only)
+/// - cargo build (redundant — tests compile everything)
+/// - `bench_compile` (slow, CI-only)
+/// - `test_default_features` (slow, CI-only — catches feature gating errors)
+fn precommit() -> Result<()> {
+    test()?;
+    machete()?;
     Ok(())
 }
 
