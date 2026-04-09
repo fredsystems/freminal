@@ -451,8 +451,10 @@ fn bench_bg_instances(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("build_bg_instances", format!("{width}x{height}")),
             |b| {
+                let mut instances = Vec::new();
+                let mut deco = Vec::new();
                 b.iter(|| {
-                    std::hint::black_box(build_background_instances(
+                    build_background_instances(
                         &lines,
                         cell_width,
                         cell_height,
@@ -470,7 +472,11 @@ fn bench_bg_instances(c: &mut Criterion) {
                         &[],   // match_highlights
                         &CATPPUCCIN_MOCHA,
                         None, // cursor_color_override
-                    ));
+                        &mut instances,
+                        &mut deco,
+                    );
+                    std::hint::black_box(instances.len());
+                    std::hint::black_box(deco.len());
                 });
             },
         );
@@ -501,9 +507,9 @@ fn bench_fg_instances(c: &mut Criterion) {
             BenchmarkId::new("build_fg_instances", format!("{width}x{height}")),
             |b| {
                 b.iter_batched(
-                    GlyphAtlas::default,
-                    |mut atlas| {
-                        std::hint::black_box(build_foreground_instances(
+                    || (GlyphAtlas::default(), Vec::new()),
+                    |(mut atlas, mut instances)| {
+                        build_foreground_instances(
                             &lines,
                             &mut atlas,
                             &fm,
@@ -511,7 +517,9 @@ fn bench_fg_instances(c: &mut Criterion) {
                             ascent,
                             &opts,
                             &CATPPUCCIN_MOCHA,
-                        ));
+                            &mut instances,
+                        );
+                        std::hint::black_box(instances.len());
                     },
                     BatchSize::SmallInput,
                 );

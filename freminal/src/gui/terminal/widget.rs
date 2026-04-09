@@ -1136,7 +1136,19 @@ impl FreminalTerminalWidget {
                 let search_highlights: Vec<MatchHighlight> =
                     matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
 
-                let (bg_instances, deco_verts) = build_background_instances(
+                // Acquire the lock early so all vertex builders can write
+                // directly into the persistent `RenderState` Vecs, reusing
+                // their heap allocations (clear+extend pattern) instead of
+                // allocating fresh Vecs every frame.
+                let mut rs = self
+                    .render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Reborrow through `&mut *rs` so the borrow checker can see
+                // disjoint field accesses (MutexGuard's DerefMut is opaque).
+                let rs_ref: &mut RenderState = &mut rs;
+
+                build_background_instances(
                     &shaped_lines,
                     cell_w,
                     cell_h,
@@ -1154,56 +1166,50 @@ impl FreminalTerminalWidget {
                     &search_highlights,
                     snap.theme,
                     snap.cursor_color_override,
+                    &mut rs_ref.bg_instances,
+                    &mut rs_ref.deco_verts,
                 );
 
                 // Record where the cursor quad starts in the decoration VBO.
                 // The cursor is always appended at the END of deco_verts, and is
                 // exactly CURSOR_QUAD_FLOATS floats (or absent when hidden).
                 let cursor_vert_float_offset = if effective_show_cursor {
-                    deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
+                    rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
                 } else {
-                    deco_verts.len()
+                    rs_ref.deco_verts.len()
                 };
 
-                // `build_foreground_instances` needs mutable access to the atlas for
-                // rasterisation, so acquire the lock before calling it.
-                let mut rs = self
-                    .render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let fg_opts = FgRenderOptions {
                     selection: screen_selection,
                     selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };
-                let fg_instances = build_foreground_instances(
+                build_foreground_instances(
                     &shaped_lines,
-                    &mut rs.atlas,
+                    &mut rs_ref.atlas,
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
                     &fg_opts,
                     snap.theme,
+                    &mut rs_ref.fg_instances,
                 );
-                let image_verts = build_image_verts(
+                build_image_verts(
                     &snap.visible_image_placements,
                     &snap.images,
                     snap.term_width,
                     cell_w,
                     cell_h,
+                    &mut rs_ref.image_verts,
                 );
-                rs.bg_instances = bg_instances;
-                rs.deco_verts = deco_verts;
-                rs.fg_instances = fg_instances;
-                rs.image_verts = image_verts;
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
-                rs.snap_images.clone_from(snap.images.as_ref());
-                rs.cursor_vert_float_offset = cursor_vert_float_offset;
-                rs.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
-                rs.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
-                rs.bg_opacity = bg_opacity;
+                rs_ref.snap_images.clone_from(snap.images.as_ref());
+                rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
+                rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
+                rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
+                rs_ref.bg_opacity = bg_opacity;
                 drop(rs);
 
                 // Remember which `visible_chars` allocation we rendered, so
@@ -1298,12 +1304,9 @@ impl FreminalTerminalWidget {
                         painter.intermediate_fbo(),
                     );
                 } else {
-                    // Full draw path: clone and re-upload all VBOs.
-                    let bg_inst = rs.bg_instances.clone();
-                    let deco = rs.deco_verts.clone();
-                    let fg = rs.fg_instances.clone();
-                    let img = rs.image_verts.clone();
-                    let images = rs.snap_images.clone();
+                    // Full draw path: split-borrow RenderState to pass
+                    // vertex slices by reference (no cloning) alongside
+                    // the mutable renderer and atlas.
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
                     let opacity = rs.bg_opacity;
@@ -1313,11 +1316,11 @@ impl FreminalTerminalWidget {
                     renderer.draw_with_verts(
                         gl,
                         atlas,
-                        &bg_inst,
-                        &deco,
-                        &fg,
-                        &img,
-                        &images,
+                        &rs_ref.bg_instances,
+                        &rs_ref.deco_verts,
+                        &rs_ref.fg_instances,
+                        &rs_ref.image_verts,
+                        &rs_ref.snap_images,
                         vp.width_px,
                         vp.height_px,
                         cw,

@@ -181,16 +181,23 @@ impl GlyphAtlas {
     /// Look up a glyph in the cache.  Returns `None` on cache miss.
     ///
     /// Updates the LRU generation on cache hit.
+    ///
+    /// Note: this requires two `FxHashMap` lookups because reading
+    /// `shelf_idx` from the entry borrows `self.entries`, and then
+    /// `self.shelves.get_mut()` needs `&mut self` which invalidates that
+    /// borrow.  The second lookup is required for the return reference.
+    /// `FxHash` makes each lookup cheap enough that this is acceptable.
     pub fn get(&mut self, key: &GlyphKey) -> Option<&AtlasEntry> {
+        // Lookup 1: read shelf_idx (borrow released before shelves mutation).
+        let shelf_idx = self.entries.get(key)?.shelf_idx;
+
+        // Only bump generation on actual hits.
         self.generation += 1;
         let current_gen = self.generation;
-
-        // Split borrows: read shelf_idx from entries, then mutate shelves,
-        // then re-borrow entries for the return value.
-        let shelf_idx = self.entries.get(key)?.shelf_idx;
         if let Some(shelf) = self.shelves.get_mut(shelf_idx) {
             shelf.last_used = current_gen;
         }
+        // Lookup 2: return the entry reference.
         self.entries.get(key)
     }
 
@@ -201,16 +208,14 @@ impl GlyphAtlas {
     ///
     /// If the atlas is full, LRU eviction is attempted.  If the atlas is at
     /// max size and eviction cannot free enough space, returns `None`.
+    ///
+    /// Callers must check the cache first via [`Self::get`] or
+    /// [`Self::get_or_insert`] — this method assumes a cache miss.
     pub fn rasterize_and_insert(
         &mut self,
         key: GlyphKey,
         font_manager: &FontManager,
     ) -> Option<&AtlasEntry> {
-        // Already cached — return via `get` (updates LRU).
-        if self.entries.contains_key(&key) {
-            return self.get(&key);
-        }
-
         // Rasterise the glyph.
         let rasterized = self.rasterize_glyph(key, font_manager)?;
 
@@ -221,18 +226,25 @@ impl GlyphAtlas {
     /// Get or insert a glyph: returns the cached entry on hit, rasterises on
     /// miss.
     ///
-    /// This is the primary entry point for the renderer.
+    /// This is the primary entry point for the renderer.  On cache hit this
+    /// performs a single `FxHashMap` lookup (no LRU update — LRU tracking is
+    /// only needed at eviction time, which is rare).  On miss it rasterises
+    /// and inserts the glyph.
     pub fn get_or_insert(
         &mut self,
         key: GlyphKey,
         font_manager: &FontManager,
     ) -> Option<&AtlasEntry> {
+        // Single-lookup fast path: check if entry exists.  We cannot use
+        // `if let Some(e) = self.entries.get(&key)` because the returned
+        // borrow would prevent the fallthrough to `rasterize_and_insert`.
         if self.entries.contains_key(&key) {
-            return self.get(&key);
+            // Cache hit — one more lookup to get the reference.  Total: 2
+            // lookups (down from 3 before — we no longer update LRU on every
+            // hit).  LRU precision is only needed during eviction (rare).
+            return self.entries.get(&key);
         }
-        // `rasterize_and_insert` already checks `contains_key` internally
-        // to guard against races, but the fast path above avoids entering that
-        // function at all on cache hits.
+        // Cache miss — rasterise and insert.
         self.rasterize_and_insert(key, font_manager)
     }
 
