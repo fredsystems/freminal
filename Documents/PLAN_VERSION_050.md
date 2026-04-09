@@ -16,7 +16,7 @@ startup commands.
 | 54  | Background Images              | Medium | Pending |
 | 55  | Custom Shaders                 | Medium | Pending |
 | 56  | Session Restore / Startup Cmds | Medium | Pending |
-| 57  | Render Loop Optimization       | Medium | Pending |
+| 57  | Render Loop Optimization       | Medium | Active  |
 
 ---
 
@@ -489,11 +489,14 @@ solve a problem that content-change gating already handles. The complexity is no
    call `global_style_mut` when any of those change. Eliminates per-frame `Arc::make_mut`
    clone of the egui Style.
 
-6. **57.6 — PaintCallback caching feasibility**
-   Investigate whether the `egui::PaintCallback` (and its `Arc<CallbackFn>`) can be cached
-   and reused across frames when no vertex data changed. If feasible, implement. If the egui
-   API requires a new callback each frame, document the finding and close this subtask as
-   not-feasible.
+6. **57.6 — PaintCallback caching feasibility** ✅ Closed: not feasible.
+   egui rebuilds its shape list from scratch every frame — `ui.painter().add()` is the only
+   way to submit draw commands, and there is no "reuse last frame's shapes" API. The
+   `CallbackFn` closure captures per-frame state (`is_cursor_only`, `cursor_only_verts`)
+   that changes each frame, so the closure itself cannot be reused. Even if we restructured
+   captures via `Arc<Mutex<…>>`, we would still allocate a `PaintCallback` shape each frame.
+   The cost of `Arc::new(CallbackFn::new(…))` is a single heap allocation per frame
+   (~microseconds) — negligible compared to actual GL draw calls. No code change needed.
 
 7. **57.7 — Benchmarks and verification**
    Measure before/after CPU usage during sustained mouse movement (no content change, no
