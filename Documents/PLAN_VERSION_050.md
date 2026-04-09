@@ -812,6 +812,10 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
    Implement split-vertical and split-horizontal: create a new pane (via `spawn_pty_tab`),
    insert it into the tree at the focused pane's location. The focused pane stays in `first`,
    the new pane goes in `second`. Focus moves to the new pane. Wire up the keybindings.
+   **CWD inheritance:** New panes inherit the parent pane's current working directory by
+   default (read via `/proc/<pid>/cwd` on Linux, or the `cwd` field on the snapshot). A
+   config option (`[panes] inherit_cwd = true`) controls this — when false, new panes use
+   the user's default shell CWD (or a configured `default_directory`).
 
 7. **58.7 — Close pane**
    Implement pane close: remove the pane from the tree, collapse the parent split. Focus
@@ -847,13 +851,18 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
     default keybindings to `BindingMap::default()` and `config_example.toml`. Update the
     Settings Modal keybindings tab to show the new bindings. Document in `config_example.toml`.
 
-13. **58.13 — Tests**
+13. **58.13 — Tests and performance verification**
     - Unit tests: `PaneTree` operations (split, close, layout, navigation, resize, zoom)
     - Unit tests: `Tab` with pane tree (single pane regression, multi-pane operations)
     - Integration tests: verify multiple panes render concurrently, input goes to correct
       pane, resize propagates correctly
     - Benchmarks: if pane layout computation is performance-sensitive, add a benchmark for
       `PaneTree::layout()` with various tree depths
+    - **Pre-merge flamegraph:** Before merging, run `cargo flamegraph` and compare against
+      the known baseline. Zero performance regressions are acceptable except for the
+      inherent cost of additional PTY/emulator instances (which should be near-zero since
+      the PTY and emulator layers are not a major bottleneck). Any regression in the render
+      loop, layout, or snapshot path is a blocker.
 
 ### 58 Primary Files
 
