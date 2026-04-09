@@ -17,6 +17,7 @@ startup commands.
 | 55  | Custom Shaders                 | Medium | Pending  |
 | 56  | Session Restore / Startup Cmds | Medium | Pending  |
 | 57  | Render Loop Optimization       | Medium | Complete |
+| 58  | Built-in Multiplexer           | Large  | Pending  |
 
 ---
 
@@ -26,6 +27,15 @@ startup commands.
 
 Allow opening multiple OS windows from a single Freminal process, sharing configuration,
 theme state, and font resources. Currently each Freminal invocation is fully independent.
+
+**Known issue:** Some application launchers (e.g., vicinae) refuse to spawn a second
+Freminal instance when one is already running. This is because the `.desktop` entry does
+not signal that multiple instances are expected. The desktop entry in `flake.nix` needs
+`StartupWMClass` and potentially other flags. Additionally, invocations like
+`freminal yazi --no-menu-bar` from compositor keybindings must spawn fully isolated
+instances that are not coalesced with existing windows. This task must address both the
+multi-window-from-one-process model (Option A) and the multi-process launch model (fixing
+the `.desktop` entry so independent instances always work).
 
 ### 53 Design
 
@@ -62,28 +72,36 @@ Recommend **Option A** for simplicity and resource sharing.
 
 ### 53 Subtasks
 
-1. **53.1 — Research egui multi-viewport API**
+1. **53.1 — Fix `.desktop` entry for multi-instance launch**
+   Update the desktop entry in `flake.nix` to ensure application launchers always spawn a
+   new process. Add `StartupWMClass=freminal` and investigate whether `SingleMainWindow=false`
+   or other freedesktop keys are needed. Verify that `freminal yazi --no-menu-bar` launched
+   from a compositor keybinding creates a fully isolated instance regardless of whether
+   another Freminal window is already open. This subtask can be completed independently of
+   the multi-viewport work below and provides immediate relief.
+
+2. **53.2 — Research egui multi-viewport API**
    Investigate eframe/egui's viewport API. Determine how to create additional OS windows,
    share GL contexts (or create separate ones), and manage per-window state. Document findings
    and confirm feasibility of Option A.
 
-2. **53.2 — Application lifecycle refactor**
+3. **53.3 — Application lifecycle refactor**
    Refactor the application model to support multiple windows. Create a `WindowManager` that
    owns a collection of windows, each with its own `TabManager`. The main eframe app becomes
    a coordinator.
 
-3. **53.3 — Per-window state**
+4. **53.4 — Per-window state**
    Each window owns: `TabManager`, `ViewState` per tab, window position/size. Shared across
    windows: `Config`, `FontManager`, glyph atlas texture.
 
-4. **53.4 — Window creation and destruction**
+5. **53.5 — Window creation and destruction**
    Implement "New Window" (creates a new viewport with an initial tab). Implement window close
    (closes all tabs in that window). Last window close exits the app.
 
-5. **53.5 — Keyboard shortcut and menu integration**
+6. **53.6 — Keyboard shortcut and menu integration**
    Add `KeyAction::NewWindow` to keybindings. Add "New Window" to the menu bar's "Window" menu.
 
-6. **53.6 — Tests**
+7. **53.7 — Tests**
    Unit tests: window manager operations (create, close, last-window-exit). Integration:
    verify multiple windows can exist concurrently without resource conflicts.
 
@@ -546,6 +564,326 @@ Requires re-implementing mouse tracking outside egui, duplicating work. Rejected
 
 ---
 
+## Task 58 — Built-in Multiplexer (Split Panes)
+
+### 58 Overview
+
+Add built-in terminal multiplexing: horizontal and vertical split panes within a tab, with
+keyboard-driven navigation, resize, close, and zoom. This replaces the need for tmux/zellij
+for local workflows and gives Freminal native ownership of every pane's scrollback — meaning
+search, selection, and copy mode work natively across all panes without fighting an external
+multiplexer's alt-screen buffer.
+
+**Subsumes:** A.2 (Split Panes) from `FUTURE_PLANS.md`. That item is now tracked here.
+
+**Explicitly out of scope for this task:**
+
+- Remote mux / SSH domains / detach-reattach (B.1 in `FUTURE_PLANS.md` — remains deferred)
+- Status bar (deferred to a future task)
+- Session save/restore of pane layouts (handled by Task 56's stretch goals)
+- Multiple OS windows (Task 53 — separate, coexists)
+
+### 58 Motivation
+
+The user relies on tmux daily. tmux works inside Freminal, but because tmux manages its own
+scrollback in the alternate screen buffer, Freminal has no access to pane scrollback content.
+Built-in muxing means Freminal owns every pane's `TerminalEmulator` and `Buffer` natively —
+search, selection, copy mode, and scroll all Just Work without fighting an external
+multiplexer. The goal is "90% of tmux" for local use: split, navigate, resize, close, zoom.
+
+### 58 Architecture
+
+#### Current Model (one emulator per tab)
+
+```text
+TabManager
+  └── Tab
+        ├── Arc<ArcSwap<TerminalSnapshot>>   (one snapshot)
+        ├── Sender<InputEvent>                (one input channel)
+        ├── Sender<PtyWrite>                  (one write channel)
+        ├── Receiver<WindowCommand>           (one cmd channel)
+        ├── Receiver<()>                      (pty death)
+        ├── ViewState                         (one view state)
+        └── …metadata (title, bell, echo_off)
+```
+
+#### New Model (pane tree per tab)
+
+```text
+TabManager
+  └── Tab
+        ├── PaneTree                          (binary tree of panes)
+        │     ├── Leaf: Pane { channels, view_state, title, … }
+        │     └── Split { direction, ratio, left, right }
+        ├── active_pane: PaneId               (which pane has focus)
+        └── zoomed_pane: Option<PaneId>       (if zoomed, only this pane renders)
+```
+
+Each `Pane` holds the fields currently on `Tab`:
+
+```rust
+pub struct Pane {
+    pub id: PaneId,
+    pub arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+    pub input_tx: Sender<InputEvent>,
+    pub pty_write_tx: Sender<PtyWrite>,
+    pub window_cmd_rx: Receiver<WindowCommand>,
+    pub clipboard_rx: Receiver<String>,
+    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
+    pub pty_dead_rx: Receiver<()>,
+    pub title: String,
+    pub bell_active: bool,
+    pub title_stack: Vec<String>,
+    pub view_state: ViewState,
+    pub echo_off: Arc<AtomicBool>,
+}
+```
+
+`Tab` becomes a thin wrapper around `PaneTree` + focus tracking. A tab with no splits is
+simply a `PaneTree` with a single leaf — zero overhead compared to today.
+
+#### PaneTree (binary tree)
+
+The pane layout is a binary tree. Leaves are `Pane` instances. Internal nodes are splits:
+
+```rust
+pub enum PaneTree {
+    Leaf(Pane),
+    Split {
+        direction: SplitDirection,  // Horizontal | Vertical
+        ratio: f32,                 // 0.0–1.0, position of the divider
+        first: Box<PaneTree>,       // left/top child
+        second: Box<PaneTree>,      // right/bottom child
+    },
+}
+
+pub enum SplitDirection {
+    Horizontal,  // divider is horizontal → panes stack top/bottom
+    Vertical,    // divider is vertical → panes stack left/right
+}
+```
+
+This is the same approach used by WezTerm (`Tree<Arc<dyn Pane>, SplitDirectionAndSize>`)
+but simplified: no trait objects, no remote pane abstraction, no Arc indirection. The tree
+is owned entirely by the GUI thread (pane channels are the only shared state).
+
+**Why a binary tree?** It naturally represents nested splits of any depth. Splitting a pane
+replaces its leaf node with an internal Split node whose children are the original pane and
+the new pane. Closing a pane removes it and collapses the parent Split back to the sibling.
+No grid layout math, no constraint solver — just recursive subdivision.
+
+#### Rendering
+
+Each pane is rendered into its allocated `egui::Rect` within the `CentralPanel`. The layout
+algorithm recursively subdivides the available rect according to split direction and ratio:
+
+```text
+fn layout(tree: &PaneTree, rect: Rect) -> Vec<(PaneId, Rect)> {
+    match tree {
+        Leaf(pane) => vec![(pane.id, rect)],
+        Split { direction, ratio, first, second } => {
+            let (r1, r2) = split_rect(rect, direction, ratio);
+            [layout(first, r1), layout(second, r2)].concat()
+        }
+    }
+}
+```
+
+Pane borders are rendered as thin lines (1-2px) between adjacent panes. The focused pane's
+border is highlighted with the theme's accent color.
+
+**Zoom mode:** When a pane is zoomed, only that pane renders (using the full `CentralPanel`
+rect). All other panes continue receiving PTY output and draining channels but are not drawn.
+A visual indicator (e.g., `[Z]` in the tab title or a subtle overlay badge) signals that
+zoom is active.
+
+#### Input Routing
+
+- **Keyboard input** goes to the active pane's `input_tx` only.
+- **Mouse input** goes to whichever pane the mouse cursor is over (hit-test against pane
+  rects). Clicking in a pane also sets it as the active pane.
+- **Resize events** are per-pane: when the window resizes or a split ratio changes, each
+  pane receives its own `InputEvent::Resize` with its new dimensions.
+
+#### Pane Lifecycle
+
+- **Split:** Takes the focused pane, replaces it with a Split node. The original pane
+  becomes `first`, a new pane (new PTY via `spawn_pty_tab`) becomes `second`.
+- **Close:** Removes the pane from the tree. Its parent Split collapses — the sibling
+  becomes the parent's replacement. If it was the last pane in the tab, the tab closes.
+- **PTY death:** Same as today — when `pty_dead_rx` fires, the pane is closed (tree
+  collapse). If it was the last pane, the tab closes.
+
+### 58 Design Decisions
+
+1. **Local-only muxing.** No Domain trait, no remote protocol, no SSH integration, no
+   detach/reattach. This keeps the implementation scope manageable and focused on the
+   primary use case (replacing tmux for local splits). Remote mux remains B.1.
+
+2. **Binary tree, not grid.** A binary tree is simpler to implement, handles arbitrary
+   nesting, and matches WezTerm's proven approach. Grid layouts can be simulated by
+   nesting horizontal splits inside vertical splits (or vice versa).
+
+3. **Ratio-based dividers.** Each split stores a `ratio: f32` (0.0–1.0) rather than
+   absolute pixel sizes. This makes resize propagation trivial — ratios are preserved
+   when the window resizes.
+
+4. **No status bar.** Deferred. Pane focus is indicated by border highlighting. Pane
+   information (title, working directory) can be shown in the tab bar or a future status
+   bar.
+
+5. **Pane tree lives on the GUI thread.** The tree structure is only needed for layout
+   and rendering. PTY threads don't know about the tree — they just own their
+   `TerminalEmulator` and publish snapshots as before. This preserves the lock-free
+   architecture.
+
+6. **`spawn_pty_tab` reused for pane creation.** The existing function creates a
+   `TerminalEmulator` and returns `TabChannels`. A new pane calls this same function
+   and wraps the result in a `Pane` struct. No new PTY spawning code needed.
+
+### 58 Keybindings
+
+All multiplexer actions go through the `BindingMap` system (per `agents.md` keybinding
+convention). Default bindings use `Ctrl+Shift+` prefix to avoid conflict with shell and
+application shortcuts:
+
+| Action            | Default Binding | `KeyAction` variant |
+| ----------------- | --------------- | ------------------- |
+| Split vertical    | Ctrl+Shift+Pipe | `SplitVertical`     |
+| Split horizontal  | Ctrl+Shift+\_   | `SplitHorizontal`   |
+| Close pane        | Ctrl+Shift+W    | `ClosePane`         |
+| Navigate left     | Ctrl+Shift+H    | `FocusPaneLeft`     |
+| Navigate down     | Ctrl+Shift+J    | `FocusPaneDown`     |
+| Navigate up       | Ctrl+Shift+K    | `FocusPaneUp`       |
+| Navigate right    | Ctrl+Shift+L    | `FocusPaneRight`    |
+| Resize grow left  | Ctrl+Alt+H      | `ResizePaneLeft`    |
+| Resize grow down  | Ctrl+Alt+J      | `ResizePaneDown`    |
+| Resize grow up    | Ctrl+Alt+K      | `ResizePaneUp`      |
+| Resize grow right | Ctrl+Alt+L      | `ResizePaneRight`   |
+| Zoom/unzoom pane  | Ctrl+Shift+Z    | `ZoomPane`          |
+
+Note: `Ctrl+Shift+W` currently closes a tab. With muxing, it closes the focused pane. If
+the pane is the last in its tab, the tab closes (same end result). This is consistent with
+how tmux's `prefix x` works.
+
+### 58 Subtasks
+
+1. **58.1 — `PaneId` and `Pane` struct**
+   Define `PaneId` (monotonic newtype, like `TabId`). Extract per-terminal fields from `Tab`
+   into a new `Pane` struct in `freminal/src/gui/panes.rs`. `Pane` holds all the channel
+   endpoints, `ViewState`, title, bell state, and `echo_off` that currently live on `Tab`.
+   Add unit tests for `PaneId` generation.
+
+2. **58.2 — `PaneTree` data structure**
+   Implement `PaneTree` enum (`Leaf`/`Split`) in `freminal/src/gui/panes.rs`. Core
+   operations:
+   - `layout(rect) -> Vec<(PaneId, Rect)>` — recursive layout computation
+   - `find(id) -> Option<&Pane>` / `find_mut(id) -> Option<&mut Pane>`
+   - `iter_panes()` / `iter_panes_mut()` — iterate all leaves
+   - `pane_count() -> usize`
+   - `split(target_id, direction) -> Result<PaneId>` — split a leaf, returns new pane's id
+   - `close(target_id) -> Result<ClosedPaneResult>` — remove a leaf, collapse parent
+   - `resize_split(target_id, direction, delta)` — adjust the split ratio of the nearest
+     ancestor split in the given direction
+     Thorough unit tests: split, close, layout math, nested trees, edge cases (close last
+     pane, deep nesting, unbalanced trees).
+
+3. **58.3 — Refactor `Tab` to use `PaneTree`**
+   Replace `Tab`'s direct channel/view-state fields with a `PaneTree` and `active_pane:
+PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is a
+   `PaneTree::Leaf` — functionally identical to today. Migrate all call sites in
+   `mod.rs` that access `tab.arc_swap`, `tab.input_tx`, etc. to go through the active
+   pane: `tab.active_pane().arc_swap`, etc. Ensure all existing tab functionality works
+   unchanged. Run the full test suite to verify no regressions.
+
+4. **58.4 — Pane layout rendering**
+   Modify `FreminalGui::ui()` to compute pane rects via `PaneTree::layout()` and render
+   each visible pane into its allocated rect. The `FreminalTerminalWidget::show()` call
+   needs to accept a rect parameter (or use `ui.allocate_rect()`). Render pane borders
+   between adjacent panes. Highlight the focused pane's border.
+
+5. **58.5 — Input routing**
+   Route keyboard input to the active pane. Route mouse input to the pane under the cursor
+   (hit-test against pane rects from the layout pass). Clicking in a pane sets it as active.
+   Per-pane resize: when the window resizes or a split ratio changes, compute each pane's
+   new `(width_chars, height_chars)` and send `InputEvent::Resize` to each affected pane.
+
+6. **58.6 — Split operations**
+   Implement split-vertical and split-horizontal: create a new pane (via `spawn_pty_tab`),
+   insert it into the tree at the focused pane's location. The focused pane stays in `first`,
+   the new pane goes in `second`. Focus moves to the new pane. Wire up the keybindings.
+
+7. **58.7 — Close pane**
+   Implement pane close: remove the pane from the tree, collapse the parent split. Focus
+   moves to the sibling. If the closed pane was the last in the tab, close the tab.
+   Handle PTY death: when `pty_dead_rx` fires for a pane, trigger the same close logic.
+   Wire up the keybinding.
+
+8. **58.8 — Directional navigation**
+   Implement `FocusPaneLeft/Down/Up/Right`: from the focused pane's rect, find the nearest
+   pane in the given direction (by comparing rect centers/edges). Move focus to it. Wrap
+   behavior: no-op at edges (do not wrap around). Wire up keybindings.
+
+9. **58.9 — Pane resize**
+   Implement `ResizePaneLeft/Down/Up/Right`: find the nearest split divider in the given
+   direction from the focused pane and adjust its ratio by a fixed step (e.g., 0.05).
+   Clamp ratio to `[0.1, 0.9]` to prevent zero-size panes. Each resize triggers
+   `InputEvent::Resize` to affected panes. Wire up keybindings. Also implement mouse-drag
+   resize: clicking and dragging a pane border adjusts the split ratio interactively.
+
+10. **58.10 — Zoom pane**
+    Implement zoom toggle: when zoomed, only the zoomed pane renders (using the full
+    available rect). All other panes continue receiving PTY output and draining channels
+    but are not drawn. The tab title or a subtle badge indicates zoom is active. Pressing
+    the zoom key again unzooms (restores the pane tree layout). Wire up the keybinding.
+
+11. **58.11 — Window command and PTY death drain for all panes**
+    Extend the per-frame drain loop in `FreminalGui::ui()` to iterate all panes in all
+    tabs (not just the active tab's channels). Each pane's `window_cmd_rx` is drained.
+    Each pane's `pty_dead_rx` is polled.
+
+12. **58.12 — Menu bar and config integration**
+    Add split/close/zoom/navigate actions to the menu bar under a "Pane" menu. Add
+    default keybindings to `BindingMap::default()` and `config_example.toml`. Update the
+    Settings Modal keybindings tab to show the new bindings. Document in `config_example.toml`.
+
+13. **58.13 — Tests**
+    - Unit tests: `PaneTree` operations (split, close, layout, navigation, resize, zoom)
+    - Unit tests: `Tab` with pane tree (single pane regression, multi-pane operations)
+    - Integration tests: verify multiple panes render concurrently, input goes to correct
+      pane, resize propagates correctly
+    - Benchmarks: if pane layout computation is performance-sensitive, add a benchmark for
+      `PaneTree::layout()` with various tree depths
+
+### 58 Primary Files
+
+- `freminal/src/gui/panes.rs` (new — `Pane`, `PaneId`, `PaneTree`, `SplitDirection`)
+- `freminal/src/gui/tabs.rs` (`Tab` refactored to use `PaneTree`)
+- `freminal/src/gui/mod.rs` (multi-pane rendering, input routing, drain loops)
+- `freminal/src/gui/terminal/widget.rs` (accept pane rect, per-pane rendering)
+- `freminal/src/gui/terminal/input.rs` (dispatch new `KeyAction` variants)
+- `freminal-common/src/keybindings.rs` (new `KeyAction` variants)
+- `config_example.toml` (new keybinding defaults)
+
+### 58 Rejected Alternatives
+
+**Trait-based `Pane` abstraction (WezTerm style):** WezTerm defines `Pane` as a trait with
+~40 methods to support local, remote, and tmux CC panes. Freminal's muxing is local-only,
+so a concrete struct is simpler, avoids dynamic dispatch, and avoids `Arc<dyn Pane>`
+indirection. If remote mux is added later (B.1), the Pane struct can be promoted to a trait
+at that time.
+
+**Grid layout (Windows Terminal style):** Windows Terminal uses a constraint-based grid.
+More flexible for certain layouts but significantly harder to implement and maintain. A
+binary tree handles all practical split arrangements and is the approach used by WezTerm,
+tmux, and zellij.
+
+**Pane tree on a separate thread:** No benefit — the tree is only needed for layout and
+rendering (GUI-thread concerns). PTY threads already communicate via channels and ArcSwap.
+Adding thread ownership of the tree would require synchronization with no performance gain.
+
+---
+
 ## Dependency Graph
 
 ```text
@@ -553,16 +891,20 @@ Task 53 (Multiple Windows) ── builds on tabs (Task 36, v0.3.0)
 Task 54 (Background Images) ── extends background_opacity (Task 34, complete)
 Task 55 (Custom Shaders) ── extends the GL renderer (Task 1, complete)
 Task 56 (Session Restore) ── depends on tabs (Task 36, v0.3.0)
-Task 57 (Render Loop Opt) ── independent; touches buffer, snapshot, and GUI
+Task 57 (Render Loop Opt) ── independent; complete
+Task 58 (Built-in Muxing) ── builds on tabs (Task 36, v0.3.0); subsumes A.2
 
 Tasks 54 and 55 are independent of each other.
-Tasks 53 and 56 both depend on tabs but are independent of each other.
-Task 57 is independent of all other v0.5.0 tasks.
+Tasks 53, 56, and 58 all depend on tabs but are independent of each other.
+Task 57 is independent of all other v0.5.0 tasks (complete).
+Task 58 is independent of Task 53 (multiple windows) — both can coexist.
+Task 58 subsumes A.2 (Split Panes) from FUTURE_PLANS.md.
 ```
 
-**Recommended order:** Task 57 can start immediately — it is independent and reduces CPU
-overhead for all subsequent development and testing. 54 and 55 can also start immediately
-(GL renderer work). 53 and 56 require tabs from v0.3.0 to be complete and stable.
+**Recommended order:** Task 57 is complete. Tasks 54 and 55 can start immediately (GL
+renderer work). Tasks 53, 56, and 58 require tabs from v0.3.0 (complete and stable).
+Task 58 (muxing) is the highest-value remaining feature — recommend prioritising it
+after or alongside Task 53.
 
 ---
 

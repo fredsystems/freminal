@@ -16,10 +16,11 @@ and plan document maintenance rules.
 | v0.2.0  | —                       | (Tasks 1–35 below)    | 35    | Done     |
 | v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Active   |
 | v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52 | Complete |
-| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–56 | Pending  |
+| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58 | Pending  |
 
 See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
-B.7, B.8, A.2) and remaining Category C housekeeping (Tasks 18, 19).
+B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been
+subsumed by Task 58.
 
 ---
 
@@ -72,6 +73,7 @@ B.7, B.8, A.2) and remaining Category C housekeeping (Tasks 18, 19).
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
+| 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Pending  | Task 36 (Tabs)       |
 
 ---
 
@@ -133,6 +135,8 @@ Task 33 (WezTerm & Ghostty Palettes) ── independent, can run any time
 Task 34 (Window Background Opacity) ── independent, can run any time
 
 Task 35 (Kitty Keyboard Protocol) ── independent, can run any time
+
+Task 58 (Built-in Multiplexer) ── depends on Task 36 (Tabs); subsumes A.2 (Split Panes)
 ```
 
 ### Dependency Details
@@ -274,63 +278,40 @@ Modal UI tab, and wires opacity into eframe viewport transparency and egui panel
 existing custom renderer already skips `DefaultBackground` cells, so semi-transparent panel fill
 achieves the effect without shader changes. Low-medium scope (5 subtasks).
 
+**Task 58:** Depends on Task 36 (Tabs). Built-in terminal multiplexing: horizontal and vertical
+split panes within a tab, with a binary pane tree layout, directional navigation, resize, close,
+and zoom. Subsumes A.2 (Split Panes) from `FUTURE_PLANS.md`. Local-only — no remote mux, no
+detach/reattach, no status bar. Each pane owns a `TerminalEmulator` via the existing `spawn_pty_tab`
+function and channel architecture. The pane tree lives on the GUI thread; PTY threads are unaware
+of the tree structure. Large scope (13 subtasks).
+
 ---
 
 ## Recommended Execution Order
 
-The following reflects the actual execution state: Tasks 1-17 and 20 are complete.
+The following reflects the actual execution state: Tasks 1-17, 20-35 are complete.
 The remaining tasks are ordered as follows.
-
-### Phase 3 — Next Up
-
-- **Task 5** — Font Ligatures (unblocked by Task 1)
-
-### Phase 4 — Feature Work
-
-Run after Task 5 completes. These are independent of each other and can run in parallel:
-
-- **Task 11** — Theming (unblocked by Tasks 2 + 3)
-- **Task 12** — Terminfo Audit (independent)
-- **Task 13** — Image Protocol Support (unblocked by Task 1)
-
-### Phase 5 — Test Coverage
-
-- **Task 6** — Test Gap Coverage (run after feature work to maximise coverage of new code)
-
-### Phase 6 — Packaging
-
-- **Task 4** — Deployment Flake (run last; benefits from a stable config schema and feature set)
 
 ### Phase 7 — Update Mechanism
 
-Run after Phase 6. Task 18 depends on Tasks 2, 3, and 16 (all complete). Task 19 is independent
+Task 18 depends on Tasks 2, 3, and 16 (all complete). Task 19 is independent
 and can be developed in a separate repo in parallel with Task 18.
 
 - **Task 18** — Client-Side Update Mechanism (unblocked by Tasks 2 + 3 + 16)
 - **Task 19** — Update Service & Website (independent, separate repo; shares API contract with 18)
 
-### Phase 8 — Correctness, Quality & Testing
+### v0.5.0 — Multi-Instance, Visual & Muxing
 
-Independent of each other and of Phases 3-7. Can run at any time in parallel with other work.
+These tasks are defined in `PLAN_VERSION_050.md`. Task 57 is complete.
 
-- **Task 21** — Tab Stop Correctness (independent)
-- **Task 22** — vttest Integration Test Suite (independent)
-- **Task 23** — Blinking Text (independent)
-- **Task 24** — Benchmark Improvements (independent)
-- **Task 25** — Code Quality Refactoring (independent)
-- **Task 26** — Bool-to-Enum Mode Refactor (independent)
-- **Task 27** — FIXME/TODO Audit (pending — 9 subtasks defined)
-- **Task 28** — Code Comment Audit (pending — 10 subtasks defined)
-- **Task 30** — Clippy Allow Audit (independent)
-- **Task 31** — Dead Code Audit (complete)
-- **Task 32** — Playback Feature Flag (stub — requires audit first)
-- **Task 33** — WezTerm & Ghostty Palettes (independent)
+- **Task 53** — Multiple Windows (depends on tabs, Task 36)
+- **Task 54** — Background Images (independent — extends Task 34)
+- **Task 55** — Custom Shaders (independent — extends Task 1 GL renderer)
+- **Task 56** — Session Restore / Startup Commands (depends on tabs, Task 36)
+- **Task 58** — Built-in Multiplexer / Split Panes (depends on tabs, Task 36; subsumes A.2)
 
-### Phase 9 — Final Structural Cleanup
-
-Must run after all other tasks are complete to avoid merge conflicts.
-
-- **Task 29** — God File Refactoring (depends on all other tasks)
+Tasks 54 and 55 can start immediately. Tasks 53, 56, and 58 all depend on tabs (Task 36,
+complete). Task 58 is the highest-value remaining feature.
 
 ```text
 Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
@@ -338,7 +319,12 @@ Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 2
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │                              │
-              └────────────────────────────── ┘
+v0.5.0:       ├── Task 53 (Multiple Windows)
+              ├── Task 54 (Background Images)
+              ├── Task 55 (Custom Shaders)
+              ├── Task 56 (Session Restore)
+              ├── Task 57 (Render Loop Opt) ── Complete
+              └── Task 58 (Built-in Muxing)
 ```
 
 ---

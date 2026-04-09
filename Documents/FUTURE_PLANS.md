@@ -38,8 +38,12 @@ any version.
 WezTerm includes a built-in multiplexer that supports remote sessions (SSH + mux protocol),
 eliminating the need for tmux in many workflows. This is WezTerm's signature differentiator.
 
-**Scope:** Very Large. This is a major architectural feature that would require a mux protocol,
-session persistence, and SSH transport. Recommend deferring until core features are solid.
+**Note:** The _local_ multiplexing portion (split panes, navigation, resize, zoom) is now
+covered by Task 58 in v0.5.0. B.1 remains as a placeholder for the _remote_ mux features:
+SSH domains, detach/reattach, session persistence across network connections, and a mux
+wire protocol. These are very large scope and deferred until core features are solid.
+
+**Scope:** Very Large. Requires a mux protocol, session persistence, and SSH transport.
 
 ---
 
@@ -112,6 +116,15 @@ needs investigation.
 
 ### A.2 — Split Panes
 
+**Status: Subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.**
+
+Task 58 in `PLAN_VERSION_050.md` implements built-in terminal multiplexing with a binary pane
+tree, directional navigation, resize, zoom, and all the functionality described below. See
+Task 58 for the full design.
+
+<details>
+<summary>Original description (for reference)</summary>
+
 Severity: Medium. No horizontal or vertical split pane support. Users who want side-by-side terminals must use
 OS window tiling or tmux.
 
@@ -127,6 +140,8 @@ from iTerm2, WezTerm, or Windows Terminal.
 - Pane border rendering
 
 **Primary files:** `freminal/src/gui/mod.rs`, new `freminal/src/gui/panes.rs`
+
+</details>
 
 ---
 
@@ -168,6 +183,7 @@ a project website at `freminal.dev`. Separate repository.
 
 ## Notes
 
-- B.1, B.2, B.3, B.7, and B.8 are deferred pending design decisions — not rejected.
-- A.2 (Split Panes) is deferred — tabs (v0.3.0) take priority; panes can layer on top later.
+- B.1 (Remote Mux) remains deferred — local muxing is now Task 58 in v0.5.0.
+- B.2, B.3, B.7, and B.8 are deferred pending design decisions — not rejected.
+- A.2 (Split Panes) is subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.
 - Category C items remain tracked in `MASTER_PLAN.md` with their existing plan documents.
