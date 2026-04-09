@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 /// Two separate `Arc<Vec<T>>` fields match the types in `TerminalSnapshot`
 /// directly, so the clean path (no dirty rows) is a pair of refcount bumps
 /// with no `Vec` allocation.
-type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>)>;
+type VisibleSnap = Option<(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>, Arc<Vec<usize>>)>;
+
+/// Result of flattening visible rows: `(chars, tags, row_offsets, content_changed)`.
+type FlattenResult = (Arc<Vec<TChar>>, Arc<Vec<FormatTag>>, Arc<Vec<usize>>, bool);
 
 /// Image data collected from the visible window for a snapshot.
 ///
@@ -519,7 +522,7 @@ impl TerminalEmulator {
         // Only flatten the *visible* rows — scrollback is not part of the
         // snapshot.  The previous code called `data_and_format_data_for_gui`
         // which also flattened scrollback, then discarded the result.
-        let (visible_chars, visible_tags, content_changed) =
+        let (visible_chars, visible_tags, row_offsets, content_changed) =
             self.flatten_visible(any_dirty, scroll_offset);
 
         // ── Remaining cheap reads ────────────────────────────────────────────
@@ -581,6 +584,7 @@ impl TerminalEmulator {
             content_changed,
             has_blinking_text,
             has_urls,
+            row_offsets,
             scroll_changed,
             bracketed_paste: mode_fields.bracketed_paste,
             mouse_tracking: mode_fields.mouse_tracking,
@@ -609,22 +613,22 @@ impl TerminalEmulator {
     }
 
     /// Flatten the visible rows into `(Arc<Vec<TChar>>, Arc<Vec<FormatTag>>,
-    /// content_changed)`, using the snapshot-level cache to avoid work when no
-    /// visible row is dirty.
-    fn flatten_visible(
-        &mut self,
-        any_dirty: bool,
-        scroll_offset: usize,
-    ) -> (Arc<Vec<TChar>>, Arc<Vec<FormatTag>>, bool) {
+    /// Arc<Vec<usize>>, content_changed)`, using the snapshot-level cache to
+    /// avoid work when no visible row is dirty.
+    ///
+    /// The `Arc<Vec<usize>>` contains per-row flat-index offsets into the
+    /// chars vec (one entry per visible row).
+    fn flatten_visible(&mut self, any_dirty: bool, scroll_offset: usize) -> FlattenResult {
         if any_dirty {
             // At least one visible row is dirty — re-flatten via the cache.
-            let (vis_chars, vis_tags) = self
+            let (vis_chars, vis_tags, vis_row_offsets) = self
                 .internal
                 .handler
                 .buffer_mut()
                 .visible_as_tchars_and_tags(scroll_offset);
             let vc = Arc::new(vis_chars);
             let vt = Arc::new(vis_tags);
+            let vr = Arc::new(vis_row_offsets);
 
             // `content_changed` is true when the flat content actually differs
             // from the previous snapshot (guards against spurious redraws from
@@ -633,25 +637,32 @@ impl TerminalEmulator {
             let changed = self
                 .previous_visible_snap
                 .as_ref()
-                .is_none_or(|(prev_chars, _)| prev_chars.as_ref() != vc.as_ref());
+                .is_none_or(|(prev_chars, _, _)| prev_chars.as_ref() != vc.as_ref());
 
-            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
-            (vc, vt, changed)
-        } else if let Some((prev_chars, prev_tags)) = &self.previous_visible_snap {
+            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt), Arc::clone(&vr)));
+            (vc, vt, vr, changed)
+        } else if let Some((prev_chars, prev_tags, prev_row_offsets)) = &self.previous_visible_snap
+        {
             // No visible row is dirty — reuse cached Arcs (refcount bump only).
-            (Arc::clone(prev_chars), Arc::clone(prev_tags), false)
+            (
+                Arc::clone(prev_chars),
+                Arc::clone(prev_tags),
+                Arc::clone(prev_row_offsets),
+                false,
+            )
         } else {
             // First-ever snapshot and nothing is marked dirty yet (e.g. the
             // buffer was just created).  Flatten once to populate the cache.
-            let (vis_chars, vis_tags) = self
+            let (vis_chars, vis_tags, vis_row_offsets) = self
                 .internal
                 .handler
                 .buffer_mut()
                 .visible_as_tchars_and_tags(scroll_offset);
             let vc = Arc::new(vis_chars);
             let vt = Arc::new(vis_tags);
-            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt)));
-            (vc, vt, true)
+            let vr = Arc::new(vis_row_offsets);
+            self.previous_visible_snap = Some((Arc::clone(&vc), Arc::clone(&vt), Arc::clone(&vr)));
+            (vc, vt, vr, true)
         }
     }
 

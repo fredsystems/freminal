@@ -36,45 +36,54 @@ pub(super) const fn visible_window_start(snap: &TerminalSnapshot) -> usize {
 /// continuation cells.  A CJK character that occupies two display columns
 /// produces only one `TChar` entry.  The simple fixed-stride formula
 /// `row * (term_width + 1) + col` is therefore wrong whenever wide
-/// characters are present.  This function walks the flat vector to find the
-/// correct index.
+/// characters are present.
+///
+/// When `row_offsets` is provided (one entry per visible row, giving the
+/// flat index of that row's first `TChar`), the row-start lookup is O(1)
+/// instead of `O(visible_chars)`.  The column scan within a single row is
+/// still linear in the row width, but that is bounded by `term_width`.
 ///
 /// Returns `None` if `row`/`col` are out of range.
 pub(super) fn flat_index_for_cell(
     visible_chars: &[TChar],
     row: usize,
     col: usize,
+    row_offsets: &[usize],
 ) -> Option<usize> {
-    // Walk through visible_chars, splitting on TChar::NewLine to find the
-    // start of the target row.
-    let mut current_row: usize = 0;
-    let mut idx: usize = 0;
-
-    // Advance past preceding rows.
-    while current_row < row {
-        if idx >= visible_chars.len() {
-            return None; // row is beyond the data
+    // ── Row-start lookup ─────────────────────────────────────────────
+    let idx = if row_offsets.is_empty() {
+        // Fallback: linear scan (only reachable if the snapshot was built
+        // without row_offsets, e.g. from `TerminalSnapshot::empty()`).
+        let mut current_row: usize = 0;
+        let mut i: usize = 0;
+        while current_row < row {
+            if i >= visible_chars.len() {
+                return None;
+            }
+            if matches!(visible_chars[i], TChar::NewLine) {
+                current_row += 1;
+            }
+            i += 1;
         }
-        if matches!(visible_chars[idx], TChar::NewLine) {
-            current_row += 1;
-        }
-        idx += 1;
-    }
+        i
+    } else {
+        // O(1) path: use the precomputed row-offset table.
+        *row_offsets.get(row)?
+    };
 
-    // Now `idx` points to the first TChar of the target row (or past the end).
-    // Walk through the row's characters, accumulating display columns.
+    // ── Column scan within the target row ────────────────────────────
+    let mut pos = idx;
     let mut display_col: usize = 0;
-    while idx < visible_chars.len() {
-        if matches!(visible_chars[idx], TChar::NewLine) {
+    while pos < visible_chars.len() {
+        if matches!(visible_chars[pos], TChar::NewLine) {
             break; // past end of this row
         }
-        let w = visible_chars[idx].display_width();
-        // The mouse is within this character's display span.
+        let w = visible_chars[pos].display_width();
         if col < display_col + w {
-            return Some(idx);
+            return Some(pos);
         }
         display_col += w;
-        idx += 1;
+        pos += 1;
     }
 
     None // col is beyond the row's content
@@ -93,9 +102,10 @@ pub(super) fn url_at_cell(
     visible_chars: &[TChar],
     visible_tags: &[FormatTag],
     window_start: usize,
+    row_offsets: &[usize],
 ) -> Option<String> {
     let screen_row = cell_row.checked_sub(window_start)?;
-    let flat_idx = flat_index_for_cell(visible_chars, screen_row, cell_col)?;
+    let flat_idx = flat_index_for_cell(visible_chars, screen_row, cell_col, row_offsets)?;
     visible_tags
         .iter()
         .find(|tag| tag.start <= flat_idx && flat_idx < tag.end)
@@ -201,9 +211,12 @@ mod flat_index_for_cell_tests {
     }
 
     /// Build a simple `visible_chars` vec: rows of ASCII chars separated by `NewLine`.
-    fn make_visible(rows: &[&str]) -> Vec<TChar> {
+    /// Also returns the `row_offsets` vector (flat index of the first char of each row).
+    fn make_visible(rows: &[&str]) -> (Vec<TChar>, Vec<usize>) {
         let mut chars = Vec::new();
+        let mut offsets = Vec::new();
         for (i, row) in rows.iter().enumerate() {
+            offsets.push(chars.len());
             for c in row.chars() {
                 chars.push(ascii(c));
             }
@@ -211,40 +224,40 @@ mod flat_index_for_cell_tests {
                 chars.push(TChar::NewLine);
             }
         }
-        chars
+        (chars, offsets)
     }
 
     #[test]
     fn first_cell() {
-        let chars = make_visible(&["abcde", "fghij"]);
-        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0));
+        let (chars, offsets) = make_visible(&["abcde", "fghij"]);
+        assert_eq!(flat_index_for_cell(&chars, 0, 0, &offsets), Some(0));
     }
 
     #[test]
     fn middle_of_first_row() {
-        let chars = make_visible(&["abcde", "fghij"]);
-        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(2));
+        let (chars, offsets) = make_visible(&["abcde", "fghij"]);
+        assert_eq!(flat_index_for_cell(&chars, 0, 2, &offsets), Some(2));
     }
 
     #[test]
     fn start_of_second_row() {
-        let chars = make_visible(&["abcde", "fghij"]);
+        let (chars, offsets) = make_visible(&["abcde", "fghij"]);
         // Row 0 = 5 chars + 1 NewLine = indices 0..5, NL at 5.
         // Row 1 starts at index 6.
-        assert_eq!(flat_index_for_cell(&chars, 1, 0), Some(6));
+        assert_eq!(flat_index_for_cell(&chars, 1, 0, &offsets), Some(6));
     }
 
     #[test]
     fn col_beyond_row() {
-        let chars = make_visible(&["abc"]);
+        let (chars, offsets) = make_visible(&["abc"]);
         // Row has 3 chars (cols 0, 1, 2). Col 5 is out of range.
-        assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
+        assert_eq!(flat_index_for_cell(&chars, 0, 5, &offsets), None);
     }
 
     #[test]
     fn row_beyond_data() {
-        let chars = make_visible(&["abc"]);
-        assert_eq!(flat_index_for_cell(&chars, 5, 0), None);
+        let (chars, offsets) = make_visible(&["abc"]);
+        assert_eq!(flat_index_for_cell(&chars, 5, 0, &offsets), None);
     }
 
     #[test]
@@ -254,18 +267,19 @@ mod flat_index_for_cell_tests {
         // entry but occupies 2 display columns.
         let wide = TChar::from('Ｗ'); // fullwidth W, width=2
         let chars = vec![wide, ascii('x')];
+        let offsets = vec![0]; // single row
 
         // Display columns: 0-1 = 'Ｗ', 2 = 'x'
-        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0)); // first col of wide char
-        assert_eq!(flat_index_for_cell(&chars, 0, 1), Some(0)); // second col of wide char
-        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(1)); // 'x'
-        assert_eq!(flat_index_for_cell(&chars, 0, 3), None); // beyond
+        assert_eq!(flat_index_for_cell(&chars, 0, 0, &offsets), Some(0)); // first col of wide char
+        assert_eq!(flat_index_for_cell(&chars, 0, 1, &offsets), Some(0)); // second col of wide char
+        assert_eq!(flat_index_for_cell(&chars, 0, 2, &offsets), Some(1)); // 'x'
+        assert_eq!(flat_index_for_cell(&chars, 0, 3, &offsets), None); // beyond
     }
 
     #[test]
     fn empty_visible_chars() {
         let chars: Vec<TChar> = Vec::new();
-        assert_eq!(flat_index_for_cell(&chars, 0, 0), None);
+        assert_eq!(flat_index_for_cell(&chars, 0, 0, &[]), None);
     }
 
     #[test]
@@ -273,14 +287,24 @@ mod flat_index_for_cell_tests {
         let w1 = TChar::from('Ｗ'); // width 2
         let w2 = TChar::from('Ｘ'); // width 2
         let chars = vec![w1, w2, ascii('z')];
+        let offsets = vec![0]; // single row
 
         // Display layout: cols 0-1 = Ｗ, cols 2-3 = Ｘ, col 4 = z
-        assert_eq!(flat_index_for_cell(&chars, 0, 0), Some(0));
-        assert_eq!(flat_index_for_cell(&chars, 0, 1), Some(0));
-        assert_eq!(flat_index_for_cell(&chars, 0, 2), Some(1));
-        assert_eq!(flat_index_for_cell(&chars, 0, 3), Some(1));
-        assert_eq!(flat_index_for_cell(&chars, 0, 4), Some(2));
-        assert_eq!(flat_index_for_cell(&chars, 0, 5), None);
+        assert_eq!(flat_index_for_cell(&chars, 0, 0, &offsets), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 1, &offsets), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 2, &offsets), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 0, 3, &offsets), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 0, 4, &offsets), Some(2));
+        assert_eq!(flat_index_for_cell(&chars, 0, 5, &offsets), None);
+    }
+
+    #[test]
+    fn fallback_linear_scan_with_empty_offsets() {
+        // Verify the linear-scan fallback works when row_offsets is empty.
+        let chars = vec![ascii('a'), ascii('b'), TChar::NewLine, ascii('c')];
+        assert_eq!(flat_index_for_cell(&chars, 0, 0, &[]), Some(0));
+        assert_eq!(flat_index_for_cell(&chars, 0, 1, &[]), Some(1));
+        assert_eq!(flat_index_for_cell(&chars, 1, 0, &[]), Some(3));
     }
 }
 
@@ -343,7 +367,7 @@ mod url_at_cell_tests {
 
         // Cell (row=0, col=2) → flat_idx=2, inside the URL tag [1,4).
         assert_eq!(
-            url_at_cell(0, 2, &chars, &tags, window_start),
+            url_at_cell(0, 2, &chars, &tags, window_start, &[]),
             Some("https://example.com".to_string())
         );
     }
@@ -359,7 +383,7 @@ mod url_at_cell_tests {
         let window_start = 0;
 
         // Cell (row=0, col=0) → flat_idx=0, inside plain tag [0,1).
-        assert_eq!(url_at_cell(0, 0, &chars, &tags, window_start), None);
+        assert_eq!(url_at_cell(0, 0, &chars, &tags, window_start, &[]), None);
     }
 
     #[test]
@@ -373,7 +397,7 @@ mod url_at_cell_tests {
 
         // Cell (row=1, col=3) → screen_row=1, flat_idx=9, inside URL tag.
         assert_eq!(
-            url_at_cell(1, 3, &chars, &tags, window_start),
+            url_at_cell(1, 3, &chars, &tags, window_start, &[]),
             Some("https://row2.example.com".to_string())
         );
     }
@@ -388,7 +412,7 @@ mod url_at_cell_tests {
 
         // Buffer row 10, col 2 → screen_row = 0, flat_idx = 2.
         assert_eq!(
-            url_at_cell(10, 2, &chars, &tags, window_start),
+            url_at_cell(10, 2, &chars, &tags, window_start, &[]),
             Some("https://scroll.example.com".to_string())
         );
     }
@@ -400,7 +424,7 @@ mod url_at_cell_tests {
         let tags = vec![url_tag(0, 5, "https://example.com")];
         let window_start = 10;
 
-        assert_eq!(url_at_cell(5, 0, &chars, &tags, window_start), None);
+        assert_eq!(url_at_cell(5, 0, &chars, &tags, window_start, &[]), None);
     }
 
     #[test]
@@ -410,7 +434,7 @@ mod url_at_cell_tests {
         let window_start = 0;
 
         // Col 10 is way past the 3-char row.
-        assert_eq!(url_at_cell(0, 10, &chars, &tags, window_start), None);
+        assert_eq!(url_at_cell(0, 10, &chars, &tags, window_start, &[]), None);
     }
 
     #[test]
@@ -419,7 +443,7 @@ mod url_at_cell_tests {
         let tags: Vec<FormatTag> = Vec::new();
         let window_start = 0;
 
-        assert_eq!(url_at_cell(0, 2, &chars, &tags, window_start), None);
+        assert_eq!(url_at_cell(0, 2, &chars, &tags, window_start, &[]), None);
     }
 
     #[test]
@@ -433,7 +457,7 @@ mod url_at_cell_tests {
         let window_start = 0;
 
         assert_eq!(
-            url_at_cell(0, 2, &chars, &tags, window_start),
+            url_at_cell(0, 2, &chars, &tags, window_start, &[]),
             Some("https://boundary.example.com".to_string())
         );
     }
@@ -452,11 +476,11 @@ mod url_at_cell_tests {
 
         // Col 4 → flat_idx 4, inside [2,5) → match.
         assert_eq!(
-            url_at_cell(0, 4, &chars, &tags, window_start),
+            url_at_cell(0, 4, &chars, &tags, window_start, &[]),
             Some("https://boundary.example.com".to_string())
         );
         // Col 5 → flat_idx 5, NOT inside [2,5) → no match.
-        assert_eq!(url_at_cell(0, 5, &chars, &tags, window_start), None);
+        assert_eq!(url_at_cell(0, 5, &chars, &tags, window_start, &[]), None);
     }
 
     #[test]
@@ -475,14 +499,14 @@ mod url_at_cell_tests {
         let window_start = 0;
 
         assert_eq!(
-            url_at_cell(0, 1, &chars, &tags, window_start),
+            url_at_cell(0, 1, &chars, &tags, window_start, &[]),
             Some("https://first.example.com".to_string())
         );
         assert_eq!(
-            url_at_cell(0, 5, &chars, &tags, window_start),
+            url_at_cell(0, 5, &chars, &tags, window_start, &[]),
             Some("https://second.example.com".to_string())
         );
         // Col 3 is the underscore between URLs — plain tag.
-        assert_eq!(url_at_cell(0, 3, &chars, &tags, window_start), None);
+        assert_eq!(url_at_cell(0, 3, &chars, &tags, window_start, &[]), None);
     }
 }

@@ -271,6 +271,7 @@ fn render_context_menu_area(
             &snap.visible_chars,
             &snap.visible_tags,
             super::coords::visible_window_start(snap),
+            &snap.row_offsets,
         )
     });
 
@@ -1382,7 +1383,7 @@ impl FreminalTerminalWidget {
             // (CJK, emoji) whose continuation cells are stripped during
             // flattening, making the per-row TChar count smaller than
             // term_width.
-            let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col);
+            let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
 
             let hovered_url = flat_idx.and_then(|idx| {
                 snap.visible_tags

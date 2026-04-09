@@ -1405,8 +1405,9 @@ impl TerminalHandler {
         TerminalSections<Vec<TChar>>,
         TerminalSections<Vec<FormatTag>>,
     ) {
-        let (visible_chars, visible_tags) = self.buffer.visible_as_tchars_and_tags(scroll_offset);
-        let (scrollback_chars, scrollback_tags) =
+        let (visible_chars, visible_tags, _visible_row_offsets) =
+            self.buffer.visible_as_tchars_and_tags(scroll_offset);
+        let (scrollback_chars, scrollback_tags, _scrollback_row_offsets) =
             self.buffer.scrollback_as_tchars_and_tags(scroll_offset);
         (
             TerminalSections {

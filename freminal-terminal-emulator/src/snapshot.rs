@@ -151,6 +151,15 @@ pub struct TerminalSnapshot {
     /// otherwise run on every mouse-move pixel.
     pub has_urls: bool,
 
+    /// Per-row flat-index offsets into `visible_chars`.
+    ///
+    /// `row_offsets[r]` is the index in `visible_chars` where row `r` begins.
+    /// This enables O(1) row lookup in `flat_index_for_cell` instead of the
+    /// `O(visible_chars)` linear scan for `NewLine` separators.
+    ///
+    /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
+    pub row_offsets: Arc<Vec<usize>>,
+
     /// Set to `true` when the scroll offset changed since the previous
     /// snapshot (the visible window moved, but the underlying text may not
     /// have changed).
@@ -332,6 +341,7 @@ impl TerminalSnapshot {
             content_changed: false,
             has_blinking_text: false,
             has_urls: false,
+            row_offsets: Arc::new(Vec::new()),
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
