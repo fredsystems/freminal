@@ -1571,6 +1571,7 @@ dependencies = [
  "glow",
  "open",
  "regex",
+ "rustc-hash 2.1.2",
  "rustybuzz",
  "swash",
  "thiserror 2.0.18",

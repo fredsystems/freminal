@@ -10,9 +10,8 @@
 //! the foreground color in the shader). Color emoji are stored as full RGBA.
 //! Uses shelf-based bin packing with LRU eviction.
 
-use std::collections::HashMap;
-
 use conv2::{ApproxFrom, ValueFrom};
+use rustc_hash::FxHashMap;
 
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -120,8 +119,9 @@ pub struct GlyphAtlas {
     max_size: u32,
     /// CPU-side RGBA pixel buffer (`size * size * 4` bytes).
     pixels: Vec<u8>,
-    /// Glyph key → atlas entry lookup.
-    entries: HashMap<GlyphKey, AtlasEntry>,
+    /// Glyph key → atlas entry lookup (`FxHash` for speed — keys are small,
+    /// non-adversarial glyph IDs).
+    entries: FxHashMap<GlyphKey, AtlasEntry>,
     /// Shelf list, ordered by Y position.
     shelves: Vec<Shelf>,
     /// Global LRU generation counter, incremented on each lookup/insert.
@@ -151,7 +151,7 @@ impl GlyphAtlas {
             size: initial_size,
             max_size,
             pixels: vec![0u8; pixel_count],
-            entries: HashMap::new(),
+            entries: FxHashMap::default(),
             shelves: Vec::new(),
             generation: 0,
             scale_ctx: ScaleContext::new(),
@@ -185,16 +185,13 @@ impl GlyphAtlas {
         self.generation += 1;
         let current_gen = self.generation;
 
-        // Update shelf LRU on hit.
-        if let Some(entry) = self.entries.get(key) {
-            let shelf_idx = entry.shelf_idx;
-            if let Some(shelf) = self.shelves.get_mut(shelf_idx) {
-                shelf.last_used = current_gen;
-            }
-            return self.entries.get(key);
+        // Split borrows: read shelf_idx from entries, then mutate shelves,
+        // then re-borrow entries for the return value.
+        let shelf_idx = self.entries.get(key)?.shelf_idx;
+        if let Some(shelf) = self.shelves.get_mut(shelf_idx) {
+            shelf.last_used = current_gen;
         }
-
-        None
+        self.entries.get(key)
     }
 
     /// Rasterise a glyph and insert it into the atlas.
@@ -209,7 +206,7 @@ impl GlyphAtlas {
         key: GlyphKey,
         font_manager: &FontManager,
     ) -> Option<&AtlasEntry> {
-        // Check if already cached (race between get and insert).
+        // Already cached — return via `get` (updates LRU).
         if self.entries.contains_key(&key) {
             return self.get(&key);
         }
@@ -233,6 +230,9 @@ impl GlyphAtlas {
         if self.entries.contains_key(&key) {
             return self.get(&key);
         }
+        // `rasterize_and_insert` already checks `contains_key` internally
+        // to guard against races, but the fast path above avoids entering that
+        // function at all on cache hits.
         self.rasterize_and_insert(key, font_manager)
     }
 
@@ -333,7 +333,7 @@ impl GlyphAtlas {
 
         // Zero-size glyphs (e.g. space) get a degenerate entry.
         if gw == 0 || gh == 0 {
-            return self.insert_zero_size_entry(key, glyph);
+            return Some(self.insert_zero_size_entry(key, glyph));
         }
 
         // 1-pixel padding between glyphs to avoid texture filtering bleed.
@@ -368,15 +368,11 @@ impl GlyphAtlas {
         };
 
         // Place the glyph in the shelf.
-        self.place_in_shelf(shelf_idx, key, glyph)
+        Some(self.place_in_shelf(shelf_idx, key, glyph))
     }
 
     /// Insert a zero-size entry (for space characters, etc.).
-    fn insert_zero_size_entry(
-        &mut self,
-        key: GlyphKey,
-        glyph: &RasterizedGlyph,
-    ) -> Option<&AtlasEntry> {
+    fn insert_zero_size_entry(&mut self, key: GlyphKey, glyph: &RasterizedGlyph) -> &AtlasEntry {
         let entry = AtlasEntry {
             uv_rect: [0.0, 0.0, 0.0, 0.0],
             bearing_x: i16::value_from(glyph.bearing_x).unwrap_or(0),
@@ -386,8 +382,8 @@ impl GlyphAtlas {
             is_color: glyph.is_color,
             shelf_idx: 0,
         };
-        self.entries.insert(key, entry);
-        self.entries.get(&key)
+        // Use entry API to insert and return a reference in one lookup.
+        self.entries.entry(key).or_insert(entry)
     }
 
     /// Find an existing shelf that can fit a glyph of the given padded size.
@@ -442,7 +438,7 @@ impl GlyphAtlas {
         shelf_idx: usize,
         key: GlyphKey,
         glyph: &RasterizedGlyph,
-    ) -> Option<&AtlasEntry> {
+    ) -> &AtlasEntry {
         let gw = glyph.width;
         let gh = glyph.height;
 
@@ -481,8 +477,8 @@ impl GlyphAtlas {
             shelf_idx,
         };
 
-        self.entries.insert(key, entry);
-        self.entries.get(&key)
+        // Use entry API to insert and return a reference in one lookup.
+        self.entries.entry(key).or_insert(entry)
     }
 
     /// Blit glyph RGBA data into the atlas pixel buffer.
