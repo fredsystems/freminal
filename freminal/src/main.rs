@@ -109,6 +109,8 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         title_stack: Vec::new(),
         view_state: gui::view_state::ViewState::new(),
         echo_off: channels.echo_off,
+        render_state: gui::terminal::new_render_state(),
+        render_cache: gui::terminal::PaneRenderCache::new(),
     };
     let initial_tab = gui::tabs::Tab::new(gui::tabs::TabId::first(), initial_pane);
 
@@ -390,6 +392,8 @@ fn main() {
             title_stack: Vec::new(),
             view_state: gui::view_state::ViewState::new(),
             echo_off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            render_state: gui::terminal::new_render_state(),
+            render_cache: gui::terminal::PaneRenderCache::new(),
         };
         gui::run(
             gui::tabs::Tab::new(gui::tabs::TabId::first(), playback_pane),

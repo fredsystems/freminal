@@ -8,8 +8,9 @@
 //! The public surface of this module is unchanged from the original
 //! `terminal.rs`: only [`FreminalTerminalWidget`] is re-exported.
 
-pub(super) mod coords;
-pub(super) mod input;
-pub(super) mod widget;
+pub(crate) mod coords;
+pub(crate) mod input;
+pub(crate) mod widget;
 
 pub use widget::FreminalTerminalWidget;
+pub use widget::{PaneRenderCache, RenderState, new_render_state};

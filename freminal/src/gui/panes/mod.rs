@@ -19,6 +19,7 @@
 //! snapshots via `ArcSwap`.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
 use arc_swap::ArcSwap;
@@ -29,6 +30,8 @@ use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
+use super::terminal::PaneRenderCache;
+use super::terminal::RenderState;
 use super::view_state::ViewState;
 
 // ── PaneId ───────────────────────────────────────────────────────────
@@ -159,6 +162,18 @@ pub struct Pane {
     /// only published on PTY output — if the shell is idle waiting for a
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
+
+    /// Per-pane GPU resources (renderer, glyph atlas, vertex buffers).
+    ///
+    /// Each pane owns an independent `RenderState` so that panes can maintain
+    /// their own GL state (VAOs, VBOs, atlas texture) without conflicts.
+    pub(crate) render_state: Arc<Mutex<RenderState>>,
+
+    /// Per-pane dirty-tracking cache for incremental rendering.
+    ///
+    /// Tracks the previous frame's cursor, theme, selection, and content pointers
+    /// to detect what changed and enable fast-path (cursor-only) updates.
+    pub(crate) render_cache: PaneRenderCache,
 }
 
 impl std::fmt::Debug for Pane {
@@ -867,6 +882,8 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            render_state: crate::gui::terminal::new_render_state(),
+            render_cache: crate::gui::terminal::PaneRenderCache::new(),
         }
     }
 

@@ -17,7 +17,7 @@ startup commands.
 | 55  | Custom Shaders                 | Medium | Pending  |
 | 56  | Session Restore / Startup Cmds | Medium | Pending  |
 | 57  | Render Loop Optimization       | Medium | Complete |
-| 58  | Built-in Multiplexer           | Large  | Pending  |
+| 58  | Built-in Multiplexer           | Large  | Active   |
 
 ---
 
@@ -810,11 +810,20 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
    through `active_pane()` / `active_pane_mut()`, Debug test updated for new output format.
    All 335 tests pass, clippy clean, no unused deps._
 
-4. **58.4 — Pane layout rendering**
+4. **58.4 — Pane layout rendering** _(Complete)_
    Modify `FreminalGui::ui()` to compute pane rects via `PaneTree::layout()` and render
    each visible pane into its allocated rect. The `FreminalTerminalWidget::show()` call
    needs to accept a rect parameter (or use `ui.allocate_rect()`). Render pane borders
    between adjacent panes. Highlight the focused pane's border.
+
+   _Completion note: Refactored `FreminalTerminalWidget` to separate shared state (font
+   manager, shaping cache) from per-pane state (`PaneRenderCache`, `RenderState`). Each
+   `Pane` now owns its own GPU resources and dirty-tracking cache. The `show()` method
+   accepts these as parameters. The CentralPanel now loops over `pane\_tree.layout()` rects
+   using `ui.scope\_builder()` to create scoped child UIs per pane. Per-pane resize debounce
+   sends `InputEvent::Resize` based on each pane's content rect. Borders drawn at interior
+   edges; active pane highlighted in blue, inactive in gray. Repaint scheduling aggregates
+   across all panes (shortest delay wins). All 335 tests pass, clippy clean, no unused deps._
 
 5. **58.5 — Input routing**
    Route keyboard input to the active pane. Route mouse input to the pane under the cursor

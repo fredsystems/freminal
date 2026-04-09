@@ -437,7 +437,7 @@ fn dispatch_context_menu_action(
 /// Wrapped in `Arc<Mutex<…>>` so that the pre-built vertex data can be
 /// written on the main thread and consumed inside the `PaintCallback`,
 /// which requires `Send + Sync + 'static` captures.
-pub(super) struct RenderState {
+pub struct RenderState {
     pub(super) renderer: TerminalRenderer,
     pub(super) atlas: GlyphAtlas,
     /// Per-cell instanced background data (col, row, r, g, b, a per cell).
@@ -461,98 +461,191 @@ pub(super) struct RenderState {
     pub(super) bg_opacity: f32,
 }
 
-/// The egui widget that owns and drives the terminal render pipeline.
+impl RenderState {
+    /// Clear the glyph atlas, forcing all glyphs to be re-rasterised on
+    /// the next frame.
+    ///
+    /// Called when font metrics change (font size, DPI, ligature toggle) so
+    /// that stale glyph textures are discarded.
+    pub fn clear_atlas(&mut self) {
+        self.atlas.clear();
+    }
+}
+
+/// Create a new [`RenderState`] with default (empty) values.
 ///
-/// `FreminalTerminalWidget` bridges the PTY snapshot model and the OpenGL
-/// renderer. It holds the [`FontManager`], the per-line shaping cache, and the
-/// GPU render state. On each call to [`show`](Self::show) it:
+/// Used when constructing new panes — each pane needs its own GPU render
+/// state since `PaintCallback` closures capture the `Arc<Mutex<RenderState>>`
+/// and execute asynchronously during egui's paint phase.
+#[must_use]
+pub fn new_render_state() -> Arc<Mutex<RenderState>> {
+    Arc::new(Mutex::new(RenderState {
+        renderer: TerminalRenderer::new(),
+        atlas: GlyphAtlas::default(),
+        bg_instances: Vec::new(),
+        deco_verts: Vec::new(),
+        fg_instances: Vec::new(),
+        image_verts: Vec::new(),
+        snap_images: std::collections::HashMap::new(),
+        cursor_vert_float_offset: 0,
+        cell_width_px: 0.0,
+        cell_height_px: 0.0,
+        bg_opacity: 1.0,
+    }))
+}
+
+/// Per-pane dirty-tracking cache for the terminal render pipeline.
 ///
-/// 1. Detects content changes via `Arc` pointer comparison.
-/// 2. Re-shapes only dirty lines using the [`ShapingCache`].
-/// 3. Rebuilds GPU vertex buffers when content, theme, selection, or blink
-///    state has changed.
-/// 4. Submits a `PaintCallback` to egui that executes the GL draw calls.
-/// 5. Processes keyboard, mouse, scroll, and focus input and forwards them
-///    to the PTY thread via `input_tx`.
-#[allow(clippy::struct_excessive_bools)] // Six GUI rendering bookkeeping bools; not terminal modes
-pub struct FreminalTerminalWidget {
-    pub(super) font_manager: FontManager,
-    shaping_cache: ShapingCache,
-    render_state: Arc<Mutex<RenderState>>,
-    previous_mouse_state: Option<PreviousMouseState>,
-    previous_key: Option<Key>,
-    previous_scroll_amount: f32,
+/// Each pane needs its own set of "previous frame" state to support
+/// incremental rendering optimisations (cursor-only fast path, content
+/// change detection via `Arc::ptr_eq`, theme/selection/blink tracking).
+///
+/// This struct is stored on [`Pane`](super::super::panes::Pane) alongside
+/// the per-pane `Arc<Mutex<RenderState>>`.
+// Bools are inherently boolean dirty-tracking flags (cursor blink on/off,
+// cursor shown/hidden, text blink visible, overlay open) — enums would add
+// noise without improving clarity.
+#[allow(clippy::struct_excessive_bools)]
+pub struct PaneRenderCache {
+    /// Mouse state from the most recently rendered frame.
+    pub(super) previous_mouse_state: Option<PreviousMouseState>,
+    /// Last key processed by input handling.
+    pub(super) previous_key: Option<Key>,
+    /// Last scroll amount processed.
+    pub(super) previous_scroll_amount: f32,
     /// Cursor blink state from the most recently rendered frame.
-    previous_cursor_blink_on: bool,
+    pub(super) previous_cursor_blink_on: bool,
     /// Cursor position from the most recently rendered frame.
-    previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
+    pub(super) previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
     /// Whether the cursor was shown in the most recently rendered frame.
-    previous_show_cursor: bool,
+    pub(super) previous_show_cursor: bool,
     /// Cursor color override from the most recently rendered frame.
-    previous_cursor_color_override: Option<(u8, u8, u8)>,
+    pub(super) previous_cursor_color_override: Option<(u8, u8, u8)>,
     /// The `visible_chars` arc from the last full vertex rebuild.
     ///
     /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
     /// where a later snapshot overwrites `content_changed` before the GUI wakes.
-    last_rendered_visible: Option<Arc<Vec<TChar>>>,
+    pub(super) last_rendered_visible: Option<Arc<Vec<TChar>>>,
     /// Line-width data from the last full vertex rebuild.  When line widths
     /// change (e.g. DECDWL/DECDHL toggle), we must force a full rebuild so
     /// glyph scaling is re-applied.
-    last_rendered_line_widths: Option<Arc<Vec<freminal_terminal_emulator::LineWidth>>>,
+    pub(super) last_rendered_line_widths: Option<Arc<Vec<freminal_terminal_emulator::LineWidth>>>,
     /// Theme pointer from the last full vertex rebuild.  When this changes,
     /// we must force a full rebuild so foreground/background vertex colors
     /// are re-resolved against the new palette.
-    previous_theme: Option<&'static ThemePalette>,
+    pub(super) previous_theme: Option<&'static ThemePalette>,
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild.
-    previous_selection: Option<(CellCoord, CellCoord)>,
+    pub(super) previous_selection: Option<(CellCoord, CellCoord)>,
     /// Text blink slow-visibility from the most recently rendered frame.
-    /// Used to detect blink-tick changes that require a foreground vertex rebuild.
-    previous_text_blink_slow_visible: bool,
+    pub(super) previous_text_blink_slow_visible: bool,
     /// Text blink fast-visibility from the most recently rendered frame.
-    previous_text_blink_fast_visible: bool,
+    pub(super) previous_text_blink_fast_visible: bool,
+    /// Whether a UI overlay (modal dialog or dropdown menu) was open on the
+    /// previous frame.
+    pub(super) overlay_was_open_last_frame: bool,
+    /// Number of search matches from the most recently rendered frame.
+    pub(super) previous_search_match_count: usize,
+    /// Current match index from the most recently rendered frame.
+    pub(super) previous_search_current_match: usize,
+    /// The terminal cell `(col, row)` the mouse was hovering over in the
+    /// previous frame.
+    pub(super) previous_hover_cell: Option<(usize, usize)>,
+    /// Cached URL from the most recent URL hover lookup.
+    pub(super) cached_hovered_url: Option<Arc<Url>>,
+    /// Pointer identity of the `visible_chars` `Arc` used for the last URL
+    /// hover lookup.
+    pub(super) hover_snap_ptr: usize,
+    /// The cursor icon that was last written via `output_mut`.
+    pub(super) previous_cursor_icon: CursorIcon,
+}
+
+impl PaneRenderCache {
+    /// Create a new cache with default initial values.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            previous_mouse_state: None,
+            previous_key: None,
+            previous_scroll_amount: 0.0,
+            previous_cursor_blink_on: true,
+            previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
+            previous_show_cursor: false,
+            previous_cursor_color_override: None,
+            last_rendered_visible: None,
+            last_rendered_line_widths: None,
+            previous_theme: None,
+            previous_selection: None,
+            previous_text_blink_slow_visible: true,
+            previous_text_blink_fast_visible: true,
+            overlay_was_open_last_frame: false,
+            previous_search_match_count: 0,
+            previous_search_current_match: 0,
+            previous_hover_cell: None,
+            cached_hovered_url: None,
+            hover_snap_ptr: 0,
+            previous_cursor_icon: CursorIcon::Default,
+        }
+    }
+
+    /// Invalidate the cached theme pointer so the next frame forces a full
+    /// vertex rebuild with the new palette colors.
+    pub const fn invalidate_theme_cache(&mut self) {
+        self.previous_theme = None;
+    }
+
+    /// Force a full vertex rebuild on the next frame by clearing the cached
+    /// `visible_chars` and `line_widths` pointers.
+    pub fn invalidate_content(&mut self) {
+        self.last_rendered_visible = None;
+        self.last_rendered_line_widths = None;
+    }
+}
+
+impl Default for PaneRenderCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The egui widget that owns and drives the terminal render pipeline.
+///
+/// `FreminalTerminalWidget` holds shared resources that are common across all
+/// panes: the [`FontManager`] (font metrics, shaping config), the
+/// [`ShapingCache`] (per-line shaped glyph runs), and global config state
+/// (ligatures, cursor trail).
+///
+/// Per-pane GPU state (`RenderState`) and dirty-tracking cache
+/// (`PaneRenderCache`) live on each [`Pane`](super::super::panes::Pane)
+/// instance. On each call to [`show`](Self::show), the widget:
+///
+/// 1. Detects content changes via `Arc` pointer comparison (per-pane cache).
+/// 2. Re-shapes only dirty lines using the shared [`ShapingCache`].
+/// 3. Rebuilds GPU vertex buffers in the pane's `RenderState`.
+/// 4. Submits a `PaintCallback` to egui that executes the GL draw calls.
+/// 5. Processes keyboard, mouse, scroll, and focus input and forwards them
+///    to the PTY thread via `input_tx`.
+pub struct FreminalTerminalWidget {
+    /// Shared font manager — metrics, rasterisation, fallback chain.
+    pub(super) font_manager: FontManager,
+    /// Shared shaping cache — reused across all panes (same font config).
+    shaping_cache: ShapingCache,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
     /// Whether cursor trail animation is enabled (cursor glides to new position).
     cursor_trail: bool,
     /// Duration of the cursor trail animation.
     cursor_trail_duration: Duration,
-    /// Whether a UI overlay (modal dialog or dropdown menu) was open on the
-    /// previous frame.
-    ///
-    /// Used to suppress input for one extra frame after the overlay closes,
-    /// preventing the dismiss-click from leaking through to the terminal.
-    overlay_was_open_last_frame: bool,
     /// The base egui `FontDefinitions` (without any preview font registered).
     /// Captured at construction and updated on `apply_config_changes`. Used by
     /// the settings modal to register a temporary preview font without losing
     /// the original font set.
     base_font_defs: eframe::egui::FontDefinitions,
-    /// Number of search matches from the most recently rendered frame.
-    /// Used to detect search state changes that require a full vertex rebuild.
-    previous_search_match_count: usize,
-    /// Current match index from the most recently rendered frame.
-    previous_search_current_match: usize,
-    /// The terminal cell `(col, row)` the mouse was hovering over in the
-    /// previous frame.  URL hover detection is skipped when the cell has not
-    /// changed, turning per-pixel mouse-move events into per-cell events.
-    previous_hover_cell: Option<(usize, usize)>,
-    /// Cached URL from the most recent URL hover lookup.  Recomputed when the
-    /// hovered cell changes or the snapshot content changes under a stationary
-    /// mouse.  Used for Ctrl+click detection even when `cell_changed` is false.
-    cached_hovered_url: Option<Arc<Url>>,
-    /// Pointer identity of the `visible_chars` `Arc` used for the last URL
-    /// hover lookup.  When the snapshot pointer changes (new content), the URL
-    /// lookup is recomputed even if the mouse hasn't moved.
-    hover_snap_ptr: usize,
-    /// The cursor icon that was last written via `output_mut`.  The egui call
-    /// is skipped when the icon has not changed.
-    previous_cursor_icon: CursorIcon,
 }
 
 impl FreminalTerminalWidget {
     /// Create a new `FreminalTerminalWidget`, loading fonts and initialising
-    /// the GPU render state from the provided config.
+    /// shared rendering resources from the provided config.
     #[must_use]
     pub fn new(ctx: &Context, config: &Config) -> Self {
         let font_config = FontConfig {
@@ -567,45 +660,12 @@ impl FreminalTerminalWidget {
         Self {
             font_manager: FontManager::new(config, pixels_per_point),
             shaping_cache: ShapingCache::new(),
-            render_state: Arc::new(Mutex::new(RenderState {
-                renderer: TerminalRenderer::new(),
-                atlas: GlyphAtlas::default(),
-                bg_instances: Vec::new(),
-                deco_verts: Vec::new(),
-                fg_instances: Vec::new(),
-                image_verts: Vec::new(),
-                snap_images: std::collections::HashMap::new(),
-                cursor_vert_float_offset: 0,
-                cell_width_px: 0.0,
-                cell_height_px: 0.0,
-                bg_opacity: 1.0,
-            })),
-            previous_mouse_state: None,
-            previous_key: None,
-            previous_scroll_amount: 0.0,
-            previous_cursor_blink_on: true,
-            previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
-            previous_show_cursor: false,
-            previous_cursor_color_override: None,
-            last_rendered_visible: None,
-            last_rendered_line_widths: None,
-            previous_theme: None,
-            previous_selection: None,
-            previous_text_blink_slow_visible: true,
-            previous_text_blink_fast_visible: true,
             ligatures: config.font.ligatures,
             cursor_trail: config.cursor.trail,
             cursor_trail_duration: Duration::from_millis(u64::from(
                 config.cursor.trail_duration_ms,
             )),
-            overlay_was_open_last_frame: false,
             base_font_defs,
-            previous_search_match_count: 0,
-            previous_search_current_match: 0,
-            previous_hover_cell: None,
-            cached_hovered_url: None,
-            hover_snap_ptr: 0,
-            previous_cursor_icon: CursorIcon::Default,
         }
     }
 
@@ -641,25 +701,22 @@ impl FreminalTerminalWidget {
 
     /// Synchronise the font manager's `pixels_per_point` with the current
     /// display scale factor.  If the value changed (e.g. the window moved to a
-    /// monitor with a different DPI), cell metrics are recomputed and all
-    /// render caches are invalidated.
+    /// monitor with a different DPI), cell metrics are recomputed and the
+    /// shared shaping cache is invalidated.
+    ///
+    /// Returns `true` if the scale factor changed. When this returns `true`
+    /// the caller must clear each pane's `RenderState::atlas` and
+    /// `PaneRenderCache::invalidate_content()` so that all panes force a
+    /// full vertex rebuild on the next frame.
     ///
     /// **Must be called before [`Self::cell_size`] each frame** so that resize
     /// calculations in `FreminalGui::ui()` use up-to-date metrics.
-    pub fn sync_pixels_per_point(&mut self, ppp: f32) {
+    pub fn sync_pixels_per_point(&mut self, ppp: f32) -> bool {
         if self.font_manager.update_pixels_per_point(ppp) {
-            let mut rs = self
-                .render_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            rs.atlas.clear();
-            drop(rs);
             self.shaping_cache.clear();
-            // Force a full vertex rebuild on the next frame.  The existing
-            // VBO data was built for the old cell pixel size and must not be
-            // reused.
-            self.last_rendered_visible = None;
-            self.last_rendered_line_widths = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -667,22 +724,28 @@ impl FreminalTerminalWidget {
     ///
     /// - `snap` — the latest terminal snapshot from the PTY thread (lock-free).
     /// - `view_state` — GUI-local scroll, selection, blink, and focus state.
+    /// - `render_state` — per-pane GPU resources (renderer, atlas, vertex buffers).
+    /// - `cache` — per-pane dirty-tracking cache for incremental rendering.
     /// - `input_tx` — channel to send keyboard/resize/focus events to the PTY.
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
+    /// - `search_buffer_rx` — receives full-buffer search content from the PTY thread.
     /// - `ui_overlay_open` — suppresses terminal input while a modal or menu dropdown is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
+    /// - `is_active_pane` — whether this pane currently has keyboard focus.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
     // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
-    // All parameters are required: `bg_opacity` must be threaded from config through to the
-    // renderer; there is no sensible grouping that reduces the count without hiding the intent.
+    // All parameters are required: each pane needs its own render state, cache, channels, and
+    // view state; there is no sensible grouping that reduces the count without hiding the intent.
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut Ui,
         snap: &TerminalSnapshot,
         view_state: &mut ViewState,
+        render_state: &Arc<Mutex<RenderState>>,
+        cache: &mut PaneRenderCache,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
         search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
@@ -690,6 +753,7 @@ impl FreminalTerminalWidget {
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
+        _is_active_pane: bool,
     ) -> Vec<freminal_common::keybindings::KeyAction> {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -710,8 +774,8 @@ impl FreminalTerminalWidget {
         // Suppress input for one extra frame after a modal closes.
         // This prevents the dismiss-click (Cancel / X / click-away) from
         // leaking through to the terminal as a pointer event.
-        let suppress_input = ui_overlay_open || self.overlay_was_open_last_frame;
-        self.overlay_was_open_last_frame = ui_overlay_open;
+        let suppress_input = ui_overlay_open || cache.overlay_was_open_last_frame;
+        cache.overlay_was_open_last_frame = ui_overlay_open;
 
         // Claim the full available space.
         let available = ui.available_size();
@@ -770,9 +834,9 @@ impl FreminalTerminalWidget {
         // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
         if suppress_input || context_menu_open || view_state.search_state.is_open {
-            self.previous_key = None;
-            self.previous_mouse_state = None;
-            self.previous_scroll_amount = 0.0;
+            cache.previous_key = None;
+            cache.previous_mouse_state = None;
+            cache.previous_scroll_amount = 0.0;
             view_state.selection.is_selecting = false;
         } else {
             let repeat_characters = snap.repeat_keys;
@@ -793,16 +857,16 @@ impl FreminalTerminalWidget {
                     logical_cell_w,
                     logical_cell_h,
                     terminal_rect,
-                    self.previous_mouse_state.clone(),
+                    cache.previous_mouse_state.clone(),
                     repeat_characters,
-                    self.previous_key,
-                    self.previous_scroll_amount,
+                    cache.previous_key,
+                    cache.previous_scroll_amount,
                     binding_map,
                 )
             });
-            self.previous_mouse_state = new_mouse_pos;
-            self.previous_key = previous_key;
-            self.previous_scroll_amount = scroll_amount;
+            cache.previous_mouse_state = new_mouse_pos;
+            cache.previous_key = previous_key;
+            cache.previous_scroll_amount = scroll_amount;
             deferred_actions = actions;
 
             // Perform the clipboard copy OUTSIDE the ui.input() closure.
@@ -928,16 +992,16 @@ impl FreminalTerminalWidget {
             //
             // Also force a full rebuild when the theme palette changes, since
             // foreground/background colors are baked into the vertex buffers.
-            let theme_changed = self
+            let theme_changed = cache
                 .previous_theme
                 .is_none_or(|prev| !std::ptr::eq(prev, snap.theme));
             let content_changed = snap.content_changed
                 || theme_changed
-                || self
+                || cache
                     .last_rendered_visible
                     .as_ref()
                     .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars))
-                || self
+                || cache
                     .last_rendered_line_widths
                     .as_ref()
                     .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_line_widths));
@@ -969,13 +1033,13 @@ impl FreminalTerminalWidget {
 
             // Check whether the selection has changed since the last frame.
             let current_selection = view_state.selection.normalised();
-            let selection_changed = current_selection != self.previous_selection;
+            let selection_changed = current_selection != cache.previous_selection;
 
             // Check whether search highlight state has changed since last frame.
             let search_match_count = view_state.search_state.matches.len();
             let search_current_match = view_state.search_state.current_match;
-            let search_changed = search_match_count != self.previous_search_match_count
-                || search_current_match != self.previous_search_current_match;
+            let search_changed = search_match_count != cache.previous_search_match_count
+                || search_current_match != cache.previous_search_current_match;
 
             // Convert buffer-absolute selection coordinates to screen-relative
             // for the renderer (which iterates `shaped_lines` by screen row).
@@ -1060,10 +1124,10 @@ impl FreminalTerminalWidget {
             //
             // When cursor trail is animating, we also enter the cursor-only
             // path so the visual position is updated each frame.
-            let cursor_state_changed = cursor_blink_on != self.previous_cursor_blink_on
-                || snap.cursor_pos != self.previous_cursor_pos
-                || effective_show_cursor != self.previous_show_cursor
-                || snap.cursor_color_override != self.previous_cursor_color_override
+            let cursor_state_changed = cursor_blink_on != cache.previous_cursor_blink_on
+                || snap.cursor_pos != cache.previous_cursor_pos
+                || effective_show_cursor != cache.previous_show_cursor
+                || snap.cursor_color_override != cache.previous_cursor_color_override
                 || cursor_animating;
 
             // A text-blink visibility change requires rebuilding the foreground
@@ -1071,16 +1135,16 @@ impl FreminalTerminalWidget {
             // a separate trigger from cursor-only so it always goes through the
             // full rebuild path.
             let text_blink_changed = snap.has_blinking_text
-                && (view_state.text_blink_slow_visible != self.previous_text_blink_slow_visible
-                    || view_state.text_blink_fast_visible != self.previous_text_blink_fast_visible);
+                && (view_state.text_blink_slow_visible != cache.previous_text_blink_slow_visible
+                    || view_state.text_blink_fast_visible
+                        != cache.previous_text_blink_fast_visible);
 
             let cursor_only = !content_changed
                 && !selection_changed
                 && !text_blink_changed
                 && !search_changed
                 && cursor_state_changed
-                && !self
-                    .render_state
+                && !render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .deco_verts
@@ -1101,8 +1165,7 @@ impl FreminalTerminalWidget {
                 );
                 is_cursor_only = true;
                 cursor_only_verts.clone_from(&cursor_verts);
-                let mut rs = self
-                    .render_state
+                let mut rs = render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 // detect the cursor-only mode via a separate flag.
@@ -1125,8 +1188,7 @@ impl FreminalTerminalWidget {
                 || selection_changed
                 || text_blink_changed
                 || search_changed
-                || self
-                    .render_state
+                || render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .deco_verts
@@ -1154,8 +1216,7 @@ impl FreminalTerminalWidget {
                 // directly into the persistent `RenderState` Vecs, reusing
                 // their heap allocations (clear+extend pattern) instead of
                 // allocating fresh Vecs every frame.
-                let mut rs = self
-                    .render_state
+                let mut rs = render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 // Reborrow through `&mut *rs` so the borrow checker can see
@@ -1228,14 +1289,14 @@ impl FreminalTerminalWidget {
 
                 // Remember which `visible_chars` allocation we rendered, so
                 // the next frame can detect changes via `Arc::ptr_eq`.
-                self.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
-                self.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
-                self.previous_theme = Some(snap.theme);
-                self.previous_selection = current_selection;
-                self.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
-                self.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
-                self.previous_search_match_count = search_match_count;
-                self.previous_search_current_match = search_current_match;
+                cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+                cache.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
+                cache.previous_theme = Some(snap.theme);
+                cache.previous_selection = current_selection;
+                cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
+                cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
+                cache.previous_search_match_count = search_match_count;
+                cache.previous_search_current_match = search_current_match;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
@@ -1249,10 +1310,10 @@ impl FreminalTerminalWidget {
         }
 
         // Update per-frame cursor state for the next frame's comparison.
-        self.previous_cursor_blink_on = cursor_blink_on;
-        self.previous_cursor_pos = snap.cursor_pos;
-        self.previous_show_cursor = effective_show_cursor;
-        self.previous_cursor_color_override = snap.cursor_color_override;
+        cache.previous_cursor_blink_on = cursor_blink_on;
+        cache.previous_cursor_pos = snap.cursor_pos;
+        cache.previous_show_cursor = effective_show_cursor;
+        cache.previous_cursor_color_override = snap.cursor_color_override;
 
         // Allocate the exact terminal rect (in logical points for egui).
         let desired_size = egui::Vec2::new(
@@ -1265,7 +1326,7 @@ impl FreminalTerminalWidget {
         // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
         // data (not `FontManager`) may be captured here.  `is_cursor_only` and
         // `cursor_only_verts` are captured by value (bool is Copy; Vec is moved).
-        let render_state = Arc::clone(&self.render_state);
+        let render_state_for_cb = Arc::clone(render_state);
         // The MutexGuard inside the callback intentionally lives through
         // `draw_with_verts` because the renderer and atlas are refs into it.
         #[allow(clippy::significant_drop_tightening)]
@@ -1274,7 +1335,7 @@ impl FreminalTerminalWidget {
             callback: Arc::new(CallbackFn::new(move |info, painter| {
                 let gl = painter.gl();
                 let vp = info.viewport_in_pixels();
-                let mut rs = render_state
+                let mut rs = render_state_for_cb
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !rs.renderer.initialized()
@@ -1414,11 +1475,11 @@ impl FreminalTerminalWidget {
                 );
 
                 let cell = (col, row);
-                let cell_changed = self.previous_hover_cell != Some(cell);
+                let cell_changed = cache.previous_hover_cell != Some(cell);
                 let snap_ptr = Arc::as_ptr(&snap.visible_chars) as usize;
-                let content_changed_under_mouse = snap_ptr != self.hover_snap_ptr;
-                self.previous_hover_cell = Some(cell);
-                self.hover_snap_ptr = snap_ptr;
+                let content_changed_under_mouse = snap_ptr != cache.hover_snap_ptr;
+                cache.previous_hover_cell = Some(cell);
+                cache.hover_snap_ptr = snap_ptr;
 
                 if cell_changed || content_changed_under_mouse {
                     // Recompute the hovered URL: convert the mouse's
@@ -1427,7 +1488,7 @@ impl FreminalTerminalWidget {
                     let flat_idx =
                         flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
 
-                    self.cached_hovered_url = flat_idx.and_then(|idx| {
+                    cache.cached_hovered_url = flat_idx.and_then(|idx| {
                         snap.url_tag_indices
                             .iter()
                             .filter_map(|&ti| snap.visible_tags.get(ti))
@@ -1437,21 +1498,21 @@ impl FreminalTerminalWidget {
                 }
 
                 // Update cursor icon from cached URL state.
-                let new_icon = if self.cached_hovered_url.is_some() {
+                let new_icon = if cache.cached_hovered_url.is_some() {
                     CursorIcon::PointingHand
                 } else {
                     CursorIcon::Default
                 };
 
-                if new_icon != self.previous_cursor_icon {
-                    self.previous_cursor_icon = new_icon;
+                if new_icon != cache.previous_cursor_icon {
+                    cache.previous_cursor_icon = new_icon;
                     ui.ctx().output_mut(|output| {
                         output.cursor_icon = new_icon;
                     });
                 }
 
                 // Ctrl+click (Cmd+click on macOS) opens the URL.
-                if let Some(url) = &self.cached_hovered_url {
+                if let Some(url) = &cache.cached_hovered_url {
                     let clicked = ui.input(|i| {
                         i.pointer.button_clicked(egui::PointerButton::Primary)
                             && (i.modifiers.ctrl || i.modifiers.mac_cmd)
@@ -1467,10 +1528,10 @@ impl FreminalTerminalWidget {
                 }
             } else {
                 // Mouse left the terminal area.
-                self.previous_hover_cell = None;
-                self.cached_hovered_url = None;
-                if self.previous_cursor_icon != CursorIcon::Default {
-                    self.previous_cursor_icon = CursorIcon::Default;
+                cache.previous_hover_cell = None;
+                cache.cached_hovered_url = None;
+                if cache.previous_cursor_icon != CursorIcon::Default {
+                    cache.previous_cursor_icon = CursorIcon::Default;
                     ui.ctx().output_mut(|output| {
                         output.cursor_icon = CursorIcon::Default;
                     });
@@ -1478,10 +1539,10 @@ impl FreminalTerminalWidget {
             }
         } else {
             // No URLs — reset tracking state and ensure default cursor.
-            self.previous_hover_cell = None;
-            self.cached_hovered_url = None;
-            if self.previous_cursor_icon != CursorIcon::Default {
-                self.previous_cursor_icon = CursorIcon::Default;
+            cache.previous_hover_cell = None;
+            cache.cached_hovered_url = None;
+            if cache.previous_cursor_icon != CursorIcon::Default {
+                cache.previous_cursor_icon = CursorIcon::Default;
                 ui.ctx().output_mut(|output| {
                     output.cursor_icon = CursorIcon::Default;
                 });
@@ -1508,6 +1569,9 @@ impl FreminalTerminalWidget {
     ///
     /// Called when the user clicks "Apply" in the settings modal. Compares the
     /// old and new configs and updates font/cursor/theme state as needed.
+    /// Returns `true` if the font or ligature config changed, meaning the
+    /// caller must clear each pane's `RenderState::atlas` and
+    /// `PaneRenderCache::invalidate_content()`.
     ///
     /// Note: this does NOT send a Resize event. When the font changes, the cell
     /// size changes too, and the normal resize detection in `FreminalGui::ui()`
@@ -1519,17 +1583,12 @@ impl FreminalTerminalWidget {
         ctx: &egui::Context,
         old_config: &Config,
         new_config: &Config,
-    ) {
+    ) -> bool {
         let pixels_per_point = ctx.pixels_per_point();
         let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
-        if rebuild_result.font_changed() || ligatures_changed {
-            let mut rs = self
-                .render_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            rs.atlas.clear();
-            drop(rs);
+        let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
+        if needs_pane_atlas_clear {
             self.shaping_cache.clear();
         }
         self.ligatures = new_config.font.ligatures;
@@ -1550,39 +1609,27 @@ impl FreminalTerminalWidget {
             };
             self.base_font_defs = setup_font_files(ctx, &new_font_config);
         }
+        needs_pane_atlas_clear
     }
 
     /// Apply a font zoom by setting the font manager to `effective_size`.
     ///
-    /// Clears the glyph atlas and shaping cache if the size actually changed.
+    /// Clears the shared shaping cache if the size actually changed.
+    /// Returns `true` if the font size changed. When this returns `true`,
+    /// the caller must clear each pane's `RenderState::atlas` and
+    /// `PaneRenderCache::invalidate_content()` so that all panes force a
+    /// full vertex rebuild on the next frame.
+    ///
     /// The resize event to the PTY is handled automatically by the existing
     /// resize-detection logic in the render loop (it compares
     /// `available_pixels / cell_size` against `view_state.last_sent_size`).
-    pub fn apply_font_zoom(&mut self, effective_size: f32) {
+    pub fn apply_font_zoom(&mut self, effective_size: f32) -> bool {
         if self.font_manager.set_font_size(effective_size) {
-            let mut rs = self
-                .render_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            rs.atlas.clear();
-            drop(rs);
             self.shaping_cache.clear();
-            // Force a full vertex rebuild on the next frame.  The existing
-            // VBO data was built for the old cell pixel size and must not be
-            // reused.
-            self.last_rendered_visible = None;
-            self.last_rendered_line_widths = None;
+            true
+        } else {
+            false
         }
-    }
-
-    /// Invalidate the cached theme pointer so the next frame forces a full
-    /// vertex rebuild with the new palette colors.
-    ///
-    /// Called when a theme change is applied (not just previewed) to guarantee
-    /// the vertex data is rebuilt even if the preview already set the same
-    /// theme pointer.
-    pub const fn invalidate_theme_cache(&mut self) {
-        self.previous_theme = None;
     }
 }
 

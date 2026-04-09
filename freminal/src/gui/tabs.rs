@@ -379,6 +379,8 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            render_state: crate::gui::terminal::new_render_state(),
+            render_cache: crate::gui::terminal::PaneRenderCache::new(),
         };
 
         Tab::new(id, pane)

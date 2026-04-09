@@ -509,6 +509,8 @@ impl FreminalGui {
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
+                    render_state: terminal::new_render_state(),
+                    render_cache: terminal::PaneRenderCache::new(),
                 };
                 let tab = Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
@@ -610,6 +612,8 @@ impl FreminalGui {
                     .view_state
                     .reset_zoom();
                 self.terminal_widget.apply_font_zoom(self.config.font.size);
+                // Zoom reset may change font size — invalidate all panes.
+                self.invalidate_all_pane_atlases();
             }
 
             // -- Search overlay --
@@ -682,6 +686,27 @@ impl FreminalGui {
         vs.adjust_zoom(base, delta);
         let effective = vs.effective_font_size(base);
         self.terminal_widget.apply_font_zoom(effective);
+        // Font size changed — invalidate all panes so atlases are rebuilt.
+        self.invalidate_all_pane_atlases();
+    }
+
+    /// Clear every pane's GL glyph atlas and dirty-tracking cache.
+    ///
+    /// Called when the font, font size, ligature config, or pixels-per-point
+    /// changes, so that all panes rebuild their vertex buffers and
+    /// re-rasterise glyphs at the new metrics.
+    fn invalidate_all_pane_atlases(&mut self) {
+        for tab in self.tabs.iter_mut() {
+            if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                for pane in panes {
+                    pane.render_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear_atlas();
+                    pane.render_cache.invalidate_content();
+                }
+            }
+        }
     }
 
     /// Switch to tab N (0-indexed). Silently does nothing if the index
@@ -1291,7 +1316,15 @@ impl eframe::App for FreminalGui {
                         }
                     }
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
-                    self.terminal_widget.invalidate_theme_cache();
+                    // Invalidate theme cache on all panes in all tabs so the
+                    // next frame forces a full vertex rebuild with the new palette.
+                    for tab in self.tabs.iter_mut() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes {
+                                pane.render_cache.invalidate_theme_cache();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1368,7 +1401,7 @@ impl eframe::App for FreminalGui {
             // reading `cell_size()`.  Without this, the first frame after a DPI
             // change would use stale pixel metrics for the resize calculation.
             let ppp = ui.ctx().pixels_per_point();
-            self.terminal_widget.sync_pixels_per_point(ppp);
+            let ppp_changed = self.terminal_widget.sync_pixels_per_point(ppp);
 
             // Synchronise font zoom for the active tab.  Each tab has its own
             // zoom_delta and the font manager only knows one size at a time.
@@ -1380,9 +1413,17 @@ impl eframe::App for FreminalGui {
                 .active_pane()
                 .view_state
                 .effective_font_size(self.config.font.size);
-            self.terminal_widget.apply_font_zoom(effective);
+            let zoom_changed = self.terminal_widget.apply_font_zoom(effective);
 
-            // Compute char size once and reuse for both PTY sizing and widget layout.
+            // When pixels-per-point or font zoom changes, every pane's GL
+            // atlas and cached content must be invalidated so glyphs are
+            // re-rasterised at the new size.
+            if ppp_changed || zoom_changed {
+                self.invalidate_all_pane_atlases();
+            }
+
+            // Compute char size once — shared across all panes since all panes
+            // use the same font at the same size.
             // `cell_size()` returns integer pixel dimensions (physical) from swash
             // font metrics.  egui's coordinate system uses logical points, so we
             // convert with `pixels_per_point` when doing layout math.
@@ -1391,55 +1432,6 @@ impl eframe::App for FreminalGui {
             let font_height = usize::value_from(cell_height_u).unwrap_or(0);
             let logical_char_w = f32::approx_from(cell_w_u).unwrap_or(0.0) / ppp;
             let logical_char_h = f32::approx_from(cell_height_u).unwrap_or(0.0) / ppp;
-
-            let available = ui.available_size();
-            let width_chars = (available.x / logical_char_w)
-                .floor()
-                .approx_as::<usize>()
-                .unwrap_or_else(|e| {
-                    error!("Failed to calculate width chars: {e}");
-                    10
-                });
-            let height_chars = ((available.y / logical_char_h).floor())
-                .approx_as::<usize>()
-                .unwrap_or_else(|e| {
-                    error!("Failed to calculate height chars: {e}");
-                    10
-                })
-                .max(1);
-
-            // Debounced resize: only send an InputEvent::Resize when the
-            // character-cell dimensions actually change.
-            let new_size = (width_chars, height_chars);
-            if new_size
-                != self
-                    .tabs
-                    .active_tab()
-                    .active_pane()
-                    .view_state
-                    .last_sent_size
-            {
-                if let Err(e) =
-                    self.tabs
-                        .active_tab()
-                        .active_pane()
-                        .input_tx
-                        .send(InputEvent::Resize(
-                            width_chars,
-                            height_chars,
-                            font_width,
-                            font_height,
-                        ))
-                {
-                    error!("Failed to send resize event: {e}");
-                } else {
-                    self.tabs
-                        .active_tab_mut()
-                        .active_pane_mut()
-                        .view_state
-                        .last_sent_size = new_size;
-                }
-            }
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
@@ -1478,8 +1470,7 @@ impl eframe::App for FreminalGui {
                 );
             }
 
-            // Update background color based on whether the terminal is in
-            // normal (non-inverted) display mode.
+            // Update background color based on the active pane's display mode.
             //
             // Gated: only call `global_style_mut` when the inputs have
             // changed.  `global_style_mut` triggers `Arc::make_mut` on
@@ -1529,26 +1520,223 @@ impl eframe::App for FreminalGui {
                 self.style_cache = Some(style_key);
             }
 
-            let tab = self.tabs.active_tab_mut();
-            let pane = tab.active_pane_mut();
-            let is_echo_off = self.config.security.password_indicator
-                && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
-            let deferred_actions = self.terminal_widget.show(
-                ui,
-                &snap,
-                &mut pane.view_state,
-                &pane.input_tx,
-                &pane.clipboard_rx,
-                &pane.search_buffer_rx,
-                self.settings_modal.is_open || any_menu_open,
-                bg_opacity,
-                &self.binding_map,
-                is_echo_off,
-            );
+            // ── Multi-pane rendering loop ────────────────────────────
+            //
+            // Compute layout rects for every leaf pane in the active tab's
+            // pane tree, then render each one into its allocated rect.
+            // Collect deferred key actions from all panes for dispatch after
+            // the loop.
+
+            let available_rect = ui.available_rect_before_wrap();
+            let active_pane_id = self.tabs.active_tab().active_pane;
+            let has_multiple_panes = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+            // Width of the border drawn between adjacent panes (logical pixels).
+            let border_width: f32 = if has_multiple_panes { 1.0 } else { 0.0 };
+
+            let pane_layout = self
+                .tabs
+                .active_tab()
+                .pane_tree
+                .layout(available_rect)
+                .unwrap_or_default();
+
+            let mut all_deferred_actions = Vec::new();
+
+            // Track repaint needs across all panes.
+            let mut shortest_repaint_delay: Option<std::time::Duration> = None;
+
+            let ui_overlay_open = self.settings_modal.is_open || any_menu_open;
+
+            for (pane_id, pane_rect) in &pane_layout {
+                // Shrink the pane rect slightly to leave room for borders.
+                // Each pane edge that is interior (shared with another pane)
+                // gives up half the border width so the total gap equals
+                // `border_width`.
+                let content_rect = if has_multiple_panes {
+                    let half = border_width / 2.0;
+                    let shrink_left = if pane_rect.min.x > available_rect.min.x {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let shrink_right = if pane_rect.max.x < available_rect.max.x {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let shrink_top = if pane_rect.min.y > available_rect.min.y {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let shrink_bottom = if pane_rect.max.y < available_rect.max.y {
+                        half
+                    } else {
+                        0.0
+                    };
+                    egui::Rect::from_min_max(
+                        egui::pos2(pane_rect.min.x + shrink_left, pane_rect.min.y + shrink_top),
+                        egui::pos2(
+                            pane_rect.max.x - shrink_right,
+                            pane_rect.max.y - shrink_bottom,
+                        ),
+                    )
+                } else {
+                    *pane_rect
+                };
+
+                // Per-pane character dimensions from this pane's content rect.
+                let pane_width_chars = (content_rect.width() / logical_char_w)
+                    .floor()
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to calculate pane width chars: {e}");
+                        10
+                    });
+                let pane_height_chars = (content_rect.height() / logical_char_h)
+                    .floor()
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to calculate pane height chars: {e}");
+                        10
+                    })
+                    .max(1);
+
+                // Look up the pane mutably for resize + render.
+                let pane_id = *pane_id;
+                let tab = self.tabs.active_tab_mut();
+                let Some(pane) = tab.pane_tree.find_mut(pane_id) else {
+                    // Should never happen — layout returned this id.
+                    error!("Pane {pane_id} not found in tree during render");
+                    continue;
+                };
+
+                // Debounced resize: only send when char dims changed.
+                let new_size = (pane_width_chars, pane_height_chars);
+                if new_size != pane.view_state.last_sent_size {
+                    if let Err(e) = pane.input_tx.send(InputEvent::Resize(
+                        pane_width_chars,
+                        pane_height_chars,
+                        font_width,
+                        font_height,
+                    )) {
+                        error!("Failed to send resize event for {pane_id}: {e}");
+                    } else {
+                        pane.view_state.last_sent_size = new_size;
+                    }
+                }
+
+                // Load this pane's snapshot and sync scroll offset.
+                let pane_snap = pane.arc_swap.load();
+                if pane.view_state.scroll_offset != pane_snap.scroll_offset {
+                    pane.view_state.scroll_offset = pane_snap.scroll_offset;
+                }
+
+                let is_echo_off = self.config.security.password_indicator
+                    && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
+                let is_active = pane_id == active_pane_id;
+
+                // Render this pane into a child UI scoped to its content rect.
+                let deferred =
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |pane_ui| {
+                        self.terminal_widget.show(
+                            pane_ui,
+                            &pane_snap,
+                            &mut pane.view_state,
+                            &pane.render_state,
+                            &mut pane.render_cache,
+                            &pane.input_tx,
+                            &pane.clipboard_rx,
+                            &pane.search_buffer_rx,
+                            ui_overlay_open,
+                            bg_opacity,
+                            &self.binding_map,
+                            is_echo_off,
+                            is_active,
+                        )
+                    });
+                all_deferred_actions.extend(deferred.inner);
+
+                // Advance text blink cycle for this pane if it has blinking text.
+                if pane_snap.has_blinking_text {
+                    // Re-borrow after the allocate_new_ui closure.
+                    let tab = self.tabs.active_tab_mut();
+                    if let Some(p) = tab.pane_tree.find_mut(pane_id) {
+                        p.view_state.tick_text_blink();
+                    }
+                }
+
+                // Determine repaint delay for this pane.
+                let cursor_is_blinking = matches!(
+                    pane_snap.cursor_visual_style,
+                    freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
+                        | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
+                        | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
+                );
+                if pane_snap.content_changed || cursor_is_blinking || pane_snap.has_blinking_text {
+                    let delay = if pane_snap.content_changed {
+                        std::time::Duration::from_millis(16)
+                    } else if pane_snap.has_blinking_text {
+                        view_state::TEXT_BLINK_TICK_DURATION
+                    } else {
+                        std::time::Duration::from_millis(500)
+                    };
+                    shortest_repaint_delay =
+                        Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
+                }
+            }
+
+            // ── Pane borders ─────────────────────────────────────────
+            //
+            // Draw thin borders between adjacent panes when the tree has
+            // splits.  The active pane gets a highlighted border; inactive
+            // pane edges get a subtle gray.
+            if has_multiple_panes {
+                let painter = ui.painter();
+                let inactive_color = egui::Color32::from_gray(80);
+                let active_color = egui::Color32::from_rgb(100, 160, 255);
+
+                for (pane_id, pane_rect) in &pane_layout {
+                    let is_active = *pane_id == active_pane_id;
+                    let color = if is_active {
+                        active_color
+                    } else {
+                        inactive_color
+                    };
+                    let stroke = egui::Stroke::new(border_width, color);
+
+                    // Draw border segments only on interior edges (edges shared
+                    // with another pane, not the outer frame of the terminal area).
+                    if pane_rect.min.x > available_rect.min.x + 0.5 {
+                        // Left edge is interior.
+                        painter
+                            .line_segment([pane_rect.left_top(), pane_rect.left_bottom()], stroke);
+                    }
+                    if pane_rect.max.x < available_rect.max.x - 0.5 {
+                        // Right edge is interior.
+                        painter.line_segment(
+                            [pane_rect.right_top(), pane_rect.right_bottom()],
+                            stroke,
+                        );
+                    }
+                    if pane_rect.min.y > available_rect.min.y + 0.5 {
+                        // Top edge is interior.
+                        painter.line_segment([pane_rect.left_top(), pane_rect.right_top()], stroke);
+                    }
+                    if pane_rect.max.y < available_rect.max.y - 0.5 {
+                        // Bottom edge is interior.
+                        painter.line_segment(
+                            [pane_rect.left_bottom(), pane_rect.right_bottom()],
+                            stroke,
+                        );
+                    }
+                }
+            }
 
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
-            for action in deferred_actions {
+            for action in all_deferred_actions {
                 self.dispatch_deferred_action(action);
             }
 
@@ -1572,42 +1760,8 @@ impl eframe::App for FreminalGui {
                 ));
             }
 
-            // Only schedule a wakeup when there is work to do:
-            //  - new content arrived (`content_changed`)
-            //  - cursor is blinking (needs toggling every ~500 ms)
-            //  - text is blinking (needs toggling every ~167 ms)
-            //  - first frame (buffers still empty — need at least one full draw)
-            //
-            // A steady cursor with no new content does not need a periodic
-            // repaint; egui will wake on the next user input event instead.
-            let cursor_is_blinking = matches!(
-                snap.cursor_visual_style,
-                freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
-                    | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
-                    | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
-            );
-
-            // Advance the text blink cycle when blinking text is present.
-            if snap.has_blinking_text {
-                self.tabs
-                    .active_tab_mut()
-                    .active_pane_mut()
-                    .view_state
-                    .tick_text_blink();
-            }
-
-            if snap.content_changed || cursor_is_blinking || snap.has_blinking_text {
-                // Use a 16 ms deadline (~60 fps) for content changes; use the
-                // blink half-period (~500 ms) when only the cursor needs to
-                // toggle; use the fast-blink tick (~167 ms) when text is
-                // blinking.  Pick the shortest applicable interval.
-                let delay = if snap.content_changed {
-                    std::time::Duration::from_millis(16)
-                } else if snap.has_blinking_text {
-                    view_state::TEXT_BLINK_TICK_DURATION
-                } else {
-                    std::time::Duration::from_millis(500)
-                };
+            // Schedule a repaint at the shortest interval needed by any pane.
+            if let Some(delay) = shortest_repaint_delay {
                 ui.ctx().request_repaint_after(delay);
             }
         });
@@ -1662,11 +1816,23 @@ impl eframe::App for FreminalGui {
                     // the new palette.  Without this, the preview's rebuild
                     // may be the last one, and the Apply-frame snapshot
                     // (with content_changed=false) would skip the rebuild.
-                    self.terminal_widget.invalidate_theme_cache();
+                    for tab in self.tabs.iter_mut() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes {
+                                pane.render_cache.invalidate_theme_cache();
+                            }
+                        }
+                    }
                 }
 
-                self.terminal_widget
-                    .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                let font_changed =
+                    self.terminal_widget
+                        .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                if font_changed {
+                    // Font or ligature config changed — clear each pane's GL
+                    // atlas and force full vertex rebuilds.
+                    self.invalidate_all_pane_atlases();
+                }
                 self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
                     error!(
                         "Failed to rebuild binding map after settings apply: {e}. Using defaults."
