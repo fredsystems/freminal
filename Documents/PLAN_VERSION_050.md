@@ -479,30 +479,30 @@ solve a problem that content-change gating already handles. The complexity is no
 
 ### 57 Subtasks
 
-1. **57.1 — `has_urls` snapshot flag**
+1. **57.1 — `has_urls` snapshot flag** ✅ Complete.
    During `rows_as_tchars_and_tags_cached` in `buffer.rs`, track whether any tag in the
    visible window has `url.is_some()`. Store as `has_urls: bool` on the snapshot. Zero-cost
    check (piggybacked on the existing tag iteration that runs only when content is dirty).
    Add to `TerminalSnapshot`, `build_snapshot()`, and relevant tests.
 
-2. **57.2 — `row_offsets` index table**
+2. **57.2 — `row_offsets` index table** ✅ Complete.
    During `rows_as_tchars_and_tags_cached`, record the flat index where each row begins in
    `visible_chars`. Store as `row_offsets: Arc<Vec<usize>>` on the snapshot. Modify
    `flat_index_for_cell` to accept the row offsets and skip the O(visible_chars) row scan.
    Update all callers. Add benchmarks comparing before/after for `flat_index_for_cell`.
 
-3. **57.3 — `url_tag_indices` lookup array**
+3. **57.3 — `url_tag_indices` lookup array** ✅ Complete.
    During `rows_as_tchars_and_tags_cached`, collect indices of tags with `url.is_some()`.
    Store as `url_tag_indices: Arc<Vec<usize>>` on the snapshot. Modify URL hover detection
    in `widget.rs` to iterate only URL-bearing tags instead of all tags.
 
-4. **57.4 — Cell-change gating for URL hover**
+4. **57.4 — Cell-change gating for URL hover** ✅ Complete.
    Add `previous_hover_cell: (usize, usize)` and `previous_cursor_icon: CursorIcon` to
    `FreminalTerminalWidget`. Only run URL detection when the hovered cell changes. Only call
    `output_mut(cursor_icon)` when the icon actually changes. When `snap.has_urls` is false,
    skip the entire block (including `encode_egui_mouse_pos_as_usize`).
 
-5. **57.5 — Gate `global_style_mut`**
+5. **57.5 — Gate `global_style_mut`** ✅ Complete.
    Track previous `(is_normal_display, theme pointer, bg_opacity)` in `FreminalGui`. Only
    call `global_style_mut` when any of those change. Eliminates per-frame `Arc::make_mut`
    clone of the egui Style.
