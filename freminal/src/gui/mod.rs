@@ -205,6 +205,22 @@ impl FreminalGui {
             error!("Failed to send initial ThemeModeUpdate to tab: {e}");
         }
 
+        // The initial tab was spawned in main.rs with `active_slug(false)` before
+        // egui existed, so when `mode = "auto"` and the OS is actually in dark mode,
+        // the PTY thread has the wrong palette.  Correct it now that we know the
+        // real OS preference.
+        if gui.config.theme.active_slug(os_dark_mode) != gui.config.theme.active_slug(false)
+            && let Some(theme) =
+                freminal_common::themes::by_slug(gui.config.theme.active_slug(os_dark_mode))
+            && let Err(e) = gui
+                .tabs
+                .active_tab()
+                .input_tx
+                .send(InputEvent::ThemeChange(theme))
+        {
+            error!("Failed to send initial ThemeChange to tab: {e}");
+        }
+
         gui
     }
 

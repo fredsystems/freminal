@@ -95,9 +95,9 @@ pub struct TerminalModes {
     /// Pushed to the PTY thread via `InputEvent::ThemeModeUpdate` at startup
     /// and whenever the config or OS dark-mode preference changes.
     /// Controls the DECRPM ?2031 response code:
-    /// - `Auto`  → Ps=1 (light active) or Ps=2 (dark active) — dynamic
-    /// - `Light` → Ps=3 (permanently set)
-    /// - `Dark`  → Ps=4 (permanently reset)
+    /// - `Light` → Ps=1 (permanently set / locked)
+    /// - `Dark`  → Ps=2 (permanently reset / locked)
+    /// - `Auto`  → Ps=3 (light active) or Ps=4 (dark active) — temporary / changeable
     pub theme_mode: ThemeMode,
 }
 

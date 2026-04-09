@@ -12,6 +12,7 @@
 //! mode query tests in `freminal-buffer/tests/terminal_handler_integration.rs`.
 
 use crossbeam_channel::Receiver;
+use freminal_common::config::ThemeMode;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;
 
@@ -194,4 +195,146 @@ fn decrpm_integration_set_then_query_multiple_modes() {
 
     let resp2 = feed_and_collect(&mut state, &rx, b"\x1b[?1$p");
     assert_eq!(resp2, "\x1b[?1;1$y", "DECCKM must report set after enable");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ?2031 Theming — DECRPM queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn decrpm_theming_default_dark_locked() {
+    // Default theme_mode is Dark → Ps=2 (permanently reset / dark locked)
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?2031$p");
+    assert_eq!(
+        resp, "\x1b[?2031;2$y",
+        "Default Dark theme_mode → Ps=2 (permanently reset)"
+    );
+}
+
+#[test]
+fn decrpm_theming_light_locked() {
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Light;
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?2031$p");
+    assert_eq!(
+        resp, "\x1b[?2031;1$y",
+        "Light theme_mode → Ps=1 (permanently set)"
+    );
+}
+
+#[test]
+fn decrpm_theming_auto_dark_active() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Auto;
+    state.modes.theming = Theming::Dark;
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?2031$p");
+    assert_eq!(
+        resp, "\x1b[?2031;4$y",
+        "Auto mode with dark active → Ps=4 (temporarily reset)"
+    );
+}
+
+#[test]
+fn decrpm_theming_auto_light_active() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Auto;
+    state.modes.theming = Theming::Light;
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?2031$p");
+    assert_eq!(
+        resp, "\x1b[?2031;3$y",
+        "Auto mode with light active → Ps=3 (temporarily set)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ?2031 Theming — DECSET/DECRST honoured only when Auto
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn theming_decset_ignored_when_dark_locked() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    // Default is Dark (locked).  DECSET ?2031 should be ignored.
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[?2031h");
+    assert_eq!(
+        state.modes.theming,
+        Theming::Light,
+        "Theming state must not change when theme_mode is Dark (locked)"
+    );
+}
+
+#[test]
+fn theming_decrst_ignored_when_light_locked() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Light;
+    state.modes.theming = Theming::Light;
+    // DECRST ?2031 should be ignored when locked to Light.
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[?2031l");
+    assert_eq!(
+        state.modes.theming,
+        Theming::Light,
+        "Theming state must not change when theme_mode is Light (locked)"
+    );
+}
+
+#[test]
+fn theming_decset_honoured_when_auto() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Auto;
+    state.modes.theming = Theming::Dark;
+    // DECSET ?2031 → switch to Light
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[?2031h");
+    assert_eq!(
+        state.modes.theming,
+        Theming::Light,
+        "DECSET ?2031 should switch to Light when theme_mode is Auto"
+    );
+}
+
+#[test]
+fn theming_decrst_honoured_when_auto() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Auto;
+    state.modes.theming = Theming::Light;
+    // DECRST ?2031 → switch to Dark
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[?2031l");
+    assert_eq!(
+        state.modes.theming,
+        Theming::Dark,
+        "DECRST ?2031 should switch to Dark when theme_mode is Auto"
+    );
+}
+
+#[test]
+fn theming_set_then_query_auto_mode() {
+    use freminal_common::buffer_states::modes::theme::Theming;
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Auto;
+    state.modes.theming = Theming::Dark;
+
+    // DECSET ?2031 → switch to Light, then query
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[?2031h");
+    assert_eq!(state.modes.theming, Theming::Light);
+
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?2031$p");
+    assert_eq!(
+        resp, "\x1b[?2031;3$y",
+        "After DECSET in Auto mode → Ps=3 (temporarily set / light)"
+    );
+
+    // DECRST ?2031 → switch back to Dark, then query
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[?2031l");
+    assert_eq!(state.modes.theming, Theming::Dark);
+
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?2031$p");
+    assert_eq!(
+        resp, "\x1b[?2031;4$y",
+        "After DECRST in Auto mode → Ps=4 (temporarily reset / dark)"
+    );
 }

@@ -539,8 +539,7 @@ impl SettingsModal {
         if self.draft.theme.mode == ThemeMode::Auto {
             ui.colored_label(
                 egui::Color32::GRAY,
-                "Auto mode uses the dark theme when the OS is in dark mode,
-                 and the light theme when the OS is in light mode.",
+                "Auto mode uses the dark theme when the OS is in dark mode,\nand the light theme when the OS is in light mode.",
             );
         }
         ui.add_space(8.0);

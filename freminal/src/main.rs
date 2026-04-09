@@ -81,6 +81,10 @@ use clap::Parser;
 /// Spawns a PTY-backed terminal tab via [`spawn_pty_tab`] and starts the
 /// GUI event loop.
 fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
+    // Select the initial theme.  The OS dark/light preference is not yet
+    // available (no egui context), so `active_slug(false)` assumes light mode
+    // for `ThemeMode::Auto`.  The GUI constructor will detect the real OS
+    // preference and send a corrective `ThemeChange` if needed.
     let theme = themes::by_slug(cfg.theme.active_slug(false)).unwrap_or(&themes::CATPPUCCIN_MOCHA);
 
     // Shared egui context handle so the PTY consumer thread can request
@@ -325,6 +329,11 @@ fn main() {
             TerminalEmulator::new_headless(Some(cfg.scrollback.limit));
 
         // Apply the configured theme.
+        //
+        // In playback mode there is no egui context yet, so we cannot detect
+        // the OS dark/light preference.  `active_slug(false)` assumes light
+        // mode for `ThemeMode::Auto`.  The GUI constructor will correct this
+        // by sending a `ThemeChange` once the real OS preference is known.
         let theme =
             themes::by_slug(cfg.theme.active_slug(false)).unwrap_or(&themes::CATPPUCCIN_MOCHA);
         terminal.internal.handler.set_theme(theme);

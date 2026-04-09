@@ -159,9 +159,15 @@ pub struct ThemeConfig {
     /// `"dark"` (default), `"light"`, or `"auto"` (follow OS preference).
     pub mode: ThemeMode,
 
-    /// **Deprecated.** Alias for `dark_name`. Supported for backward compatibility:
-    /// a config file that only sets `name` will continue to work, with `name` used
-    /// as the dark theme name. Ignored when `dark_name` is also set explicitly.
+    /// **Deprecated.** Legacy alias for `dark_name`.
+    /// Supported for backward compatibility: a config file that only sets `name`
+    /// will continue to work, with `name` used as the dark theme name.
+    ///
+    /// With the current deserialization model, explicit field presence is not
+    /// tracked separately from default values. As a result, `name` is only
+    /// ignored when `dark_name` differs from its default value
+    /// (`"catppuccin-mocha"`). If `dark_name` is omitted or explicitly set to
+    /// that default value, `name` will still take effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -565,7 +571,7 @@ impl Config {
         let dark_slug = self.theme.effective_dark_name();
         if themes::by_slug(dark_slug).is_none() {
             return Err(ConfigError::Validation(format!(
-                "theme.dark_name=\"{dark_slug}\" is not a recognized theme slug"
+                "theme.dark_name (or legacy theme.name)=\"{dark_slug}\" is not a recognized theme slug"
             )));
         }
 
