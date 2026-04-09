@@ -10,7 +10,9 @@
 #       font.family = "JetBrainsMono Nerd Font";
 #       font.size = 14.0;
 #       cursor.shape = "bar";
-#       theme.name = "catppuccin-mocha";
+#       theme.dark_name = "catppuccin-mocha";
+#       theme.light_name = "catppuccin-latte";
+#       theme.mode = "auto";
 #     };
 #   };
 { freminal-flake }:
@@ -58,8 +60,13 @@ let
           ;
       };
 
-      themeSection = {
-        inherit (s.theme) name;
+      themeSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.theme)
+          dark_name
+          light_name
+          mode
+          name
+          ;
       };
 
       # Only include shell section if path is set.
@@ -181,7 +188,7 @@ in
       };
 
       theme = {
-        name = mkOption {
+        dark_name = mkOption {
           # Sorted alphabetically by slug. Keep in sync with ALL_THEMES in
           # freminal-common/src/themes.rs.
           type = types.enum [
@@ -214,7 +221,96 @@ in
             "xterm-default"
           ];
           default = "catppuccin-mocha";
-          description = "Color theme name (must be a recognized built-in slug).";
+          description = "Dark theme slug (used when mode = \"dark\" or as the dark variant for \"auto\").";
+        };
+
+        light_name = mkOption {
+          type = types.enum [
+            "ayu-dark"
+            "ayu-light"
+            "catppuccin-frappe"
+            "catppuccin-latte"
+            "catppuccin-macchiato"
+            "catppuccin-mocha"
+            "dracula"
+            "everforest-dark"
+            "everforest-light"
+            "ghostty-default"
+            "gruvbox-dark"
+            "gruvbox-light"
+            "kanagawa"
+            "material-dark"
+            "monokai-pro"
+            "nord"
+            "one-dark"
+            "one-light"
+            "rose-pine"
+            "rose-pine-dawn"
+            "rose-pine-moon"
+            "solarized-dark"
+            "solarized-light"
+            "tokyo-night"
+            "tokyo-night-storm"
+            "wezterm-default"
+            "xterm-default"
+          ];
+          default = "catppuccin-latte";
+          description = "Light theme slug (used when mode = \"light\" or as the light variant for \"auto\").";
+        };
+
+        mode = mkOption {
+          type = types.enum [
+            "dark"
+            "light"
+            "auto"
+          ];
+          default = "dark";
+          description = ''
+            How to select between dark_name and light_name.
+            "dark" always uses dark_name; "light" always uses light_name;
+            "auto" follows the OS light/dark preference.
+          '';
+        };
+
+        name = mkOption {
+          # Deprecated alias for dark_name.  Kept for backward compatibility.
+          type = types.nullOr (
+            types.enum [
+              "ayu-dark"
+              "ayu-light"
+              "catppuccin-frappe"
+              "catppuccin-latte"
+              "catppuccin-macchiato"
+              "catppuccin-mocha"
+              "dracula"
+              "everforest-dark"
+              "everforest-light"
+              "ghostty-default"
+              "gruvbox-dark"
+              "gruvbox-light"
+              "kanagawa"
+              "material-dark"
+              "monokai-pro"
+              "nord"
+              "one-dark"
+              "one-light"
+              "rose-pine"
+              "rose-pine-dawn"
+              "rose-pine-moon"
+              "solarized-dark"
+              "solarized-light"
+              "tokyo-night"
+              "tokyo-night-storm"
+              "wezterm-default"
+              "xterm-default"
+            ]
+          );
+          default = null;
+          description = ''
+            Deprecated. Use dark_name instead.
+            When set, this value is written as the TOML `name` field for
+            backward compatibility with older Freminal versions.
+          '';
         };
       };
 

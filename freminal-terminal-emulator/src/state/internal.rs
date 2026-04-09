@@ -22,11 +22,13 @@ use freminal_common::{
             reverse_wrap_around::ReverseWrapAround,
             s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
+            theme::Theming,
             xtmsewin::XtMseWin,
         },
         terminal_output::TerminalOutput,
         window_manipulation::WindowManipulation,
     },
+    config::ThemeMode,
     cursor::CursorVisualStyle,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
@@ -268,7 +270,8 @@ impl TerminalState {
             | Mode::SynchronizedUpdates(SynchronizedUpdates::Query)
             | Mode::Decnkm(Decnkm::Query)
             | Mode::Decbkm(Decbkm::Query)
-            | Mode::AlternateScroll(AlternateScroll::Query) => {
+            | Mode::AlternateScroll(AlternateScroll::Query)
+            | Mode::Theming(Theming::Query) => {
                 self.handle_mode_query(mode);
             }
             // ── Set/Reset variants — sync into self.modes ─────
@@ -327,8 +330,24 @@ impl TerminalState {
             Mode::Decanm(Decanm::Ansi) => {
                 self.parser.vt52_mode = Decanm::Ansi;
             }
+            // ── ?2031 Theming Set/Reset — only honoured when mode is Auto ──
+            //
+            // When `theme_mode` is `Dark` or `Light`, the mode is locked and
+            // application DECSET/DECRST requests are silently ignored.  When
+            // `theme_mode` is `Auto`, the Theming state is updated to reflect
+            // the application's requested preference.
+            Mode::Theming(v) => {
+                if self.modes.theme_mode == ThemeMode::Auto {
+                    self.modes.theming = v.clone();
+                } else {
+                    debug!(
+                        "?2031 Theming mode change ignored: theme_mode={:?} is locked",
+                        self.modes.theme_mode
+                    );
+                }
+            }
             // ── Modes parsed but not yet acted on ─────────────
-            Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
+            Mode::NoOp | Mode::Decsclm(_) | Mode::Unknown(_) => {
                 debug!("Mode not acted on by either layer: {mode}");
             }
         }
@@ -402,6 +421,30 @@ impl TerminalState {
             }
             Mode::AlternateScroll(AlternateScroll::Query) => {
                 let resp = self.modes.alternate_scroll.report(None);
+                self.send_decrpm(&resp);
+            }
+            // ── ?2031 Theming query ─────────────────────────────────────────
+            //
+            // Response codes defined in the xterm spec:
+            //   Ps=1 → permanently set (light mode active, locked)
+            //   Ps=2 → permanently reset (dark mode active, locked)
+            //   Ps=3 → temporarily set (was: light mode, but can be changed)
+            //   Ps=4 → temporarily reset (was: dark mode, but can be changed)
+            //
+            // Freminal usage:
+            //   `ThemeMode::Light` → Ps=1 (light locked — permanently set)
+            //   `ThemeMode::Dark`  → Ps=2 (dark locked — permanently reset)
+            //   `ThemeMode::Auto`  → Ps=3 or Ps=4 based on current Theming state
+            //                        (dynamically follows OS preference; app can override)
+            Mode::Theming(Theming::Query) => {
+                let resp = match self.modes.theme_mode {
+                    ThemeMode::Light => String::from("\x1b[?2031;1$y"),
+                    ThemeMode::Dark => String::from("\x1b[?2031;2$y"),
+                    ThemeMode::Auto => match self.modes.theming {
+                        Theming::Light => String::from("\x1b[?2031;3$y"),
+                        Theming::Dark | Theming::Query => String::from("\x1b[?2031;4$y"),
+                    },
+                };
                 self.send_decrpm(&resp);
             }
             _ => {}

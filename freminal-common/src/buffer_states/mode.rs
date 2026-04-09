@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use crate::config::ThemeMode;
+
 use crate::buffer_states::modes::{
     ReportMode,
     allow_alt_screen::AllowAltScreen,
@@ -82,6 +84,21 @@ pub struct TerminalModes {
     pub keypad_mode: KeypadMode,
     pub backarrow_key_mode: Decbkm,
     pub alternate_scroll: AlternateScroll,
+    /// DEC private mode `?2031` — the current dark/light theming state.
+    ///
+    /// Updated by `DECSET ?2031` (light) / `DECRST ?2031` (dark) only when
+    /// `theme_mode` is `Auto`.  When `Dark` or `Light`, application requests
+    /// to change this mode are silently ignored.
+    pub theming: Theming,
+    /// The GUI-configured theme selection mode (`Dark`, `Light`, or `Auto`).
+    ///
+    /// Pushed to the PTY thread via `InputEvent::ThemeModeUpdate` at startup
+    /// and whenever the config or OS dark-mode preference changes.
+    /// Controls the DECRPM ?2031 response code:
+    /// - `Light` → Ps=1 (permanently set / locked)
+    /// - `Dark`  → Ps=2 (permanently reset / locked)
+    /// - `Auto`  → Ps=3 (light active) or Ps=4 (dark active) — temporary / changeable
+    pub theme_mode: ThemeMode,
 }
 
 #[derive(Eq, PartialEq, Debug, Default, Clone)]
@@ -448,5 +465,64 @@ mod tests {
         use super::super::modes::declrmm::Declrmm;
         let s = format!("{}", Mode::Declrmm(Declrmm::Enabled));
         assert!(!s.is_empty());
+    }
+
+    // ── ?2031 Theming parse ──────────────────────────────────────────
+
+    #[test]
+    fn parse_2031_dec_set() {
+        let mode = Mode::terminal_mode_from_params(b"?2031", SetMode::DecSet);
+        assert_eq!(mode, Mode::Theming(Theming::Light));
+    }
+
+    #[test]
+    fn parse_2031_dec_rst() {
+        let mode = Mode::terminal_mode_from_params(b"?2031", SetMode::DecRst);
+        assert_eq!(mode, Mode::Theming(Theming::Dark));
+    }
+
+    #[test]
+    fn parse_2031_dec_query() {
+        let mode = Mode::terminal_mode_from_params(b"?2031", SetMode::DecQuery);
+        assert_eq!(mode, Mode::Theming(Theming::Query));
+    }
+
+    // ── ?2031 Theming report (Theming::report) ───────────────────────
+
+    #[test]
+    fn report_theming_dark_ps2() {
+        // Theming::Dark → currently dark → Ps=2
+        let mode = Mode::Theming(Theming::Dark);
+        assert_eq!(mode.report(None), "\x1b[?2031;2$y");
+    }
+
+    #[test]
+    fn report_theming_light_ps1() {
+        // Theming::Light → currently light → Ps=1
+        let mode = Mode::Theming(Theming::Light);
+        assert_eq!(mode.report(None), "\x1b[?2031;1$y");
+    }
+
+    // ── TerminalModes theming/theme_mode defaults ─────────────────────
+
+    #[test]
+    fn terminal_modes_default_theme_mode_is_dark() {
+        use crate::config::ThemeMode;
+        let modes = TerminalModes::default();
+        assert_eq!(
+            modes.theme_mode,
+            ThemeMode::Dark,
+            "default theme_mode should be Dark (locked)"
+        );
+    }
+
+    #[test]
+    fn terminal_modes_default_theming_is_light() {
+        let modes = TerminalModes::default();
+        assert_eq!(
+            modes.theming,
+            Theming::Light,
+            "default Theming state is Light (per enum #[default])"
+        );
     }
 }

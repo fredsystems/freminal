@@ -13,7 +13,7 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
 use freminal_common::args::Args;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::config::{Config, TabBarPosition};
+use freminal_common::config::{Config, TabBarPosition, ThemeMode};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 #[cfg(feature = "playback")]
@@ -37,14 +37,18 @@ pub mod tabs;
 pub mod terminal;
 pub mod view_state;
 
-fn set_egui_options(ctx: &egui::Context, bg_opacity: f32) {
+fn set_egui_options(
+    ctx: &egui::Context,
+    theme: &freminal_common::themes::ThemePalette,
+    bg_opacity: f32,
+) {
     ctx.global_style_mut(|style| {
         // window_fill stays fully opaque so menus, settings modal, and all
         // egui chrome are never affected by background_opacity.
         style.visuals.window_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
-            &freminal_common::themes::CATPPUCCIN_MOCHA,
+            theme,
             1.0,
         );
         // panel_fill gets the opacity — it controls the CentralPanel
@@ -53,7 +57,7 @@ fn set_egui_options(ctx: &egui::Context, bg_opacity: f32) {
         style.visuals.panel_fill = internal_color_to_egui_with_alpha(
             freminal_common::colors::TerminalColor::DefaultBackground,
             false,
-            &freminal_common::themes::CATPPUCCIN_MOCHA,
+            theme,
             bg_opacity,
         );
     });
@@ -132,6 +136,13 @@ struct FreminalGui {
     /// infinite repaint loop.
     last_window_title: String,
 
+    /// Cached OS dark/light preference.  `true` = OS is in dark mode.
+    ///
+    /// Sampled each frame from `egui ctx.style().visuals.dark_mode` and used
+    /// to resolve `ThemeMode::Auto` to the correct palette.  When the value
+    /// changes, the active theme is re-applied to all tabs.
+    os_dark_mode: bool,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -152,9 +163,16 @@ impl FreminalGui {
         config_path: Option<std::path::PathBuf>,
         #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
-        set_egui_options(&cc.egui_ctx, config.ui.background_opacity);
+        // Sample the OS dark/light preference from egui.
+        // `dark_mode` is true when the OS is in dark mode.
+        let os_dark_mode = cc.egui_ctx.global_style().visuals.dark_mode;
 
-        Self {
+        let initial_theme =
+            freminal_common::themes::by_slug(config.theme.active_slug(os_dark_mode))
+                .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+        set_egui_options(&cc.egui_ctx, initial_theme, config.ui.background_opacity);
+
+        let gui = Self {
             tabs: TabManager::new(initial_tab),
             terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
             binding_map: config.build_binding_map().unwrap_or_else(|e| {
@@ -166,11 +184,44 @@ impl FreminalGui {
             egui_ctx,
             settings_modal: SettingsModal::new(config_path),
             last_window_title: String::from("Freminal"),
+            os_dark_mode,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
             selected_playback_mode: None,
+        };
+
+        // Inform the initial tab about the configured theme mode and current OS
+        // dark/light preference so DECRPM ?2031 responses are correct from the start.
+        if let Err(e) = gui
+            .tabs
+            .active_tab()
+            .input_tx
+            .send(InputEvent::ThemeModeUpdate(
+                gui.config.theme.mode,
+                os_dark_mode,
+            ))
+        {
+            error!("Failed to send initial ThemeModeUpdate to tab: {e}");
         }
+
+        // The initial tab was spawned in main.rs with `active_slug(false)` before
+        // egui existed, so when `mode = "auto"` and the OS is actually in dark mode,
+        // the PTY thread has the wrong palette.  Correct it now that we know the
+        // real OS preference.
+        if gui.config.theme.active_slug(os_dark_mode) != gui.config.theme.active_slug(false)
+            && let Some(theme) =
+                freminal_common::themes::by_slug(gui.config.theme.active_slug(os_dark_mode))
+            && let Err(e) = gui
+                .tabs
+                .active_tab()
+                .input_tx
+                .send(InputEvent::ThemeChange(theme))
+        {
+            error!("Failed to send initial ThemeChange to tab: {e}");
+        }
+
+        gui
     }
 
     /// Show the top menu bar.
@@ -195,7 +246,8 @@ impl FreminalGui {
             let freminal_resp = ui.menu_button("Freminal", |ui| {
                 if ui.button("Settings...").clicked() {
                     let families = self.terminal_widget.monospace_families();
-                    self.settings_modal.open(&self.config, families);
+                    self.settings_modal
+                        .open(&self.config, families, self.os_dark_mode);
                     self.settings_modal
                         .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
                     ui.close();
@@ -408,8 +460,9 @@ impl FreminalGui {
             return;
         }
 
-        let theme = freminal_common::themes::by_slug(&self.config.theme.name)
-            .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+        let theme =
+            freminal_common::themes::by_slug(self.config.theme.active_slug(self.os_dark_mode))
+                .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
 
         match pty::spawn_pty_tab(
             &self.args,
@@ -434,6 +487,14 @@ impl FreminalGui {
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
                 };
+                // Inform the new tab of the current theme mode so DECRPM
+                // ?2031 queries return the correct locked/dynamic status.
+                if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
+                    self.config.theme.mode,
+                    self.os_dark_mode,
+                )) {
+                    error!("Failed to send ThemeModeUpdate to new tab: {e}");
+                }
                 self.tabs.add_tab(tab);
             }
             Err(e) => {
@@ -482,7 +543,8 @@ impl FreminalGui {
             KeyAction::OpenSettings => {
                 if !self.settings_modal.is_open {
                     let families = self.terminal_widget.monospace_families();
-                    self.settings_modal.open(&self.config, families);
+                    self.settings_modal
+                        .open(&self.config, families, self.os_dark_mode);
                     self.settings_modal
                         .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
                 }
@@ -1153,6 +1215,41 @@ impl eframe::App for FreminalGui {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
 
+        // Detect OS dark/light preference changes and auto-switch theme when
+        // `mode = "auto"` is configured.
+        let current_os_dark = ui.ctx().global_style().visuals.dark_mode;
+        if current_os_dark != self.os_dark_mode {
+            self.os_dark_mode = current_os_dark;
+
+            // Only auto-switch when the user has opted in.
+            // Always propagate the updated OS preference so DECRPM ?2031
+            // reflects the new dark/light state, regardless of ThemeMode.
+            for tab in self.tabs.iter() {
+                if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
+                    self.config.theme.mode,
+                    self.os_dark_mode,
+                )) {
+                    error!("Failed to send ThemeModeUpdate on OS change to tab: {e}");
+                }
+            }
+
+            if self.config.theme.mode == ThemeMode::Auto {
+                let slug = self.config.theme.active_slug(self.os_dark_mode);
+                if let Some(theme) = freminal_common::themes::by_slug(slug) {
+                    // Notify every tab so all PTY threads get the new palette.
+                    for tab in self.tabs.iter() {
+                        if let Err(e) = tab.input_tx.send(
+                            freminal_terminal_emulator::io::InputEvent::ThemeChange(theme),
+                        ) {
+                            error!("Failed to send auto ThemeChange to tab: {e}");
+                        }
+                    }
+                    update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
+                    self.terminal_widget.invalidate_theme_cache();
+                }
+            }
+        }
+
         // Poll all tabs for PTY death signals.  Dead tabs are collected by
         // index (in reverse order so removal doesn't shift later indices).
         let dead_indices: Vec<usize> = self
@@ -1411,7 +1508,7 @@ impl eframe::App for FreminalGui {
 
         // Show the settings modal (if open) above everything else.
         let modal_was_open = self.settings_modal.is_open;
-        let settings_action = self.settings_modal.show(ui.ctx());
+        let settings_action = self.settings_modal.show(ui.ctx(), self.os_dark_mode);
 
         // After show() processes the dropdown change, load the new font's
         // bytes and register them with egui so the preview renders in the
@@ -1435,10 +1532,14 @@ impl eframe::App for FreminalGui {
             SettingsAction::Applied => {
                 let new_cfg = self.settings_modal.applied_config().clone();
 
-                // If the theme slug changed, look it up and notify the PTY thread
-                // so the next snapshot carries the new palette.
-                if new_cfg.theme.name != self.config.theme.name
-                    && let Some(theme) = freminal_common::themes::by_slug(&new_cfg.theme.name)
+                // If the active theme slug changed (accounting for mode and OS pref),
+                // look it up and notify the PTY thread so the next snapshot carries
+                // the new palette.
+                if new_cfg.theme.active_slug(self.os_dark_mode)
+                    != self.config.theme.active_slug(self.os_dark_mode)
+                    && let Some(theme) = freminal_common::themes::by_slug(
+                        new_cfg.theme.active_slug(self.os_dark_mode),
+                    )
                 {
                     if let Err(e) = self
                         .tabs
@@ -1466,6 +1567,17 @@ impl eframe::App for FreminalGui {
                     freminal_common::keybindings::BindingMap::default()
                 });
                 self.config = new_cfg;
+
+                // Notify all tabs of the new theme mode so DECRPM ?2031 returns
+                // the correct locked/dynamic response after the config change.
+                for tab in self.tabs.iter() {
+                    if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
+                        self.config.theme.mode,
+                        self.os_dark_mode,
+                    )) {
+                        error!("Failed to send ThemeModeUpdate after settings apply: {e}");
+                    }
+                }
             }
             SettingsAction::PreviewTheme(ref slug) => {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {

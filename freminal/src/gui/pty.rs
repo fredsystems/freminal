@@ -16,6 +16,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use freminal_common::args::Args;
+use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::PtyWrite;
@@ -222,6 +223,16 @@ fn spawn_pty_consumer_thread(
                 }
                 Ok(InputEvent::ThemeChange(theme)) => {
                     emulator.internal.handler.set_theme(theme);
+                }
+                Ok(InputEvent::ThemeModeUpdate(theme_mode, os_is_dark)) => {
+                    emulator.internal.modes.theme_mode = theme_mode;
+                    // Sync the live theming state to match the OS preference
+                    // so that ?2031 queries reflect reality immediately.
+                    if os_is_dark {
+                        emulator.internal.modes.theming = Theming::Dark;
+                    } else {
+                        emulator.internal.modes.theming = Theming::Light;
+                    }
                 }
                 Ok(InputEvent::ExtractSelection {
                     start_row,

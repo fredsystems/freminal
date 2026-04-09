@@ -30,7 +30,7 @@ fn default_config_has_expected_values() {
     assert!((cfg.font.size - 12.0).abs() < f32::EPSILON);
     assert!(cfg.font.family.is_none());
     assert!(cfg.cursor.blink);
-    assert_eq!(cfg.theme.name, "catppuccin-mocha");
+    assert_eq!(cfg.theme.effective_dark_name(), "catppuccin-mocha");
     assert!(cfg.shell.path.is_none());
     assert!(!cfg.logging.write_to_file);
     assert_eq!(cfg.scrollback.limit, 4000);
@@ -62,7 +62,8 @@ fn v1_config_without_new_sections_loads_with_defaults() {
     assert_eq!(cfg.font.family.as_deref(), Some("Fira Code"));
     assert!((cfg.font.size - 14.0).abs() < f32::EPSILON);
     assert!(!cfg.cursor.blink);
-    assert_eq!(cfg.theme.name, "gruvbox-dark");
+    // Old `name` field is treated as the deprecated alias for dark_name.
+    assert_eq!(cfg.theme.effective_dark_name(), "gruvbox-dark");
 
     // New sections should fall back to defaults
     assert!(cfg.shell.path.is_none());
@@ -114,7 +115,7 @@ fn full_config_with_all_sections_parses() {
     assert_eq!(cfg.font.family.as_deref(), Some("JetBrains Mono"));
     assert!((cfg.font.size - 16.0).abs() < f32::EPSILON);
     assert!(cfg.cursor.blink);
-    assert_eq!(cfg.theme.name, "dracula");
+    assert_eq!(cfg.theme.effective_dark_name(), "dracula");
     assert_eq!(cfg.shell.path.as_deref(), Some("/bin/zsh"));
     assert!(cfg.logging.write_to_file);
     assert_eq!(cfg.scrollback.limit, 10000);
@@ -285,7 +286,10 @@ fn config_serializes_to_valid_toml() {
     let deserialized: Config = toml::from_str(&toml_str).expect("serialized TOML should parse");
     assert_eq!(deserialized.version, cfg.version);
     assert!((deserialized.font.size - cfg.font.size).abs() < f32::EPSILON);
-    assert_eq!(deserialized.theme.name, cfg.theme.name);
+    assert_eq!(
+        deserialized.theme.effective_dark_name(),
+        cfg.theme.effective_dark_name()
+    );
     assert_eq!(deserialized.scrollback.limit, cfg.scrollback.limit);
     assert_eq!(
         deserialized.logging.write_to_file,
@@ -625,7 +629,7 @@ fn save_config_round_trips_custom_values() {
     cfg.scrollback.limit = 10_000;
     cfg.font.size = 16.0;
     cfg.font.family = Some("JetBrains Mono".to_string());
-    cfg.theme.name = "solarized-dark".to_string();
+    cfg.theme.dark_name = "solarized-dark".to_string();
 
     save_config(&cfg, Some(&path)).expect("save should succeed");
 
@@ -635,7 +639,7 @@ fn save_config_round_trips_custom_values() {
     assert_eq!(loaded.scrollback.limit, 10_000);
     assert!((loaded.font.size - 16.0).abs() < f32::EPSILON);
     assert_eq!(loaded.font.family.as_deref(), Some("JetBrains Mono"));
-    assert_eq!(loaded.theme.name, "solarized-dark");
+    assert_eq!(loaded.theme.effective_dark_name(), "solarized-dark");
 }
 
 #[test]

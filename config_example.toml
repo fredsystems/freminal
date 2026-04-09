@@ -48,9 +48,14 @@ trail_duration_ms = 150
 # THEME SETTINGS
 ## ##############################################################################
 [theme]
-# Name of your color scheme (must be a recognized built-in slug).
+# How to choose between the dark and light theme.
+# Values: "dark" (always use dark_name), "light" (always use light_name),
+#         "auto" (follow the OS light/dark preference).
+mode = "dark"
+
+# Theme to use when mode = "dark", or as the dark variant when mode = "auto".
 #
-# Available themes:
+# Available theme slugs:
 #   catppuccin-mocha      catppuccin-macchiato   catppuccin-frappe
 #   catppuccin-latte      dracula                nord
 #   solarized-dark        solarized-light        gruvbox-dark
@@ -58,9 +63,17 @@ trail_duration_ms = 150
 #   tokyo-night           tokyo-night-storm      kanagawa
 #   rose-pine             rose-pine-moon         rose-pine-dawn
 #   monokai-pro           ayu-dark               ayu-light
-#   everforest-dark       everforest-light        material-dark
-#   xterm-default
-name = "catppuccin-mocha"
+#   everforest-dark       everforest-light       material-dark
+#   ghostty-default       wezterm-default        xterm-default
+dark_name = "catppuccin-mocha"
+
+# Theme to use when mode = "light", or as the light variant when mode = "auto".
+light_name = "catppuccin-latte"
+
+# Backward-compatible alias: if you previously had `name = "..."`, that
+# continues to work and is treated as the dark theme name.
+# Prefer `dark_name` going forward.
+# name = "catppuccin-mocha"
 
 ## ##############################################################################
 # SHELL SETTINGS

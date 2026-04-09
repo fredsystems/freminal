@@ -243,6 +243,11 @@ fn handle_event(
         InputEvent::ThemeChange(theme) => {
             emulator.internal.handler.set_theme(theme);
         }
+        InputEvent::ThemeModeUpdate(theme_mode, _os_is_dark) => {
+            // In playback mode, just update the theme_mode so DECRPM responses
+            // are correct. The OS preference is not meaningful in playback.
+            emulator.internal.modes.theme_mode = theme_mode;
+        }
         InputEvent::ExtractSelection {
             start_row,
             start_col,

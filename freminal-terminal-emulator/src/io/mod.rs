@@ -10,6 +10,7 @@ pub use pty::FreminalPtyInputOutput;
 // can use the same definitions without creating a circular dependency.
 pub use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 
+use freminal_common::config::ThemeMode;
 use freminal_common::themes::ThemePalette;
 
 pub struct PtyRead {
@@ -45,6 +46,15 @@ pub enum InputEvent {
     /// carry the new palette. All embedded themes are `'static` so this is
     /// a zero-cost pointer update.
     ThemeChange(&'static ThemePalette),
+    /// Update the GUI-configured theme selection mode in the PTY thread.
+    ///
+    /// Sent at startup and whenever `ThemeConfig::mode` or the OS dark-mode
+    /// preference changes.  The PTY thread stores this in `TerminalModes` so
+    /// that DECRPM `?2031` responses reflect the correct locked/dynamic state.
+    ///
+    /// `os_is_dark` is the current OS dark/light preference; it is used to
+    /// initialise `theming` when `mode` is `Auto`.
+    ThemeModeUpdate(ThemeMode, bool),
     /// Request the full buffer content (scrollback + visible) for search.
     ///
     /// The PTY thread concatenates `scrollback_chars` and `visible_chars`
