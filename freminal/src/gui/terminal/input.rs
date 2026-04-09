@@ -129,6 +129,7 @@ pub(in crate::gui) const fn egui_key_to_binding_key(key: Key) -> Option<BindingK
         Key::CloseBracket => Some(BindingKey::CloseBracket),
         Key::Backtick => Some(BindingKey::Backtick),
         Key::Quote => Some(BindingKey::Quote),
+        Key::Pipe => Some(BindingKey::Pipe),
         _ => None,
     }
 }
@@ -1061,7 +1062,7 @@ pub(super) fn write_input_to_terminal(
                 if let Some(inputs) = control_key(*key) {
                     inputs
                 } else {
-                    error!("Unexpected ctrl key: {}", key.name());
+                    debug!("Ignoring ctrl key with no C0 mapping: {}", key.name());
                     continue;
                 }
             }

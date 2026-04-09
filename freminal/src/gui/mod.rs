@@ -107,6 +107,21 @@ enum TabBarAction {
     Close(usize),
 }
 
+/// Tracks an in-progress mouse drag on a pane split border.
+///
+/// Created when the user starts dragging a border sensor rect and
+/// cleared when the drag ends. While active, mouse movement deltas
+/// are converted to ratio deltas and fed to [`panes::PaneTree::resize_split`].
+#[derive(Debug, Clone, Copy)]
+struct PaneBorderDrag {
+    /// A pane id in the first child of the split being resized.
+    /// Used as `target_id` for `resize_split()`.
+    target_pane: panes::PaneId,
+
+    /// The direction of the split being resized.
+    direction: panes::SplitDirection,
+}
+
 struct FreminalGui {
     /// All open terminal tabs, managed by `TabManager`.
     /// Each tab owns its own PTY channels, snapshot handle, and `ViewState`.
@@ -167,6 +182,10 @@ struct FreminalGui {
     /// where the pane layout rects are available.
     pending_focus_direction: Option<freminal_common::keybindings::KeyAction>,
 
+    /// Tracks an in-progress mouse drag on a pane split border.
+    /// `None` when no border drag is active.
+    border_drag: Option<PaneBorderDrag>,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -220,6 +239,7 @@ impl FreminalGui {
             pane_id_gen: panes::PaneIdGenerator::new(1),
             pending_close_pane: false,
             pending_focus_direction: None,
+            border_drag: None,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -1958,6 +1978,101 @@ impl eframe::App for FreminalGui {
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
             let ui_overlay_open = self.settings_modal.is_open || any_menu_open;
+
+            // ── Pane border drag-to-resize ───────────────────────────
+            //
+            // Before rendering panes, place invisible drag sensors on each
+            // split border. This must happen before the per-pane
+            // `scope_builder` calls so that pointer events on the border
+            // are consumed here instead of reaching the terminal widgets.
+            if has_multiple_panes && zoomed_pane.is_none() && !ui_overlay_open {
+                let borders = self
+                    .tabs
+                    .active_tab()
+                    .pane_tree
+                    .split_borders(available_rect)
+                    .unwrap_or_default();
+
+                // Half-width of the invisible drag sensor zone (pixels
+                // on each side of the 1px border line).
+                let sensor_half: f32 = 3.0;
+
+                for (border_idx, border) in borders.iter().enumerate() {
+                    // Expand the thin 1px border rect into a wider sensor rect.
+                    let sensor_rect = match border.direction {
+                        panes::SplitDirection::Horizontal => {
+                            // Vertical divider — expand horizontally.
+                            let cx = border.rect.center().x;
+                            egui::Rect::from_min_max(
+                                egui::pos2(cx - sensor_half, border.rect.min.y),
+                                egui::pos2(cx + sensor_half, border.rect.max.y),
+                            )
+                        }
+                        panes::SplitDirection::Vertical => {
+                            // Horizontal divider — expand vertically.
+                            let cy = border.rect.center().y;
+                            egui::Rect::from_min_max(
+                                egui::pos2(border.rect.min.x, cy - sensor_half),
+                                egui::pos2(border.rect.max.x, cy + sensor_half),
+                            )
+                        }
+                    };
+
+                    let sensor_id = ui.id().with("pane_border_sensor").with(border_idx);
+                    let response =
+                        ui.interact(sensor_rect, sensor_id, egui::Sense::click_and_drag());
+
+                    // Change cursor when hovering or dragging a border.
+                    if response.hovered() || response.dragged() {
+                        let cursor = match border.direction {
+                            panes::SplitDirection::Horizontal => egui::CursorIcon::ResizeHorizontal,
+                            panes::SplitDirection::Vertical => egui::CursorIcon::ResizeVertical,
+                        };
+                        ui.ctx().set_cursor_icon(cursor);
+                    }
+
+                    // On drag start, record which border we're resizing.
+                    if response.drag_started() {
+                        self.border_drag = Some(PaneBorderDrag {
+                            target_pane: border.first_child_pane,
+                            direction: border.direction,
+                        });
+                    }
+
+                    // While dragging, convert pixel delta to ratio delta.
+                    if response.dragged()
+                        && let Some(drag) = &self.border_drag
+                    {
+                        let delta_px = match drag.direction {
+                            panes::SplitDirection::Horizontal => response.drag_delta().x,
+                            panes::SplitDirection::Vertical => response.drag_delta().y,
+                        };
+
+                        // Convert pixel delta to ratio delta based on
+                        // the available rect dimension along the split axis.
+                        let total_px = match drag.direction {
+                            panes::SplitDirection::Horizontal => available_rect.width(),
+                            panes::SplitDirection::Vertical => available_rect.height(),
+                        };
+
+                        if total_px > 0.0 {
+                            let delta_ratio = delta_px / total_px;
+                            if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                                drag.target_pane,
+                                drag.direction,
+                                delta_ratio,
+                            ) {
+                                debug!("Border resize failed: {e}");
+                            }
+                        }
+                    }
+
+                    // Clear drag state when drag ends.
+                    if response.drag_stopped() {
+                        self.border_drag = None;
+                    }
+                }
+            }
 
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.

@@ -239,6 +239,38 @@ pub struct ClosedPaneResult {
     pub closed_pane: Pane,
 }
 
+// ── SplitBorder ──────────────────────────────────────────────────────
+
+/// Describes a single split border between adjacent panes.
+///
+/// Used by the GUI to create invisible drag sensor rects on the border,
+/// enabling mouse drag-to-resize. Each border maps to exactly one split
+/// node in the tree: dragging the border changes that node's `ratio`.
+#[derive(Debug, Clone)]
+pub struct SplitBorder {
+    /// The split axis.
+    ///
+    /// - `Horizontal`: a vertical dividing line (drag left/right).
+    /// - `Vertical`: a horizontal dividing line (drag up/down).
+    pub direction: SplitDirection,
+
+    /// A pane id from the **first** child of the split node.
+    ///
+    /// Passed to [`PaneTree::resize_split`] to identify which split to
+    /// adjust. The `resize_split` algorithm searches for the nearest
+    /// ancestor split matching `direction`, so any leaf in the first
+    /// subtree will find the correct node.
+    pub first_child_pane: PaneId,
+
+    /// The rectangle of the border line.
+    ///
+    /// For a horizontal split (vertical line): a thin vertical rect at
+    /// the split x-coordinate, spanning the full height of the parent.
+    /// For a vertical split (horizontal line): a thin horizontal rect at
+    /// the split y-coordinate, spanning the full width of the parent.
+    pub rect: Rect,
+}
+
 // ── PaneNode (internal) ─────────────────────────────────────────────
 
 /// Minimum fraction for a split ratio, preventing invisible panes.
@@ -362,6 +394,69 @@ impl PaneNode {
                 first.layout(r1, out);
                 second.layout(r2, out);
             }
+        }
+    }
+
+    /// Collect all split borders with their screen rects.
+    ///
+    /// For each `Split` node, computes the split coordinate and emits a
+    /// [`SplitBorder`] whose `rect` is a thin (1px) strip at the split
+    /// line spanning the full cross-axis extent of the parent rect.
+    /// Then recurses into both children with their respective sub-rects.
+    fn split_borders(&self, rect: Rect, out: &mut Vec<SplitBorder>) {
+        match self {
+            Self::Leaf(_) => {}
+            Self::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let (r1, r2) = split_rect(rect, *direction, *ratio);
+
+                // Emit a border descriptor for this split.
+                let border_rect = match direction {
+                    SplitDirection::Horizontal => {
+                        // Vertical dividing line at split_x.
+                        let split_x = r1.max.x;
+                        Rect::from_min_max(
+                            egui::pos2(split_x - 0.5, rect.min.y),
+                            egui::pos2(split_x + 0.5, rect.max.y),
+                        )
+                    }
+                    SplitDirection::Vertical => {
+                        // Horizontal dividing line at split_y.
+                        let split_y = r1.max.y;
+                        Rect::from_min_max(
+                            egui::pos2(rect.min.x, split_y - 0.5),
+                            egui::pos2(rect.max.x, split_y + 0.5),
+                        )
+                    }
+                };
+
+                // Find any leaf pane in the first subtree to use as the
+                // target_id for resize_split. The leftmost/topmost leaf
+                // is always reachable and will find this split node.
+                if let Some(first_leaf_id) = first.first_leaf_id() {
+                    out.push(SplitBorder {
+                        direction: *direction,
+                        first_child_pane: first_leaf_id,
+                        rect: border_rect,
+                    });
+                }
+
+                // Recurse into children.
+                first.split_borders(r1, out);
+                second.split_borders(r2, out);
+            }
+        }
+    }
+
+    /// Return the `PaneId` of the leftmost/topmost leaf in this subtree.
+    fn first_leaf_id(&self) -> Option<PaneId> {
+        match self {
+            Self::Leaf(pane) => Some(pane.id),
+            Self::Split { first, .. } => first.first_leaf_id(),
         }
     }
 
@@ -656,6 +751,24 @@ impl PaneTree {
         let mut result = Vec::with_capacity(root.pane_count());
         root.layout(rect, &mut result);
         Ok(result)
+    }
+
+    /// Compute the split borders for the current tree layout.
+    ///
+    /// Returns a [`SplitBorder`] for each internal split node, with the
+    /// screen-space rect of the border line and enough info to drive
+    /// [`PaneTree::resize_split`] on drag.
+    ///
+    /// Returns an empty `Vec` when the tree has only one pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaneError::InvalidState`] if the tree is empty (bug).
+    pub fn split_borders(&self, rect: Rect) -> Result<Vec<SplitBorder>, PaneError> {
+        let root = self.root()?;
+        let mut borders = Vec::new();
+        root.split_borders(rect, &mut borders);
+        Ok(borders)
     }
 
     // ── Mutations ────────────────────────────────────────────────────
@@ -1543,5 +1656,104 @@ mod tests {
             tree.close(PaneId(0)).unwrap_err(),
             PaneError::CannotCloseLastPane
         ));
+    }
+
+    // ── split_borders ────────────────────────────────────────────────
+
+    #[test]
+    fn split_borders_single_pane_returns_empty() {
+        let tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
+        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let borders = tree.split_borders(rect).unwrap();
+        assert!(borders.is_empty());
+    }
+
+    #[test]
+    fn split_borders_single_horizontal_split() {
+        let mut tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
+        let mut id_gen = PaneIdGenerator::new(1);
+
+        tree.split(
+            PaneId(0),
+            SplitDirection::Horizontal,
+            &mut id_gen,
+            make_dummy,
+        )
+        .unwrap();
+
+        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let borders = tree.split_borders(rect).unwrap();
+
+        assert_eq!(borders.len(), 1);
+        let border = &borders[0];
+        assert_eq!(border.direction, SplitDirection::Horizontal);
+        assert_eq!(border.first_child_pane, PaneId(0));
+
+        // The split should be at x=400 (50% of 800) ± 0.5
+        let center_x = border.rect.center().x;
+        assert!((center_x - 400.0).abs() < 1.0, "center_x = {center_x}");
+        // Vertical extent should span full height
+        assert!((border.rect.min.y - 0.0).abs() < 0.01);
+        assert!((border.rect.max.y - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn split_borders_single_vertical_split() {
+        let mut tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
+        let mut id_gen = PaneIdGenerator::new(1);
+
+        tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
+            .unwrap();
+
+        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let borders = tree.split_borders(rect).unwrap();
+
+        assert_eq!(borders.len(), 1);
+        let border = &borders[0];
+        assert_eq!(border.direction, SplitDirection::Vertical);
+
+        // The split should be at y=300 (50% of 600) ± 0.5
+        let center_y = border.rect.center().y;
+        assert!((center_y - 300.0).abs() < 1.0, "center_y = {center_y}");
+        // Horizontal extent should span full width
+        assert!((border.rect.min.x - 0.0).abs() < 0.01);
+        assert!((border.rect.max.x - 800.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn split_borders_nested_tree_returns_all_borders() {
+        let mut tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
+        let mut id_gen = PaneIdGenerator::new(1);
+
+        // [0 | 1]
+        tree.split(
+            PaneId(0),
+            SplitDirection::Horizontal,
+            &mut id_gen,
+            make_dummy,
+        )
+        .unwrap();
+        // [0 / 2 | 1]  (vertical split within left pane)
+        tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
+            .unwrap();
+
+        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let borders = tree.split_borders(rect).unwrap();
+
+        // Should have 2 borders: the horizontal split at x=400 and the
+        // vertical split at y=300 (within the left half).
+        assert_eq!(borders.len(), 2);
+
+        // One horizontal, one vertical
+        let h_count = borders
+            .iter()
+            .filter(|b| b.direction == SplitDirection::Horizontal)
+            .count();
+        let v_count = borders
+            .iter()
+            .filter(|b| b.direction == SplitDirection::Vertical)
+            .count();
+        assert_eq!(h_count, 1);
+        assert_eq!(v_count, 1);
     }
 }
