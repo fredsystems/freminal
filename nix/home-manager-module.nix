@@ -339,7 +339,7 @@ in
           default = null;
           description = ''
             Log level for file output.
-            Null uses the default ("debug").
+            Null uses the default ("info").
           '';
         };
       };
