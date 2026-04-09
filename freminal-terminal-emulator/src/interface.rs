@@ -556,7 +556,9 @@ impl TerminalEmulator {
             .any(|tag| tag.blink != freminal_common::buffer_states::fonts::BlinkState::None);
 
         // ── URL presence detection ───────────────────────────────────────────
-        let has_urls = visible_tags.iter().any(|tag| tag.url.is_some());
+        // O(1) — `url_tag_indices` already enumerates exactly those tags with a
+        // URL, so we skip the O(n) scan of `visible_tags`.
+        let has_urls = !url_tag_indices.is_empty();
 
         let cwd = self
             .internal

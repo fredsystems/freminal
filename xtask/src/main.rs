@@ -156,7 +156,7 @@ enum Command {
     #[command(visible_alias = "bc")]
     BenchCompile,
 
-    /// Lightweight pre-commit check (test + machete + default-features test)
+    /// Lightweight pre-commit check (test + machete)
     ///
     /// Runs only the checks that are NOT already covered by separate
     /// pre-commit hooks (clippy, rustfmt, codespell, markdownlint, prettier).

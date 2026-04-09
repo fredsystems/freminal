@@ -12,7 +12,11 @@ use crate::gui::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use freminal_common::{buffer_states::tchar::TChar, config::Config, themes::ThemePalette};
+use freminal_common::{
+    buffer_states::{tchar::TChar, url::Url},
+    config::Config,
+    themes::ThemePalette,
+};
 use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
 
 use eframe::egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
@@ -533,6 +537,14 @@ pub struct FreminalTerminalWidget {
     /// previous frame.  URL hover detection is skipped when the cell has not
     /// changed, turning per-pixel mouse-move events into per-cell events.
     previous_hover_cell: Option<(usize, usize)>,
+    /// Cached URL from the most recent URL hover lookup.  Recomputed when the
+    /// hovered cell changes or the snapshot content changes under a stationary
+    /// mouse.  Used for Ctrl+click detection even when `cell_changed` is false.
+    cached_hovered_url: Option<Arc<Url>>,
+    /// Pointer identity of the `visible_chars` `Arc` used for the last URL
+    /// hover lookup.  When the snapshot pointer changes (new content), the URL
+    /// lookup is recomputed even if the mouse hasn't moved.
+    hover_snap_ptr: usize,
     /// The cursor icon that was last written via `output_mut`.  The egui call
     /// is skipped when the icon has not changed.
     previous_cursor_icon: CursorIcon,
@@ -591,6 +603,8 @@ impl FreminalTerminalWidget {
             previous_search_match_count: 0,
             previous_search_current_match: 0,
             previous_hover_cell: None,
+            cached_hovered_url: None,
+            hover_snap_ptr: 0,
             previous_cursor_icon: CursorIcon::Default,
         }
     }
@@ -1382,12 +1396,15 @@ impl FreminalTerminalWidget {
 
         // ── URL hover detection ───────────────────────────────────────
         //
-        // Three gates to minimise work:
+        // Four gates to minimise work:
         //   1. has_urls — skip everything when no URLs exist (common case).
-        //   2. Cell-change — skip URL lookup when the mouse is still over the
-        //      same terminal cell as last frame.
-        //   3. Icon-change — skip `output_mut(cursor_icon)` when the icon has
-        //      not changed.
+        //   2. Cell-or-content change — skip URL lookup when the mouse is
+        //      still over the same terminal cell AND the snapshot content has
+        //      not changed (i.e. the underlying text is identical).
+        //   3. Icon-change — skip `output_mut(cursor_icon)` when the icon
+        //      has not changed.
+        //   4. Click detection always runs against the cached URL so that
+        //      Ctrl+click works even when the mouse has not moved.
         if snap.has_urls {
             if let Some(mouse_position) = view_state.mouse_position {
                 let (col, row) = encode_egui_mouse_pos_as_usize(
@@ -1398,55 +1415,60 @@ impl FreminalTerminalWidget {
 
                 let cell = (col, row);
                 let cell_changed = self.previous_hover_cell != Some(cell);
+                let snap_ptr = Arc::as_ptr(&snap.visible_chars) as usize;
+                let content_changed_under_mouse = snap_ptr != self.hover_snap_ptr;
                 self.previous_hover_cell = Some(cell);
+                self.hover_snap_ptr = snap_ptr;
 
-                if cell_changed {
-                    // Convert the mouse's display-column position to a flat
-                    // index into visible_chars, using the O(1) row-offset
-                    // table.
+                if cell_changed || content_changed_under_mouse {
+                    // Recompute the hovered URL: convert the mouse's
+                    // display-column position to a flat index into
+                    // `visible_chars`, using the O(1) row-offset table.
                     let flat_idx =
                         flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
 
-                    let hovered_url = flat_idx.and_then(|idx| {
+                    self.cached_hovered_url = flat_idx.and_then(|idx| {
                         snap.url_tag_indices
                             .iter()
                             .filter_map(|&ti| snap.visible_tags.get(ti))
                             .find(|tag| tag.start <= idx && idx < tag.end)
-                            .and_then(|tag| tag.url.as_ref())
+                            .and_then(|tag| tag.url.clone())
                     });
+                }
 
-                    let new_icon = if hovered_url.is_some() {
-                        CursorIcon::PointingHand
-                    } else {
-                        CursorIcon::Default
-                    };
+                // Update cursor icon from cached URL state.
+                let new_icon = if self.cached_hovered_url.is_some() {
+                    CursorIcon::PointingHand
+                } else {
+                    CursorIcon::Default
+                };
 
-                    if new_icon != self.previous_cursor_icon {
-                        self.previous_cursor_icon = new_icon;
-                        ui.ctx().output_mut(|output| {
-                            output.cursor_icon = new_icon;
+                if new_icon != self.previous_cursor_icon {
+                    self.previous_cursor_icon = new_icon;
+                    ui.ctx().output_mut(|output| {
+                        output.cursor_icon = new_icon;
+                    });
+                }
+
+                // Ctrl+click (Cmd+click on macOS) opens the URL.
+                if let Some(url) = &self.cached_hovered_url {
+                    let clicked = ui.input(|i| {
+                        i.pointer.button_clicked(egui::PointerButton::Primary)
+                            && (i.modifiers.ctrl || i.modifiers.mac_cmd)
+                    });
+                    if clicked {
+                        let url_str = url.url.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = open::that(&url_str) {
+                                error!("Failed to open URL {url_str}: {e}");
+                            }
                         });
-                    }
-
-                    // Ctrl+click (Cmd+click on macOS) opens the URL.
-                    if let Some(url) = hovered_url {
-                        let clicked = ui.input(|i| {
-                            i.pointer.button_clicked(egui::PointerButton::Primary)
-                                && (i.modifiers.ctrl || i.modifiers.mac_cmd)
-                        });
-                        if clicked {
-                            let url_str = url.url.clone();
-                            std::thread::spawn(move || {
-                                if let Err(e) = open::that(&url_str) {
-                                    error!("Failed to open URL {url_str}: {e}");
-                                }
-                            });
-                        }
                     }
                 }
             } else {
                 // Mouse left the terminal area.
                 self.previous_hover_cell = None;
+                self.cached_hovered_url = None;
                 if self.previous_cursor_icon != CursorIcon::Default {
                     self.previous_cursor_icon = CursorIcon::Default;
                     ui.ctx().output_mut(|output| {
@@ -1457,6 +1479,7 @@ impl FreminalTerminalWidget {
         } else {
             // No URLs — reset tracking state and ensure default cursor.
             self.previous_hover_cell = None;
+            self.cached_hovered_url = None;
             if self.previous_cursor_icon != CursorIcon::Default {
                 self.previous_cursor_icon = CursorIcon::Default;
                 ui.ctx().output_mut(|output| {
