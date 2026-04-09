@@ -753,8 +753,8 @@ impl FreminalTerminalWidget {
         bg_opacity: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
-        _is_active_pane: bool,
-    ) -> Vec<freminal_common::keybindings::KeyAction> {
+        is_active_pane: bool,
+    ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
         // `sync_pixels_per_point()` has already been called by
@@ -793,7 +793,7 @@ impl FreminalTerminalWidget {
         // overlay is open so that egui can deliver events to those widgets.
         let context_menu_open = view_state.context_menu_pos.is_some();
         let search_open = view_state.search_state.is_open;
-        if !suppress_input && !context_menu_open && !search_open {
+        if !suppress_input && !context_menu_open && !search_open && is_active_pane {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -833,6 +833,7 @@ impl FreminalTerminalWidget {
         // menu button (e.g. Copy) is delivered to egui's Area widget instead
         // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
+        let mut left_mouse_button_pressed = false;
         if suppress_input || context_menu_open || view_state.search_state.is_open {
             cache.previous_key = None;
             cache.previous_mouse_state = None;
@@ -842,7 +843,7 @@ impl FreminalTerminalWidget {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
             let (
-                _left_mouse_button_pressed,
+                left_mouse_button_pressed_inner,
                 new_mouse_pos,
                 previous_key,
                 scroll_amount,
@@ -862,8 +863,10 @@ impl FreminalTerminalWidget {
                     cache.previous_key,
                     cache.previous_scroll_amount,
                     binding_map,
+                    is_active_pane,
                 )
             });
+            left_mouse_button_pressed = left_mouse_button_pressed_inner;
             cache.previous_mouse_state = new_mouse_pos;
             cache.previous_key = previous_key;
             cache.previous_scroll_amount = scroll_amount;
@@ -1562,7 +1565,7 @@ impl FreminalTerminalWidget {
             &mut deferred_actions,
         );
 
-        deferred_actions
+        (left_mouse_button_pressed, deferred_actions)
     }
 
     /// Apply config changes that can be hot-reloaded at runtime.

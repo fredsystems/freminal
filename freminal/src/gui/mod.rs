@@ -1638,7 +1638,10 @@ impl eframe::App for FreminalGui {
                 let is_active = pane_id == active_pane_id;
 
                 // Render this pane into a child UI scoped to its content rect.
-                let deferred =
+                // show() returns (left_clicked, deferred_key_actions).
+                // left_clicked is true when a primary left-click was pressed inside
+                // this pane's rect — used below for click-to-focus.
+                let show_result =
                     ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |pane_ui| {
                         self.terminal_widget.show(
                             pane_ui,
@@ -1656,7 +1659,29 @@ impl eframe::App for FreminalGui {
                             is_active,
                         )
                     });
-                all_deferred_actions.extend(deferred.inner);
+                let (left_clicked, deferred_actions) = show_result.inner;
+                all_deferred_actions.extend(deferred_actions);
+
+                // Click-to-focus: if a non-active pane was left-clicked, transfer
+                // keyboard focus to it and send FocusChange events to both panes.
+                if left_clicked && !is_active {
+                    let tab = self.tabs.active_tab_mut();
+                    let old_active = tab.active_pane;
+                    // Notify the previously-active pane that it lost focus.
+                    if let Some(old_pane) = tab.pane_tree.find(old_active)
+                        && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+                    {
+                        error!("Failed to send FocusChange(false) to pane {old_active}: {e}");
+                    }
+                    // Switch focus.
+                    tab.active_pane = pane_id;
+                    // Notify the newly-active pane that it gained focus.
+                    if let Some(new_pane) = tab.pane_tree.find(pane_id)
+                        && let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true))
+                    {
+                        error!("Failed to send FocusChange(true) to pane {pane_id}: {e}");
+                    }
+                }
 
                 // Advance text blink cycle for this pane if it has blinking text.
                 if pane_snap.has_blinking_text {
