@@ -160,6 +160,15 @@ pub struct TerminalSnapshot {
     /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
     pub row_offsets: Arc<Vec<usize>>,
 
+    /// Indices into `visible_tags` of tags that carry a URL (`url.is_some()`).
+    ///
+    /// The GUI uses this to iterate only URL-bearing tags during hover
+    /// detection instead of scanning all tags — reducing the cost from
+    /// `O(all_tags)` to `O(url_tags)` (typically O(0)).
+    ///
+    /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
+    pub url_tag_indices: Arc<Vec<usize>>,
+
     /// Set to `true` when the scroll offset changed since the previous
     /// snapshot (the visible window moved, but the underlying text may not
     /// have changed).
@@ -342,6 +351,7 @@ impl TerminalSnapshot {
             has_blinking_text: false,
             has_urls: false,
             row_offsets: Arc::new(Vec::new()),
+            url_tag_indices: Arc::new(Vec::new()),
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),

@@ -1386,8 +1386,9 @@ impl FreminalTerminalWidget {
             let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
 
             let hovered_url = flat_idx.and_then(|idx| {
-                snap.visible_tags
+                snap.url_tag_indices
                     .iter()
+                    .filter_map(|&ti| snap.visible_tags.get(ti))
                     .find(|tag| tag.start <= idx && idx < tag.end)
                     .and_then(|tag| tag.url.as_ref())
             });
