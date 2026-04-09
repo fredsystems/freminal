@@ -28,6 +28,7 @@ pub mod colors;
 pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
+pub mod panes;
 pub mod pty;
 pub mod renderer;
 pub mod search;
