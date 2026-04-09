@@ -159,6 +159,14 @@ struct FreminalGui {
     /// ids are globally unique within the process lifetime.
     pane_id_gen: panes::PaneIdGenerator,
 
+    /// Set to `true` by the `ClosePane` key action dispatch; consumed after
+    /// the render loop where the `ui` reference is available.
+    pending_close_pane: bool,
+
+    /// Set by directional focus key actions; consumed after the render loop
+    /// where the pane layout rects are available.
+    pending_focus_direction: Option<freminal_common::keybindings::KeyAction>,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -210,6 +218,8 @@ impl FreminalGui {
             // Start at 1: the initial pane (spawned in main.rs) was assigned
             // PaneId(0) = PaneId::first(). All subsequent panes get ids ≥ 1.
             pane_id_gen: panes::PaneIdGenerator::new(1),
+            pending_close_pane: false,
+            pending_focus_direction: None,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -325,6 +335,13 @@ impl FreminalGui {
                 any_menu_open = true;
             }
 
+            let pane_resp = ui.menu_button("Pane", |ui| {
+                self.show_pane_menu(ui);
+            });
+            if pane_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
             // Playback controls: only shown when running in playback mode.
             #[cfg(feature = "playback")]
             if self.is_playback {
@@ -350,6 +367,55 @@ impl FreminalGui {
             }
         });
         (menu_action, any_menu_open)
+    }
+
+    /// Render the "Pane" dropdown menu contents.
+    ///
+    /// Extracted from `show_menu_bar` to keep that function under the
+    /// `too_many_lines` clippy limit.
+    fn show_pane_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Split Vertical (Left | Right)").clicked() {
+            self.spawn_split_pane(panes::SplitDirection::Horizontal);
+            ui.close();
+        }
+        if ui.button("Split Horizontal (Top / Bottom)").clicked() {
+            self.spawn_split_pane(panes::SplitDirection::Vertical);
+            ui.close();
+        }
+
+        ui.separator();
+
+        let can_close_pane = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+        if ui
+            .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
+            .clicked()
+        {
+            self.pending_close_pane = true;
+            ui.close();
+        }
+
+        let is_zoomed = self.tabs.active_tab().zoomed_pane.is_some();
+        let zoom_label = if is_zoomed {
+            "Un-Zoom Pane"
+        } else {
+            "Zoom Pane"
+        };
+        let can_zoom = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+        if ui
+            .add_enabled(can_zoom, egui::Button::new(zoom_label))
+            .clicked()
+        {
+            let tab = self.tabs.active_tab_mut();
+            let current = tab.active_pane;
+            if tab.zoomed_pane == Some(current) {
+                tab.zoomed_pane = None;
+            } else {
+                tab.zoomed_pane = Some(current);
+            }
+            ui.close();
+        }
     }
 
     /// Render the tab bar between the menu bar and the terminal area.
@@ -628,6 +694,124 @@ impl FreminalGui {
         }
     }
 
+    /// Close the focused pane in the active tab.
+    ///
+    /// If the pane is the last one in its tab, the tab itself is closed.
+    /// If the tab is the last tab, the application exits.
+    /// Otherwise, focus transfers to a sibling pane.
+    fn close_focused_pane(&mut self, ui: &egui::Ui) {
+        let tab = self.tabs.active_tab_mut();
+        let target = tab.active_pane;
+
+        // Cancel zoom if the zoomed pane is being closed.
+        if tab.zoomed_pane == Some(target) {
+            tab.zoomed_pane = None;
+        }
+
+        match tab.pane_tree.close(target) {
+            Ok(_closed) => {
+                // Focus transfers to the first pane remaining in the tree.
+                let tab = self.tabs.active_tab_mut();
+                if let Ok(panes) = tab.pane_tree.iter_panes()
+                    && let Some(first) = panes.first()
+                {
+                    tab.active_pane = first.id;
+                }
+            }
+            Err(panes::PaneError::CannotCloseLastPane) => {
+                // Last pane in tab — close the tab instead.
+                if self.tabs.tab_count() <= 1 {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    return;
+                }
+                let idx = self.tabs.active_index();
+                self.close_tab(idx);
+            }
+            Err(e) => {
+                error!("Failed to close pane {target}: {e}");
+            }
+        }
+    }
+
+    /// Find the nearest pane in the given direction relative to the focused
+    /// pane and transfer focus to it.
+    ///
+    /// Uses the center-point of each pane's layout rect to determine spatial
+    /// relationships. "Left" means the candidate's center X is less than the
+    /// current pane's center X, etc.
+    fn focus_pane_in_direction(
+        &mut self,
+        direction: freminal_common::keybindings::KeyAction,
+        available_rect: egui::Rect,
+    ) {
+        use freminal_common::keybindings::KeyAction;
+
+        let tab = self.tabs.active_tab();
+        let current_id = tab.active_pane;
+
+        let layout = match tab.pane_tree.layout(available_rect) {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to compute pane layout for navigation: {e}");
+                return;
+            }
+        };
+
+        // Find the current pane's rect.
+        let Some(current_rect) = layout
+            .iter()
+            .find(|(id, _)| *id == current_id)
+            .map(|(_, r)| *r)
+        else {
+            return;
+        };
+        let current_center = current_rect.center();
+
+        // Filter candidates by direction and pick the closest.
+        let best = layout
+            .iter()
+            .filter(|(id, _)| *id != current_id)
+            .filter(|(_, rect)| {
+                let c = rect.center();
+                match direction {
+                    KeyAction::FocusPaneLeft => c.x < current_center.x,
+                    KeyAction::FocusPaneRight => c.x > current_center.x,
+                    KeyAction::FocusPaneUp => c.y < current_center.y,
+                    KeyAction::FocusPaneDown => c.y > current_center.y,
+                    _ => false,
+                }
+            })
+            .min_by(|(_, a), (_, b)| {
+                let dist_a = a.center().distance(current_center);
+                let dist_b = b.center().distance(current_center);
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        if let Some((new_id, _)) = best {
+            let new_id = *new_id;
+            let tab = self.tabs.active_tab_mut();
+            let old_id = tab.active_pane;
+
+            // Notify the old pane it lost focus.
+            if let Some(old_pane) = tab.pane_tree.find(old_id)
+                && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+            {
+                error!("Failed to send FocusChange(false) to pane {old_id}: {e}");
+            }
+
+            tab.active_pane = new_id;
+
+            // Notify the new pane it gained focus.
+            if let Some(new_pane) = tab.pane_tree.find(new_id)
+                && let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true))
+            {
+                error!("Failed to send FocusChange(true) to pane {new_id}: {e}");
+            }
+        }
+    }
+
     /// Dispatch a `TabBarAction` from either the tab bar or the Tab menu.
     fn dispatch_tab_bar_action(&mut self, action: TabBarAction) {
         match action {
@@ -760,6 +944,74 @@ impl FreminalGui {
             }
             KeyAction::SplitHorizontal => {
                 self.spawn_split_pane(panes::SplitDirection::Vertical);
+            }
+            KeyAction::ClosePane => {
+                // Deferred — needs `ui` reference. Stored and handled after
+                // the render loop. See the `deferred_close_pane` handling below.
+                // For now we call the helper directly since we already have
+                // `&mut self`. The `ui` reference is not available here, so
+                // we handle last-pane-in-last-tab by checking upfront.
+                //
+                // We cannot access `ui` from dispatch_deferred_action, so the
+                // "close app" path uses a flag instead.
+                self.pending_close_pane = true;
+            }
+            KeyAction::FocusPaneLeft
+            | KeyAction::FocusPaneDown
+            | KeyAction::FocusPaneUp
+            | KeyAction::FocusPaneRight => {
+                self.pending_focus_direction = Some(action);
+            }
+            KeyAction::ResizePaneLeft => {
+                let id = self.tabs.active_tab().active_pane;
+                // Left resize = shrink horizontal split ratio (move divider left).
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Horizontal,
+                    -0.05,
+                ) {
+                    trace!("Cannot resize pane left: {e}");
+                }
+            }
+            KeyAction::ResizePaneRight => {
+                let id = self.tabs.active_tab().active_pane;
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Horizontal,
+                    0.05,
+                ) {
+                    trace!("Cannot resize pane right: {e}");
+                }
+            }
+            KeyAction::ResizePaneUp => {
+                let id = self.tabs.active_tab().active_pane;
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Vertical,
+                    -0.05,
+                ) {
+                    trace!("Cannot resize pane up: {e}");
+                }
+            }
+            KeyAction::ResizePaneDown => {
+                let id = self.tabs.active_tab().active_pane;
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Vertical,
+                    0.05,
+                ) {
+                    trace!("Cannot resize pane down: {e}");
+                }
+            }
+            KeyAction::ZoomPane => {
+                let tab = self.tabs.active_tab_mut();
+                let current = tab.active_pane;
+                if tab.zoomed_pane == Some(current) {
+                    // Un-zoom
+                    tab.zoomed_pane = None;
+                } else {
+                    tab.zoomed_pane = Some(current);
+                }
             }
 
             // These actions are handled at the input layer and should never
@@ -1432,26 +1684,70 @@ impl eframe::App for FreminalGui {
             }
         }
 
-        // Poll all tabs for PTY death signals.  Dead tabs are collected by
-        // index (in reverse order so removal doesn't shift later indices).
-        // In single-pane mode, each tab has exactly one pane; for multi-pane
-        // support (58.7+), this will be extended to check all panes.
-        let dead_indices: Vec<usize> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, tab)| tab.active_pane().pty_dead_rx.try_recv().is_ok())
-            .map(|(i, _)| i)
-            .rev()
-            .collect();
-
-        for idx in dead_indices {
-            if self.tabs.tab_count() <= 1 {
-                // Last tab died — close the whole application.
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                return;
+        // Poll all tabs for PTY death signals.  When a pane's PTY dies,
+        // close that pane.  If it was the last pane in the tab, close the
+        // tab.  If it was the last tab, close the application.
+        //
+        // Collect (tab_index, pane_id) pairs for dead panes, then process
+        // them in reverse order to avoid index shifting issues.
+        let mut dead_panes: Vec<(usize, panes::PaneId)> = Vec::new();
+        for (tab_idx, tab) in self.tabs.iter().enumerate() {
+            if let Ok(panes) = tab.pane_tree.iter_panes() {
+                for pane in panes {
+                    if pane.pty_dead_rx.try_recv().is_ok() {
+                        dead_panes.push((tab_idx, pane.id));
+                    }
+                }
             }
-            self.close_tab(idx);
+        }
+
+        for (tab_idx, pane_id) in dead_panes.into_iter().rev() {
+            // Try to close just the dead pane within its tab.
+            let is_active_tab = tab_idx == self.tabs.active_index();
+
+            // Switch to the dead pane's tab temporarily if needed so we can
+            // operate on it.
+            if !is_active_tab && let Err(e) = self.tabs.switch_to(tab_idx) {
+                error!("Failed to switch to tab {tab_idx} for dead pane cleanup: {e}");
+                continue;
+            }
+
+            let tab = self.tabs.active_tab_mut();
+            // If the dead pane was the zoomed pane, un-zoom first.
+            if tab.zoomed_pane == Some(pane_id) {
+                tab.zoomed_pane = None;
+            }
+
+            match tab.pane_tree.close(pane_id) {
+                Ok(_closed) => {
+                    // If the active pane was the one that died, pick a new active pane.
+                    let tab = self.tabs.active_tab_mut();
+                    if tab.active_pane == pane_id
+                        && let Ok(panes) = tab.pane_tree.iter_panes()
+                        && let Some(first) = panes.first()
+                    {
+                        tab.active_pane = first.id;
+                    }
+                }
+                Err(panes::PaneError::CannotCloseLastPane) => {
+                    // Last pane in tab — close the entire tab.
+                    if self.tabs.tab_count() <= 1 {
+                        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                        return;
+                    }
+                    self.close_tab(tab_idx);
+                }
+                Err(e) => {
+                    error!("Failed to close dead pane {pane_id}: {e}");
+                }
+            }
+
+            // Restore the original active tab if we switched away.
+            if !is_active_tab {
+                // The tab we were on may have been removed, so saturate.
+                let restore_idx = tab_idx.min(self.tabs.tab_count().saturating_sub(1));
+                let _ = self.tabs.switch_to(restore_idx);
+            }
         }
 
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
@@ -1538,13 +1834,15 @@ impl eframe::App for FreminalGui {
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
-            // Drain window commands for ALL tabs.  The active tab gets full
-            // handling (viewport commands, reports, title updates, clipboard).
-            // Inactive tabs get reports answered, titles updated, and clipboard
-            // handled — only viewport-mutating commands (resize, move, minimize,
-            // fullscreen) are discarded since an inactive tab must not alter the
-            // shared window geometry.
+            // Drain window commands for ALL tabs and ALL panes within each tab.
+            // The active tab's active pane gets full handling (viewport commands,
+            // reports, title updates, clipboard). All other panes get reports
+            // answered, titles updated, and clipboard handled — only
+            // viewport-mutating commands (resize, move, minimize, fullscreen)
+            // are discarded since a non-active pane must not alter the shared
+            // window geometry.
             let active_idx = self.tabs.active_index();
+            let active_pane_id_for_drain = self.tabs.active_tab().active_pane;
             let window_focused = self
                 .tabs
                 .active_tab()
@@ -1552,25 +1850,28 @@ impl eframe::App for FreminalGui {
                 .view_state
                 .window_focused;
             for (idx, tab) in self.tabs.iter_mut().enumerate() {
-                // In single-pane mode, each tab has exactly one pane.
-                // For multi-pane (58.11+), this will iterate all panes.
-                let pane = tab.active_pane_mut();
-                handle_window_manipulation(
-                    ui,
-                    &pane.window_cmd_rx,
-                    &pane.pty_write_tx,
-                    font_width,
-                    font_height,
-                    window_width,
-                    &mut pane.title_stack,
-                    &mut pane.title,
-                    &mut pane.bell_active,
-                    &mut pane.view_state.bell_since,
-                    self.config.bell.mode,
-                    self.config.security.allow_clipboard_read,
-                    idx == active_idx,
-                    window_focused,
-                );
+                let is_active_tab = idx == active_idx;
+                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes {
+                        let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
+                        handle_window_manipulation(
+                            ui,
+                            &pane.window_cmd_rx,
+                            &pane.pty_write_tx,
+                            font_width,
+                            font_height,
+                            window_width,
+                            &mut pane.title_stack,
+                            &mut pane.title,
+                            &mut pane.bell_active,
+                            &mut pane.view_state.bell_since,
+                            self.config.bell.mode,
+                            self.config.security.allow_clipboard_read,
+                            is_fully_active,
+                            window_focused,
+                        );
+                    }
+                }
             }
 
             // Update background color based on the active pane's display mode.
@@ -1632,17 +1933,24 @@ impl eframe::App for FreminalGui {
 
             let available_rect = ui.available_rect_before_wrap();
             let active_pane_id = self.tabs.active_tab().active_pane;
+            let zoomed_pane = self.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
-            // Width of the border drawn between adjacent panes (logical pixels).
-            let border_width: f32 = if has_multiple_panes { 1.0 } else { 0.0 };
-
-            let pane_layout = self
-                .tabs
-                .active_tab()
-                .pane_tree
-                .layout(available_rect)
-                .unwrap_or_default();
+            // When a pane is zoomed, render only that pane at full size.
+            // Borders are hidden during zoom since there is only one visible pane.
+            let (pane_layout, border_width) = if let Some(zoomed_id) = zoomed_pane {
+                (vec![(zoomed_id, available_rect)], 0.0)
+            } else {
+                // Width of the border drawn between adjacent panes (logical pixels).
+                let bw: f32 = if has_multiple_panes { 1.0 } else { 0.0 };
+                let layout = self
+                    .tabs
+                    .active_tab()
+                    .pane_tree
+                    .layout(available_rect)
+                    .unwrap_or_default();
+                (layout, bw)
+            };
 
             let mut all_deferred_actions = Vec::new();
 
@@ -1820,7 +2128,7 @@ impl eframe::App for FreminalGui {
             // Draw thin borders between adjacent panes when the tree has
             // splits.  The active pane gets a highlighted border; inactive
             // pane edges get a subtle gray.
-            if has_multiple_panes {
+            if has_multiple_panes && zoomed_pane.is_none() {
                 let painter = ui.painter();
                 let inactive_color = egui::Color32::from_gray(80);
                 let active_color = egui::Color32::from_rgb(100, 160, 255);
@@ -1866,6 +2174,17 @@ impl eframe::App for FreminalGui {
             // layer because they require full GUI state.
             for action in all_deferred_actions {
                 self.dispatch_deferred_action(action);
+            }
+
+            // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
+            if self.pending_close_pane {
+                self.pending_close_pane = false;
+                self.close_focused_pane(ui);
+            }
+
+            // Handle deferred directional focus (needs layout rects).
+            if let Some(dir) = self.pending_focus_direction.take() {
+                self.focus_pane_in_direction(dir, available_rect);
             }
 
             // Keep the window title bar in sync with the active tab's title.

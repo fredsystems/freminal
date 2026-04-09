@@ -982,9 +982,12 @@ impl FreminalTerminalWidget {
         let mut is_cursor_only = false;
         let mut cursor_only_verts: Vec<f32> = Vec::new();
 
-        // When a password prompt is active (echo-off), suppress the
-        // normal cursor — the lock icon overlay replaces it.
-        let effective_show_cursor = snap.show_cursor && !is_echo_off;
+        // Suppress the cursor when:
+        // - the terminal has hidden it (DECTCEM ?25l),
+        // - a password prompt is active (echo-off lock icon replaces it), or
+        // - this pane is not the active/focused pane (tmux-style: only the
+        //   focused pane shows a cursor).
+        let effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
 
         if !snap.skip_draw {
             // Detect content changes via `Arc::ptr_eq` — this is immune to the

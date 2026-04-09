@@ -179,7 +179,7 @@ limit = 4000
 #
 #   Tab management:
 #     new_tab         = "Ctrl+Shift+T"
-#     close_tab       = "Ctrl+Shift+W"
+#     close_tab       = (unbound)           (reassigned to close_pane; configure manually)
 #     next_tab        = "Ctrl+Tab"
 #     prev_tab        = "Ctrl+Shift+Tab"
 #     switch_to_tab_1 = "Ctrl+Shift+1"  (through switch_to_tab_9)
@@ -219,6 +219,16 @@ limit = 4000
 #   Pane management:
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)
 #     split_horizontal = "Ctrl+Shift+Minus"  (split focused pane top / bottom)
+#     close_pane       = "Ctrl+Shift+W"      (close focused pane; last pane closes tab)
+#     focus_pane_left  = "Ctrl+Shift+H"      (move focus left)
+#     focus_pane_down  = "Ctrl+Shift+J"      (move focus down)
+#     focus_pane_up    = "Ctrl+Shift+K"      (move focus up)
+#     focus_pane_right = "Ctrl+Shift+L"      (move focus right)
+#     resize_pane_left  = "Ctrl+Alt+H"       (shrink pane leftward)
+#     resize_pane_down  = "Ctrl+Alt+J"       (grow pane downward)
+#     resize_pane_up    = "Ctrl+Alt+K"       (shrink pane upward)
+#     resize_pane_right = "Ctrl+Alt+L"       (grow pane rightward)
+#     zoom_pane        = "Ctrl+Shift+Z"      (toggle zoom on focused pane)
 #
 # Example: remap copy/paste to Ctrl+C / Ctrl+V (warning: this will prevent
 # Ctrl+C from sending SIGINT to the running program):

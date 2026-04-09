@@ -452,6 +452,13 @@ impl BindingModifiers {
         shift: false,
         alt: true,
     };
+
+    /// Ctrl + Alt.
+    pub const CTRL_ALT: Self = Self {
+        ctrl: true,
+        shift: false,
+        alt: true,
+    };
 }
 
 impl fmt::Display for BindingModifiers {
@@ -696,6 +703,26 @@ pub enum KeyAction {
     SplitVertical,
     /// Split the focused pane horizontally (top / bottom, horizontal divider).
     SplitHorizontal,
+    /// Close the focused pane (last pane closes the tab).
+    ClosePane,
+    /// Move focus to the pane to the left.
+    FocusPaneLeft,
+    /// Move focus to the pane below.
+    FocusPaneDown,
+    /// Move focus to the pane above.
+    FocusPaneUp,
+    /// Move focus to the pane to the right.
+    FocusPaneRight,
+    /// Grow the focused pane leftward (shrink right neighbor).
+    ResizePaneLeft,
+    /// Grow the focused pane downward (shrink top neighbor).
+    ResizePaneDown,
+    /// Grow the focused pane upward (shrink bottom neighbor).
+    ResizePaneUp,
+    /// Grow the focused pane rightward (shrink left neighbor).
+    ResizePaneRight,
+    /// Toggle zoom on the focused pane (full-tab or restore).
+    ZoomPane,
 }
 
 impl KeyAction {
@@ -742,6 +769,16 @@ impl KeyAction {
             Self::ScrollLineDown => "scroll_line_down",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
+            Self::ClosePane => "close_pane",
+            Self::FocusPaneLeft => "focus_pane_left",
+            Self::FocusPaneDown => "focus_pane_down",
+            Self::FocusPaneUp => "focus_pane_up",
+            Self::FocusPaneRight => "focus_pane_right",
+            Self::ResizePaneLeft => "resize_pane_left",
+            Self::ResizePaneDown => "resize_pane_down",
+            Self::ResizePaneUp => "resize_pane_up",
+            Self::ResizePaneRight => "resize_pane_right",
+            Self::ZoomPane => "zoom_pane",
         }
     }
 
@@ -790,6 +827,16 @@ impl KeyAction {
             Self::ScrollLineDown => "Scroll Line Down",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
+            Self::ClosePane => "Close Pane",
+            Self::FocusPaneLeft => "Focus Pane Left",
+            Self::FocusPaneDown => "Focus Pane Down",
+            Self::FocusPaneUp => "Focus Pane Up",
+            Self::FocusPaneRight => "Focus Pane Right",
+            Self::ResizePaneLeft => "Resize Pane Left",
+            Self::ResizePaneDown => "Resize Pane Down",
+            Self::ResizePaneUp => "Resize Pane Up",
+            Self::ResizePaneRight => "Resize Pane Right",
+            Self::ZoomPane => "Zoom Pane",
         }
     }
 
@@ -835,6 +882,16 @@ impl KeyAction {
         Self::ScrollLineDown,
         Self::SplitVertical,
         Self::SplitHorizontal,
+        Self::ClosePane,
+        Self::FocusPaneLeft,
+        Self::FocusPaneDown,
+        Self::FocusPaneUp,
+        Self::FocusPaneRight,
+        Self::ResizePaneLeft,
+        Self::ResizePaneDown,
+        Self::ResizePaneUp,
+        Self::ResizePaneRight,
+        Self::ZoomPane,
     ];
 }
 
@@ -892,6 +949,16 @@ impl FromStr for KeyAction {
             "scroll_line_down" => Ok(Self::ScrollLineDown),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
+            "close_pane" => Ok(Self::ClosePane),
+            "focus_pane_left" => Ok(Self::FocusPaneLeft),
+            "focus_pane_down" => Ok(Self::FocusPaneDown),
+            "focus_pane_up" => Ok(Self::FocusPaneUp),
+            "focus_pane_right" => Ok(Self::FocusPaneRight),
+            "resize_pane_left" => Ok(Self::ResizePaneLeft),
+            "resize_pane_down" => Ok(Self::ResizePaneDown),
+            "resize_pane_up" => Ok(Self::ResizePaneUp),
+            "resize_pane_right" => Ok(Self::ResizePaneRight),
+            "zoom_pane" => Ok(Self::ZoomPane),
             other => Err(KeyBindingError::UnknownAction(other.to_string())),
         }
     }
@@ -1042,10 +1109,8 @@ fn register_tab_bindings(map: &mut BindingMap) {
         KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT),
         KeyAction::NewTab,
     );
-    map.bind(
-        KeyCombo::new(BindingKey::W, BindingModifiers::CTRL_SHIFT),
-        KeyAction::CloseTab,
-    );
+    // Note: Ctrl+Shift+W is now ClosePane (registered in register_pane_bindings).
+    // CloseTab has no default binding but can be configured by the user.
     map.bind(
         KeyCombo::new(BindingKey::Tab, BindingModifiers::CTRL),
         KeyAction::NextTab,
@@ -1165,6 +1230,54 @@ fn register_pane_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::Minus, BindingModifiers::CTRL_SHIFT),
         KeyAction::SplitHorizontal,
+    );
+    // Close the focused pane (last pane in tab closes the tab).
+    // Replaces the tab-level CloseTab binding on Ctrl+Shift+W.
+    map.bind(
+        KeyCombo::new(BindingKey::W, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ClosePane,
+    );
+
+    // Directional navigation (vim-style).
+    map.bind(
+        KeyCombo::new(BindingKey::H, BindingModifiers::CTRL_SHIFT),
+        KeyAction::FocusPaneLeft,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::J, BindingModifiers::CTRL_SHIFT),
+        KeyAction::FocusPaneDown,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::K, BindingModifiers::CTRL_SHIFT),
+        KeyAction::FocusPaneUp,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::L, BindingModifiers::CTRL_SHIFT),
+        KeyAction::FocusPaneRight,
+    );
+
+    // Directional resize (vim-style, Ctrl+Alt prefix).
+    map.bind(
+        KeyCombo::new(BindingKey::H, BindingModifiers::CTRL_ALT),
+        KeyAction::ResizePaneLeft,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::J, BindingModifiers::CTRL_ALT),
+        KeyAction::ResizePaneDown,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::K, BindingModifiers::CTRL_ALT),
+        KeyAction::ResizePaneUp,
+    );
+    map.bind(
+        KeyCombo::new(BindingKey::L, BindingModifiers::CTRL_ALT),
+        KeyAction::ResizePaneRight,
+    );
+
+    // Zoom toggle.
+    map.bind(
+        KeyCombo::new(BindingKey::Z, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ZoomPane,
     );
 }
 
@@ -1485,7 +1598,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            37,
+            47,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -1820,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn default_close_tab_binding() {
+    fn default_close_pane_binding() {
         let map = BindingMap::default();
         let combo = KeyCombo::new(
             BindingKey::W,
@@ -1830,7 +1943,8 @@ mod tests {
                 alt: false,
             },
         );
-        assert_eq!(map.lookup(&combo), Some(KeyAction::CloseTab));
+        // Ctrl+Shift+W now maps to ClosePane (was CloseTab before muxing).
+        assert_eq!(map.lookup(&combo), Some(KeyAction::ClosePane));
     }
 
     #[test]
@@ -1838,17 +1952,19 @@ mod tests {
         // The default map should have a known number of bindings.
         // This catches silent additions or removals.
         let map = BindingMap::default();
-        // Count: Copy(1) + Paste(1) + NewTab(1) + CloseTab(1) + NextTab(1)
+        // Count: Copy(1) + Paste(1) + NewTab(1) + NextTab(1)
         //        + PrevTab(1) + SwitchToTab1-9(9) + ZoomIn(2) + ZoomOut(1)
         //        + ZoomReset(1) + OpenSettings(1) + OpenSearch(1)
         //        + PrevCommand(1) + NextCommand(1) + ScrollPageUp(1)
         //        + ScrollPageDown(1) + ScrollToTop(1) + ScrollToBottom(1)
         //        + ScrollLineUp(1) + ScrollLineDown(1)
-        //        + SplitVertical(1) + SplitHorizontal(1) = 31
+        //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
+        //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
+        //        + ZoomPane(1) = 40
         assert_eq!(
             map.len(),
-            31,
-            "default binding map should have exactly 31 bindings"
+            40,
+            "default binding map should have exactly 40 bindings"
         );
     }
 
@@ -1857,6 +1973,7 @@ mod tests {
         // These actions have no default binding.
         let map = BindingMap::default();
         let unbound = [
+            KeyAction::CloseTab,
             KeyAction::MoveTabLeft,
             KeyAction::MoveTabRight,
             KeyAction::RenameTab,
