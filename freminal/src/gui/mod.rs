@@ -209,14 +209,15 @@ impl FreminalGui {
 
         // Inform the initial tab about the configured theme mode and current OS
         // dark/light preference so DECRPM ?2031 responses are correct from the start.
-        if let Err(e) = gui
-            .tabs
-            .active_tab()
-            .input_tx
-            .send(InputEvent::ThemeModeUpdate(
-                gui.config.theme.mode,
-                os_dark_mode,
-            ))
+        if let Err(e) =
+            gui.tabs
+                .active_tab()
+                .active_pane()
+                .input_tx
+                .send(InputEvent::ThemeModeUpdate(
+                    gui.config.theme.mode,
+                    os_dark_mode,
+                ))
         {
             error!("Failed to send initial ThemeModeUpdate to tab: {e}");
         }
@@ -231,6 +232,7 @@ impl FreminalGui {
             && let Err(e) = gui
                 .tabs
                 .active_tab()
+                .active_pane()
                 .input_tx
                 .send(InputEvent::ThemeChange(theme))
         {
@@ -326,6 +328,7 @@ impl FreminalGui {
                 && self
                     .tabs
                     .active_tab()
+                    .active_pane()
                     .echo_off
                     .load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -366,7 +369,10 @@ impl FreminalGui {
                 // is idle at a password prompt.  The atomic is updated by the
                 // writer thread every 250 ms regardless of PTY activity.
                 let is_echo_off = self.config.security.password_indicator
-                    && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
+                    && tab
+                        .active_pane()
+                        .echo_off
+                        .load(std::sync::atomic::Ordering::Relaxed);
 
                 let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
                 if !matches!(tab_action, TabBarAction::None) {
@@ -404,13 +410,14 @@ impl FreminalGui {
         is_echo_off: bool,
     ) -> TabBarAction {
         let mut action = TabBarAction::None;
-        let label = if tab.title.is_empty() {
+        let pane = tab.active_pane();
+        let label = if pane.title.is_empty() {
             "Shell"
         } else {
-            &tab.title
+            &pane.title
         };
 
-        let has_bell = tab.bell_active && !is_active;
+        let has_bell = pane.bell_active && !is_active;
 
         // Build the display label: prepend a lock indicator when echo is disabled
         // (password prompt active), and a bell indicator when the tab has an
@@ -488,8 +495,8 @@ impl FreminalGui {
         ) {
             Ok(channels) => {
                 let id = self.tabs.next_tab_id();
-                let tab = Tab {
-                    id,
+                let pane = panes::Pane {
+                    id: panes::PaneId::first(),
                     arc_swap: channels.arc_swap,
                     input_tx: channels.input_tx,
                     pty_write_tx: channels.pty_write_tx,
@@ -503,9 +510,10 @@ impl FreminalGui {
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
                 };
+                let tab = Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
                 // ?2031 queries return the correct locked/dynamic status.
-                if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
+                if let Err(e) = tab.active_pane().input_tx.send(InputEvent::ThemeModeUpdate(
                     self.config.theme.mode,
                     self.os_dark_mode,
                 )) {
@@ -537,7 +545,7 @@ impl FreminalGui {
                 } else {
                     // Clear the bell indicator on the newly-active tab —
                     // switching to it acknowledges the bell.
-                    self.tabs.active_tab_mut().bell_active = false;
+                    self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
                 }
             }
             TabBarAction::Close(i) => self.close_tab(i),
@@ -575,11 +583,11 @@ impl FreminalGui {
             }
             KeyAction::NextTab => {
                 self.tabs.next_tab();
-                self.tabs.active_tab_mut().bell_active = false;
+                self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
             }
             KeyAction::PrevTab => {
                 self.tabs.prev_tab();
-                self.tabs.active_tab_mut().bell_active = false;
+                self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
             }
             KeyAction::SwitchToTab1 => self.switch_to_tab_n(0),
             KeyAction::SwitchToTab2 => self.switch_to_tab_n(1),
@@ -596,35 +604,48 @@ impl FreminalGui {
             KeyAction::ZoomIn => self.apply_zoom(1.0),
             KeyAction::ZoomOut => self.apply_zoom(-1.0),
             KeyAction::ZoomReset => {
-                self.tabs.active_tab_mut().view_state.reset_zoom();
+                self.tabs
+                    .active_tab_mut()
+                    .active_pane_mut()
+                    .view_state
+                    .reset_zoom();
                 self.terminal_widget.apply_font_zoom(self.config.font.size);
             }
 
             // -- Search overlay --
             KeyAction::OpenSearch => {
-                self.tabs.active_tab_mut().view_state.search_state.is_open = true;
+                self.tabs
+                    .active_tab_mut()
+                    .active_pane_mut()
+                    .view_state
+                    .search_state
+                    .is_open = true;
             }
             KeyAction::SearchNext => {
                 let tab = self.tabs.active_tab_mut();
-                tab.view_state.search_state.next_match();
-                let snap = tab.arc_swap.load();
-                search::scroll_to_match_and_send(&mut tab.view_state, &snap, &tab.input_tx);
+                let pane = tab.active_pane_mut();
+                pane.view_state.search_state.next_match();
+                let snap = pane.arc_swap.load();
+                search::scroll_to_match_and_send(&mut pane.view_state, &snap, &pane.input_tx);
             }
             KeyAction::SearchPrev => {
                 let tab = self.tabs.active_tab_mut();
-                tab.view_state.search_state.prev_match();
-                let snap = tab.arc_swap.load();
-                search::scroll_to_match_and_send(&mut tab.view_state, &snap, &tab.input_tx);
+                let pane = tab.active_pane_mut();
+                pane.view_state.search_state.prev_match();
+                let snap = pane.arc_swap.load();
+                search::scroll_to_match_and_send(&mut pane.view_state, &snap, &pane.input_tx);
             }
             KeyAction::PrevCommand => {
                 let tab = self.tabs.active_tab_mut();
-                let snap = tab.arc_swap.load();
-                search::jump_to_prev_command(&mut tab.view_state, &snap);
+                let pane = tab.active_pane_mut();
+                let snap = pane.arc_swap.load();
+                search::jump_to_prev_command(&mut pane.view_state, &snap);
             }
             KeyAction::NextCommand => {
                 let tab = self.tabs.active_tab_mut();
-                let snap = tab.arc_swap.load();
-                search::jump_to_next_command(&mut tab.view_state, &snap);
+                let pane = tab.active_pane_mut();
+                let snap = pane.arc_swap.load();
+                search::jump_to_next_command(&mut pane.view_state, &snap);
             }
 
             // -- Not yet implemented --
@@ -657,7 +678,7 @@ impl FreminalGui {
     /// to the terminal widget.
     fn apply_zoom(&mut self, delta: f32) {
         let base = self.config.font.size;
-        let vs = &mut self.tabs.active_tab_mut().view_state;
+        let vs = &mut self.tabs.active_tab_mut().active_pane_mut().view_state;
         vs.adjust_zoom(base, delta);
         let effective = vs.effective_font_size(base);
         self.terminal_widget.apply_font_zoom(effective);
@@ -669,7 +690,7 @@ impl FreminalGui {
         if let Err(e) = self.tabs.switch_to(index) {
             trace!("Cannot switch to tab {index}: {e}");
         } else {
-            self.tabs.active_tab_mut().bell_active = false;
+            self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
         }
     }
 
@@ -778,6 +799,7 @@ impl FreminalGui {
         if let Err(e) = self
             .tabs
             .active_tab()
+            .active_pane()
             .input_tx
             .send(InputEvent::PlaybackControl(cmd))
         {
@@ -1241,23 +1263,31 @@ impl eframe::App for FreminalGui {
             // Always propagate the updated OS preference so DECRPM ?2031
             // reflects the new dark/light state, regardless of ThemeMode.
             for tab in self.tabs.iter() {
-                if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
-                    self.config.theme.mode,
-                    self.os_dark_mode,
-                )) {
-                    error!("Failed to send ThemeModeUpdate on OS change to tab: {e}");
+                if let Ok(panes) = tab.pane_tree.iter_panes() {
+                    for pane in panes {
+                        if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                            self.config.theme.mode,
+                            self.os_dark_mode,
+                        )) {
+                            error!("Failed to send ThemeModeUpdate on OS change to pane: {e}");
+                        }
+                    }
                 }
             }
 
             if self.config.theme.mode == ThemeMode::Auto {
                 let slug = self.config.theme.active_slug(self.os_dark_mode);
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    // Notify every tab so all PTY threads get the new palette.
+                    // Notify every pane in every tab so all PTY threads get the new palette.
                     for tab in self.tabs.iter() {
-                        if let Err(e) = tab.input_tx.send(
-                            freminal_terminal_emulator::io::InputEvent::ThemeChange(theme),
-                        ) {
-                            error!("Failed to send auto ThemeChange to tab: {e}");
+                        if let Ok(panes) = tab.pane_tree.iter_panes() {
+                            for pane in panes {
+                                if let Err(e) = pane.input_tx.send(
+                                    freminal_terminal_emulator::io::InputEvent::ThemeChange(theme),
+                                ) {
+                                    error!("Failed to send auto ThemeChange to pane: {e}");
+                                }
+                            }
                         }
                     }
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
@@ -1268,11 +1298,13 @@ impl eframe::App for FreminalGui {
 
         // Poll all tabs for PTY death signals.  Dead tabs are collected by
         // index (in reverse order so removal doesn't shift later indices).
+        // In single-pane mode, each tab has exactly one pane; for multi-pane
+        // support (58.7+), this will be extended to check all panes.
         let dead_indices: Vec<usize> = self
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, tab)| tab.pty_dead_rx.try_recv().is_ok())
+            .filter(|(_, tab)| tab.active_pane().pty_dead_rx.try_recv().is_ok())
             .map(|(i, _)| i)
             .rev()
             .collect();
@@ -1287,14 +1319,25 @@ impl eframe::App for FreminalGui {
         }
 
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
-        let snap = self.tabs.active_tab().arc_swap.load();
+        let snap = self.tabs.active_tab().active_pane().arc_swap.load();
 
         // Sync the GUI's scroll offset from the snapshot.  When new PTY output
         // arrives the PTY thread resets its offset to 0, so the snapshot will
         // carry scroll_offset = 0 even if the GUI previously sent a non-zero
         // value.  Adopting the snapshot's value keeps ViewState in sync.
-        if self.tabs.active_tab().view_state.scroll_offset != snap.scroll_offset {
-            self.tabs.active_tab_mut().view_state.scroll_offset = snap.scroll_offset;
+        if self
+            .tabs
+            .active_tab()
+            .active_pane()
+            .view_state
+            .scroll_offset
+            != snap.scroll_offset
+        {
+            self.tabs
+                .active_tab_mut()
+                .active_pane_mut()
+                .view_state
+                .scroll_offset = snap.scroll_offset;
         }
 
         // Menu bar at the top of the window.
@@ -1334,6 +1377,7 @@ impl eframe::App for FreminalGui {
             let effective = self
                 .tabs
                 .active_tab()
+                .active_pane()
                 .view_state
                 .effective_font_size(self.config.font.size);
             self.terminal_widget.apply_font_zoom(effective);
@@ -1367,16 +1411,33 @@ impl eframe::App for FreminalGui {
             // Debounced resize: only send an InputEvent::Resize when the
             // character-cell dimensions actually change.
             let new_size = (width_chars, height_chars);
-            if new_size != self.tabs.active_tab().view_state.last_sent_size {
-                if let Err(e) = self.tabs.active_tab().input_tx.send(InputEvent::Resize(
-                    width_chars,
-                    height_chars,
-                    font_width,
-                    font_height,
-                )) {
+            if new_size
+                != self
+                    .tabs
+                    .active_tab()
+                    .active_pane()
+                    .view_state
+                    .last_sent_size
+            {
+                if let Err(e) =
+                    self.tabs
+                        .active_tab()
+                        .active_pane()
+                        .input_tx
+                        .send(InputEvent::Resize(
+                            width_chars,
+                            height_chars,
+                            font_width,
+                            font_height,
+                        ))
+                {
                     error!("Failed to send resize event: {e}");
                 } else {
-                    self.tabs.active_tab_mut().view_state.last_sent_size = new_size;
+                    self.tabs
+                        .active_tab_mut()
+                        .active_pane_mut()
+                        .view_state
+                        .last_sent_size = new_size;
                 }
             }
 
@@ -1389,19 +1450,27 @@ impl eframe::App for FreminalGui {
             // fullscreen) are discarded since an inactive tab must not alter the
             // shared window geometry.
             let active_idx = self.tabs.active_index();
-            let window_focused = self.tabs.active_tab().view_state.window_focused;
+            let window_focused = self
+                .tabs
+                .active_tab()
+                .active_pane()
+                .view_state
+                .window_focused;
             for (idx, tab) in self.tabs.iter_mut().enumerate() {
+                // In single-pane mode, each tab has exactly one pane.
+                // For multi-pane (58.11+), this will iterate all panes.
+                let pane = tab.active_pane_mut();
                 handle_window_manipulation(
                     ui,
-                    &tab.window_cmd_rx,
-                    &tab.pty_write_tx,
+                    &pane.window_cmd_rx,
+                    &pane.pty_write_tx,
                     font_width,
                     font_height,
                     window_width,
-                    &mut tab.title_stack,
-                    &mut tab.title,
-                    &mut tab.bell_active,
-                    &mut tab.view_state.bell_since,
+                    &mut pane.title_stack,
+                    &mut pane.title,
+                    &mut pane.bell_active,
+                    &mut pane.view_state.bell_since,
                     self.config.bell.mode,
                     self.config.security.allow_clipboard_read,
                     idx == active_idx,
@@ -1461,15 +1530,16 @@ impl eframe::App for FreminalGui {
             }
 
             let tab = self.tabs.active_tab_mut();
+            let pane = tab.active_pane_mut();
             let is_echo_off = self.config.security.password_indicator
-                && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
+                && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
             let deferred_actions = self.terminal_widget.show(
                 ui,
                 &snap,
-                &mut tab.view_state,
-                &tab.input_tx,
-                &tab.clipboard_rx,
-                &tab.search_buffer_rx,
+                &mut pane.view_state,
+                &pane.input_tx,
+                &pane.clipboard_rx,
+                &pane.search_buffer_rx,
                 self.settings_modal.is_open || any_menu_open,
                 bg_opacity,
                 &self.binding_map,
@@ -1489,7 +1559,7 @@ impl eframe::App for FreminalGui {
             // Only issue the viewport command when the title actually changed;
             // calling `send_viewport_cmd` unconditionally every frame triggers
             // an infinite repaint loop (~3 % idle CPU).
-            let active_title = &self.tabs.active_tab().title;
+            let active_title = &self.tabs.active_tab().active_pane().title;
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
@@ -1519,7 +1589,11 @@ impl eframe::App for FreminalGui {
 
             // Advance the text blink cycle when blinking text is present.
             if snap.has_blinking_text {
-                self.tabs.active_tab_mut().view_state.tick_text_blink();
+                self.tabs
+                    .active_tab_mut()
+                    .active_pane_mut()
+                    .view_state
+                    .tick_text_blink();
             }
 
             if snap.content_changed || cursor_is_blinking || snap.has_blinking_text {
@@ -1576,6 +1650,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self
                         .tabs
                         .active_tab()
+                        .active_pane()
                         .input_tx
                         .send(InputEvent::ThemeChange(theme))
                     {
@@ -1600,14 +1675,18 @@ impl eframe::App for FreminalGui {
                 });
                 self.config = new_cfg;
 
-                // Notify all tabs of the new theme mode so DECRPM ?2031 returns
-                // the correct locked/dynamic response after the config change.
+                // Notify all panes in all tabs of the new theme mode so DECRPM ?2031
+                // returns the correct locked/dynamic response after the config change.
                 for tab in self.tabs.iter() {
-                    if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
-                        self.config.theme.mode,
-                        self.os_dark_mode,
-                    )) {
-                        error!("Failed to send ThemeModeUpdate after settings apply: {e}");
+                    if let Ok(panes) = tab.pane_tree.iter_panes() {
+                        for pane in panes {
+                            if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                                self.config.theme.mode,
+                                self.os_dark_mode,
+                            )) {
+                                error!("Failed to send ThemeModeUpdate after settings apply: {e}");
+                            }
+                        }
                     }
                 }
             }
@@ -1616,6 +1695,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self
                         .tabs
                         .active_tab()
+                        .active_pane()
                         .input_tx
                         .send(InputEvent::ThemeChange(theme))
                     {
@@ -1629,6 +1709,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self
                         .tabs
                         .active_tab()
+                        .active_pane()
                         .input_tx
                         .send(InputEvent::ThemeChange(theme))
                     {

@@ -5,22 +5,15 @@
 
 //! Tab model and manager for multi-terminal support.
 //!
-//! Each `Tab` owns its own PTY thread channels and snapshot handle.
+//! Each `Tab` owns a [`PaneTree`] containing one or more terminal panes.
+//! The single-pane case (no splits) is a tree with one leaf — functionally
+//! identical to the pre-pane `Tab`.
+//!
 //! `TabManager` provides an API for creating, closing, switching, and
 //! reordering tabs.  It is owned exclusively by `FreminalGui` and never
 //! shared with the PTY thread.
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
-use arc_swap::ArcSwap;
-use crossbeam_channel::{Receiver, Sender};
-use freminal_common::buffer_states::tchar::TChar;
-use freminal_common::pty_write::PtyWrite;
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
-use freminal_terminal_emulator::snapshot::TerminalSnapshot;
-
-use super::view_state::ViewState;
+use super::panes::{Pane, PaneId, PaneTree};
 
 /// A unique, monotonically increasing identifier for each tab.
 ///
@@ -39,77 +32,72 @@ impl TabId {
 
 /// A single terminal tab.
 ///
-/// Each tab owns an independent set of channels to its PTY consumer thread
-/// and a shared snapshot handle.  The GUI reads from `arc_swap` and sends
-/// user input through `input_tx`.
+/// Each tab owns a [`PaneTree`] of one or more terminal panes. The
+/// `active_pane` field tracks which pane has keyboard focus.
+/// When no splits exist the tree is a single leaf — zero overhead
+/// compared to the pre-pane model.
 pub struct Tab {
     /// Unique identifier for this tab.
     pub id: TabId,
 
-    /// The latest terminal snapshot published by this tab's PTY consumer thread.
-    pub arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
+    /// The pane tree holding all terminal panes in this tab.
+    pub pane_tree: PaneTree,
 
-    /// Channel sender for input events (key, resize, focus) to this tab's PTY thread.
-    pub input_tx: Sender<InputEvent>,
+    /// The pane that currently has keyboard focus.
+    pub active_pane: PaneId,
 
-    /// Sender for raw bytes back to this tab's PTY (for Report* responses).
-    pub pty_write_tx: Sender<PtyWrite>,
+    /// When set, this pane is zoomed (occupies the entire tab area)
+    /// and the rest of the tree is hidden but preserved.
+    pub zoomed_pane: Option<PaneId>,
+}
 
-    /// Receiver for window manipulation commands from this tab's PTY thread.
-    pub window_cmd_rx: Receiver<WindowCommand>,
+impl Tab {
+    /// Create a new tab containing a single pane.
+    #[must_use]
+    pub fn new(id: TabId, pane: Pane) -> Self {
+        let pane_id = pane.id;
+        Self {
+            id,
+            pane_tree: PaneTree::new(pane),
+            active_pane: pane_id,
+            zoomed_pane: None,
+        }
+    }
 
-    /// Receiver for clipboard text extraction responses from this tab's PTY thread.
-    pub clipboard_rx: Receiver<String>,
-
-    /// Receiver for full-buffer search content from this tab's PTY thread.
+    /// Return a reference to the currently active pane.
     ///
-    /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
-    /// concatenates scrollback + visible `TChar` data and sends it here.
-    /// The first element of the tuple is `total_rows` at the time the buffer
-    /// was captured, used by the GUI to detect stale responses.
-    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
-
-    /// Signals that this tab's PTY process has exited.
+    /// # Panics
     ///
-    /// The PTY consumer thread sends `()` when the child exits or the PTY read
-    /// channel closes.  The GUI polls this to close the tab (or the whole
-    /// application when it is the last remaining tab).
-    pub pty_dead_rx: Receiver<()>,
+    /// Panics if `active_pane` does not exist in the tree. This is a
+    /// programming invariant — `active_pane` is always kept valid by
+    /// all tree-mutating operations.
+    #[must_use]
+    pub fn active_pane(&self) -> &Pane {
+        self.pane_tree
+            .find(self.active_pane)
+            .unwrap_or_else(|| panic!("active pane {:?} not in tree", self.active_pane))
+    }
 
-    /// Tab title, set by OSC 0/2 escape sequences.
+    /// Return a mutable reference to the currently active pane.
     ///
-    /// When empty, the visible label is supplied by tab creation or tab-bar UI
-    /// fallback logic rather than a guaranteed model-level default title.
-    pub title: String,
-
-    /// Whether a bell has fired in this tab and not yet been cleared.
-    pub bell_active: bool,
-
-    /// Per-tab title stack for `SaveWindowTitleToStack` /
-    /// `RestoreWindowTitleFromStack` (CSI 22/23 t).  Each tab maintains its
-    /// own stack so that background shells pushing/popping titles do not
-    /// interfere with the active tab.
-    pub title_stack: Vec<String>,
-
-    /// Per-tab GUI view state (scroll offset, selection, blink, mouse).
-    pub view_state: ViewState,
-
-    /// Shared atomic flag reflecting whether the PTY slave currently has
-    /// `ECHO` disabled (i.e. a password prompt is active).
+    /// # Panics
     ///
-    /// Read directly every frame by the GUI (cheap `Relaxed` atomic load)
-    /// instead of going through `TerminalSnapshot`, because snapshots are
-    /// only published on PTY output — if the shell is idle waiting for a
-    /// password, the snapshot would be stale.
-    pub echo_off: Arc<AtomicBool>,
+    /// Panics if `active_pane` does not exist in the tree.
+    #[must_use]
+    pub fn active_pane_mut(&mut self) -> &mut Pane {
+        let id = self.active_pane;
+        self.pane_tree
+            .find_mut(id)
+            .unwrap_or_else(|| panic!("active pane {id:?} not in tree"))
+    }
 }
 
 impl std::fmt::Debug for Tab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tab")
             .field("id", &self.id)
-            .field("title", &self.title)
-            .field("bell_active", &self.bell_active)
+            .field("active_pane", &self.active_pane)
+            .field("zoomed_pane", &self.zoomed_pane)
             .finish_non_exhaustive()
     }
 }
@@ -357,6 +345,11 @@ impl TabManager {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::gui::view_state::ViewState;
+    use arc_swap::ArcSwap;
+    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+    use std::sync::{Arc, atomic::AtomicBool};
 
     /// Create a dummy `Tab` for testing.
     ///
@@ -372,8 +365,8 @@ mod tests {
             crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
 
-        Tab {
-            id,
+        let pane = Pane {
+            id: PaneId::first(),
             arc_swap,
             input_tx,
             pty_write_tx,
@@ -386,7 +379,9 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
-        }
+        };
+
+        Tab::new(id, pane)
     }
 
     #[test]
@@ -396,7 +391,7 @@ mod tests {
 
         assert_eq!(mgr.tab_count(), 1);
         assert_eq!(mgr.active_index(), 0);
-        assert_eq!(mgr.active_tab().title, "Tab 1");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 1");
     }
 
     #[test]
@@ -423,7 +418,7 @@ mod tests {
 
         assert_eq!(mgr.tab_count(), 2);
         assert_eq!(mgr.active_index(), 1);
-        assert_eq!(mgr.active_tab().title, "Tab 2");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 2");
     }
 
     #[test]
@@ -438,10 +433,10 @@ mod tests {
 
         // Close Tab 3 (active, last).
         let removed = mgr.close_tab(2).unwrap();
-        assert_eq!(removed.title, "Tab 3");
+        assert_eq!(removed.active_pane().title, "Tab 3");
         assert_eq!(mgr.tab_count(), 2);
         assert_eq!(mgr.active_index(), 1); // moved to new last
-        assert_eq!(mgr.active_tab().title, "Tab 2");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 2");
     }
 
     #[test]
@@ -458,7 +453,7 @@ mod tests {
         mgr.close_tab(0).unwrap();
         assert_eq!(mgr.tab_count(), 2);
         assert_eq!(mgr.active_index(), 1); // shifted left
-        assert_eq!(mgr.active_tab().title, "Tab 3");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 3");
     }
 
     #[test]
@@ -472,12 +467,12 @@ mod tests {
 
         // Switch to Tab 2 (index 1) and close it.
         mgr.switch_to(1).unwrap();
-        assert_eq!(mgr.active_tab().title, "Tab 2");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 2");
 
         mgr.close_tab(1).unwrap();
         assert_eq!(mgr.tab_count(), 2);
         assert_eq!(mgr.active_index(), 1); // successor (Tab 3 slid into slot 1)
-        assert_eq!(mgr.active_tab().title, "Tab 3");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 3");
     }
 
     #[test]
@@ -510,7 +505,7 @@ mod tests {
 
         mgr.switch_to(0).unwrap();
         assert_eq!(mgr.active_index(), 0);
-        assert_eq!(mgr.active_tab().title, "Tab 1");
+        assert_eq!(mgr.active_tab().active_pane().title, "Tab 1");
     }
 
     #[test]
@@ -568,7 +563,7 @@ mod tests {
 
         // Move A from 0 to 2.
         mgr.move_tab(0, 2).unwrap();
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["B", "C", "A"]);
         // C was at active=2, tab moved right past it → active shifts left.
         assert_eq!(mgr.active_index(), 1);
@@ -589,7 +584,7 @@ mod tests {
 
         // Move C from 2 to 0.
         mgr.move_tab(2, 0).unwrap();
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["C", "A", "B"]);
         // A was at active=0, tab moved left past it → active shifts right.
         assert_eq!(mgr.active_index(), 1);
@@ -607,7 +602,7 @@ mod tests {
         // Switch to B (index 1) and move it to 0.
         mgr.switch_to(1).unwrap();
         mgr.move_tab(1, 0).unwrap();
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["B", "A", "C"]);
         assert_eq!(mgr.active_index(), 0); // followed the moved tab
     }
@@ -646,7 +641,7 @@ mod tests {
         mgr.move_active_left(); // already leftmost
 
         assert_eq!(mgr.active_index(), 0);
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["A", "B"]);
     }
 
@@ -660,7 +655,7 @@ mod tests {
 
         mgr.move_active_left();
         assert_eq!(mgr.active_index(), 0);
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["B", "A"]);
     }
 
@@ -675,7 +670,7 @@ mod tests {
         mgr.move_active_right(); // already rightmost
 
         assert_eq!(mgr.active_index(), 1);
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["A", "B"]);
     }
 
@@ -689,7 +684,7 @@ mod tests {
         mgr.switch_to(0).unwrap();
         mgr.move_active_right();
         assert_eq!(mgr.active_index(), 1);
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["B", "A"]);
     }
 
@@ -702,7 +697,7 @@ mod tests {
         mgr.add_tab(tab2);
         mgr.add_tab(tab3);
 
-        let titles: Vec<&str> = mgr.iter().map(|t| t.title.as_str()).collect();
+        let titles: Vec<&str> = mgr.iter().map(|t| t.active_pane().title.as_str()).collect();
         assert_eq!(titles, vec!["X", "Y", "Z"]);
     }
 
@@ -711,8 +706,8 @@ mod tests {
         let tab = dummy_tab(TabId(0), "Original");
         let mut mgr = TabManager::new(tab);
 
-        mgr.active_tab_mut().title = "Modified".to_owned();
-        assert_eq!(mgr.active_tab().title, "Modified");
+        mgr.active_tab_mut().active_pane_mut().title = "Modified".to_owned();
+        assert_eq!(mgr.active_tab().active_pane().title, "Modified");
     }
 
     #[test]
@@ -737,7 +732,7 @@ mod tests {
         // Close middle tab (index 1) — active (0) is before it, no shift.
         mgr.close_tab(1).unwrap();
         assert_eq!(mgr.active_index(), 0);
-        assert_eq!(mgr.active_tab().title, "A");
+        assert_eq!(mgr.active_tab().active_pane().title, "A");
         assert_eq!(mgr.tab_count(), 2);
     }
 
@@ -754,11 +749,14 @@ mod tests {
     }
 
     #[test]
-    fn tab_debug_includes_id_and_title() {
+    fn tab_debug_includes_id_and_active_pane() {
         let tab = dummy_tab(TabId(42), "Debug test");
         let debug = format!("{tab:?}");
-        assert!(debug.contains("42"));
-        assert!(debug.contains("Debug test"));
+        assert!(debug.contains("42"), "Debug output should contain TabId");
+        assert!(
+            debug.contains("active_pane"),
+            "Debug output should contain active_pane field"
+        );
     }
 
     #[test]
@@ -784,15 +782,18 @@ mod tests {
         mgr.add_tab(tab2);
 
         // Modify Tab 2's scroll offset.
-        mgr.active_tab_mut().view_state.scroll_offset = 42;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 42;
 
         // Switch to Tab 1 — its scroll offset should still be 0 (default).
         mgr.switch_to(0).unwrap();
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 0);
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 0);
 
         // Switch back to Tab 2 — its scroll offset should still be 42.
         mgr.switch_to(1).unwrap();
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 42);
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 42);
     }
 
     #[test]
@@ -806,18 +807,27 @@ mod tests {
 
         // Set distinct scroll offsets.
         mgr.switch_to(0).unwrap();
-        mgr.active_tab_mut().view_state.scroll_offset = 10;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 10;
         mgr.switch_to(1).unwrap();
-        mgr.active_tab_mut().view_state.scroll_offset = 20;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 20;
         mgr.switch_to(2).unwrap();
-        mgr.active_tab_mut().view_state.scroll_offset = 30;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 30;
 
         // Close Tab 2 (index 1) — Tab 1 and Tab 3 should keep their offsets.
         mgr.close_tab(1).unwrap();
         // After close, Tab 3 slid to index 1 and is still active.
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 30);
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 30);
         mgr.switch_to(0).unwrap();
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 10);
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 10);
     }
 
     #[test]
@@ -831,27 +841,36 @@ mod tests {
 
         // Set distinct scroll offsets.
         mgr.switch_to(0).unwrap();
-        mgr.active_tab_mut().view_state.scroll_offset = 100;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 100;
         mgr.switch_to(1).unwrap();
-        mgr.active_tab_mut().view_state.scroll_offset = 200;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 200;
         mgr.switch_to(2).unwrap();
-        mgr.active_tab_mut().view_state.scroll_offset = 300;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 300;
 
         // Move C (index 2) to index 0.  Order becomes [C, A, B].
         mgr.move_tab(2, 0).unwrap();
 
         // Verify each tab still has its own scroll offset.
         mgr.switch_to(0).unwrap();
-        assert_eq!(mgr.active_tab().title, "C");
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 300);
+        assert_eq!(mgr.active_tab().active_pane().title, "C");
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 300);
 
         mgr.switch_to(1).unwrap();
-        assert_eq!(mgr.active_tab().title, "A");
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 100);
+        assert_eq!(mgr.active_tab().active_pane().title, "A");
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 100);
 
         mgr.switch_to(2).unwrap();
-        assert_eq!(mgr.active_tab().title, "B");
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 200);
+        assert_eq!(mgr.active_tab().active_pane().title, "B");
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 200);
     }
 
     #[test]
@@ -860,11 +879,14 @@ mod tests {
         let mut mgr = TabManager::new(tab1);
 
         // Modify Tab 1's view state.
-        mgr.active_tab_mut().view_state.scroll_offset = 999;
+        mgr.active_tab_mut()
+            .active_pane_mut()
+            .view_state
+            .scroll_offset = 999;
 
         // Add a new tab — it should have a fresh ViewState.
         let tab2 = dummy_tab(TabId(1), "Tab 2");
         mgr.add_tab(tab2);
-        assert_eq!(mgr.active_tab().view_state.scroll_offset, 0);
+        assert_eq!(mgr.active_tab().active_pane().view_state.scroll_offset, 0);
     }
 }

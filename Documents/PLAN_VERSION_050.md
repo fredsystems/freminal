@@ -792,13 +792,23 @@ how tmux's `prefix x` works.
      _Commit: `333dcb4` — PaneTree with PaneNode (Leaf/Split), SplitDirection, PaneError,
      ClosedPaneResult, split_rect helper, 35+ unit tests. Pane module converted to directory._
 
-3. **58.3 — Refactor `Tab` to use `PaneTree`**
+3. **58.3 — Refactor `Tab` to use `PaneTree`** ✅ _Complete._
    Replace `Tab`'s direct channel/view-state fields with a `PaneTree` and `active_pane:
 PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is a
    `PaneTree::Leaf` — functionally identical to today. Migrate all call sites in
    `mod.rs` that access `tab.arc_swap`, `tab.input_tx`, etc. to go through the active
    pane: `tab.active_pane().arc_swap`, etc. Ensure all existing tab functionality works
    unchanged. Run the full test suite to verify no regressions.
+
+   _Completion note: `Tab` struct replaced with `{id, pane_tree, active_pane, zoomed_pane}`.
+   `Tab::new()` constructor and `active_pane()` / `active_pane_mut()` accessors added. All
+   27 call-site groups in `mod.rs` migrated — including the window command drain loop
+   (heaviest site), terminal widget show, theme broadcasting (all-pane iteration), PTY death
+   polling, resize debounce, scroll offset sync, font zoom, and settings theme changes.
+   `main.rs` tab construction updated (both normal and playback modes). `tabs.rs` test module
+   rewritten: `dummy_tab()` now creates a `Pane` + `Tab::new()`, all field accesses go
+   through `active_pane()` / `active_pane_mut()`, Debug test updated for new output format.
+   All 335 tests pass, clippy clean, no unused deps._
 
 4. **58.4 — Pane layout rendering**
    Modify `FreminalGui::ui()` to compute pane rects via `PaneTree::layout()` and render

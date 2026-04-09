@@ -95,8 +95,8 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
 
     let config_path = args.config.clone();
 
-    let initial_tab = gui::tabs::Tab {
-        id: gui::tabs::TabId::first(),
+    let initial_pane = gui::panes::Pane {
+        id: gui::panes::PaneId::first(),
         arc_swap: channels.arc_swap,
         input_tx: channels.input_tx,
         pty_write_tx: channels.pty_write_tx,
@@ -110,6 +110,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         view_state: gui::view_state::ViewState::new(),
         echo_off: channels.echo_off,
     };
+    let initial_tab = gui::tabs::Tab::new(gui::tabs::TabId::first(), initial_pane);
 
     gui::run(
         initial_tab,
@@ -375,22 +376,23 @@ fn main() {
 
         let config_path = args.config.clone();
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
+        let playback_pane = gui::panes::Pane {
+            id: gui::panes::PaneId::first(),
+            arc_swap: arc_swap_gui,
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            search_buffer_rx,
+            pty_dead_rx,
+            title: "Playback".to_owned(),
+            bell_active: false,
+            title_stack: Vec::new(),
+            view_state: gui::view_state::ViewState::new(),
+            echo_off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
         gui::run(
-            gui::tabs::Tab {
-                id: gui::tabs::TabId::first(),
-                arc_swap: arc_swap_gui,
-                input_tx,
-                pty_write_tx,
-                window_cmd_rx,
-                clipboard_rx,
-                search_buffer_rx,
-                pty_dead_rx,
-                title: "Playback".to_owned(),
-                bell_active: false,
-                title_stack: Vec::new(),
-                view_state: gui::view_state::ViewState::new(),
-                echo_off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            },
+            gui::tabs::Tab::new(gui::tabs::TabId::first(), playback_pane),
             cfg,
             args,
             config_path,
