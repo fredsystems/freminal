@@ -841,41 +841,69 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
    and pane management section in `config_example.toml`. All 335 tests pass, clippy clean,
    no unused deps. CWD inheritance deferred to a future subtask._
 
-7. **58.7 — Close pane**
+7. **58.7 — Close pane** — **COMPLETE** (2026-04-09)
    Implement pane close: remove the pane from the tree, collapse the parent split. Focus
    moves to the sibling. If the closed pane was the last in the tab, close the tab.
    Handle PTY death: when `pty_dead_rx` fires for a pane, trigger the same close logic.
    Wire up the keybinding.
+   _Implemented `ClosePane` (Ctrl+Shift+W) via deferred `pending_close_pane` flag.
+   `close_focused_pane()` removes pane from tree, collapses parent split, focuses sibling.
+   Last-pane-in-tab closes the tab. PTY death triggers same close logic. Cursor suppressed
+   in unfocused panes (tmux-style). Commit: `4a76255`._
 
-8. **58.8 — Directional navigation**
+8. **58.8 — Directional navigation** — **COMPLETE** (2026-04-09)
    Implement `FocusPaneLeft/Down/Up/Right`: from the focused pane's rect, find the nearest
    pane in the given direction (by comparing rect centers/edges). Move focus to it. Wrap
    behavior: no-op at edges (do not wrap around). Wire up keybindings.
+   _Implemented via deferred `pending_focus_direction` flag. `focus_pane_in_direction()`
+   uses rect center/edge comparisons to find nearest pane in the given direction. No-op at
+   edges. Keybindings: Ctrl+Alt+Arrow keys. Commit: `4a76255`._
 
-9. **58.9 — Pane resize**
+9. **58.9 — Pane resize** — **COMPLETE** (2026-04-09)
    Implement `ResizePaneLeft/Down/Up/Right`: find the nearest split divider in the given
    direction from the focused pane and adjust its ratio by a fixed step (e.g., 0.05).
    Clamp ratio to `[0.1, 0.9]` to prevent zero-size panes. Each resize triggers
-   `InputEvent::Resize` to affected panes. Wire up keybindings. Also implement mouse-drag
-   resize: clicking and dragging a pane border adjusts the split ratio interactively.
+   `InputEvent::Resize` to affected panes. Wire up keybindings. Mouse-drag resize split
+   out to 58.13.
+   _Keyboard resize via `PaneTree::resize_split()` with 0.05 step, clamped to [0.1, 0.9].
+   Keybindings: Ctrl+Alt+Shift+Arrow keys. Commit: `4a76255`._
 
-10. **58.10 — Zoom pane**
+10. **58.10 — Zoom pane** — **COMPLETE** (2026-04-09)
     Implement zoom toggle: when zoomed, only the zoomed pane renders (using the full
     available rect). All other panes continue receiving PTY output and draining channels
     but are not drawn. The tab title or a subtle badge indicates zoom is active. Pressing
     the zoom key again unzooms (restores the pane tree layout). Wire up the keybinding.
+    _`zoomed_pane: Option<PaneId>` on Tab. When set, layout returns only the zoomed pane
+    at full available_rect. Keybinding: Ctrl+Shift+Z. Commit: `4a76255`._
 
-11. **58.11 — Window command and PTY death drain for all panes**
+11. **58.11 — Window command and PTY death drain for all panes** — **COMPLETE** (2026-04-09)
     Extend the per-frame drain loop in `FreminalGui::ui()` to iterate all panes in all
     tabs (not just the active tab's channels). Each pane's `window_cmd_rx` is drained.
     Each pane's `pty_dead_rx` is polled.
+    _Per-frame drain loop iterates all panes across all tabs. Commit: `4a76255`._
 
-12. **58.12 — Menu bar and config integration**
+12. **58.12 — Menu bar and config integration** — **COMPLETE** (2026-04-09)
     Add split/close/zoom/navigate actions to the menu bar under a "Pane" menu. Add
     default keybindings to `BindingMap::default()` and `config_example.toml`. Update the
     Settings Modal keybindings tab to show the new bindings. Document in `config_example.toml`.
+    _"Pane" menu added with Split Vertical/Horizontal, Close, Zoom, Focus direction, and
+    Resize direction actions. All keybindings documented in config_example.toml. Settings
+    Modal shows new bindings automatically. Commit: `4a76255`._
 
-13. **58.13 — Tests and performance verification**
+13. **58.13 — Mouse drag-to-resize on pane borders** — **COMPLETE** (2026-04-09)
+    Implement interactive mouse drag-to-resize for split pane borders. Add
+    `PaneTree::split_borders(rect)` API to compute border rectangles from the tree layout.
+    Create invisible ±3px sensor rects on borders that consume pointer events before pane
+    widgets (preventing accidental click-to-focus). Change cursor shape to
+    `ResizeHorizontal`/`ResizeVertical` on hover. Track drag state in `PaneBorderDrag` and
+    convert pixel drag deltas to ratio deltas for `resize_split()`.
+    _Added `SplitBorder` struct, `PaneNode::split_borders()` recursive method,
+    `PaneNode::first_leaf_id()` helper, `PaneTree::split_borders()` public API,
+    `PaneBorderDrag` state tracking. 4 unit tests for split_borders(). Also fixed
+    `Ctrl+Shift+|` (Pipe) keybinding by adding `Key::Pipe` mapping in
+    `egui_key_to_binding_key()`. Commit: `85cb495`._
+
+14. **58.14 — Tests and performance verification**
     - Unit tests: `PaneTree` operations (split, close, layout, navigation, resize, zoom)
     - Unit tests: `Tab` with pane tree (single pane regression, multi-pane operations)
     - Integration tests: verify multiple panes render concurrently, input goes to correct
@@ -890,7 +918,7 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
 
 ### 58 Primary Files
 
-- `freminal/src/gui/panes.rs` (new — `Pane`, `PaneId`, `PaneTree`, `SplitDirection`)
+- `freminal/src/gui/panes/mod.rs` (`Pane`, `PaneId`, `PaneTree`, `SplitDirection`, `SplitBorder`)
 - `freminal/src/gui/tabs.rs` (`Tab` refactored to use `PaneTree`)
 - `freminal/src/gui/mod.rs` (multi-pane rendering, input routing, drain loops)
 - `freminal/src/gui/terminal/widget.rs` (accept pane rect, per-pane rendering)

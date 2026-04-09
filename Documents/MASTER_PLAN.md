@@ -73,7 +73,7 @@ subsumed by Task 58.
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
-| 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Pending  | Task 36 (Tabs)       |
+| 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Active   | Task 36 (Tabs)       |
 
 ---
 
@@ -283,7 +283,7 @@ split panes within a tab, with a binary pane tree layout, directional navigation
 and zoom. Subsumes A.2 (Split Panes) from `FUTURE_PLANS.md`. Local-only — no remote mux, no
 detach/reattach, no status bar. Each pane owns a `TerminalEmulator` via the existing `spawn_pty_tab`
 function and channel architecture. The pane tree lives on the GUI thread; PTY threads are unaware
-of the tree structure. Large scope (13 subtasks).
+of the tree structure. Large scope (14 subtasks).
 
 ---
 
@@ -424,6 +424,7 @@ Update this section as tasks complete:
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
 | 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |
+| 58   | 2026-04-09 |            | 58.1–58.13 complete; 58.14 (tests+perf) pending                       |
 
 ---
 
