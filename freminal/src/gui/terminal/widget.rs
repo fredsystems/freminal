@@ -12,7 +12,11 @@ use crate::gui::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use freminal_common::{buffer_states::tchar::TChar, config::Config, themes::ThemePalette};
+use freminal_common::{
+    buffer_states::{tchar::TChar, url::Url},
+    config::Config,
+    themes::ThemePalette,
+};
 use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
 
 use eframe::egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
@@ -271,6 +275,7 @@ fn render_context_menu_area(
             &snap.visible_chars,
             &snap.visible_tags,
             super::coords::visible_window_start(snap),
+            &snap.row_offsets,
         )
     });
 
@@ -528,6 +533,21 @@ pub struct FreminalTerminalWidget {
     previous_search_match_count: usize,
     /// Current match index from the most recently rendered frame.
     previous_search_current_match: usize,
+    /// The terminal cell `(col, row)` the mouse was hovering over in the
+    /// previous frame.  URL hover detection is skipped when the cell has not
+    /// changed, turning per-pixel mouse-move events into per-cell events.
+    previous_hover_cell: Option<(usize, usize)>,
+    /// Cached URL from the most recent URL hover lookup.  Recomputed when the
+    /// hovered cell changes or the snapshot content changes under a stationary
+    /// mouse.  Used for Ctrl+click detection even when `cell_changed` is false.
+    cached_hovered_url: Option<Arc<Url>>,
+    /// Pointer identity of the `visible_chars` `Arc` used for the last URL
+    /// hover lookup.  When the snapshot pointer changes (new content), the URL
+    /// lookup is recomputed even if the mouse hasn't moved.
+    hover_snap_ptr: usize,
+    /// The cursor icon that was last written via `output_mut`.  The egui call
+    /// is skipped when the icon has not changed.
+    previous_cursor_icon: CursorIcon,
 }
 
 impl FreminalTerminalWidget {
@@ -582,6 +602,10 @@ impl FreminalTerminalWidget {
             base_font_defs,
             previous_search_match_count: 0,
             previous_search_current_match: 0,
+            previous_hover_cell: None,
+            cached_hovered_url: None,
+            hover_snap_ptr: 0,
+            previous_cursor_icon: CursorIcon::Default,
         }
     }
 
@@ -1126,7 +1150,19 @@ impl FreminalTerminalWidget {
                 let search_highlights: Vec<MatchHighlight> =
                     matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
 
-                let (bg_instances, deco_verts) = build_background_instances(
+                // Acquire the lock early so all vertex builders can write
+                // directly into the persistent `RenderState` Vecs, reusing
+                // their heap allocations (clear+extend pattern) instead of
+                // allocating fresh Vecs every frame.
+                let mut rs = self
+                    .render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Reborrow through `&mut *rs` so the borrow checker can see
+                // disjoint field accesses (MutexGuard's DerefMut is opaque).
+                let rs_ref: &mut RenderState = &mut rs;
+
+                build_background_instances(
                     &shaped_lines,
                     cell_w,
                     cell_h,
@@ -1144,56 +1180,50 @@ impl FreminalTerminalWidget {
                     &search_highlights,
                     snap.theme,
                     snap.cursor_color_override,
+                    &mut rs_ref.bg_instances,
+                    &mut rs_ref.deco_verts,
                 );
 
                 // Record where the cursor quad starts in the decoration VBO.
                 // The cursor is always appended at the END of deco_verts, and is
                 // exactly CURSOR_QUAD_FLOATS floats (or absent when hidden).
                 let cursor_vert_float_offset = if effective_show_cursor {
-                    deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
+                    rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
                 } else {
-                    deco_verts.len()
+                    rs_ref.deco_verts.len()
                 };
 
-                // `build_foreground_instances` needs mutable access to the atlas for
-                // rasterisation, so acquire the lock before calling it.
-                let mut rs = self
-                    .render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let fg_opts = FgRenderOptions {
                     selection: screen_selection,
                     selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };
-                let fg_instances = build_foreground_instances(
+                build_foreground_instances(
                     &shaped_lines,
-                    &mut rs.atlas,
+                    &mut rs_ref.atlas,
                     &self.font_manager,
                     cell_h,
                     self.font_manager.ascent(),
                     &fg_opts,
                     snap.theme,
+                    &mut rs_ref.fg_instances,
                 );
-                let image_verts = build_image_verts(
+                build_image_verts(
                     &snap.visible_image_placements,
                     &snap.images,
                     snap.term_width,
                     cell_w,
                     cell_h,
+                    &mut rs_ref.image_verts,
                 );
-                rs.bg_instances = bg_instances;
-                rs.deco_verts = deco_verts;
-                rs.fg_instances = fg_instances;
-                rs.image_verts = image_verts;
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
-                rs.snap_images.clone_from(snap.images.as_ref());
-                rs.cursor_vert_float_offset = cursor_vert_float_offset;
-                rs.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
-                rs.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
-                rs.bg_opacity = bg_opacity;
+                rs_ref.snap_images.clone_from(snap.images.as_ref());
+                rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
+                rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
+                rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
+                rs_ref.bg_opacity = bg_opacity;
                 drop(rs);
 
                 // Remember which `visible_chars` allocation we rendered, so
@@ -1288,12 +1318,9 @@ impl FreminalTerminalWidget {
                         painter.intermediate_fbo(),
                     );
                 } else {
-                    // Full draw path: clone and re-upload all VBOs.
-                    let bg_inst = rs.bg_instances.clone();
-                    let deco = rs.deco_verts.clone();
-                    let fg = rs.fg_instances.clone();
-                    let img = rs.image_verts.clone();
-                    let images = rs.snap_images.clone();
+                    // Full draw path: split-borrow RenderState to pass
+                    // vertex slices by reference (no cloning) alongside
+                    // the mutable renderer and atlas.
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
                     let opacity = rs.bg_opacity;
@@ -1303,11 +1330,11 @@ impl FreminalTerminalWidget {
                     renderer.draw_with_verts(
                         gl,
                         atlas,
-                        &bg_inst,
-                        &deco,
-                        &fg,
-                        &img,
-                        &images,
+                        &rs_ref.bg_instances,
+                        &rs_ref.deco_verts,
+                        &rs_ref.fg_instances,
+                        &rs_ref.image_verts,
+                        &rs_ref.snap_images,
                         vp.width_px,
                         vp.height_px,
                         cw,
@@ -1367,59 +1394,98 @@ impl FreminalTerminalWidget {
             }
         }
 
-        // URL hover detection: convert mouse pixel position to a cell
-        // coordinate, find the FormatTag covering that cell in the snapshot,
-        // and check whether it carries a URL.
-        if let Some(mouse_position) = view_state.mouse_position {
-            let (col, row) = encode_egui_mouse_pos_as_usize(
-                mouse_position,
-                (logical_cell_w, logical_cell_h),
-                terminal_rect.min,
-            );
+        // ── URL hover detection ───────────────────────────────────────
+        //
+        // Four gates to minimise work:
+        //   1. has_urls — skip everything when no URLs exist (common case).
+        //   2. Cell-or-content change — skip URL lookup when the mouse is
+        //      still over the same terminal cell AND the snapshot content has
+        //      not changed (i.e. the underlying text is identical).
+        //   3. Icon-change — skip `output_mut(cursor_icon)` when the icon
+        //      has not changed.
+        //   4. Click detection always runs against the cached URL so that
+        //      Ctrl+click works even when the mouse has not moved.
+        if snap.has_urls {
+            if let Some(mouse_position) = view_state.mouse_position {
+                let (col, row) = encode_egui_mouse_pos_as_usize(
+                    mouse_position,
+                    (logical_cell_w, logical_cell_h),
+                    terminal_rect.min,
+                );
 
-            // Convert the mouse's display-column position to a flat index
-            // into visible_chars.  This correctly handles wide characters
-            // (CJK, emoji) whose continuation cells are stripped during
-            // flattening, making the per-row TChar count smaller than
-            // term_width.
-            let flat_idx = flat_index_for_cell(&snap.visible_chars, row, col);
+                let cell = (col, row);
+                let cell_changed = self.previous_hover_cell != Some(cell);
+                let snap_ptr = Arc::as_ptr(&snap.visible_chars) as usize;
+                let content_changed_under_mouse = snap_ptr != self.hover_snap_ptr;
+                self.previous_hover_cell = Some(cell);
+                self.hover_snap_ptr = snap_ptr;
 
-            let hovered_url = flat_idx.and_then(|idx| {
-                snap.visible_tags
-                    .iter()
-                    .find(|tag| tag.start <= idx && idx < tag.end)
-                    .and_then(|tag| tag.url.as_ref())
-            });
+                if cell_changed || content_changed_under_mouse {
+                    // Recompute the hovered URL: convert the mouse's
+                    // display-column position to a flat index into
+                    // `visible_chars`, using the O(1) row-offset table.
+                    let flat_idx =
+                        flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
 
-            if let Some(url) = hovered_url {
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = CursorIcon::PointingHand;
-                });
-
-                // Ctrl+click (Cmd+click on macOS) opens the URL.
-                let clicked = ui.input(|i| {
-                    i.pointer.button_clicked(egui::PointerButton::Primary)
-                        && (i.modifiers.ctrl || i.modifiers.mac_cmd)
-                });
-                if clicked {
-                    let url_str = url.url.clone();
-                    // Spawn the open on a background thread to avoid blocking
-                    // the render loop on the system's URL handler.
-                    std::thread::spawn(move || {
-                        if let Err(e) = open::that(&url_str) {
-                            error!("Failed to open URL {url_str}: {e}");
-                        }
+                    self.cached_hovered_url = flat_idx.and_then(|idx| {
+                        snap.url_tag_indices
+                            .iter()
+                            .filter_map(|&ti| snap.visible_tags.get(ti))
+                            .find(|tag| tag.start <= idx && idx < tag.end)
+                            .and_then(|tag| tag.url.clone())
                     });
                 }
+
+                // Update cursor icon from cached URL state.
+                let new_icon = if self.cached_hovered_url.is_some() {
+                    CursorIcon::PointingHand
+                } else {
+                    CursorIcon::Default
+                };
+
+                if new_icon != self.previous_cursor_icon {
+                    self.previous_cursor_icon = new_icon;
+                    ui.ctx().output_mut(|output| {
+                        output.cursor_icon = new_icon;
+                    });
+                }
+
+                // Ctrl+click (Cmd+click on macOS) opens the URL.
+                if let Some(url) = &self.cached_hovered_url {
+                    let clicked = ui.input(|i| {
+                        i.pointer.button_clicked(egui::PointerButton::Primary)
+                            && (i.modifiers.ctrl || i.modifiers.mac_cmd)
+                    });
+                    if clicked {
+                        let url_str = url.url.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = open::that(&url_str) {
+                                error!("Failed to open URL {url_str}: {e}");
+                            }
+                        });
+                    }
+                }
             } else {
+                // Mouse left the terminal area.
+                self.previous_hover_cell = None;
+                self.cached_hovered_url = None;
+                if self.previous_cursor_icon != CursorIcon::Default {
+                    self.previous_cursor_icon = CursorIcon::Default;
+                    ui.ctx().output_mut(|output| {
+                        output.cursor_icon = CursorIcon::Default;
+                    });
+                }
+            }
+        } else {
+            // No URLs — reset tracking state and ensure default cursor.
+            self.previous_hover_cell = None;
+            self.cached_hovered_url = None;
+            if self.previous_cursor_icon != CursorIcon::Default {
+                self.previous_cursor_icon = CursorIcon::Default;
                 ui.ctx().output_mut(|output| {
                     output.cursor_icon = CursorIcon::Default;
                 });
             }
-        } else {
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = CursorIcon::Default;
-            });
         }
 
         // ── Drag-and-drop ────────────────────────────────────────────

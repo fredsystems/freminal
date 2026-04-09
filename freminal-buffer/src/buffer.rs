@@ -2740,7 +2740,7 @@ impl Buffer {
     pub fn visible_as_tchars_and_tags(
         &mut self,
         scroll_offset: usize,
-    ) -> (Vec<TChar>, Vec<FormatTag>) {
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
         let visible_start = self.visible_window_start(scroll_offset);
         let visible_end = (visible_start + self.height).min(self.rows.len());
         Self::rows_as_tchars_and_tags_cached(
@@ -2750,30 +2750,27 @@ impl Buffer {
     }
 
     /// Flatten all scrollback rows (everything before the visible window) into
-    /// a linear `(Vec<TChar>, Vec<FormatTag>)` pair using the same algorithm as
-    /// [`Self::visible_as_tchars_and_tags`].
+    /// a linear `(Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>)` tuple
+    /// using the same algorithm as [`Self::visible_as_tchars_and_tags`].
     ///
-    /// Returns `(vec![], vec![])` for the alternate screen buffer, which never
-    /// accumulates scrollback.
-    ///
-    /// Flatten all scrollback rows (everything before the visible window) into
-    /// a linear `(Vec<TChar>, Vec<FormatTag>)` pair.
+    /// Returns `(vec![], vec![], vec![], vec![])` for the alternate screen
+    /// buffer, which never accumulates scrollback.
     ///
     /// Pass `scroll_offset = 0` when calling from the PTY thread.
     pub fn scrollback_as_tchars_and_tags(
         &mut self,
         scroll_offset: usize,
-    ) -> (Vec<TChar>, Vec<FormatTag>) {
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
         // Alternate buffer has no scrollback.
         if self.kind == BufferType::Alternate {
-            return (vec![], vec![]);
+            return (vec![], vec![], vec![], vec![]);
         }
 
         let visible_start = self.visible_window_start(scroll_offset);
 
         if visible_start == 0 {
             // No scrollback rows exist yet.
-            return (vec![], vec![]);
+            return (vec![], vec![], vec![], vec![]);
         }
 
         Self::rows_as_tchars_and_tags_cached(
@@ -2783,8 +2780,8 @@ impl Buffer {
     }
 
     /// Shared helper: flatten a slice of [`Row`]s into `(Vec<TChar>,
-    /// Vec<FormatTag>)`, using a per-row cache to skip rows that have not
-    /// changed since the last snapshot.
+    /// Vec<FormatTag>, Vec<usize>)`, using a per-row cache to skip rows that
+    /// have not changed since the last snapshot.
     ///
     /// For each row:
     /// - If `row.dirty` or the cache entry is `None`, flatten the row, populate
@@ -2794,10 +2791,18 @@ impl Buffer {
     /// Per-row tag offsets are stored relative to each row's own character
     /// slice (starting at 0).  The merge step below re-computes global offsets
     /// each time, so the cache never stores stale absolute positions.
+    ///
+    /// The returned tuple contains:
+    /// - `Vec<TChar>` — flat character data
+    /// - `Vec<FormatTag>` — merged format tags with global offsets
+    /// - `Vec<usize>` — row offsets (`row_offsets[r]` is the flat index where
+    ///   row `r` begins)
+    /// - `Vec<usize>` — URL tag indices (indices into the tags vec where
+    ///   `url.is_some()`)
     fn rows_as_tchars_and_tags_cached(
         rows: &mut [Row],
         cache: &mut [Option<(Vec<TChar>, Vec<FormatTag>)>],
-    ) -> (Vec<TChar>, Vec<FormatTag>) {
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
         // ── Step 1: ensure every row has an up-to-date cache entry ──────────
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             if row.dirty || entry.is_none() {
@@ -2812,6 +2817,7 @@ impl Buffer {
         let row_count = rows.len();
         let mut chars: Vec<TChar> = Vec::new();
         let mut tags: Vec<FormatTag> = Vec::new();
+        let mut row_offsets: Vec<usize> = Vec::with_capacity(row_count);
 
         for (row_idx, entry) in cache.iter().enumerate() {
             // Step 1 populated every entry unconditionally, so `None` cannot
@@ -2819,6 +2825,9 @@ impl Buffer {
             // the `else` branch is unreachable in practice.
             if let Some((row_chars, row_tags)) = entry.as_ref() {
                 let global_offset = chars.len();
+
+                // Record the flat index where this row begins.
+                row_offsets.push(global_offset);
 
                 // Append this row's characters, adjusting tag offsets.
                 for row_tag in row_tags {
@@ -2888,7 +2897,21 @@ impl Buffer {
             last.end = chars.len();
         }
 
-        (chars, tags)
+        let url_tag_indices = Self::collect_url_tag_indices(&tags);
+        (chars, tags, row_offsets, url_tag_indices)
+    }
+
+    /// Collect the indices of tags in `tags` that carry a URL.
+    ///
+    /// This is a cheap post-pass over the already-built tag vector — typically
+    /// O(tags) where tags is small.  The result enables the GUI to iterate
+    /// only URL-bearing tags instead of scanning all tags during hover
+    /// detection.
+    fn collect_url_tag_indices(tags: &[FormatTag]) -> Vec<usize> {
+        tags.iter()
+            .enumerate()
+            .filter_map(|(i, tag)| tag.url.as_ref().map(|_| i))
+            .collect()
     }
 
     /// Flatten a single [`Row`] into a `(Vec<TChar>, Vec<FormatTag>)` pair.
@@ -5879,7 +5902,7 @@ mod visible_as_tchars_and_tags_tests {
         // A freshly created buffer with no content written must return an empty
         // chars vec and exactly one default-format tag (start=0, end=usize::MAX).
         let mut buf = Buffer::new(10, 5);
-        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
+        let (chars, tags, _row_offsets, _url_tag_indices) = buf.visible_as_tchars_and_tags(0);
 
         // Empty buffer: visible rows exist but all cells are blank/empty.
         // The returned tags must be non-empty (at least one sentinel tag).
@@ -5901,7 +5924,7 @@ mod visible_as_tchars_and_tags_tests {
         let mut buf = Buffer::new(10, 5);
         buf.insert_text(&to_tchars("A"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
+        let (chars, tags, _row_offsets, _url_tag_indices) = buf.visible_as_tchars_and_tags(0);
 
         // 'A' must appear in chars.
         assert!(
@@ -5927,7 +5950,7 @@ mod visible_as_tchars_and_tags_tests {
         let mut buf = Buffer::new(80, 5);
         buf.insert_text(&to_tchars("ABC"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
+        let (chars, tags, _row_offsets, _url_tag_indices) = buf.visible_as_tchars_and_tags(0);
 
         // All three characters must be present.
         assert!(chars.contains(&TChar::Ascii(b'A')), "must contain A");
@@ -5961,7 +5984,7 @@ mod visible_as_tchars_and_tags_tests {
         // Write 'B' with red format.
         buf.insert_text(&to_tchars("B"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
+        let (chars, tags, _row_offsets, _url_tag_indices) = buf.visible_as_tchars_and_tags(0);
 
         // Both characters must be present.
         assert!(chars.contains(&TChar::Ascii(b'A')), "must contain A");
@@ -5993,7 +6016,7 @@ mod visible_as_tchars_and_tags_tests {
         buf.handle_cr();
         buf.insert_text(&to_tchars("bye"));
 
-        let (chars, tags) = buf.visible_as_tchars_and_tags(0);
+        let (chars, tags, _row_offsets, _url_tag_indices) = buf.visible_as_tchars_and_tags(0);
 
         // NewLine must appear somewhere in the output.
         assert!(
@@ -6027,7 +6050,7 @@ mod visible_as_tchars_and_tags_tests {
         let wide_tchar = TChar::from('あ');
         buf.insert_text(std::slice::from_ref(&wide_tchar));
 
-        let (chars, _tags) = buf.visible_as_tchars_and_tags(0);
+        let (chars, _tags, _row_offsets, _url_tag_indices) = buf.visible_as_tchars_and_tags(0);
 
         let count = chars.iter().filter(|c| **c == wide_tchar).count();
         assert_eq!(

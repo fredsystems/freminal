@@ -190,7 +190,6 @@ pub struct MatchHighlight {
 ///
 /// The cursor quad (if visible) is always appended **last** in `deco_verts`
 /// so that cursor-only partial updates can patch just the tail.
-#[must_use]
 // All parameters are required geometric and style inputs for GPU instance data generation.
 // Inherently large: iterates all shaped lines, resolving background color for every cell.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -212,9 +211,12 @@ pub fn build_background_instances(
     match_highlights: &[MatchHighlight],
     theme: &ThemePalette,
     cursor_color_override: Option<(u8, u8, u8)>,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut instances: Vec<f32> = Vec::new();
-    let mut deco: Vec<f32> = Vec::new();
+    instances: &mut Vec<f32>,
+    deco: &mut Vec<f32>,
+) {
+    // Reuse existing heap allocations — clear but keep capacity.
+    instances.clear();
+    deco.clear();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         let y_top = gl_f32(row_idx) * gl_f32_u32(cell_height);
@@ -242,7 +244,7 @@ pub fn build_background_instances(
             // cells wide, so emit 2 adjacent instances per column.
             let col_count = run_col_count(run);
             emit_bg_cells(
-                &mut instances,
+                instances,
                 run.col_start,
                 col_count,
                 row_idx,
@@ -287,7 +289,7 @@ pub fn build_background_instances(
 
                 let cw = gl_f32_u32(cell_width);
                 push_underline_quads(
-                    &mut deco,
+                    deco,
                     underline_style,
                     &UnderlineParams {
                         x0,
@@ -307,7 +309,7 @@ pub fn build_background_instances(
                 // baseline places the line above the baseline (middle of cell).
                 let st_top = y_top + ascent - strikeout_offset;
                 let st_bot = st_top + stroke_size.max(1.0);
-                push_quad(&mut deco, x0, st_top, x1, st_bot, fg_color);
+                push_quad(deco, x0, st_top, x1, st_bot, fg_color);
             }
         }
     }
@@ -335,7 +337,7 @@ pub fn build_background_instances(
             } else {
                 search_match_bg_f()
             };
-            push_quad(&mut deco, x0, y0, x1, y1, color);
+            push_quad(deco, x0, y0, x1, y1, color);
         }
     }
 
@@ -386,7 +388,7 @@ pub fn build_background_instances(
             let y0 = gl_f32(row) * ch;
             let y1 = y0 + ch;
 
-            push_quad(&mut deco, x0, y0, x1, y1, selection_bg_f(theme));
+            push_quad(deco, x0, y0, x1, y1, selection_bg_f(theme));
         }
     }
 
@@ -400,21 +402,19 @@ pub fn build_background_instances(
 
         match cursor_visual_style {
             CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
-                push_quad(&mut deco, cx, cy, cx + cw, cy + ch, color);
+                push_quad(deco, cx, cy, cx + cw, cy + ch, color);
             }
             CursorVisualStyle::UnderlineCursorBlink | CursorVisualStyle::UnderlineCursorSteady => {
                 let bar_h = (ch * 0.1).max(2.0);
-                push_quad(&mut deco, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
+                push_quad(deco, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
             }
             CursorVisualStyle::VerticalLineCursorBlink
             | CursorVisualStyle::VerticalLineCursorSteady => {
                 let bar_w = (cw * 0.1).max(1.0);
-                push_quad(&mut deco, cx, cy, cx + bar_w, cy + ch, color);
+                push_quad(deco, cx, cy, cx + bar_w, cy + ch, color);
             }
         }
     }
-
-    (instances, deco)
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +485,12 @@ pub fn build_cursor_verts_only(
 /// reading order.  Glyphs that fall within the selection use `SELECTION_FG_F`
 /// instead of their normal foreground color.
 ///
-/// Returns a flat `Vec<f32>` with `FG_INSTANCE_FLOATS` floats per glyph instance.
-#[must_use]
+/// Writes glyph instances into the caller-supplied `instances` buffer, which
+/// is cleared first so that the existing heap allocation is reused across
+/// frames (clear+extend pattern).
+// All parameters are required: shaped lines, atlas, font manager, cell metrics,
+// render options, theme, and the output buffer.
+#[allow(clippy::too_many_arguments)]
 pub fn build_foreground_instances(
     shaped_lines: &[Arc<ShapedLine>],
     atlas: &mut GlyphAtlas,
@@ -495,8 +499,10 @@ pub fn build_foreground_instances(
     ascent: f32,
     opts: &FgRenderOptions,
     theme: &ThemePalette,
-) -> Vec<f32> {
-    let mut instances: Vec<f32> = Vec::new();
+    instances: &mut Vec<f32>,
+) {
+    // Reuse existing heap allocation — clear but keep capacity.
+    instances.clear();
 
     for (row_idx, line) in shaped_lines.iter().enumerate() {
         let cell_h_f = gl_f32_u32(cell_height);
@@ -527,7 +533,7 @@ pub fn build_foreground_instances(
 
                 if run_visible {
                     emit_glyph_instance(
-                        &mut instances,
+                        instances,
                         glyph,
                         atlas,
                         font_manager,
@@ -540,31 +546,22 @@ pub fn build_foreground_instances(
             }
         }
     }
-
-    instances
 }
 
 // ---------------------------------------------------------------------------
 //  Build image verts
 // ---------------------------------------------------------------------------
 
-/// Build the image vertex buffer from the visible placements.
-///
-/// Emits one textured quad per unique image ID found in `placements`.
-/// Images are sorted by ID before emission so that `draw_images` (which
-/// iterates `snap_images.keys()` in the same sorted order) draws the
-/// correct texture for each quad.
-///
-/// Each quad covers the union of all cells that belong to a given image in
-/// the current visible window (i.e. the full image bounding box).
+/// Writes image vertex data into the caller-supplied `verts` buffer, which
+/// is cleared first so that the existing heap allocation is reused across
+/// frames (clear+extend pattern).
 ///
 /// `placements` is parallel to `visible_chars`: one entry per cell in
 /// row-major order.  `term_width` is the number of columns per row.
 /// `cell_width` and `cell_height` are integer pixel sizes.
 ///
-/// Returns a flat `Vec<f32>` with `IMG_VERTEX_FLOATS` floats per vertex,
-/// `VERTS_PER_QUAD` vertices per image quad.
-#[must_use]
+/// Emits `IMG_VERTEX_FLOATS` floats per vertex, `VERTS_PER_QUAD` vertices
+/// per image quad.
 // All parameters are required for image vertex generation: placements, cell dimensions,
 // terminal size, and display area.
 // `implicit_hasher`: `build_image_verts` is an internal function; generic hasher adds no value.
@@ -575,9 +572,13 @@ pub fn build_image_verts(
     term_width: usize,
     cell_width: u32,
     cell_height: u32,
-) -> Vec<f32> {
+    verts: &mut Vec<f32>,
+) {
+    // Reuse existing heap allocation — clear but keep capacity.
+    verts.clear();
+
     if placements.is_empty() || snap_images.is_empty() {
-        return Vec::new();
+        return;
     }
 
     let mut bounds: std::collections::HashMap<u64, ImageBounds> = std::collections::HashMap::new();
@@ -625,7 +626,7 @@ pub fn build_image_verts(
     let mut sorted_ids: Vec<u64> = bounds.keys().copied().collect();
     sorted_ids.sort_unstable();
 
-    let mut verts = Vec::with_capacity(sorted_ids.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+    verts.reserve(sorted_ids.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
 
     for id in &sorted_ids {
         let Some(b) = bounds.get(id) else {
@@ -635,8 +636,6 @@ pub fn build_image_verts(
         let quad = compute_image_quad(b, snap_images.get(id));
         verts.extend_from_slice(&quad);
     }
-
-    verts
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,6 +1188,8 @@ mod tests {
             gl_f32(cursor_pos.x) * gl_f32_u32(cell_width),
             gl_f32(cursor_pos.y) * gl_f32_u32(cell_height),
         );
+        let mut instances = Vec::new();
+        let mut deco = Vec::new();
         build_background_instances(
             lines,
             cell_width,
@@ -1207,7 +1208,10 @@ mod tests {
             &[],
             &themes::CATPPUCCIN_MOCHA,
             None,
-        )
+            &mut instances,
+            &mut deco,
+        );
+        (instances, deco)
     }
 
     #[test]
@@ -1528,7 +1532,8 @@ mod tests {
 
     #[test]
     fn fg_instances_empty_on_empty_lines() {
-        let instances = build_foreground_instances(
+        let mut instances = Vec::new();
+        build_foreground_instances(
             &[],
             &mut GlyphAtlas::default(),
             &FontManager::new(&Config::default(), 1.0),
@@ -1536,6 +1541,7 @@ mod tests {
             13.0,
             &FgRenderOptions::all_visible(None),
             &themes::CATPPUCCIN_MOCHA,
+            &mut instances,
         );
         assert_eq!(instances.len(), 0);
     }
@@ -1558,7 +1564,8 @@ mod tests {
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
         let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
 
-        let instances = build_foreground_instances(
+        let mut instances = Vec::new();
+        build_foreground_instances(
             &lines,
             &mut atlas,
             &fm,
@@ -1566,6 +1573,7 @@ mod tests {
             ascent,
             &FgRenderOptions::all_visible(None),
             &themes::CATPPUCCIN_MOCHA,
+            &mut instances,
         );
 
         // Three ASCII glyphs each produce one instance = FG_INSTANCE_FLOATS floats.

@@ -10,12 +10,13 @@ startup commands.
 
 ## Task Summary
 
-| #   | Feature                        | Scope  | Status  |
-| --- | ------------------------------ | ------ | ------- |
-| 53  | Multiple Windows               | Large  | Pending |
-| 54  | Background Images              | Medium | Pending |
-| 55  | Custom Shaders                 | Medium | Pending |
-| 56  | Session Restore / Startup Cmds | Medium | Pending |
+| #   | Feature                        | Scope  | Status   |
+| --- | ------------------------------ | ------ | -------- |
+| 53  | Multiple Windows               | Large  | Pending  |
+| 54  | Background Images              | Medium | Pending  |
+| 55  | Custom Shaders                 | Medium | Pending  |
+| 56  | Session Restore / Startup Cmds | Medium | Pending  |
+| 57  | Render Loop Optimization       | Medium | Complete |
 
 ---
 
@@ -352,6 +353,199 @@ title = "Main"
 
 ---
 
+## Task 57 — Render Loop Optimization
+
+### 57 Overview
+
+Eliminate unnecessary CPU work during mouse movement and other input events that do not
+change terminal content. Currently, `egui-winit` unconditionally returns `repaint: true`
+for every `WindowEvent::CursorMoved`, triggering a full `update()` call — including snapshot
+load, input processing, blink calculations, URL hover detection, PaintCallback allocation,
+and OpenGL draw — even when nothing visible has changed. At 125 Hz mouse polling (standard)
+this is 250 wasted frames/second; at 1000 Hz (gaming mice) it is 2000.
+
+The same applies to keyboard input: key presses dispatch to the PTY and the result arrives
+back as a snapshot change. The key press itself should never drive a repaint.
+
+**Guiding principle:** Input events dispatch to the PTY but never drive repaints. Repaints
+are driven only by observable state changes: new PTY content, cursor blink, text blink,
+selection cell changes during active drag, and animations (cursor trail, bell flash).
+
+### 57 Root Cause Analysis
+
+**Hard constraint:** `egui-winit` 0.34.1 (`src/lib.rs:333-338`) hardcodes
+`EventResponse { repaint: true }` for `WindowEvent::CursorMoved`. Additionally, a zero-delay
+repaint sets `outstanding = 1` in egui's context (`context.rs:140`), meaning each
+`CursorMoved` causes **two** frames. This is upstream behaviour that cannot be changed without
+forking `egui-winit`.
+
+**Consequence:** We cannot prevent `update()` from being called on every mouse movement. But
+we can make those frames cost near-zero by short-circuiting all expensive work when nothing
+meaningful has changed.
+
+### 57 Design
+
+The design has four independent sub-optimisations, ordered from highest to lowest impact:
+
+#### A. URL hover fast-path (highest impact)
+
+Current cost: **O(visible_chars) + O(tags)** per mouse-move pixel.
+
+`flat_index_for_cell()` (`coords.rs:43-81`) linearly scans the flat `visible_chars` vec
+looking for `NewLine` separators to find the target row, then walks within the row. For a
+50×220 terminal this is up to ~11,000 iterations. Then `visible_tags.iter().find()` does a
+linear scan of all tags. This runs on every single pixel of mouse movement even when there
+are zero URLs in the entire visible content.
+
+**New data structures** (built during `rows_as_tchars_and_tags_cached`, zero extra cost
+since we already iterate tags):
+
+1. **`has_urls: bool`** on `TerminalSnapshot` — set `true` if any tag in the visible
+   window has `url.is_some()`. When `false`, the entire URL hover code path is skipped.
+   This is the fast path for ~99% of terminal usage.
+
+2. **`row_offsets: Arc<Vec<usize>>`** on `TerminalSnapshot` — one entry per visible row,
+   `row_offsets[r]` = flat index in `visible_chars` where row `r` begins. Replaces the
+   O(visible_chars) scan in `flat_index_for_cell` with O(1) row lookup + O(row_width)
+   column walk. Benefits all callers (URL hover, selection hit-testing).
+
+3. **`url_tag_indices: Arc<Vec<usize>>`** on `TerminalSnapshot` — indices into
+   `visible_tags` of tags with `url.is_some()`. Replaces O(all_tags) linear scan with
+   O(url_tags) — typically O(0) or O(1).
+
+**Cell-change gating:** Track the previous hovered cell `(col, row)`. Only run URL
+detection when the cell changes. Only call `output_mut(cursor_icon)` when the icon
+actually needs to change (track previous icon).
+
+| Scenario              | Before                               | After                      |
+| --------------------- | ------------------------------------ | -------------------------- |
+| No URLs, mouse moving | O(visible_chars) + O(tags) per pixel | O(0) — `has_urls` skip     |
+| URLs exist, same cell | O(visible_chars) + O(tags) per pixel | O(0) — cell-change gate    |
+| URLs exist, new cell  | O(visible_chars) + O(tags)           | O(row_width) + O(url_tags) |
+| Cursor icon unchanged | `output_mut` every frame             | Skipped                    |
+
+#### B. Gate `global_style_mut` on actual changes (minor)
+
+`global_style_mut` calls `Arc::make_mut` on the egui `Style` every frame, cloning the Arc
+even when the background color and theme haven't changed. Track the previous
+`(is_normal_display, theme_ptr, bg_opacity)` tuple and only call `global_style_mut` when
+any of those change.
+
+#### C. Cache PaintCallback allocation (minor)
+
+Every frame allocates `Arc::new(CallbackFn::new(...))` even when the GPU data is identical
+to the previous frame. Investigate whether the PaintCallback can be cached and reused when
+no vertex data changed. This may require changes to the egui PaintCallback API compatibility
+(the closure captures change each frame for `is_cursor_only` / `cursor_only_verts`), so this
+subtask begins with a feasibility check.
+
+#### D. Worker thread for vertex generation (rejected)
+
+Considered and rejected. Benchmark data shows:
+
+| Operation                    | 80×24   | 200×50   |
+| ---------------------------- | ------- | -------- |
+| `build_bg_instances`         | ~140 ns | ~276 ns  |
+| `build_fg_instances`         | ~941 µs | ~1.50 ms |
+| `shape_visible` (cache miss) | —       | ~1.82 ms |
+| `shape_visible` (cache hit)  | —       | ~14.2 µs |
+
+The full rebuild path is ~3.3 ms worst case, fitting comfortably within the PTY thread's
+8 ms repaint cadence. The shaping cache reduces repeat frames to ~1.5 ms. The "nothing
+changed" path (which is what mouse-move frames hit) does zero vertex generation — just
+re-renders cached VBOs.
+
+A worker thread would add latency (one extra frame delay between content arrival and
+display), complicate ownership (selection and cursor state live on the GUI thread), and
+solve a problem that content-change gating already handles. The complexity is not justified.
+
+### 57 Subtasks
+
+1. **57.1 — `has_urls` snapshot flag**
+   During `rows_as_tchars_and_tags_cached` in `buffer.rs`, track whether any tag in the
+   visible window has `url.is_some()`. Store as `has_urls: bool` on the snapshot. Zero-cost
+   check (piggybacked on the existing tag iteration that runs only when content is dirty).
+   Add to `TerminalSnapshot`, `build_snapshot()`, and relevant tests.
+
+2. **57.2 — `row_offsets` index table**
+   During `rows_as_tchars_and_tags_cached`, record the flat index where each row begins in
+   `visible_chars`. Store as `row_offsets: Arc<Vec<usize>>` on the snapshot. Modify
+   `flat_index_for_cell` to accept the row offsets and skip the O(visible_chars) row scan.
+   Update all callers. Add benchmarks comparing before/after for `flat_index_for_cell`.
+
+3. **57.3 — `url_tag_indices` lookup array**
+   During `rows_as_tchars_and_tags_cached`, collect indices of tags with `url.is_some()`.
+   Store as `url_tag_indices: Arc<Vec<usize>>` on the snapshot. Modify URL hover detection
+   in `widget.rs` to iterate only URL-bearing tags instead of all tags.
+
+4. **57.4 — Cell-change gating for URL hover**
+   Add `previous_hover_cell: (usize, usize)` and `previous_cursor_icon: CursorIcon` to
+   `FreminalTerminalWidget`. Only run URL detection when the hovered cell changes. Only call
+   `output_mut(cursor_icon)` when the icon actually changes. When `snap.has_urls` is false,
+   skip the entire block (including `encode_egui_mouse_pos_as_usize`).
+
+5. **57.5 — Gate `global_style_mut`**
+   Track previous `(is_normal_display, theme pointer, bg_opacity)` in `FreminalGui`. Only
+   call `global_style_mut` when any of those change. Eliminates per-frame `Arc::make_mut`
+   clone of the egui Style.
+
+6. **57.6 — PaintCallback caching feasibility** ✅ Closed: not feasible.
+   egui rebuilds its shape list from scratch every frame — `ui.painter().add()` is the only
+   way to submit draw commands, and there is no "reuse last frame's shapes" API. The
+   `CallbackFn` closure captures per-frame state (`is_cursor_only`, `cursor_only_verts`)
+   that changes each frame, so the closure itself cannot be reused. Even if we restructured
+   captures via `Arc<Mutex<…>>`, we would still allocate a `PaintCallback` shape each frame.
+   The cost of `Arc::new(CallbackFn::new(…))` is a single heap allocation per frame
+   (~microseconds) — negligible compared to actual GL draw calls. No code change needed.
+
+7. **57.7 — Benchmarks and verification** ✅ Complete.
+   Full verification suite passes: `cargo test --all`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo-machete`. Benchmark results (post-Task 57):
+
+   | Benchmark                                        | Time    | Throughput   |
+   | ------------------------------------------------ | ------- | ------------ |
+   | `bench_visible_flatten/visible_200x50`           | 4.59 µs | 2.18 Gelem/s |
+   | `bench_scrollback_flatten/scrollback_1024_rows`  | 5.02 ns | 16.3 Gelem/s |
+   | `bench_scrollback_render/offset/0`               | 1.30 µs | 1.48 Gelem/s |
+   | `bench_scrollback_render/offset/1000`            | 1.27 µs | 1.51 Gelem/s |
+   | `bench_scrollback_render/offset/4000`            | 1.24 µs | 1.55 Gelem/s |
+   | `bench_data_and_format_for_gui/flatten_80x24`    | 1.18 µs | 1.63 Gelem/s |
+   | `bench_build_snapshot/dirty_80x24`               | 41.8 µs | 45.9 Melem/s |
+   | `bench_build_snapshot/clean_80x24`               | 150 ns  | 12.8 Gelem/s |
+   | `bench_build_snapshot_scrollback/dirty_10k`      | 1.04 ms | 1.85 Melem/s |
+   | `bench_build_snapshot_scrollback/clean_10k`      | 157 ns  | 12.2 Gelem/s |
+   | `render_terminal_text_snapshot/build_after_ansi` | 50.9 µs | 37.8 Melem/s |
+
+   No Criterion regressions reported. The primary CPU savings come from gating (skipping
+   work on mouse-movement frames), which is not captured by dirty-path benchmarks. Manual
+   testing with mouse movement is needed to verify the idle CPU reduction.
+
+### 57 Primary Files
+
+- `freminal-buffer/src/buffer.rs` (`rows_as_tchars_and_tags_cached` — build new indices)
+- `freminal-terminal-emulator/src/snapshot.rs` (new snapshot fields)
+- `freminal-terminal-emulator/src/interface.rs` (`build_snapshot`, `flatten_visible`)
+- `freminal/src/gui/terminal/widget.rs` (URL hover gating, PaintCallback caching)
+- `freminal/src/gui/terminal/coords.rs` (`flat_index_for_cell` optimisation)
+- `freminal/src/gui/mod.rs` (`global_style_mut` gating)
+
+### 57 Rejected Alternatives
+
+**Fork egui-winit:** Would allow returning `repaint: false` for `CursorMoved`, eliminating
+wasted frames entirely. Rejected due to maintenance burden of carrying a fork across egui
+version upgrades. The "make wasted frames near-zero cost" approach achieves the same CPU
+savings without a fork.
+
+**Worker thread for vertex generation:** See section D above. Rejected due to added latency,
+ownership complexity, and the fact that content-change gating already prevents vertex
+generation on input-only frames.
+
+**Strip `PointerMoved` from `raw_input_hook`:** Would prevent egui from knowing the mouse
+moved, but also breaks selection drag, URL hover, context menus, and cursor shape changes.
+Requires re-implementing mouse tracking outside egui, duplicating work. Rejected.
+
+---
+
 ## Dependency Graph
 
 ```text
@@ -359,13 +553,16 @@ Task 53 (Multiple Windows) ── builds on tabs (Task 36, v0.3.0)
 Task 54 (Background Images) ── extends background_opacity (Task 34, complete)
 Task 55 (Custom Shaders) ── extends the GL renderer (Task 1, complete)
 Task 56 (Session Restore) ── depends on tabs (Task 36, v0.3.0)
+Task 57 (Render Loop Opt) ── independent; touches buffer, snapshot, and GUI
 
 Tasks 54 and 55 are independent of each other.
 Tasks 53 and 56 both depend on tabs but are independent of each other.
+Task 57 is independent of all other v0.5.0 tasks.
 ```
 
-**Recommended order:** 54 and 55 can start immediately (GL renderer work). 53 and 56 require
-tabs from v0.3.0 to be complete and stable.
+**Recommended order:** Task 57 can start immediately — it is independent and reduces CPU
+overhead for all subsequent development and testing. 54 and 55 can also start immediately
+(GL renderer work). 53 and 56 require tabs from v0.3.0 to be complete and stable.
 
 ---
 

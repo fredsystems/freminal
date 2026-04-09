@@ -9,9 +9,10 @@
 //! and font-face boundaries, then shapes each run to produce glyph IDs and advances.
 //! Results are cached per-line for incremental updates.
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+use rustc_hash::FxHasher;
 
 use conv2::{ConvUtil, ValueFrom};
 
@@ -184,7 +185,7 @@ impl ShapingCache {
             // Include line_width in hash so cache invalidates when DECDWL/DECDHL changes.
             let mut line_hash = hash_line(line_chars, visible_tags, global_offset);
             {
-                let mut h = DefaultHasher::new();
+                let mut h = FxHasher::default();
                 line_hash.hash(&mut h);
                 std::mem::discriminant(&lw).hash(&mut h);
                 line_hash = h.finish();
@@ -259,8 +260,11 @@ fn split_into_lines(chars: &[TChar]) -> Vec<&[TChar]> {
 
 /// Compute a content hash for a single line, incorporating both character data
 /// and the format tags that overlap this line's range.
+///
+/// Uses `FxHasher` (non-cryptographic) for speed — these hashes are cache keys,
+/// not security-sensitive.
 fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
 
     // Hash character content.
     for ch in line_chars {

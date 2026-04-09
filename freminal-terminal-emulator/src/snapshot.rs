@@ -143,6 +143,32 @@ pub struct TerminalSnapshot {
     /// saving power.
     pub has_blinking_text: bool,
 
+    /// `true` when at least one visible format tag carries a URL (`url.is_some()`).
+    ///
+    /// The GUI uses this to skip the entire URL hover detection code path when
+    /// no URLs exist in the visible window — the common case (~99% of terminal
+    /// usage).  This avoids the `O(visible_chars)` + `O(tags)` scan that would
+    /// otherwise run on every mouse-move pixel.
+    pub has_urls: bool,
+
+    /// Per-row flat-index offsets into `visible_chars`.
+    ///
+    /// `row_offsets[r]` is the index in `visible_chars` where row `r` begins.
+    /// This enables O(1) row lookup in `flat_index_for_cell` instead of the
+    /// `O(visible_chars)` linear scan for `NewLine` separators.
+    ///
+    /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
+    pub row_offsets: Arc<Vec<usize>>,
+
+    /// Indices into `visible_tags` of tags that carry a URL (`url.is_some()`).
+    ///
+    /// The GUI uses this to iterate only URL-bearing tags during hover
+    /// detection instead of scanning all tags — reducing the cost from
+    /// `O(all_tags)` to `O(url_tags)` (typically O(0)).
+    ///
+    /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
+    pub url_tag_indices: Arc<Vec<usize>>,
+
     /// Set to `true` when the scroll offset changed since the previous
     /// snapshot (the visible window moved, but the underlying text may not
     /// have changed).
@@ -323,6 +349,9 @@ impl TerminalSnapshot {
             total_rows: 0,
             content_changed: false,
             has_blinking_text: false,
+            has_urls: false,
+            row_offsets: Arc::new(Vec::new()),
+            url_tag_indices: Arc::new(Vec::new()),
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
@@ -373,6 +402,11 @@ mod tests {
     #[test]
     fn empty_has_blinking_text_is_false() {
         assert!(!TerminalSnapshot::empty().has_blinking_text);
+    }
+
+    #[test]
+    fn empty_has_urls_is_false() {
+        assert!(!TerminalSnapshot::empty().has_urls);
     }
 
     #[test]
