@@ -538,6 +538,9 @@ impl TerminalEmulator {
             .iter()
             .any(|tag| tag.blink != freminal_common::buffer_states::fonts::BlinkState::None);
 
+        // ── URL presence detection ───────────────────────────────────────────
+        let has_urls = visible_tags.iter().any(|tag| tag.url.is_some());
+
         let cwd = self
             .internal
             .handler
@@ -577,6 +580,7 @@ impl TerminalEmulator {
             total_rows,
             content_changed,
             has_blinking_text,
+            has_urls,
             scroll_changed,
             bracketed_paste: mode_fields.bracketed_paste,
             mouse_tracking: mode_fields.mouse_tracking,

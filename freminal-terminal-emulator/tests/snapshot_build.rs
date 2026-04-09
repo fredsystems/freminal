@@ -571,3 +571,42 @@ fn has_blinking_text_false_after_blink_cleared() {
         "has_blinking_text must be false after all blinking cells are overwritten"
     );
 }
+
+// ─── 16. has_urls flag ───────────────────────────────────────────────────────
+
+#[test]
+fn has_urls_false_for_plain_text() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"no urls here");
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.has_urls,
+        "has_urls must be false when no OSC 8 hyperlinks are present"
+    );
+}
+
+#[test]
+fn has_urls_true_after_osc8_hyperlink() {
+    let (mut emu, _rx) = make_emulator();
+    // OSC 8 ; ; URL ST  text  OSC 8 ; ; ST
+    emu.handle_incoming_data(b"\x1b]8;;https://example.com\x07Click Here\x1b]8;;\x07");
+    let snap = emu.build_snapshot();
+    assert!(
+        snap.has_urls,
+        "has_urls must be true when visible text contains an OSC 8 hyperlink"
+    );
+}
+
+#[test]
+fn has_urls_false_after_hyperlink_overwritten() {
+    let (mut emu, _rx) = make_emulator();
+    // Write a hyperlink
+    emu.handle_incoming_data(b"\x1b]8;;https://example.com\x07Link\x1b]8;;\x07");
+    // Move cursor home and overwrite with plain text
+    emu.handle_incoming_data(b"\x1b[H\x1b[0mPlain text here!!");
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.has_urls,
+        "has_urls must be false after all hyperlink cells are overwritten"
+    );
+}

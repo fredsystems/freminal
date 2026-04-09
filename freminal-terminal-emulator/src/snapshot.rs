@@ -143,6 +143,14 @@ pub struct TerminalSnapshot {
     /// saving power.
     pub has_blinking_text: bool,
 
+    /// `true` when at least one visible format tag carries a URL (`url.is_some()`).
+    ///
+    /// The GUI uses this to skip the entire URL hover detection code path when
+    /// no URLs exist in the visible window — the common case (~99% of terminal
+    /// usage).  This avoids the `O(visible_chars)` + `O(tags)` scan that would
+    /// otherwise run on every mouse-move pixel.
+    pub has_urls: bool,
+
     /// Set to `true` when the scroll offset changed since the previous
     /// snapshot (the visible window moved, but the underlying text may not
     /// have changed).
@@ -323,6 +331,7 @@ impl TerminalSnapshot {
             total_rows: 0,
             content_changed: false,
             has_blinking_text: false,
+            has_urls: false,
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
             mouse_tracking: MouseTrack::default(),
@@ -373,6 +382,11 @@ mod tests {
     #[test]
     fn empty_has_blinking_text_is_false() {
         assert!(!TerminalSnapshot::empty().has_blinking_text);
+    }
+
+    #[test]
+    fn empty_has_urls_is_false() {
+        assert!(!TerminalSnapshot::empty().has_urls);
     }
 
     #[test]
