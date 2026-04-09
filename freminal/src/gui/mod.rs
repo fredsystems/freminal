@@ -143,6 +143,15 @@ struct FreminalGui {
     /// changes, the active theme is re-applied to all tabs.
     os_dark_mode: bool,
 
+    /// Cached inputs to `global_style_mut` from the previous frame:
+    /// `(is_normal_display, theme, bg_opacity)`.
+    ///
+    /// `None` on the first frame forces an unconditional style apply.
+    /// Compared each frame; `global_style_mut` is only called when a
+    /// value changes.  This eliminates the per-frame `Arc::make_mut`
+    /// clone of the egui `Style` during idle mouse movement.
+    style_cache: Option<(bool, &'static freminal_common::themes::ThemePalette, f32)>,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -185,6 +194,12 @@ impl FreminalGui {
             settings_modal: SettingsModal::new(config_path),
             last_window_title: String::from("Freminal"),
             os_dark_mode,
+            // `None` forces the first frame to unconditionally apply the
+            // style.  `set_egui_options` already ran above, so the first
+            // snapshot comparison will update the cache without a redundant
+            // `global_style_mut` call only when the snapshot differs from
+            // what `set_egui_options` established.
+            style_cache: None,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -1395,37 +1410,53 @@ impl eframe::App for FreminalGui {
 
             // Update background color based on whether the terminal is in
             // normal (non-inverted) display mode.
+            //
+            // Gated: only call `global_style_mut` when the inputs have
+            // changed.  `global_style_mut` triggers `Arc::make_mut` on
+            // the egui `Style`, which clones every frame unless skipped.
             let bg_opacity = self.config.ui.background_opacity;
-            if snap.is_normal_display {
-                ui.ctx().global_style_mut(|style| {
-                    // window_fill: always opaque (menus, settings, chrome).
-                    style.visuals.window_fill = internal_color_to_egui_with_alpha(
-                        freminal_common::colors::TerminalColor::DefaultBackground,
-                        false,
-                        snap.theme,
-                        1.0,
-                    );
-                    // panel_fill: respects background_opacity (terminal area only).
-                    style.visuals.panel_fill = internal_color_to_egui_with_alpha(
-                        freminal_common::colors::TerminalColor::DefaultBackground,
-                        false,
-                        snap.theme,
-                        bg_opacity,
-                    );
-                });
-            } else {
-                ui.ctx().global_style_mut(|style| {
-                    // window_fill: always opaque (menus, settings, chrome).
-                    style.visuals.window_fill =
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
-                    // panel_fill: respects background_opacity (terminal area only).
-                    let alpha = (bg_opacity * 255.0)
-                        .round()
-                        .approx_as::<u8>()
-                        .unwrap_or(255);
-                    style.visuals.panel_fill =
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
-                });
+            let style_key = (snap.is_normal_display, snap.theme, bg_opacity);
+            let style_changed = match self.style_cache {
+                Some((prev_display, prev_theme, prev_opacity)) => {
+                    prev_display != style_key.0
+                        || !std::ptr::eq(prev_theme, style_key.1)
+                        || prev_opacity.to_bits() != bg_opacity.to_bits()
+                }
+                None => true,
+            };
+            if style_changed {
+                if snap.is_normal_display {
+                    ui.ctx().global_style_mut(|style| {
+                        // window_fill: always opaque (menus, settings, chrome).
+                        style.visuals.window_fill = internal_color_to_egui_with_alpha(
+                            freminal_common::colors::TerminalColor::DefaultBackground,
+                            false,
+                            snap.theme,
+                            1.0,
+                        );
+                        // panel_fill: respects background_opacity (terminal area only).
+                        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
+                            freminal_common::colors::TerminalColor::DefaultBackground,
+                            false,
+                            snap.theme,
+                            bg_opacity,
+                        );
+                    });
+                } else {
+                    ui.ctx().global_style_mut(|style| {
+                        // window_fill: always opaque (menus, settings, chrome).
+                        style.visuals.window_fill =
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
+                        // panel_fill: respects background_opacity (terminal area only).
+                        let alpha = (bg_opacity * 255.0)
+                            .round()
+                            .approx_as::<u8>()
+                            .unwrap_or(255);
+                        style.visuals.panel_fill =
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+                    });
+                }
+                self.style_cache = Some(style_key);
             }
 
             let tab = self.tabs.active_tab_mut();
