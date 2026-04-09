@@ -234,6 +234,72 @@ If any step fails, fix the issue before proceeding.
 
 When acting as an orchestrator (decomposing a task into sub-agent work), follow this protocol:
 
+### MANDATORY: Explicit Sub-Agent Intent Scoping
+
+**THIS IS THE SINGLE MOST IMPORTANT RULE IN THIS DOCUMENT.**
+
+Every sub-agent prompt MUST explicitly state the agent's **permitted action class**. A sub-agent
+that is told to "understand the code" will decide on its own to start writing code, committing,
+and moving to the next task. This has happened repeatedly and is unacceptable.
+
+**Action classes** (use these exact words in every sub-agent prompt):
+
+| Action Class       | What the agent MAY do                             | What the agent MUST NOT do                                        |
+| ------------------ | ------------------------------------------------- | ----------------------------------------------------------------- |
+| **READ-ONLY**      | Read files, search, analyze, report findings      | Edit files, write files, run cargo/git commands that mutate state |
+| **CODE-REVIEW**    | Read files, analyze diffs, report issues          | Edit files, write files, commit, run tests                        |
+| **IMPLEMENTATION** | Read + edit + write files within the stated scope | Touch files outside scope, commit, push, move to the next subtask |
+| **COMMIT**         | Stage and commit specified changes                | Edit code, start new work                                         |
+
+**Every sub-agent prompt MUST include ALL of the following:**
+
+1. **Action class** — One of the four above, stated at the top of the prompt in bold/caps.
+2. **Exact scope** — Which files/modules the agent may read or modify. Be specific.
+3. **Deliverable** — What the agent must return. "A summary of X" or "Modified files A, B, C
+   with change Y."
+4. **Explicit prohibitions** — What the agent must NOT do. Always include at minimum:
+   "Do NOT edit any files" (for read-only), or "Do NOT commit" (for implementation), or
+   "Do NOT proceed to the next subtask" (always).
+5. **Stop condition** — When to stop. "Stop after reporting findings." or "Stop after the
+   verification suite passes."
+
+**Example — read-only exploration:**
+
+```text
+ACTION CLASS: READ-ONLY. Do NOT edit, write, or create any files. Do NOT run git commit.
+
+Read the following files and report back:
+- freminal/src/gui/mod.rs (lines 1600-1720)
+- freminal/src/gui/terminal/input.rs (the write_input_to_terminal function)
+
+Return: The full function signatures, how keyboard input flows from key press to PTY,
+and how mouse events are currently routed.
+
+Stop after reporting. Do NOT write code. Do NOT proceed to implementation.
+```
+
+**Example — scoped implementation:**
+
+```text
+ACTION CLASS: IMPLEMENTATION. You may edit files listed below. Do NOT commit.
+Do NOT proceed to the next subtask. Do NOT touch files outside this list.
+
+Scope: freminal/src/gui/terminal/input.rs, freminal/src/gui/terminal/widget.rs
+
+Task: Add an `is_active_pane: bool` parameter to `write_input_to_terminal`. When false,
+suppress all events except primary left-click. Thread the parameter through from
+`show()` in widget.rs.
+
+Verification: Run `cargo test --all` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Stop condition: Report back with files modified, summary of changes, and verification results.
+Do NOT commit. Do NOT update plan documents. Do NOT start the next subtask.
+```
+
+**If a sub-agent prompt does not contain an explicit action class and stop condition, the
+orchestrator has failed.** The resulting sub-agent behavior is undefined and the orchestrator
+is solely responsible for any damage.
+
 ### Task Decomposition
 
 1. **Analyze scope** — Identify which crates and files are affected
