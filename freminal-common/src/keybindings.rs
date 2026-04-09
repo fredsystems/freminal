@@ -161,6 +161,8 @@ pub enum BindingKey {
     CloseBracket,
     Backtick,
     Quote,
+    /// The pipe character `|` (Shift+Backslash on US keyboards).
+    Pipe,
 }
 
 impl BindingKey {
@@ -293,6 +295,7 @@ impl BindingKey {
             Self::CloseBracket => "CloseBracket",
             Self::Backtick => "Backtick",
             Self::Quote => "Quote",
+            Self::Pipe => "Pipe",
         }
     }
 }
@@ -390,6 +393,7 @@ impl FromStr for BindingKey {
             "closebracket" | "]" => Ok(Self::CloseBracket),
             "backtick" | "`" => Ok(Self::Backtick),
             "quote" | "'" => Ok(Self::Quote),
+            "pipe" | "|" => Ok(Self::Pipe),
             other => Err(KeyBindingError::UnknownKey(other.to_string())),
         }
     }
@@ -686,6 +690,12 @@ pub enum KeyAction {
     ScrollLineUp,
     /// Scroll down by one line.
     ScrollLineDown,
+
+    // -- Pane management ---------------------------------------------------
+    /// Split the focused pane vertically (left | right, vertical divider).
+    SplitVertical,
+    /// Split the focused pane horizontally (top / bottom, horizontal divider).
+    SplitHorizontal,
 }
 
 impl KeyAction {
@@ -730,6 +740,8 @@ impl KeyAction {
             Self::ScrollToBottom => "scroll_to_bottom",
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
+            Self::SplitVertical => "split_vertical",
+            Self::SplitHorizontal => "split_horizontal",
         }
     }
 
@@ -776,6 +788,8 @@ impl KeyAction {
             Self::ScrollToBottom => "Scroll to Bottom",
             Self::ScrollLineUp => "Scroll Line Up",
             Self::ScrollLineDown => "Scroll Line Down",
+            Self::SplitVertical => "Split Vertical",
+            Self::SplitHorizontal => "Split Horizontal",
         }
     }
 
@@ -819,6 +833,8 @@ impl KeyAction {
         Self::ScrollToBottom,
         Self::ScrollLineUp,
         Self::ScrollLineDown,
+        Self::SplitVertical,
+        Self::SplitHorizontal,
     ];
 }
 
@@ -874,6 +890,8 @@ impl FromStr for KeyAction {
             "scroll_to_bottom" => Ok(Self::ScrollToBottom),
             "scroll_line_up" => Ok(Self::ScrollLineUp),
             "scroll_line_down" => Ok(Self::ScrollLineDown),
+            "split_vertical" => Ok(Self::SplitVertical),
+            "split_horizontal" => Ok(Self::SplitHorizontal),
             other => Err(KeyBindingError::UnknownAction(other.to_string())),
         }
     }
@@ -1134,6 +1152,22 @@ fn register_misc_bindings(map: &mut BindingMap) {
     );
 }
 
+/// Register built-in multiplexer (split pane) bindings.
+fn register_pane_bindings(map: &mut BindingMap) {
+    // Split the focused pane with a vertical divider (left | right).
+    // Ctrl+Shift+Pipe mirrors the tmux/zellij convention.
+    map.bind(
+        KeyCombo::new(BindingKey::Pipe, BindingModifiers::CTRL_SHIFT),
+        KeyAction::SplitVertical,
+    );
+    // Split the focused pane with a horizontal divider (top / bottom).
+    // Ctrl+Shift+Minus (underscore row) is the natural complement.
+    map.bind(
+        KeyCombo::new(BindingKey::Minus, BindingModifiers::CTRL_SHIFT),
+        KeyAction::SplitHorizontal,
+    );
+}
+
 impl Default for BindingMap {
     /// Produce the standard set of key bindings matching common terminal
     /// emulator conventions.
@@ -1141,6 +1175,7 @@ impl Default for BindingMap {
         let mut map = Self::empty();
         register_tab_bindings(&mut map);
         register_misc_bindings(&mut map);
+        register_pane_bindings(&mut map);
         map
     }
 }
@@ -1450,7 +1485,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            35,
+            37,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -1808,11 +1843,12 @@ mod tests {
         //        + ZoomReset(1) + OpenSettings(1) + OpenSearch(1)
         //        + PrevCommand(1) + NextCommand(1) + ScrollPageUp(1)
         //        + ScrollPageDown(1) + ScrollToTop(1) + ScrollToBottom(1)
-        //        + ScrollLineUp(1) + ScrollLineDown(1) = 29
+        //        + ScrollLineUp(1) + ScrollLineDown(1)
+        //        + SplitVertical(1) + SplitHorizontal(1) = 31
         assert_eq!(
             map.len(),
-            29,
-            "default binding map should have exactly 29 bindings"
+            31,
+            "default binding map should have exactly 31 bindings"
         );
     }
 

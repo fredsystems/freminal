@@ -153,6 +153,12 @@ struct FreminalGui {
     /// clone of the egui `Style` during idle mouse movement.
     style_cache: Option<(bool, &'static freminal_common::themes::ThemePalette, f32)>,
 
+    /// Monotonic generator for `PaneId` values.
+    ///
+    /// All panes across all tabs draw from this single generator so that pane
+    /// ids are globally unique within the process lifetime.
+    pane_id_gen: panes::PaneIdGenerator,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -201,6 +207,9 @@ impl FreminalGui {
             // `global_style_mut` call only when the snapshot differs from
             // what `set_egui_options` established.
             style_cache: None,
+            // Start at 1: the initial pane (spawned in main.rs) was assigned
+            // PaneId(0) = PaneId::first(). All subsequent panes get ids ≥ 1.
+            pane_id_gen: panes::PaneIdGenerator::new(1),
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -495,8 +504,9 @@ impl FreminalGui {
         ) {
             Ok(channels) => {
                 let id = self.tabs.next_tab_id();
+                let pane_id = self.pane_id_gen.next_id();
                 let pane = panes::Pane {
-                    id: panes::PaneId::first(),
+                    id: pane_id,
                     arc_swap: channels.arc_swap,
                     input_tx: channels.input_tx,
                     pty_write_tx: channels.pty_write_tx,
@@ -537,6 +547,87 @@ impl FreminalGui {
         }
     }
 
+    /// Spawn a new PTY-backed pane and insert it into the active tab's pane tree,
+    /// splitting the currently focused pane.
+    ///
+    /// The focused pane becomes the `first` child of the new split; the new pane
+    /// becomes the `second` child. Focus is transferred to the new pane after
+    /// insertion. The split ratio starts at 0.5 (equal halves).
+    ///
+    /// Does nothing in playback mode (no PTY to spawn).
+    fn spawn_split_pane(&mut self, direction: panes::SplitDirection) {
+        // Split panes are not supported in playback mode.
+        #[cfg(feature = "playback")]
+        if self.is_playback {
+            return;
+        }
+
+        let theme =
+            freminal_common::themes::by_slug(self.config.theme.active_slug(self.os_dark_mode))
+                .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+
+        // Spawn the new PTY before touching `self.tabs` so there is no borrow conflict.
+        let channels = match pty::spawn_pty_tab(
+            &self.args,
+            self.config.scrollback.limit,
+            theme,
+            &self.egui_ctx,
+        ) {
+            Ok(ch) => ch,
+            Err(e) => {
+                error!("Failed to spawn split pane: {e}");
+                return;
+            }
+        };
+
+        // Read the focused pane id before mutably borrowing the tab.
+        let target_id = self.tabs.active_tab().active_pane;
+
+        // Insert the new pane into the tree.
+        let id_gen = &mut self.pane_id_gen;
+        let tab = self.tabs.active_tab_mut();
+        let new_pane_id =
+            match tab
+                .pane_tree
+                .split(target_id, direction, id_gen, |new_id| panes::Pane {
+                    id: new_id,
+                    arc_swap: channels.arc_swap,
+                    input_tx: channels.input_tx,
+                    pty_write_tx: channels.pty_write_tx,
+                    window_cmd_rx: channels.window_cmd_rx,
+                    clipboard_rx: channels.clipboard_rx,
+                    search_buffer_rx: channels.search_buffer_rx,
+                    pty_dead_rx: channels.pty_dead_rx,
+                    title: "Terminal".to_owned(),
+                    bell_active: false,
+                    title_stack: Vec::new(),
+                    view_state: view_state::ViewState::new(),
+                    echo_off: channels.echo_off,
+                    render_state: terminal::new_render_state(),
+                    render_cache: terminal::PaneRenderCache::new(),
+                }) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Failed to insert split pane into tree: {e}");
+                    return;
+                }
+            };
+
+        // Move keyboard focus to the newly created pane.
+        tab.active_pane = new_pane_id;
+
+        // Notify the new pane of the current theme mode so DECRPM ?2031
+        // responses are correct from the start.
+        if let Some(new_pane) = tab.pane_tree.find(new_pane_id)
+            && let Err(e) = new_pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                self.config.theme.mode,
+                self.os_dark_mode,
+            ))
+        {
+            error!("Failed to send ThemeModeUpdate to split pane: {e}");
+        }
+    }
+
     /// Dispatch a `TabBarAction` from either the tab bar or the Tab menu.
     fn dispatch_tab_bar_action(&mut self, action: TabBarAction) {
         match action {
@@ -555,6 +646,10 @@ impl FreminalGui {
         }
     }
 
+    // Inherently large: routes all key actions that require full GUI state.
+    // Each arm is a distinct GUI operation; extracting further would add
+    // indirection without improving clarity.
+    #[allow(clippy::too_many_lines)]
     /// Dispatch a deferred key action that requires full GUI state.
     ///
     /// Called from the `ui()` method for each action returned by the terminal
@@ -657,6 +752,14 @@ impl FreminalGui {
             // their respective features land.
             KeyAction::RenameTab => {
                 trace!("Unhandled deferred key action: {action:?}");
+            }
+
+            // -- Pane management --
+            KeyAction::SplitVertical => {
+                self.spawn_split_pane(panes::SplitDirection::Horizontal);
+            }
+            KeyAction::SplitHorizontal => {
+                self.spawn_split_pane(panes::SplitDirection::Vertical);
             }
 
             // These actions are handled at the input layer and should never

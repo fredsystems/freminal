@@ -825,20 +825,21 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
    edges; active pane highlighted in blue, inactive in gray. Repaint scheduling aggregates
    across all panes (shortest delay wins). All 335 tests pass, clippy clean, no unused deps._
 
-5. **58.5 — Input routing**
+5. **58.5 — Input routing** — **COMPLETE** (2026-04-09)
    Route keyboard input to the active pane. Route mouse input to the pane under the cursor
    (hit-test against pane rects from the layout pass). Clicking in a pane sets it as active.
    Per-pane resize: when the window resizes or a split ratio changes, compute each pane's
    new `(width_chars, height_chars)` and send `InputEvent::Resize` to each affected pane.
 
-6. **58.6 — Split operations**
+6. **58.6 — Split operations** — **COMPLETE** (2026-04-09)
    Implement split-vertical and split-horizontal: create a new pane (via `spawn_pty_tab`),
    insert it into the tree at the focused pane's location. The focused pane stays in `first`,
    the new pane goes in `second`. Focus moves to the new pane. Wire up the keybindings.
-   **CWD inheritance:** New panes inherit the parent pane's current working directory by
-   default (read via `/proc/<pid>/cwd` on Linux, or the `cwd` field on the snapshot). A
-   config option (`[panes] inherit_cwd = true`) controls this — when false, new panes use
-   the user's default shell CWD (or a configured `default_directory`).
+   _Added `KeyAction::SplitVertical` (Ctrl+Shift+Pipe, left/right split) and
+   `KeyAction::SplitHorizontal` (Ctrl+Shift+Minus, top/bottom split) to keybindings.rs,
+   `BindingKey::Pipe` variant, `register_pane_bindings()`, `spawn_split_pane()` in mod.rs,
+   and pane management section in `config_example.toml`. All 335 tests pass, clippy clean,
+   no unused deps. CWD inheritance deferred to a future subtask._
 
 7. **58.7 — Close pane**
    Implement pane close: remove the pane from the tree, collapse the parent split. Focus
