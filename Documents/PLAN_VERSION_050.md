@@ -768,11 +768,13 @@ how tmux's `prefix x` works.
 
 ### 58 Subtasks
 
-1. **58.1 — `PaneId` and `Pane` struct**
+1. **58.1 — `PaneId` and `Pane` struct** — **COMPLETE** (2026-04-09)
    Define `PaneId` (monotonic newtype, like `TabId`). Extract per-terminal fields from `Tab`
    into a new `Pane` struct in `freminal/src/gui/panes.rs`. `Pane` holds all the channel
    endpoints, `ViewState`, title, bell state, and `echo_off` that currently live on `Tab`.
    Add unit tests for `PaneId` generation.
+   _Commit: `8f8fc06` — `PaneId`, `PaneIdGenerator`, `Pane` struct, custom `Debug` impl,
+   11 unit tests._
 
 2. **58.2 — `PaneTree` data structure**
    Implement `PaneTree` enum (`Leaf`/`Split`) in `freminal/src/gui/panes.rs`. Core
