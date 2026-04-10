@@ -1990,7 +1990,7 @@ impl eframe::App for FreminalGui {
                     .tabs
                     .active_tab()
                     .pane_tree
-                    .split_borders(available_rect)
+                    .split_borders(available_rect, active_pane_id)
                     .unwrap_or_default();
 
                 // Half-width of the invisible drag sensor zone (pixels
@@ -2240,47 +2240,69 @@ impl eframe::App for FreminalGui {
 
             // ── Pane borders ─────────────────────────────────────────
             //
-            // Draw thin borders between adjacent panes when the tree has
-            // splits.  The active pane gets a highlighted border; inactive
-            // pane edges get a subtle gray.
+            // Draw tmux-style half-highlighted borders: each split border is
+            // divided at the midpoint along its length. The half adjacent to
+            // the active pane's subtree is drawn in the active color; the
+            // other half gets the inactive color. This makes it visually
+            // clear which pane owns each shared edge.
             if has_multiple_panes && zoomed_pane.is_none() {
                 let painter = ui.painter();
                 let inactive_color = egui::Color32::from_gray(80);
                 let active_color = egui::Color32::from_rgb(100, 160, 255);
 
-                for (pane_id, pane_rect) in &pane_layout {
-                    let is_active = *pane_id == active_pane_id;
-                    let color = if is_active {
-                        active_color
-                    } else {
-                        inactive_color
-                    };
-                    let stroke = egui::Stroke::new(border_width, color);
+                let border_rects = self
+                    .tabs
+                    .active_tab()
+                    .pane_tree
+                    .split_borders(available_rect, active_pane_id)
+                    .unwrap_or_default();
 
-                    // Draw border segments only on interior edges (edges shared
-                    // with another pane, not the outer frame of the terminal area).
-                    if pane_rect.min.x > available_rect.min.x + 0.5 {
-                        // Left edge is interior.
-                        painter
-                            .line_segment([pane_rect.left_top(), pane_rect.left_bottom()], stroke);
-                    }
-                    if pane_rect.max.x < available_rect.max.x - 0.5 {
-                        // Right edge is interior.
-                        painter.line_segment(
-                            [pane_rect.right_top(), pane_rect.right_bottom()],
-                            stroke,
-                        );
-                    }
-                    if pane_rect.min.y > available_rect.min.y + 0.5 {
-                        // Top edge is interior.
-                        painter.line_segment([pane_rect.left_top(), pane_rect.right_top()], stroke);
-                    }
-                    if pane_rect.max.y < available_rect.max.y - 0.5 {
-                        // Bottom edge is interior.
-                        painter.line_segment(
-                            [pane_rect.left_bottom(), pane_rect.right_bottom()],
-                            stroke,
-                        );
+                for border in &border_rects {
+                    let r = border.rect;
+
+                    // Determine which halves are active/inactive.
+                    // active_in_first == Some(true)  → first half active
+                    // active_in_first == Some(false) → second half active
+                    // active_in_first == None        → both inactive
+                    let (first_color, second_color) = match border.active_in_first {
+                        Some(true) => (active_color, inactive_color),
+                        Some(false) => (inactive_color, active_color),
+                        None => (inactive_color, inactive_color),
+                    };
+
+                    match border.direction {
+                        panes::SplitDirection::Horizontal => {
+                            // Vertical dividing line — split top/bottom.
+                            // First child is left → "first half" = top.
+                            let mid_y = f32::midpoint(r.min.y, r.max.y);
+                            let top = egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, mid_y));
+                            let bot = egui::Rect::from_min_max(egui::pos2(r.min.x, mid_y), r.max);
+
+                            painter.line_segment(
+                                [top.left_top(), top.left_bottom()],
+                                egui::Stroke::new(border_width, first_color),
+                            );
+                            painter.line_segment(
+                                [bot.left_top(), bot.left_bottom()],
+                                egui::Stroke::new(border_width, second_color),
+                            );
+                        }
+                        panes::SplitDirection::Vertical => {
+                            // Horizontal dividing line — split left/right.
+                            // First child is top → "first half" = left.
+                            let mid_x = f32::midpoint(r.min.x, r.max.x);
+                            let left = egui::Rect::from_min_max(r.min, egui::pos2(mid_x, r.max.y));
+                            let right = egui::Rect::from_min_max(egui::pos2(mid_x, r.min.y), r.max);
+
+                            painter.line_segment(
+                                [left.left_top(), left.right_top()],
+                                egui::Stroke::new(border_width, first_color),
+                            );
+                            painter.line_segment(
+                                [right.left_top(), right.right_top()],
+                                egui::Stroke::new(border_width, second_color),
+                            );
+                        }
                     }
                 }
             }
