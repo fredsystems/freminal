@@ -903,7 +903,7 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
     `Ctrl+Shift+|` (Pipe) keybinding by adding `Key::Pipe` mapping in
     `egui_key_to_binding_key()`. Commit: `85cb495`._
 
-14. **58.14 — Tests and performance verification**
+14. **58.14 — Tests and performance verification** ✅ Complete (2026-04-10)
     - Unit tests: `PaneTree` operations (split, close, layout, navigation, resize, zoom)
     - Unit tests: `Tab` with pane tree (single pane regression, multi-pane operations)
     - Integration tests: verify multiple panes render concurrently, input goes to correct
@@ -915,6 +915,13 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
       inherent cost of additional PTY/emulator instances (which should be near-zero since
       the PTY and emulator layers are not a major bottleneck). Any regression in the render
       loop, layout, or snapshot path is a blocker.
+
+    _46 pane-related unit tests covering PaneId, Pane, PaneTree (split, close, layout,
+    find, resize, clamping, deep nesting, borders), and Tab integration. Flamegraph
+    analysis showed zero pane-related overhead — no pane functions appear in the profile.
+    User confirmed performance is identical to pre-pane build. Layout computation is
+    trivially fast; no dedicated benchmark needed. Resize propagation verified via
+    `last_sent_size` reset logic (close, zoom toggle, PTY death). Commit: `e1e3038`._
 
 ### 58 Primary Files
 
