@@ -699,18 +699,30 @@ impl FreminalGui {
                 }
             };
 
+        // Transfer terminal focus from the old pane to the new one so
+        // applications that track focus (DEC mode 1004) see the transition.
+        if let Some(old_pane) = tab.pane_tree.find(target_id)
+            && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+        {
+            error!("Failed to send FocusChange(false) to previous pane {target_id}: {e}");
+        }
+
         // Move keyboard focus to the newly created pane.
         tab.active_pane = new_pane_id;
 
-        // Notify the new pane of the current theme mode so DECRPM ?2031
-        // responses are correct from the start.
-        if let Some(new_pane) = tab.pane_tree.find(new_pane_id)
-            && let Err(e) = new_pane.input_tx.send(InputEvent::ThemeModeUpdate(
+        if let Some(new_pane) = tab.pane_tree.find(new_pane_id) {
+            if let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true)) {
+                error!("Failed to send FocusChange(true) to new pane {new_pane_id}: {e}");
+            }
+
+            // Notify the new pane of the current theme mode so DECRPM ?2031
+            // responses are correct from the start.
+            if let Err(e) = new_pane.input_tx.send(InputEvent::ThemeModeUpdate(
                 self.config.theme.mode,
                 self.os_dark_mode,
-            ))
-        {
-            error!("Failed to send ThemeModeUpdate to split pane: {e}");
+            )) {
+                error!("Failed to send ThemeModeUpdate to split pane: {e}");
+            }
         }
     }
 
@@ -744,7 +756,13 @@ impl FreminalGui {
                 if let Ok(panes) = tab.pane_tree.iter_panes()
                     && let Some(first) = panes.first()
                 {
-                    tab.active_pane = first.id;
+                    let new_id = first.id;
+                    // Notify the new active pane that it gained focus so
+                    // applications tracking DEC mode 1004 see the transition.
+                    if let Err(e) = first.input_tx.send(InputEvent::FocusChange(true)) {
+                        error!("Failed to send FocusChange(true) to pane {new_id}: {e}");
+                    }
+                    tab.active_pane = new_id;
                 }
             }
             Err(panes::PaneError::CannotCloseLastPane) => {
@@ -776,6 +794,13 @@ impl FreminalGui {
         use freminal_common::keybindings::KeyAction;
 
         let tab = self.tabs.active_tab();
+
+        // Focus navigation is a no-op while a pane is zoomed — there is only
+        // one visible pane so changing active_pane would desync the GUI.
+        if tab.zoomed_pane.is_some() {
+            return;
+        }
+
         let current_id = tab.active_pane;
 
         let layout = match tab.pane_tree.layout(available_rect) {
@@ -1766,13 +1791,18 @@ impl eframe::App for FreminalGui {
                             pane.view_state.last_sent_size = (0, 0);
                         }
                     }
-                    // If the active pane was the one that died, pick a new active pane.
+                    // If the active pane was the one that died, pick a new active pane
+                    // and notify it that it gained focus.
                     let tab = self.tabs.active_tab_mut();
                     if tab.active_pane == pane_id
                         && let Ok(panes) = tab.pane_tree.iter_panes()
                         && let Some(first) = panes.first()
                     {
-                        tab.active_pane = first.id;
+                        let new_id = first.id;
+                        if let Err(e) = first.input_tx.send(InputEvent::FocusChange(true)) {
+                            error!("Failed to send FocusChange(true) to pane {new_id}: {e}");
+                        }
+                        tab.active_pane = new_id;
                     }
                 }
                 Err(panes::PaneError::CannotCloseLastPane) => {
