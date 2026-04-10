@@ -731,6 +731,15 @@ impl FreminalGui {
         match tab.pane_tree.close(target) {
             Ok(_closed) => {
                 // Focus transfers to the first pane remaining in the tree.
+                // Reset last_sent_size on all surviving panes so the next
+                // frame's resize check fires — the layout rects change after
+                // a close and the PTY must learn the new dimensions.
+                let tab = self.tabs.active_tab_mut();
+                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes {
+                        pane.view_state.last_sent_size = (0, 0);
+                    }
+                }
                 let tab = self.tabs.active_tab_mut();
                 if let Ok(panes) = tab.pane_tree.iter_panes()
                     && let Some(first) = panes.first()
@@ -1031,6 +1040,15 @@ impl FreminalGui {
                     tab.zoomed_pane = None;
                 } else {
                     tab.zoomed_pane = Some(current);
+                }
+                // Zoom/unzoom changes the effective layout dimensions.
+                // Reset last_sent_size on all panes so the resize check
+                // fires on the next frame with the correct sizes.
+                let tab = self.tabs.active_tab_mut();
+                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes {
+                        pane.view_state.last_sent_size = (0, 0);
+                    }
                 }
             }
 
@@ -1740,6 +1758,14 @@ impl eframe::App for FreminalGui {
 
             match tab.pane_tree.close(pane_id) {
                 Ok(_closed) => {
+                    // Reset last_sent_size on all surviving panes so the
+                    // next frame's resize check fires with the new layout.
+                    let tab = self.tabs.active_tab_mut();
+                    if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                        for pane in panes {
+                            pane.view_state.last_sent_size = (0, 0);
+                        }
+                    }
                     // If the active pane was the one that died, pick a new active pane.
                     let tab = self.tabs.active_tab_mut();
                     if tab.active_pane == pane_id
