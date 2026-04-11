@@ -163,6 +163,10 @@ pub struct TerminalEmulator {
     /// from the current `gui_scroll_offset`, the visible window has moved and
     /// the cached snapshot must be invalidated.
     previous_scroll_offset: usize,
+    /// The terminal dimensions (cols, rows) at the time of the previous
+    /// snapshot.  When these change (e.g. after a pane resize), the cached
+    /// snapshot must be invalidated — it was built for a different grid size.
+    previous_term_size: (usize, usize),
     /// The instant at which `SynchronizedUpdates::DontDraw` was first observed
     /// during `build_snapshot`.  Used to enforce the 200 ms auto-resume timeout:
     /// if `DontDraw` is still active when this deadline passes, the mode is
@@ -196,6 +200,7 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             previous_scroll_offset: 0,
+            previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         }
     }
@@ -222,6 +227,7 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             previous_scroll_offset: 0,
+            previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
         (emulator, write_rx)
@@ -284,6 +290,7 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             previous_scroll_offset: 0,
+            previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
         Ok((ret, pty_rx))
@@ -526,6 +533,19 @@ impl TerminalEmulator {
         if scroll_changed {
             self.previous_visible_snap = None;
             self.previous_scroll_offset = scroll_offset;
+        }
+
+        // ── Invalidate the snap cache when terminal dimensions change ────
+        //
+        // After a resize the grid has a different number of columns and/or
+        // rows.  The cached snapshot was flattened for the old dimensions
+        // and must not be reused — otherwise full-screen TUIs like nvim
+        // that rely on absolute cursor positioning after SIGWINCH see
+        // stale content (gaps, uncolored cells, mispositioned text).
+        let current_size = (term_width, term_height);
+        if current_size != self.previous_term_size {
+            self.previous_visible_snap = None;
+            self.previous_term_size = current_size;
         }
 
         // ── Determine whether any visible row changed since last snapshot ────
