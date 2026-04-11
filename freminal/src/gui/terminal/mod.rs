@@ -5,8 +5,9 @@
 
 //! Terminal widget module — split into focused sub-modules.
 //!
-//! The public surface of this module is unchanged from the original
-//! `terminal.rs`: only [`FreminalTerminalWidget`] is re-exported.
+//! The public surface of this module exports the main [`FreminalTerminalWidget`]
+//! as well as pane-specific rendering types (`PaneRenderCache`, `RenderState`,
+//! and `new_render_state`) required by the multi-pane GUI architecture.
 
 pub(crate) mod coords;
 pub(crate) mod input;

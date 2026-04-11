@@ -614,16 +614,16 @@ impl Default for PaneRenderCache {
 /// The egui widget that owns and drives the terminal render pipeline.
 ///
 /// `FreminalTerminalWidget` holds shared resources that are common across all
-/// panes: the [`FontManager`] (font metrics, shaping config), the
-/// [`ShapingCache`] (per-line shaped glyph runs), and global config state
-/// (ligatures, cursor trail).
+/// panes: the [`FontManager`] (font metrics, shaping config) and global
+/// config state (ligatures, cursor trail).
 ///
-/// Per-pane GPU state (`RenderState`) and dirty-tracking cache
-/// (`PaneRenderCache`) live on each [`Pane`](super::super::panes::Pane)
-/// instance. On each call to [`show`](Self::show), the widget:
+/// Per-pane GPU state (`RenderState`) and render cache state
+/// (`PaneRenderCache`, including dirty tracking and per-line shaped glyph
+/// runs) live on each [`Pane`](super::super::panes::Pane) instance. On each
+/// call to [`show`](Self::show), the widget:
 ///
 /// 1. Detects content changes via `Arc` pointer comparison (per-pane cache).
-/// 2. Re-shapes only dirty lines using the shared [`ShapingCache`].
+/// 2. Re-shapes only dirty lines using the pane's shaping cache.
 /// 3. Rebuilds GPU vertex buffers in the pane's `RenderState`.
 /// 4. Submits a `PaintCallback` to egui that executes the GL draw calls.
 /// 5. Processes keyboard, mouse, scroll, and focus input and forwards them

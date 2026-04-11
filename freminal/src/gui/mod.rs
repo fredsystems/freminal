@@ -120,6 +120,10 @@ struct PaneBorderDrag {
 
     /// The direction of the split being resized.
     direction: panes::SplitDirection,
+
+    /// The extent of the parent split node along the split axis,
+    /// used to accurately convert pixel drag distance into a ratio delta.
+    parent_extent: f32,
 }
 
 struct FreminalGui {
@@ -2092,6 +2096,7 @@ impl eframe::App for FreminalGui {
                         self.border_drag = Some(PaneBorderDrag {
                             target_pane: border.first_child_pane,
                             direction: border.direction,
+                            parent_extent: border.parent_extent,
                         });
                     }
 
@@ -2105,11 +2110,8 @@ impl eframe::App for FreminalGui {
                         };
 
                         // Convert pixel delta to ratio delta based on
-                        // the available rect dimension along the split axis.
-                        let total_px = match drag.direction {
-                            panes::SplitDirection::Horizontal => available_rect.width(),
-                            panes::SplitDirection::Vertical => available_rect.height(),
-                        };
+                        // the dragged split parent's extent along the split axis.
+                        let total_px = drag.parent_extent;
 
                         if total_px > 0.0 {
                             let delta_ratio = delta_px / total_px;

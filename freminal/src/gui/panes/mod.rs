@@ -270,6 +270,14 @@ pub struct SplitBorder {
     /// the split y-coordinate, spanning the full width of the parent.
     pub rect: Rect,
 
+    /// The extent of the parent node along the split axis.
+    ///
+    /// - For a horizontal split (vertical line), this is the width of the parent.
+    /// - For a vertical split (horizontal line), this is the height of the parent.
+    ///
+    /// Used by the GUI to correctly scale pixel drag distance into ratio delta.
+    pub parent_extent: f32,
+
     /// Whether the active pane lives in the **first** child's subtree.
     ///
     /// Used by the GUI to implement tmux-style half-highlighted borders:
@@ -463,6 +471,10 @@ impl PaneNode {
                         direction: *direction,
                         first_child_pane: first_leaf_id,
                         rect: border_rect,
+                        parent_extent: match direction {
+                            SplitDirection::Horizontal => rect.width(),
+                            SplitDirection::Vertical => rect.height(),
+                        },
                         active_in_first,
                     });
                 }
