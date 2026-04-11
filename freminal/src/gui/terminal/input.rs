@@ -129,6 +129,7 @@ pub(in crate::gui) const fn egui_key_to_binding_key(key: Key) -> Option<BindingK
         Key::CloseBracket => Some(BindingKey::CloseBracket),
         Key::Backtick => Some(BindingKey::Backtick),
         Key::Quote => Some(BindingKey::Quote),
+        Key::Pipe => Some(BindingKey::Pipe),
         _ => None,
     }
 }
@@ -576,12 +577,18 @@ fn release_end_col(
 ///
 /// ## Return value
 ///
-/// Returns `(state_changed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending)`:
-/// - `state_changed` — true if the view state was mutated (scroll, selection) and a repaint is needed.
+/// Returns `(left_mouse_pressed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending, deferred_actions)`:
+/// - `left_mouse_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
 /// - `last_reported_mouse_pos` — updated mouse tracking state for the next call.
 /// - `previous_key` — last pressed key (used for key-repeat deduplication).
 /// - `scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
 /// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
+///
+/// ## Active-pane gating
+///
+/// When `is_active_pane` is `false`, only primary left-click presses are detected (to support
+/// click-to-focus in the caller). All keyboard, text, paste, copy, scroll, and mouse-tracking
+/// events are suppressed — they are never forwarded to the inactive pane's PTY.
 pub(super) fn write_input_to_terminal(
     input: &InputState,
     snap: &TerminalSnapshot,
@@ -595,6 +602,7 @@ pub(super) fn write_input_to_terminal(
     previous_key: Option<Key>,
     scroll_amount: f32,
     binding_map: &BindingMap,
+    is_active_pane: bool,
 ) -> (
     bool,
     Option<PreviousMouseState>,
@@ -641,6 +649,24 @@ pub(super) fn write_input_to_terminal(
 
     for event in &input.raw.events {
         debug!("event: {:?}", event);
+
+        // Non-active panes: only detect primary left-click press so the caller
+        // can implement click-to-focus.  All other events (keyboard, scroll,
+        // paste, mouse tracking) are suppressed — they belong to the active pane.
+        if !is_active_pane {
+            if let Event::PointerButton {
+                button: PointerButton::Primary,
+                pressed: true,
+                pos,
+                ..
+            } = event
+                && terminal_rect.contains(*pos)
+            {
+                left_mouse_button_pressed = true;
+            }
+            continue;
+        }
+
         if let Event::Key { pressed: false, .. } = event {
             previous_key = None;
         }
@@ -1036,7 +1062,7 @@ pub(super) fn write_input_to_terminal(
                 if let Some(inputs) = control_key(*key) {
                     inputs
                 } else {
-                    error!("Unexpected ctrl key: {}", key.name());
+                    debug!("Ignoring ctrl key with no C0 mapping: {}", key.name());
                     continue;
                 }
             }

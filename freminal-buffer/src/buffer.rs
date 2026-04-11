@@ -140,6 +140,8 @@ pub struct SavedPrimaryState {
     pub cursor: CursorState,
     /// Caller-owned scroll offset (from `ViewState`) at the time of the switch.
     pub scroll_offset: usize,
+    /// Visible height of the terminal grid at the time of the switch.
+    pub height: usize,
     /// Top of the DECSTBM scroll region at the time of the switch.
     pub scroll_region_top: usize,
     /// Bottom of the DECSTBM scroll region at the time of the switch.
@@ -761,18 +763,37 @@ impl Buffer {
             let adjusted = self.resize_height(new_height, after_reflow);
 
             // Validate scroll region against new height.
-            // If it's now invalid, reset to full screen.
-            let max_bottom = new_height.saturating_sub(1);
+            //
+            // `self.height` is still the OLD height here (updated at line 785).
+            //
+            // If the scroll region covered the entire old screen (which is the
+            // default after DECSTBM reset or after `enter_alternate`), expand it
+            // to cover the entire NEW screen.  Without this, growing the buffer
+            // (e.g. from 29→58 rows when a split pane is closed) leaves the
+            // scroll region at the old height.  Full-screen TUIs like nvim that
+            // redraw via space-fill + LF rather than ED hit the old
+            // scroll_region_bottom and start scrolling prematurely, causing the
+            // lower half of the screen to never be written.
+            let old_max_bottom = self.height.saturating_sub(1);
+            let new_max_bottom = new_height.saturating_sub(1);
 
-            if self.scroll_region_bottom >= new_height
+            let was_full_screen =
+                self.scroll_region_top == 0 && self.scroll_region_bottom == old_max_bottom;
+
+            if was_full_screen {
+                // Region was full-screen → keep it full-screen at the new size.
+                self.scroll_region_top = 0;
+                self.scroll_region_bottom = new_max_bottom;
+            } else if self.scroll_region_bottom >= new_height
                 || self.scroll_region_top >= new_height
                 || self.scroll_region_top >= self.scroll_region_bottom
             {
+                // Region is now invalid → reset to full screen.
                 self.scroll_region_top = 0;
-                self.scroll_region_bottom = max_bottom;
+                self.scroll_region_bottom = new_max_bottom;
             } else {
-                // Just clamp bottom if region is still valid
-                self.scroll_region_bottom = self.scroll_region_bottom.min(max_bottom);
+                // Partial region still valid → just clamp bottom.
+                self.scroll_region_bottom = self.scroll_region_bottom.min(new_max_bottom);
             }
 
             adjusted
@@ -802,10 +823,18 @@ impl Buffer {
             }
         }
 
-        // Ensure every row's max_width matches the new buffer width
+        // Ensure every row's max_width matches the new buffer width.
+        // For alternate buffers (which skip reflow), the row-level cache
+        // entries still contain flattened data at the old width — we must
+        // invalidate them so the next `flatten_visible` re-flattens every
+        // row at the new width.  Without this, nvim (and any full-screen
+        // TUI on the alternate screen) renders with stale row data after a
+        // resize, causing gaps, uncolored cells, and mispositioned content.
         if width_changed {
-            for row in &mut self.rows {
+            for (i, row) in self.rows.iter_mut().enumerate() {
                 row.set_max_width(new_width);
+                row.dirty = true;
+                self.row_cache[i] = None;
             }
         }
 
@@ -815,9 +844,80 @@ impl Buffer {
         // Enforce scrollback limit after resize (reflow may have created extra rows)
         let final_offset = self.enforce_scrollback_limit(after_resize);
 
+        // When on the alternate screen, also resize the saved primary buffer
+        // so that `leave_alternate` restores a buffer that matches the current
+        // terminal dimensions.  Without this, exiting a full-screen TUI (e.g.
+        // nvim) after a pane resize restores the primary buffer at the old
+        // dimensions, causing immediate rendering artifacts.
+        if self.kind == BufferType::Alternate
+            && let Some(saved) = self.saved_primary.take()
+        {
+            let saved = Self::resize_saved_primary(saved, new_width, new_height);
+            self.saved_primary = Some(saved);
+        }
+
         self.debug_assert_invariants();
 
         final_offset
+    }
+
+    /// Resize a saved primary buffer to new dimensions.
+    ///
+    /// Builds a temporary primary `Buffer`, applies `set_size`, and extracts
+    /// the updated state back into a `SavedPrimaryState`.  This reuses all
+    /// the existing resize logic (reflow, height adjust, scroll region
+    /// validation, cursor clamping, scrollback limit enforcement) instead of
+    /// duplicating it.
+    fn resize_saved_primary(
+        saved: SavedPrimaryState,
+        new_width: usize,
+        new_height: usize,
+    ) -> SavedPrimaryState {
+        // Reconstruct a temporary primary Buffer from the saved state.
+        let old_width = saved.rows.first().map_or(new_width, Row::max_width);
+        let old_height = saved.height;
+
+        let mut tmp = Self {
+            rows: saved.rows,
+            row_cache: saved.row_cache,
+            width: old_width,
+            height: old_height,
+            cursor: saved.cursor,
+            current_tag: FormatTag::default(),
+            scrollback_limit: 4000,
+            kind: BufferType::Primary,
+            saved_primary: None,
+            saved_cursor: saved.saved_cursor,
+            lnm_enabled: Lnm::LineFeed,
+            wrap_enabled: Decawm::AutoWrap,
+            preserve_scrollback_anchor: false,
+            scroll_region_top: saved.scroll_region_top,
+            scroll_region_bottom: saved.scroll_region_bottom,
+            scroll_region_left: saved.scroll_region_left,
+            scroll_region_right: saved.scroll_region_right,
+            declrmm_enabled: Declrmm::Disabled,
+            tab_stops: Self::default_tab_stops(old_width),
+            decom_enabled: Decom::NormalCursor,
+            image_store: saved.image_store,
+            image_cell_count: saved.image_cell_count,
+        };
+
+        let new_offset = tmp.set_size(new_width, new_height, saved.scroll_offset);
+
+        SavedPrimaryState {
+            rows: tmp.rows,
+            row_cache: tmp.row_cache,
+            cursor: tmp.cursor,
+            scroll_offset: new_offset,
+            height: new_height,
+            scroll_region_top: tmp.scroll_region_top,
+            scroll_region_bottom: tmp.scroll_region_bottom,
+            scroll_region_left: tmp.scroll_region_left,
+            scroll_region_right: tmp.scroll_region_right,
+            saved_cursor: tmp.saved_cursor,
+            image_store: tmp.image_store,
+            image_cell_count: tmp.image_cell_count,
+        }
     }
 
     // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
@@ -1021,11 +1121,21 @@ impl Buffer {
         let old_height = self.height;
 
         if new_height > old_height {
-            // Grow: add blank rows at the bottom
+            // Grow: add blank rows at the bottom.
             let grow = new_height - old_height;
             for _ in 0..grow {
                 self.rows.push(Row::new(self.width));
                 self.row_cache.push(None);
+            }
+            // Mark all pre-existing rows dirty so the row-level cache is
+            // invalidated.  The visible window is now taller and the old
+            // snapshot was built for a different height — returning stale
+            // cached rows causes gaps and mispositioned content in
+            // full-screen TUIs (e.g. nvim) that rely on absolute cursor
+            // positioning after SIGWINCH.
+            for i in 0..old_height.min(self.rows.len()) {
+                self.rows[i].dirty = true;
+                self.row_cache[i] = None;
             }
         } else if new_height < old_height {
             if self.kind == BufferType::Alternate {
@@ -3230,6 +3340,7 @@ impl Buffer {
             row_cache: self.row_cache.clone(),
             cursor: self.cursor.clone(),
             scroll_offset,
+            height: self.height,
             scroll_region_top: self.scroll_region_top,
             scroll_region_bottom: self.scroll_region_bottom,
             scroll_region_left: self.scroll_region_left,
@@ -4484,6 +4595,7 @@ mod pty_behavior_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod resize_tests {
     use super::*;
     use crate::row::{RowJoin, RowOrigin};
@@ -4647,6 +4759,155 @@ mod resize_tests {
                 );
             }
         }
+    }
+
+    /// Regression test: when the alternate buffer is resized from 29→58 rows
+    /// with a full-screen scroll region, the scroll region must expand to cover
+    /// the new full height.  Previously the region stayed at (0, 28) — matching
+    /// the old height — which caused nvim's space-fill redraw (189 spaces +
+    /// CR+LF × 58 rows) to scroll prematurely at row 29, leaving the bottom
+    /// half of the screen stale.
+    #[test]
+    fn grow_alternate_expands_full_screen_scroll_region() {
+        let mut buf = Buffer::new(80, 29);
+        buf.enter_alternate(0);
+
+        // Scroll region should be full-screen for the old height.
+        assert_eq!(buf.scroll_region(), (0, 28));
+        assert_eq!(buf.rows.len(), 29);
+
+        // Grow to 58 rows (simulating a split pane being closed).
+        buf.set_size(80, 58, 0);
+
+        // Scroll region MUST expand to the new full screen.
+        assert_eq!(
+            buf.scroll_region(),
+            (0, 57),
+            "Full-screen scroll region must expand when buffer height grows"
+        );
+        assert_eq!(buf.rows.len(), 58);
+
+        // Verify that LF at the old bottom (row 28) advances the cursor
+        // instead of scrolling — this is the behavior nvim relies on.
+        buf.set_cursor_pos(Some(0), Some(28)); // 0-based row 28
+        buf.handle_lf();
+        assert_eq!(
+            buf.cursor.pos.y, 29,
+            "LF at old bottom (row 28) should advance cursor to row 29, not scroll"
+        );
+    }
+
+    /// Verify that a partial (non-full-screen) scroll region is preserved
+    /// across a height grow — only the bottom is clamped, not expanded.
+    #[test]
+    fn grow_alternate_preserves_partial_scroll_region() {
+        let mut buf = Buffer::new(80, 29);
+        buf.enter_alternate(0);
+
+        // Set a partial scroll region (rows 5–20, 1-based: 6–21).
+        buf.set_scroll_region(6, 21);
+        assert_eq!(buf.scroll_region(), (5, 20));
+
+        // Grow to 58 rows.
+        buf.set_size(80, 58, 0);
+
+        // Partial region should be preserved, not expanded to full screen.
+        assert_eq!(
+            buf.scroll_region(),
+            (5, 20),
+            "Partial scroll region should be preserved when buffer grows"
+        );
+    }
+
+    /// Verify that shrinking the alternate buffer then growing it back
+    /// restores a full-screen scroll region (the exact nvim pane-close scenario).
+    #[test]
+    fn shrink_then_grow_alternate_restores_full_screen_region() {
+        let mut buf = Buffer::new(189, 58);
+        buf.enter_alternate(0);
+
+        assert_eq!(buf.scroll_region(), (0, 57));
+
+        // Shrink (split pane created).
+        buf.set_size(189, 29, 0);
+        assert_eq!(buf.scroll_region(), (0, 28));
+        assert_eq!(buf.rows.len(), 29);
+
+        // Grow back (split pane closed).
+        buf.set_size(189, 58, 0);
+        assert_eq!(
+            buf.scroll_region(),
+            (0, 57),
+            "After shrink→grow cycle, full-screen scroll region must cover new height"
+        );
+        assert_eq!(buf.rows.len(), 58);
+
+        // Simulate nvim's space-fill pattern: CUP(1,1) then 58 rows of
+        // 189 spaces + CR + LF.  All 58 rows should be reachable.
+        buf.set_cursor_pos(Some(0), Some(0));
+        for row in 0..58 {
+            // Write 189 spaces (simplified — just advance cursor X).
+            let spaces: Vec<TChar> = vec![TChar::Ascii(b' '); 189];
+            buf.insert_text(&spaces);
+
+            if row < 57 {
+                buf.handle_cr();
+                buf.handle_lf();
+            }
+        }
+
+        // After filling all 58 rows, cursor should be on the last row.
+        assert_eq!(
+            buf.cursor.pos.y, 57,
+            "Cursor should reach row 57 (0-based) after filling 58 rows"
+        );
+    }
+
+    /// Regression test: resizing while on the alternate screen must also resize
+    /// the saved primary buffer.  Without this, `leave_alternate` restores the
+    /// primary buffer at the old dimensions, causing an immediate mismatch
+    /// between buffer size and terminal geometry.
+    #[test]
+    fn resize_on_alternate_updates_saved_primary() {
+        let mut buf = Buffer::new(80, 24);
+
+        // Write some content in primary so it's non-trivial.
+        buf.insert_text(&to_tchars("hello world"));
+        buf.handle_lf();
+        buf.insert_text(&to_tchars("line two"));
+
+        // Enter alternate screen (saves primary state).
+        buf.enter_alternate(0);
+        assert_eq!(buf.rows.len(), 24);
+
+        // Resize while on alternate (simulates pane close).
+        buf.set_size(120, 48, 0);
+
+        // The saved primary should have been resized too.
+        let saved = buf
+            .saved_primary
+            .as_ref()
+            .expect("saved_primary should exist while on alternate screen");
+        // Rows should have the new width.
+        for row in &saved.rows {
+            assert_eq!(
+                row.max_width(),
+                120,
+                "Saved primary rows should be reflowed to new width"
+            );
+        }
+        // Scroll region should match new height.
+        assert_eq!(
+            saved.scroll_region_bottom, 47,
+            "Saved primary scroll_region_bottom should match new height - 1"
+        );
+
+        // Leave alternate → primary should be at new dimensions.
+        let restored_offset = buf.leave_alternate();
+        assert_eq!(restored_offset, 0);
+        assert_eq!(buf.width, 120);
+        assert_eq!(buf.height, 48);
+        assert_eq!(buf.scroll_region(), (0, 47));
     }
 }
 

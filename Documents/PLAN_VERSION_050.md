@@ -17,7 +17,7 @@ startup commands.
 | 55  | Custom Shaders                 | Medium | Pending  |
 | 56  | Session Restore / Startup Cmds | Medium | Pending  |
 | 57  | Render Loop Optimization       | Medium | Complete |
-| 58  | Built-in Multiplexer           | Large  | Pending  |
+| 58  | Built-in Multiplexer           | Large  | Active   |
 
 ---
 
@@ -768,14 +768,16 @@ how tmux's `prefix x` works.
 
 ### 58 Subtasks
 
-1. **58.1 — `PaneId` and `Pane` struct**
+1. **58.1 — `PaneId` and `Pane` struct** — **COMPLETE** (2026-04-09)
    Define `PaneId` (monotonic newtype, like `TabId`). Extract per-terminal fields from `Tab`
    into a new `Pane` struct in `freminal/src/gui/panes.rs`. `Pane` holds all the channel
    endpoints, `ViewState`, title, bell state, and `echo_off` that currently live on `Tab`.
    Add unit tests for `PaneId` generation.
+   _Commit: `8f8fc06` — `PaneId`, `PaneIdGenerator`, `Pane` struct, custom `Debug` impl,
+   11 unit tests._
 
-2. **58.2 — `PaneTree` data structure**
-   Implement `PaneTree` enum (`Leaf`/`Split`) in `freminal/src/gui/panes.rs`. Core
+2. **58.2 — `PaneTree` data structure** — **COMPLETE** (2026-04-09)
+   Implement `PaneTree` enum (`Leaf`/`Split`) in `freminal/src/gui/panes/mod.rs`. Core
    operations:
    - `layout(rect) -> Vec<(PaneId, Rect)>` — recursive layout computation
    - `find(id) -> Option<&Pane>` / `find_mut(id) -> Option<&mut Pane>`
@@ -787,8 +789,10 @@ how tmux's `prefix x` works.
      ancestor split in the given direction
      Thorough unit tests: split, close, layout math, nested trees, edge cases (close last
      pane, deep nesting, unbalanced trees).
+     _Commit: `333dcb4` — PaneTree with PaneNode (Leaf/Split), SplitDirection, PaneError,
+     ClosedPaneResult, split_rect helper, 35+ unit tests. Pane module converted to directory._
 
-3. **58.3 — Refactor `Tab` to use `PaneTree`**
+3. **58.3 — Refactor `Tab` to use `PaneTree`** ✅ _Complete._
    Replace `Tab`'s direct channel/view-state fields with a `PaneTree` and `active_pane:
 PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is a
    `PaneTree::Leaf` — functionally identical to today. Migrate all call sites in
@@ -796,68 +800,132 @@ PaneId`. Add `zoomed_pane: Option<PaneId>`. The single-pane case (no splits) is 
    pane: `tab.active_pane().arc_swap`, etc. Ensure all existing tab functionality works
    unchanged. Run the full test suite to verify no regressions.
 
-4. **58.4 — Pane layout rendering**
+   _Completion note: `Tab` struct replaced with `{id, pane_tree, active_pane, zoomed_pane}`.
+   `Tab::new()` constructor and `active_pane()` / `active_pane_mut()` accessors added. All
+   27 call-site groups in `mod.rs` migrated — including the window command drain loop
+   (heaviest site), terminal widget show, theme broadcasting (all-pane iteration), PTY death
+   polling, resize debounce, scroll offset sync, font zoom, and settings theme changes.
+   `main.rs` tab construction updated (both normal and playback modes). `tabs.rs` test module
+   rewritten: `dummy_tab()` now creates a `Pane` + `Tab::new()`, all field accesses go
+   through `active_pane()` / `active_pane_mut()`, Debug test updated for new output format.
+   All 335 tests pass, clippy clean, no unused deps._
+
+4. **58.4 — Pane layout rendering** _(Complete)_
    Modify `FreminalGui::ui()` to compute pane rects via `PaneTree::layout()` and render
    each visible pane into its allocated rect. The `FreminalTerminalWidget::show()` call
    needs to accept a rect parameter (or use `ui.allocate_rect()`). Render pane borders
    between adjacent panes. Highlight the focused pane's border.
 
-5. **58.5 — Input routing**
+   _Completion note: Refactored `FreminalTerminalWidget` to separate shared state (font
+   manager, shaping cache) from per-pane state (`PaneRenderCache`, `RenderState`). Each
+   `Pane` now owns its own GPU resources and dirty-tracking cache. The `show()` method
+   accepts these as parameters. The CentralPanel now loops over `pane\_tree.layout()` rects
+   using `ui.scope\_builder()` to create scoped child UIs per pane. Per-pane resize debounce
+   sends `InputEvent::Resize` based on each pane's content rect. Borders drawn at interior
+   edges; active pane highlighted in blue, inactive in gray. Repaint scheduling aggregates
+   across all panes (shortest delay wins). All 335 tests pass, clippy clean, no unused deps._
+
+5. **58.5 — Input routing** — **COMPLETE** (2026-04-09)
    Route keyboard input to the active pane. Route mouse input to the pane under the cursor
    (hit-test against pane rects from the layout pass). Clicking in a pane sets it as active.
    Per-pane resize: when the window resizes or a split ratio changes, compute each pane's
    new `(width_chars, height_chars)` and send `InputEvent::Resize` to each affected pane.
 
-6. **58.6 — Split operations**
+6. **58.6 — Split operations** — **COMPLETE** (2026-04-09)
    Implement split-vertical and split-horizontal: create a new pane (via `spawn_pty_tab`),
    insert it into the tree at the focused pane's location. The focused pane stays in `first`,
    the new pane goes in `second`. Focus moves to the new pane. Wire up the keybindings.
+   _Added `KeyAction::SplitVertical` (Ctrl+Shift+Pipe, left/right split) and
+   `KeyAction::SplitHorizontal` (Ctrl+Shift+Minus, top/bottom split) to keybindings.rs,
+   `BindingKey::Pipe` variant, `register_pane_bindings()`, `spawn_split_pane()` in mod.rs,
+   and pane management section in `config_example.toml`. All 335 tests pass, clippy clean,
+   no unused deps. CWD inheritance deferred to a future subtask._
 
-7. **58.7 — Close pane**
+7. **58.7 — Close pane** — **COMPLETE** (2026-04-09)
    Implement pane close: remove the pane from the tree, collapse the parent split. Focus
    moves to the sibling. If the closed pane was the last in the tab, close the tab.
    Handle PTY death: when `pty_dead_rx` fires for a pane, trigger the same close logic.
    Wire up the keybinding.
+   _Implemented `ClosePane` (Ctrl+Shift+W) via deferred `pending_close_pane` flag.
+   `close_focused_pane()` removes pane from tree, collapses parent split, focuses sibling.
+   Last-pane-in-tab closes the tab. PTY death triggers same close logic. Cursor suppressed
+   in unfocused panes (tmux-style). Commit: `4a76255`._
 
-8. **58.8 — Directional navigation**
+8. **58.8 — Directional navigation** — **COMPLETE** (2026-04-09)
    Implement `FocusPaneLeft/Down/Up/Right`: from the focused pane's rect, find the nearest
    pane in the given direction (by comparing rect centers/edges). Move focus to it. Wrap
    behavior: no-op at edges (do not wrap around). Wire up keybindings.
+   _Implemented via deferred `pending_focus_direction` flag. `focus_pane_in_direction()`
+   uses rect center/edge comparisons to find nearest pane in the given direction. No-op at
+   edges. Keybindings: Ctrl+Alt+Arrow keys. Commit: `4a76255`._
 
-9. **58.9 — Pane resize**
+9. **58.9 — Pane resize** — **COMPLETE** (2026-04-09)
    Implement `ResizePaneLeft/Down/Up/Right`: find the nearest split divider in the given
    direction from the focused pane and adjust its ratio by a fixed step (e.g., 0.05).
    Clamp ratio to `[0.1, 0.9]` to prevent zero-size panes. Each resize triggers
-   `InputEvent::Resize` to affected panes. Wire up keybindings. Also implement mouse-drag
-   resize: clicking and dragging a pane border adjusts the split ratio interactively.
+   `InputEvent::Resize` to affected panes. Wire up keybindings. Mouse-drag resize split
+   out to 58.13.
+   _Keyboard resize via `PaneTree::resize_split()` with 0.05 step, clamped to [0.1, 0.9].
+   Keybindings: Ctrl+Alt+Shift+Arrow keys. Commit: `4a76255`._
 
-10. **58.10 — Zoom pane**
+10. **58.10 — Zoom pane** — **COMPLETE** (2026-04-09)
     Implement zoom toggle: when zoomed, only the zoomed pane renders (using the full
     available rect). All other panes continue receiving PTY output and draining channels
     but are not drawn. The tab title or a subtle badge indicates zoom is active. Pressing
     the zoom key again unzooms (restores the pane tree layout). Wire up the keybinding.
+    _`zoomed_pane: Option<PaneId>` on Tab. When set, layout returns only the zoomed pane
+    at full available_rect. Keybinding: Ctrl+Shift+Z. Commit: `4a76255`._
 
-11. **58.11 — Window command and PTY death drain for all panes**
+11. **58.11 — Window command and PTY death drain for all panes** — **COMPLETE** (2026-04-09)
     Extend the per-frame drain loop in `FreminalGui::ui()` to iterate all panes in all
     tabs (not just the active tab's channels). Each pane's `window_cmd_rx` is drained.
     Each pane's `pty_dead_rx` is polled.
+    _Per-frame drain loop iterates all panes across all tabs. Commit: `4a76255`._
 
-12. **58.12 — Menu bar and config integration**
+12. **58.12 — Menu bar and config integration** — **COMPLETE** (2026-04-09)
     Add split/close/zoom/navigate actions to the menu bar under a "Pane" menu. Add
     default keybindings to `BindingMap::default()` and `config_example.toml`. Update the
     Settings Modal keybindings tab to show the new bindings. Document in `config_example.toml`.
+    _"Pane" menu added with Split Vertical/Horizontal, Close, Zoom, Focus direction, and
+    Resize direction actions. All keybindings documented in config_example.toml. Settings
+    Modal shows new bindings automatically. Commit: `4a76255`._
 
-13. **58.13 — Tests**
+13. **58.13 — Mouse drag-to-resize on pane borders** — **COMPLETE** (2026-04-09)
+    Implement interactive mouse drag-to-resize for split pane borders. Add
+    `PaneTree::split_borders(rect)` API to compute border rectangles from the tree layout.
+    Create invisible ±3px sensor rects on borders that consume pointer events before pane
+    widgets (preventing accidental click-to-focus). Change cursor shape to
+    `ResizeHorizontal`/`ResizeVertical` on hover. Track drag state in `PaneBorderDrag` and
+    convert pixel drag deltas to ratio deltas for `resize_split()`.
+    _Added `SplitBorder` struct, `PaneNode::split_borders()` recursive method,
+    `PaneNode::first_leaf_id()` helper, `PaneTree::split_borders()` public API,
+    `PaneBorderDrag` state tracking. 4 unit tests for split_borders(). Also fixed
+    `Ctrl+Shift+|` (Pipe) keybinding by adding `Key::Pipe` mapping in
+    `egui_key_to_binding_key()`. Commit: `85cb495`._
+
+14. **58.14 — Tests and performance verification** ✅ Complete (2026-04-10)
     - Unit tests: `PaneTree` operations (split, close, layout, navigation, resize, zoom)
     - Unit tests: `Tab` with pane tree (single pane regression, multi-pane operations)
     - Integration tests: verify multiple panes render concurrently, input goes to correct
       pane, resize propagates correctly
     - Benchmarks: if pane layout computation is performance-sensitive, add a benchmark for
       `PaneTree::layout()` with various tree depths
+    - **Pre-merge flamegraph:** Before merging, run `cargo flamegraph` and compare against
+      the known baseline. Zero performance regressions are acceptable except for the
+      inherent cost of additional PTY/emulator instances (which should be near-zero since
+      the PTY and emulator layers are not a major bottleneck). Any regression in the render
+      loop, layout, or snapshot path is a blocker.
+
+    _46 pane-related unit tests covering PaneId, Pane, PaneTree (split, close, layout,
+    find, resize, clamping, deep nesting, borders), and Tab integration. Flamegraph
+    analysis showed zero pane-related overhead — no pane functions appear in the profile.
+    User confirmed performance is identical to pre-pane build. Layout computation is
+    trivially fast; no dedicated benchmark needed. Resize propagation verified via
+    `last_sent_size` reset logic (close, zoom toggle, PTY death). Commit: `e1e3038`._
 
 ### 58 Primary Files
 
-- `freminal/src/gui/panes.rs` (new — `Pane`, `PaneId`, `PaneTree`, `SplitDirection`)
+- `freminal/src/gui/panes/mod.rs` (`Pane`, `PaneId`, `PaneTree`, `SplitDirection`, `SplitBorder`)
 - `freminal/src/gui/tabs.rs` (`Tab` refactored to use `PaneTree`)
 - `freminal/src/gui/mod.rs` (multi-pane rendering, input routing, drain loops)
 - `freminal/src/gui/terminal/widget.rs` (accept pane rect, per-pane rendering)

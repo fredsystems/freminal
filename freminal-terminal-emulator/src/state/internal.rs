@@ -311,7 +311,7 @@ impl TerminalState {
             | Mode::AllowAltScreen(_)
             | Mode::UnknownQuery(_)
             | Mode::ApplicationEscapeKey(_)
-            | Mode::ModifyOtherKeysMode(_)
+            | Mode::InBandResizeMode(_)
             | Mode::GraphemeClustering(_)
             | Mode::Decsdm(_)
             | Mode::Decnrcm(_)

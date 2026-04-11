@@ -26,10 +26,10 @@ use freminal_common::{
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
+        modes::in_band_resize_mode::InBandResizeMode,
         modes::irm::Irm,
         modes::kitty_keyboard::KittyKeyboardFlags,
         modes::lnm::Lnm,
-        modes::modify_other_keys_mode::ModifyOtherKeysMode,
         modes::private_color_registers::PrivateColorRegisters,
         modes::reverse_wrap_around::ReverseWrapAround,
         modes::s8c1t::S8c1t,
@@ -247,6 +247,12 @@ pub struct TerminalHandler {
     /// `ESC` (`0x1b`), allowing tmux to instantly distinguish the Escape key
     /// from the start of an escape sequence.
     application_escape_key: ApplicationEscapeKey,
+    /// Whether In-Band Resize Notifications are enabled (`?2048 h`).
+    ///
+    /// When set, the terminal sends `CSI 48 ; height ; width t` upon window
+    /// resize, allowing the application to receive resize events in the input
+    /// stream instead of relying on `SIGWINCH`.
+    in_band_resize_enabled: bool,
     /// Whether Sixel Display Mode (DECSDM `?80`) is active.
     ///
     /// When set (`CSI ? 80 h`), Sixel images are placed at the cursor position
@@ -346,6 +352,7 @@ impl TerminalHandler {
             in_tmux_passthrough: false,
             modify_other_keys_level: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
+            in_band_resize_enabled: false,
             sixel_display_mode: Decsdm::ScrollingMode,
             private_color_registers: PrivateColorRegisters::Private,
             nrc_mode: Decnrcm::NrcDisabled,
@@ -1351,6 +1358,8 @@ impl TerminalHandler {
         cell_pixel_width: u32,
         cell_pixel_height: u32,
     ) {
+        let (old_width, old_height) = self.get_win_size();
+
         if cell_pixel_width > 0 {
             self.cell_pixel_width = cell_pixel_width;
         }
@@ -1360,6 +1369,25 @@ impl TerminalHandler {
         // scroll_offset is owned by ViewState on the GUI side; the PTY thread
         // always passes 0 when resizing.
         let _new_offset = self.buffer.set_size(width, height, 0);
+
+        if self.in_band_resize_enabled && (old_width != width || old_height != height) {
+            self.send_in_band_resize();
+        }
+    }
+
+    /// Send an in-band resize notification to the PTY.
+    /// Format: `CSI 48 ; height_chars ; width_chars ; height_pixels ; width_pixels t`
+    fn send_in_band_resize(&self) {
+        let (width, height) = self.get_win_size();
+        let Ok(width_u32) = u32::value_from(width) else {
+            return;
+        };
+        let Ok(height_u32) = u32::value_from(height) else {
+            return;
+        };
+        let px_w = width_u32 * self.cell_pixel_width;
+        let px_h = height_u32 * self.cell_pixel_height;
+        self.write_csi_response(&format!("48;{height_u32};{width_u32};{px_h};{px_w}t"));
     }
 
     /// Compute new `scroll_offset` after scrolling back by `lines`.
@@ -1928,22 +1956,22 @@ impl TerminalHandler {
                     self.write_to_pty(&ApplicationEscapeKey::Set.report(Some(mode)));
                 }
 
-                // ── ModifyOtherKeys via DEC mode (?2048) ──────────────
-                Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Set) => {
-                    // DECSET ?2048 → enable modifyOtherKeys level 1
-                    self.modify_other_keys_level = 1;
+                // ── In-Band Resize Notifications (?2048) ──────────────
+                Mode::InBandResizeMode(InBandResizeMode::Set) => {
+                    self.in_band_resize_enabled = true;
+                    // Send an immediate resize notification per the specification
+                    self.send_in_band_resize();
                 }
-                Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset) => {
-                    // DECRST ?2048 → disable modifyOtherKeys (level 0)
-                    self.modify_other_keys_level = 0;
+                Mode::InBandResizeMode(InBandResizeMode::Reset) => {
+                    self.in_band_resize_enabled = false;
                 }
-                Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Query) => {
-                    let mode = if self.modify_other_keys_level > 0 {
+                Mode::InBandResizeMode(InBandResizeMode::Query) => {
+                    let mode = if self.in_band_resize_enabled {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&ModifyOtherKeysMode::Set.report(Some(mode)));
+                    self.write_to_pty(&InBandResizeMode::Set.report(Some(mode)));
                 }
 
                 // ── Grapheme Clustering (?2027) — permanently on ────

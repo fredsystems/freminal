@@ -7,28 +7,28 @@ use core::fmt;
 
 use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
-/// DECRQM mode `?2048` — `modifyOtherKeys` query/set/reset via DEC private mode.
+/// DECRQM mode `?2048` — `in-band-resize` query/set/reset via DEC private mode.
 ///
 /// This is the DEC private mode equivalent of the `CSI > 4 ; Pv m` sequence.
 /// tmux queries `?2048` via DECRQM to check whether the terminal supports
-/// `modifyOtherKeys`.  Responding with mode 1 (set) or mode 2 (reset) tells
+/// `in-band-resize`.  Responding with mode 1 (set) or mode 2 (reset) tells
 /// tmux the feature is recognised.
 ///
-/// - `DECSET ?2048` → enable `modifyOtherKeys` level 1
-/// - `DECRST ?2048` → disable `modifyOtherKeys` (level 0)
+/// - `DECSET ?2048` → enable `in-band-resize` level 1
+/// - `DECRST ?2048` → disable `in-band-resize` (level 0)
 /// - `DECRQM ?2048` → report current state
 #[derive(Debug, Default, Eq, PartialEq, Clone, Copy)]
-pub enum ModifyOtherKeysMode {
+pub enum InBandResizeMode {
     #[default]
-    /// Reset (off) — `modifyOtherKeys` level 0.
+    /// Reset (off) — `in-band-resize` level 0.
     Reset,
-    /// Set (on) — `modifyOtherKeys` level 1.
+    /// Set (on) — `in-band-resize` level 1.
     Set,
     /// Query — report current state.
     Query,
 }
 
-impl ModifyOtherKeysMode {
+impl InBandResizeMode {
     #[must_use]
     pub const fn new(mode: &SetMode) -> Self {
         match mode {
@@ -39,7 +39,7 @@ impl ModifyOtherKeysMode {
     }
 }
 
-impl ReportMode for ModifyOtherKeysMode {
+impl ReportMode for InBandResizeMode {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
@@ -56,12 +56,12 @@ impl ReportMode for ModifyOtherKeysMode {
     }
 }
 
-impl fmt::Display for ModifyOtherKeysMode {
+impl fmt::Display for InBandResizeMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Reset => write!(f, "ModifyOtherKeys Mode (DEC 2048) Reset"),
-            Self::Set => write!(f, "ModifyOtherKeys Mode (DEC 2048) Set"),
-            Self::Query => write!(f, "ModifyOtherKeys Mode (DEC 2048) Query"),
+            Self::Reset => write!(f, "InBandResize Mode (DEC 2048) Reset"),
+            Self::Set => write!(f, "InBandResize Mode (DEC 2048) Set"),
+            Self::Query => write!(f, "InBandResize Mode (DEC 2048) Query"),
         }
     }
 }
@@ -75,24 +75,24 @@ mod tests {
     #[test]
     fn new_dec_set_returns_set() {
         assert_eq!(
-            ModifyOtherKeysMode::new(&SetMode::DecSet),
-            ModifyOtherKeysMode::Set
+            InBandResizeMode::new(&SetMode::DecSet),
+            InBandResizeMode::Set
         );
     }
 
     #[test]
     fn new_dec_rst_returns_reset() {
         assert_eq!(
-            ModifyOtherKeysMode::new(&SetMode::DecRst),
-            ModifyOtherKeysMode::Reset
+            InBandResizeMode::new(&SetMode::DecRst),
+            InBandResizeMode::Reset
         );
     }
 
     #[test]
     fn new_dec_query_returns_query() {
         assert_eq!(
-            ModifyOtherKeysMode::new(&SetMode::DecQuery),
-            ModifyOtherKeysMode::Query
+            InBandResizeMode::new(&SetMode::DecQuery),
+            InBandResizeMode::Query
         );
     }
 
@@ -100,24 +100,24 @@ mod tests {
 
     #[test]
     fn default_is_reset() {
-        assert_eq!(ModifyOtherKeysMode::default(), ModifyOtherKeysMode::Reset);
+        assert_eq!(InBandResizeMode::default(), InBandResizeMode::Reset);
     }
 
     // ── ReportMode (self-report, no override) ────────────────────────
 
     #[test]
     fn report_reset_no_override() {
-        assert_eq!(ModifyOtherKeysMode::Reset.report(None), "\x1b[?2048;2$y");
+        assert_eq!(InBandResizeMode::Reset.report(None), "\x1b[?2048;2$y");
     }
 
     #[test]
     fn report_set_no_override() {
-        assert_eq!(ModifyOtherKeysMode::Set.report(None), "\x1b[?2048;1$y");
+        assert_eq!(InBandResizeMode::Set.report(None), "\x1b[?2048;1$y");
     }
 
     #[test]
     fn report_query_no_override() {
-        assert_eq!(ModifyOtherKeysMode::Query.report(None), "\x1b[?2048;0$y");
+        assert_eq!(InBandResizeMode::Query.report(None), "\x1b[?2048;0$y");
     }
 
     // ── ReportMode (with override) ──────────────────────────────────
@@ -126,7 +126,7 @@ mod tests {
     fn report_override_dec_set() {
         // Regardless of self, override DecSet → mode 1
         assert_eq!(
-            ModifyOtherKeysMode::Reset.report(Some(SetMode::DecSet)),
+            InBandResizeMode::Reset.report(Some(SetMode::DecSet)),
             "\x1b[?2048;1$y"
         );
     }
@@ -135,7 +135,7 @@ mod tests {
     fn report_override_dec_rst() {
         // Regardless of self, override DecRst → mode 2
         assert_eq!(
-            ModifyOtherKeysMode::Reset.report(Some(SetMode::DecRst)),
+            InBandResizeMode::Reset.report(Some(SetMode::DecRst)),
             "\x1b[?2048;2$y"
         );
     }
@@ -144,7 +144,7 @@ mod tests {
     fn report_override_dec_query() {
         // Regardless of self, override DecQuery → mode 0
         assert_eq!(
-            ModifyOtherKeysMode::Set.report(Some(SetMode::DecQuery)),
+            InBandResizeMode::Set.report(Some(SetMode::DecQuery)),
             "\x1b[?2048;0$y"
         );
     }
@@ -155,9 +155,9 @@ mod tests {
     fn display_all_variants() {
         // Ensure Display does not panic and produces non-empty strings
         let variants = [
-            ModifyOtherKeysMode::Reset,
-            ModifyOtherKeysMode::Set,
-            ModifyOtherKeysMode::Query,
+            InBandResizeMode::Reset,
+            InBandResizeMode::Set,
+            InBandResizeMode::Query,
         ];
         for v in &variants {
             let s = format!("{v}");

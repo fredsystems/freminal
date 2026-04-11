@@ -28,6 +28,7 @@ pub mod colors;
 pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
+pub mod panes;
 pub mod pty;
 pub mod renderer;
 pub mod search;
@@ -106,6 +107,25 @@ enum TabBarAction {
     Close(usize),
 }
 
+/// Tracks an in-progress mouse drag on a pane split border.
+///
+/// Created when the user starts dragging a border sensor rect and
+/// cleared when the drag ends. While active, mouse movement deltas
+/// are converted to ratio deltas and fed to [`panes::PaneTree::resize_split`].
+#[derive(Debug, Clone, Copy)]
+struct PaneBorderDrag {
+    /// A pane id in the first child of the split being resized.
+    /// Used as `target_id` for `resize_split()`.
+    target_pane: panes::PaneId,
+
+    /// The direction of the split being resized.
+    direction: panes::SplitDirection,
+
+    /// The extent of the parent split node along the split axis,
+    /// used to accurately convert pixel drag distance into a ratio delta.
+    parent_extent: f32,
+}
+
 struct FreminalGui {
     /// All open terminal tabs, managed by `TabManager`.
     /// Each tab owns its own PTY channels, snapshot handle, and `ViewState`.
@@ -151,6 +171,24 @@ struct FreminalGui {
     /// value changes.  This eliminates the per-frame `Arc::make_mut`
     /// clone of the egui `Style` during idle mouse movement.
     style_cache: Option<(bool, &'static freminal_common::themes::ThemePalette, f32)>,
+
+    /// Monotonic generator for `PaneId` values.
+    ///
+    /// All panes across all tabs draw from this single generator so that pane
+    /// ids are globally unique within the process lifetime.
+    pane_id_gen: panes::PaneIdGenerator,
+
+    /// Set to `true` by the `ClosePane` key action dispatch; consumed after
+    /// the render loop where the `ui` reference is available.
+    pending_close_pane: bool,
+
+    /// Set by directional focus key actions; consumed after the render loop
+    /// where the pane layout rects are available.
+    pending_focus_direction: Option<freminal_common::keybindings::KeyAction>,
+
+    /// Tracks an in-progress mouse drag on a pane split border.
+    /// `None` when no border drag is active.
+    border_drag: Option<PaneBorderDrag>,
 
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
@@ -200,6 +238,12 @@ impl FreminalGui {
             // `global_style_mut` call only when the snapshot differs from
             // what `set_egui_options` established.
             style_cache: None,
+            // Start at 1: the initial pane (spawned in main.rs) was assigned
+            // PaneId(0) = PaneId::first(). All subsequent panes get ids ≥ 1.
+            pane_id_gen: panes::PaneIdGenerator::new(1),
+            pending_close_pane: false,
+            pending_focus_direction: None,
+            border_drag: None,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -208,14 +252,15 @@ impl FreminalGui {
 
         // Inform the initial tab about the configured theme mode and current OS
         // dark/light preference so DECRPM ?2031 responses are correct from the start.
-        if let Err(e) = gui
-            .tabs
-            .active_tab()
-            .input_tx
-            .send(InputEvent::ThemeModeUpdate(
-                gui.config.theme.mode,
-                os_dark_mode,
-            ))
+        if let Err(e) =
+            gui.tabs
+                .active_tab()
+                .active_pane()
+                .input_tx
+                .send(InputEvent::ThemeModeUpdate(
+                    gui.config.theme.mode,
+                    os_dark_mode,
+                ))
         {
             error!("Failed to send initial ThemeModeUpdate to tab: {e}");
         }
@@ -230,6 +275,7 @@ impl FreminalGui {
             && let Err(e) = gui
                 .tabs
                 .active_tab()
+                .active_pane()
                 .input_tx
                 .send(InputEvent::ThemeChange(theme))
         {
@@ -313,6 +359,13 @@ impl FreminalGui {
                 any_menu_open = true;
             }
 
+            let pane_resp = ui.menu_button("Pane", |ui| {
+                self.show_pane_menu(ui);
+            });
+            if pane_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
             // Playback controls: only shown when running in playback mode.
             #[cfg(feature = "playback")]
             if self.is_playback {
@@ -325,6 +378,7 @@ impl FreminalGui {
                 && self
                     .tabs
                     .active_tab()
+                    .active_pane()
                     .echo_off
                     .load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -337,6 +391,55 @@ impl FreminalGui {
             }
         });
         (menu_action, any_menu_open)
+    }
+
+    /// Render the "Pane" dropdown menu contents.
+    ///
+    /// Extracted from `show_menu_bar` to keep that function under the
+    /// `too_many_lines` clippy limit.
+    fn show_pane_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Split Vertical (Left | Right)").clicked() {
+            self.spawn_split_pane(panes::SplitDirection::Horizontal);
+            ui.close();
+        }
+        if ui.button("Split Horizontal (Top / Bottom)").clicked() {
+            self.spawn_split_pane(panes::SplitDirection::Vertical);
+            ui.close();
+        }
+
+        ui.separator();
+
+        let can_close_pane = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+        if ui
+            .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
+            .clicked()
+        {
+            self.pending_close_pane = true;
+            ui.close();
+        }
+
+        let is_zoomed = self.tabs.active_tab().zoomed_pane.is_some();
+        let zoom_label = if is_zoomed {
+            "Un-Zoom Pane"
+        } else {
+            "Zoom Pane"
+        };
+        let can_zoom = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+        if ui
+            .add_enabled(can_zoom, egui::Button::new(zoom_label))
+            .clicked()
+        {
+            let tab = self.tabs.active_tab_mut();
+            let current = tab.active_pane;
+            if tab.zoomed_pane == Some(current) {
+                tab.zoomed_pane = None;
+            } else {
+                tab.zoomed_pane = Some(current);
+            }
+            ui.close();
+        }
     }
 
     /// Render the tab bar between the menu bar and the terminal area.
@@ -365,7 +468,10 @@ impl FreminalGui {
                 // is idle at a password prompt.  The atomic is updated by the
                 // writer thread every 250 ms regardless of PTY activity.
                 let is_echo_off = self.config.security.password_indicator
-                    && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
+                    && tab
+                        .active_pane()
+                        .echo_off
+                        .load(std::sync::atomic::Ordering::Relaxed);
 
                 let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
                 if !matches!(tab_action, TabBarAction::None) {
@@ -403,13 +509,14 @@ impl FreminalGui {
         is_echo_off: bool,
     ) -> TabBarAction {
         let mut action = TabBarAction::None;
-        let label = if tab.title.is_empty() {
+        let pane = tab.active_pane();
+        let label = if pane.title.is_empty() {
             "Shell"
         } else {
-            &tab.title
+            &pane.title
         };
 
-        let has_bell = tab.bell_active && !is_active;
+        let has_bell = pane.bell_active && !is_active;
 
         // Build the display label: prepend a lock indicator when echo is disabled
         // (password prompt active), and a bell indicator when the tab has an
@@ -487,8 +594,9 @@ impl FreminalGui {
         ) {
             Ok(channels) => {
                 let id = self.tabs.next_tab_id();
-                let tab = Tab {
-                    id,
+                let pane_id = self.pane_id_gen.next_id();
+                let pane = panes::Pane {
+                    id: pane_id,
                     arc_swap: channels.arc_swap,
                     input_tx: channels.input_tx,
                     pty_write_tx: channels.pty_write_tx,
@@ -501,10 +609,13 @@ impl FreminalGui {
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
+                    render_state: terminal::new_render_state(),
+                    render_cache: terminal::PaneRenderCache::new(),
                 };
+                let tab = Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
                 // ?2031 queries return the correct locked/dynamic status.
-                if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
+                if let Err(e) = tab.active_pane().input_tx.send(InputEvent::ThemeModeUpdate(
                     self.config.theme.mode,
                     self.os_dark_mode,
                 )) {
@@ -526,6 +637,239 @@ impl FreminalGui {
         }
     }
 
+    /// Spawn a new PTY-backed pane and insert it into the active tab's pane tree,
+    /// splitting the currently focused pane.
+    ///
+    /// The focused pane becomes the `first` child of the new split; the new pane
+    /// becomes the `second` child. Focus is transferred to the new pane after
+    /// insertion. The split ratio starts at 0.5 (equal halves).
+    ///
+    /// Does nothing in playback mode (no PTY to spawn).
+    fn spawn_split_pane(&mut self, direction: panes::SplitDirection) {
+        // Split panes are not supported in playback mode.
+        #[cfg(feature = "playback")]
+        if self.is_playback {
+            return;
+        }
+
+        let theme =
+            freminal_common::themes::by_slug(self.config.theme.active_slug(self.os_dark_mode))
+                .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+
+        // Spawn the new PTY before touching `self.tabs` so there is no borrow conflict.
+        let channels = match pty::spawn_pty_tab(
+            &self.args,
+            self.config.scrollback.limit,
+            theme,
+            &self.egui_ctx,
+        ) {
+            Ok(ch) => ch,
+            Err(e) => {
+                error!("Failed to spawn split pane: {e}");
+                return;
+            }
+        };
+
+        // Read the focused pane id before mutably borrowing the tab.
+        let target_id = self.tabs.active_tab().active_pane;
+
+        // Insert the new pane into the tree.
+        let id_gen = &mut self.pane_id_gen;
+        let tab = self.tabs.active_tab_mut();
+        let new_pane_id =
+            match tab
+                .pane_tree
+                .split(target_id, direction, id_gen, |new_id| panes::Pane {
+                    id: new_id,
+                    arc_swap: channels.arc_swap,
+                    input_tx: channels.input_tx,
+                    pty_write_tx: channels.pty_write_tx,
+                    window_cmd_rx: channels.window_cmd_rx,
+                    clipboard_rx: channels.clipboard_rx,
+                    search_buffer_rx: channels.search_buffer_rx,
+                    pty_dead_rx: channels.pty_dead_rx,
+                    title: "Terminal".to_owned(),
+                    bell_active: false,
+                    title_stack: Vec::new(),
+                    view_state: view_state::ViewState::new(),
+                    echo_off: channels.echo_off,
+                    render_state: terminal::new_render_state(),
+                    render_cache: terminal::PaneRenderCache::new(),
+                }) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Failed to insert split pane into tree: {e}");
+                    return;
+                }
+            };
+
+        // Transfer terminal focus from the old pane to the new one so
+        // applications that track focus (DEC mode 1004) see the transition.
+        if let Some(old_pane) = tab.pane_tree.find(target_id)
+            && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+        {
+            error!("Failed to send FocusChange(false) to previous pane {target_id}: {e}");
+        }
+
+        // Move keyboard focus to the newly created pane.
+        tab.active_pane = new_pane_id;
+
+        if let Some(new_pane) = tab.pane_tree.find(new_pane_id) {
+            if let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true)) {
+                error!("Failed to send FocusChange(true) to new pane {new_pane_id}: {e}");
+            }
+
+            // Notify the new pane of the current theme mode so DECRPM ?2031
+            // responses are correct from the start.
+            if let Err(e) = new_pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                self.config.theme.mode,
+                self.os_dark_mode,
+            )) {
+                error!("Failed to send ThemeModeUpdate to split pane: {e}");
+            }
+        }
+    }
+
+    /// Close the focused pane in the active tab.
+    ///
+    /// If the pane is the last one in its tab, the tab itself is closed.
+    /// If the tab is the last tab, the application exits.
+    /// Otherwise, focus transfers to a sibling pane.
+    fn close_focused_pane(&mut self, ui: &egui::Ui) {
+        let tab = self.tabs.active_tab_mut();
+        let target = tab.active_pane;
+
+        // Cancel zoom if the zoomed pane is being closed.
+        if tab.zoomed_pane == Some(target) {
+            tab.zoomed_pane = None;
+        }
+
+        match tab.pane_tree.close(target) {
+            Ok(_closed) => {
+                // Focus transfers to the first pane remaining in the tree.
+                // Reset last_sent_size on all surviving panes so the next
+                // frame's resize check fires — the layout rects change after
+                // a close and the PTY must learn the new dimensions.
+                let tab = self.tabs.active_tab_mut();
+                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes {
+                        pane.view_state.last_sent_size = (0, 0);
+                    }
+                }
+                let tab = self.tabs.active_tab_mut();
+                if let Ok(panes) = tab.pane_tree.iter_panes()
+                    && let Some(first) = panes.first()
+                {
+                    let new_id = first.id;
+                    // Notify the new active pane that it gained focus so
+                    // applications tracking DEC mode 1004 see the transition.
+                    if let Err(e) = first.input_tx.send(InputEvent::FocusChange(true)) {
+                        error!("Failed to send FocusChange(true) to pane {new_id}: {e}");
+                    }
+                    tab.active_pane = new_id;
+                }
+            }
+            Err(panes::PaneError::CannotCloseLastPane) => {
+                // Last pane in tab — close the tab instead.
+                if self.tabs.tab_count() <= 1 {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    return;
+                }
+                let idx = self.tabs.active_index();
+                self.close_tab(idx);
+            }
+            Err(e) => {
+                error!("Failed to close pane {target}: {e}");
+            }
+        }
+    }
+
+    /// Find the nearest pane in the given direction relative to the focused
+    /// pane and transfer focus to it.
+    ///
+    /// Uses the center-point of each pane's layout rect to determine spatial
+    /// relationships. "Left" means the candidate's center X is less than the
+    /// current pane's center X, etc.
+    fn focus_pane_in_direction(
+        &mut self,
+        direction: freminal_common::keybindings::KeyAction,
+        available_rect: egui::Rect,
+    ) {
+        use freminal_common::keybindings::KeyAction;
+
+        let tab = self.tabs.active_tab();
+
+        // Focus navigation is a no-op while a pane is zoomed — there is only
+        // one visible pane so changing active_pane would desync the GUI.
+        if tab.zoomed_pane.is_some() {
+            return;
+        }
+
+        let current_id = tab.active_pane;
+
+        let layout = match tab.pane_tree.layout(available_rect) {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to compute pane layout for navigation: {e}");
+                return;
+            }
+        };
+
+        // Find the current pane's rect.
+        let Some(current_rect) = layout
+            .iter()
+            .find(|(id, _)| *id == current_id)
+            .map(|(_, r)| *r)
+        else {
+            return;
+        };
+        let current_center = current_rect.center();
+
+        // Filter candidates by direction and pick the closest.
+        let best = layout
+            .iter()
+            .filter(|(id, _)| *id != current_id)
+            .filter(|(_, rect)| {
+                let c = rect.center();
+                match direction {
+                    KeyAction::FocusPaneLeft => c.x < current_center.x,
+                    KeyAction::FocusPaneRight => c.x > current_center.x,
+                    KeyAction::FocusPaneUp => c.y < current_center.y,
+                    KeyAction::FocusPaneDown => c.y > current_center.y,
+                    _ => false,
+                }
+            })
+            .min_by(|(_, a), (_, b)| {
+                let dist_a = a.center().distance(current_center);
+                let dist_b = b.center().distance(current_center);
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        if let Some((new_id, _)) = best {
+            let new_id = *new_id;
+            let tab = self.tabs.active_tab_mut();
+            let old_id = tab.active_pane;
+
+            // Notify the old pane it lost focus.
+            if let Some(old_pane) = tab.pane_tree.find(old_id)
+                && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+            {
+                error!("Failed to send FocusChange(false) to pane {old_id}: {e}");
+            }
+
+            tab.active_pane = new_id;
+
+            // Notify the new pane it gained focus.
+            if let Some(new_pane) = tab.pane_tree.find(new_id)
+                && let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true))
+            {
+                error!("Failed to send FocusChange(true) to pane {new_id}: {e}");
+            }
+        }
+    }
+
     /// Dispatch a `TabBarAction` from either the tab bar or the Tab menu.
     fn dispatch_tab_bar_action(&mut self, action: TabBarAction) {
         match action {
@@ -536,7 +880,7 @@ impl FreminalGui {
                 } else {
                     // Clear the bell indicator on the newly-active tab —
                     // switching to it acknowledges the bell.
-                    self.tabs.active_tab_mut().bell_active = false;
+                    self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
                 }
             }
             TabBarAction::Close(i) => self.close_tab(i),
@@ -544,6 +888,10 @@ impl FreminalGui {
         }
     }
 
+    // Inherently large: routes all key actions that require full GUI state.
+    // Each arm is a distinct GUI operation; extracting further would add
+    // indirection without improving clarity.
+    #[allow(clippy::too_many_lines)]
     /// Dispatch a deferred key action that requires full GUI state.
     ///
     /// Called from the `ui()` method for each action returned by the terminal
@@ -574,11 +922,11 @@ impl FreminalGui {
             }
             KeyAction::NextTab => {
                 self.tabs.next_tab();
-                self.tabs.active_tab_mut().bell_active = false;
+                self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
             }
             KeyAction::PrevTab => {
                 self.tabs.prev_tab();
-                self.tabs.active_tab_mut().bell_active = false;
+                self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
             }
             KeyAction::SwitchToTab1 => self.switch_to_tab_n(0),
             KeyAction::SwitchToTab2 => self.switch_to_tab_n(1),
@@ -595,35 +943,50 @@ impl FreminalGui {
             KeyAction::ZoomIn => self.apply_zoom(1.0),
             KeyAction::ZoomOut => self.apply_zoom(-1.0),
             KeyAction::ZoomReset => {
-                self.tabs.active_tab_mut().view_state.reset_zoom();
+                self.tabs
+                    .active_tab_mut()
+                    .active_pane_mut()
+                    .view_state
+                    .reset_zoom();
                 self.terminal_widget.apply_font_zoom(self.config.font.size);
+                // Zoom reset may change font size — invalidate all panes.
+                self.invalidate_all_pane_atlases();
             }
 
             // -- Search overlay --
             KeyAction::OpenSearch => {
-                self.tabs.active_tab_mut().view_state.search_state.is_open = true;
+                self.tabs
+                    .active_tab_mut()
+                    .active_pane_mut()
+                    .view_state
+                    .search_state
+                    .is_open = true;
             }
             KeyAction::SearchNext => {
                 let tab = self.tabs.active_tab_mut();
-                tab.view_state.search_state.next_match();
-                let snap = tab.arc_swap.load();
-                search::scroll_to_match_and_send(&mut tab.view_state, &snap, &tab.input_tx);
+                let pane = tab.active_pane_mut();
+                pane.view_state.search_state.next_match();
+                let snap = pane.arc_swap.load();
+                search::scroll_to_match_and_send(&mut pane.view_state, &snap, &pane.input_tx);
             }
             KeyAction::SearchPrev => {
                 let tab = self.tabs.active_tab_mut();
-                tab.view_state.search_state.prev_match();
-                let snap = tab.arc_swap.load();
-                search::scroll_to_match_and_send(&mut tab.view_state, &snap, &tab.input_tx);
+                let pane = tab.active_pane_mut();
+                pane.view_state.search_state.prev_match();
+                let snap = pane.arc_swap.load();
+                search::scroll_to_match_and_send(&mut pane.view_state, &snap, &pane.input_tx);
             }
             KeyAction::PrevCommand => {
                 let tab = self.tabs.active_tab_mut();
-                let snap = tab.arc_swap.load();
-                search::jump_to_prev_command(&mut tab.view_state, &snap);
+                let pane = tab.active_pane_mut();
+                let snap = pane.arc_swap.load();
+                search::jump_to_prev_command(&mut pane.view_state, &snap);
             }
             KeyAction::NextCommand => {
                 let tab = self.tabs.active_tab_mut();
-                let snap = tab.arc_swap.load();
-                search::jump_to_next_command(&mut tab.view_state, &snap);
+                let pane = tab.active_pane_mut();
+                let snap = pane.arc_swap.load();
+                search::jump_to_next_command(&mut pane.view_state, &snap);
             }
 
             // -- Not yet implemented --
@@ -631,6 +994,91 @@ impl FreminalGui {
             // their respective features land.
             KeyAction::RenameTab => {
                 trace!("Unhandled deferred key action: {action:?}");
+            }
+
+            // -- Pane management --
+            KeyAction::SplitVertical => {
+                self.spawn_split_pane(panes::SplitDirection::Horizontal);
+            }
+            KeyAction::SplitHorizontal => {
+                self.spawn_split_pane(panes::SplitDirection::Vertical);
+            }
+            KeyAction::ClosePane => {
+                // Deferred — needs `ui` reference. Stored and handled after
+                // the render loop. See the `deferred_close_pane` handling below.
+                // For now we call the helper directly since we already have
+                // `&mut self`. The `ui` reference is not available here, so
+                // we handle last-pane-in-last-tab by checking upfront.
+                //
+                // We cannot access `ui` from dispatch_deferred_action, so the
+                // "close app" path uses a flag instead.
+                self.pending_close_pane = true;
+            }
+            KeyAction::FocusPaneLeft
+            | KeyAction::FocusPaneDown
+            | KeyAction::FocusPaneUp
+            | KeyAction::FocusPaneRight => {
+                self.pending_focus_direction = Some(action);
+            }
+            KeyAction::ResizePaneLeft => {
+                let id = self.tabs.active_tab().active_pane;
+                // Left resize = shrink horizontal split ratio (move divider left).
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Horizontal,
+                    -0.05,
+                ) {
+                    trace!("Cannot resize pane left: {e}");
+                }
+            }
+            KeyAction::ResizePaneRight => {
+                let id = self.tabs.active_tab().active_pane;
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Horizontal,
+                    0.05,
+                ) {
+                    trace!("Cannot resize pane right: {e}");
+                }
+            }
+            KeyAction::ResizePaneUp => {
+                let id = self.tabs.active_tab().active_pane;
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Vertical,
+                    -0.05,
+                ) {
+                    trace!("Cannot resize pane up: {e}");
+                }
+            }
+            KeyAction::ResizePaneDown => {
+                let id = self.tabs.active_tab().active_pane;
+                if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                    id,
+                    panes::SplitDirection::Vertical,
+                    0.05,
+                ) {
+                    trace!("Cannot resize pane down: {e}");
+                }
+            }
+            KeyAction::ZoomPane => {
+                let tab = self.tabs.active_tab_mut();
+                let current = tab.active_pane;
+                if tab.zoomed_pane == Some(current) {
+                    // Un-zoom
+                    tab.zoomed_pane = None;
+                } else {
+                    tab.zoomed_pane = Some(current);
+                }
+                // Zoom/unzoom changes the effective layout dimensions.
+                // Reset last_sent_size on all panes so the resize check
+                // fires on the next frame with the correct sizes.
+                let tab = self.tabs.active_tab_mut();
+                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes {
+                        pane.view_state.last_sent_size = (0, 0);
+                    }
+                }
             }
 
             // These actions are handled at the input layer and should never
@@ -656,10 +1104,31 @@ impl FreminalGui {
     /// to the terminal widget.
     fn apply_zoom(&mut self, delta: f32) {
         let base = self.config.font.size;
-        let vs = &mut self.tabs.active_tab_mut().view_state;
+        let vs = &mut self.tabs.active_tab_mut().active_pane_mut().view_state;
         vs.adjust_zoom(base, delta);
         let effective = vs.effective_font_size(base);
         self.terminal_widget.apply_font_zoom(effective);
+        // Font size changed — invalidate all panes so atlases are rebuilt.
+        self.invalidate_all_pane_atlases();
+    }
+
+    /// Clear every pane's GL glyph atlas and dirty-tracking cache.
+    ///
+    /// Called when the font, font size, ligature config, or pixels-per-point
+    /// changes, so that all panes rebuild their vertex buffers and
+    /// re-rasterise glyphs at the new metrics.
+    fn invalidate_all_pane_atlases(&mut self) {
+        for tab in self.tabs.iter_mut() {
+            if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                for pane in panes {
+                    pane.render_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear_atlas();
+                    pane.render_cache.invalidate_content();
+                }
+            }
+        }
     }
 
     /// Switch to tab N (0-indexed). Silently does nothing if the index
@@ -668,7 +1137,7 @@ impl FreminalGui {
         if let Err(e) = self.tabs.switch_to(index) {
             trace!("Cannot switch to tab {index}: {e}");
         } else {
-            self.tabs.active_tab_mut().bell_active = false;
+            self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
         }
     }
 
@@ -777,6 +1246,7 @@ impl FreminalGui {
         if let Err(e) = self
             .tabs
             .active_tab()
+            .active_pane()
             .input_tx
             .send(InputEvent::PlaybackControl(cmd))
         {
@@ -1240,60 +1710,146 @@ impl eframe::App for FreminalGui {
             // Always propagate the updated OS preference so DECRPM ?2031
             // reflects the new dark/light state, regardless of ThemeMode.
             for tab in self.tabs.iter() {
-                if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
-                    self.config.theme.mode,
-                    self.os_dark_mode,
-                )) {
-                    error!("Failed to send ThemeModeUpdate on OS change to tab: {e}");
+                if let Ok(panes) = tab.pane_tree.iter_panes() {
+                    for pane in panes {
+                        if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                            self.config.theme.mode,
+                            self.os_dark_mode,
+                        )) {
+                            error!("Failed to send ThemeModeUpdate on OS change to pane: {e}");
+                        }
+                    }
                 }
             }
 
             if self.config.theme.mode == ThemeMode::Auto {
                 let slug = self.config.theme.active_slug(self.os_dark_mode);
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    // Notify every tab so all PTY threads get the new palette.
+                    // Notify every pane in every tab so all PTY threads get the new palette.
                     for tab in self.tabs.iter() {
-                        if let Err(e) = tab.input_tx.send(
-                            freminal_terminal_emulator::io::InputEvent::ThemeChange(theme),
-                        ) {
-                            error!("Failed to send auto ThemeChange to tab: {e}");
+                        if let Ok(panes) = tab.pane_tree.iter_panes() {
+                            for pane in panes {
+                                if let Err(e) = pane.input_tx.send(
+                                    freminal_terminal_emulator::io::InputEvent::ThemeChange(theme),
+                                ) {
+                                    error!("Failed to send auto ThemeChange to pane: {e}");
+                                }
+                            }
                         }
                     }
                     update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
-                    self.terminal_widget.invalidate_theme_cache();
+                    // Invalidate theme cache on all panes in all tabs so the
+                    // next frame forces a full vertex rebuild with the new palette.
+                    for tab in self.tabs.iter_mut() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes {
+                                pane.render_cache.invalidate_theme_cache();
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Poll all tabs for PTY death signals.  Dead tabs are collected by
-        // index (in reverse order so removal doesn't shift later indices).
-        let dead_indices: Vec<usize> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, tab)| tab.pty_dead_rx.try_recv().is_ok())
-            .map(|(i, _)| i)
-            .rev()
-            .collect();
-
-        for idx in dead_indices {
-            if self.tabs.tab_count() <= 1 {
-                // Last tab died — close the whole application.
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-                return;
+        // Poll all tabs for PTY death signals.  When a pane's PTY dies,
+        // close that pane.  If it was the last pane in the tab, close the
+        // tab.  If it was the last tab, close the application.
+        //
+        // Collect (tab_index, pane_id) pairs for dead panes, then process
+        // them in reverse order to avoid index shifting issues.
+        let mut dead_panes: Vec<(usize, panes::PaneId)> = Vec::new();
+        for (tab_idx, tab) in self.tabs.iter().enumerate() {
+            if let Ok(panes) = tab.pane_tree.iter_panes() {
+                for pane in panes {
+                    if pane.pty_dead_rx.try_recv().is_ok() {
+                        dead_panes.push((tab_idx, pane.id));
+                    }
+                }
             }
-            self.close_tab(idx);
+        }
+
+        for (tab_idx, pane_id) in dead_panes.into_iter().rev() {
+            // Try to close just the dead pane within its tab.
+            let is_active_tab = tab_idx == self.tabs.active_index();
+
+            // Switch to the dead pane's tab temporarily if needed so we can
+            // operate on it.
+            if !is_active_tab && let Err(e) = self.tabs.switch_to(tab_idx) {
+                error!("Failed to switch to tab {tab_idx} for dead pane cleanup: {e}");
+                continue;
+            }
+
+            let tab = self.tabs.active_tab_mut();
+            // If the dead pane was the zoomed pane, un-zoom first.
+            if tab.zoomed_pane == Some(pane_id) {
+                tab.zoomed_pane = None;
+            }
+
+            match tab.pane_tree.close(pane_id) {
+                Ok(_closed) => {
+                    // Reset last_sent_size on all surviving panes so the
+                    // next frame's resize check fires with the new layout.
+                    let tab = self.tabs.active_tab_mut();
+                    if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                        for pane in panes {
+                            pane.view_state.last_sent_size = (0, 0);
+                        }
+                    }
+                    // If the active pane was the one that died, pick a new active pane
+                    // and notify it that it gained focus.
+                    let tab = self.tabs.active_tab_mut();
+                    if tab.active_pane == pane_id
+                        && let Ok(panes) = tab.pane_tree.iter_panes()
+                        && let Some(first) = panes.first()
+                    {
+                        let new_id = first.id;
+                        if let Err(e) = first.input_tx.send(InputEvent::FocusChange(true)) {
+                            error!("Failed to send FocusChange(true) to pane {new_id}: {e}");
+                        }
+                        tab.active_pane = new_id;
+                    }
+                }
+                Err(panes::PaneError::CannotCloseLastPane) => {
+                    // Last pane in tab — close the entire tab.
+                    if self.tabs.tab_count() <= 1 {
+                        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                        return;
+                    }
+                    self.close_tab(tab_idx);
+                }
+                Err(e) => {
+                    error!("Failed to close dead pane {pane_id}: {e}");
+                }
+            }
+
+            // Restore the original active tab if we switched away.
+            if !is_active_tab {
+                // The tab we were on may have been removed, so saturate.
+                let restore_idx = tab_idx.min(self.tabs.tab_count().saturating_sub(1));
+                let _ = self.tabs.switch_to(restore_idx);
+            }
         }
 
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
-        let snap = self.tabs.active_tab().arc_swap.load();
+        let snap = self.tabs.active_tab().active_pane().arc_swap.load();
 
         // Sync the GUI's scroll offset from the snapshot.  When new PTY output
         // arrives the PTY thread resets its offset to 0, so the snapshot will
         // carry scroll_offset = 0 even if the GUI previously sent a non-zero
         // value.  Adopting the snapshot's value keeps ViewState in sync.
-        if self.tabs.active_tab().view_state.scroll_offset != snap.scroll_offset {
-            self.tabs.active_tab_mut().view_state.scroll_offset = snap.scroll_offset;
+        if self
+            .tabs
+            .active_tab()
+            .active_pane()
+            .view_state
+            .scroll_offset
+            != snap.scroll_offset
+        {
+            self.tabs
+                .active_tab_mut()
+                .active_pane_mut()
+                .view_state
+                .scroll_offset = snap.scroll_offset;
         }
 
         // Menu bar at the top of the window.
@@ -1324,7 +1880,7 @@ impl eframe::App for FreminalGui {
             // reading `cell_size()`.  Without this, the first frame after a DPI
             // change would use stale pixel metrics for the resize calculation.
             let ppp = ui.ctx().pixels_per_point();
-            self.terminal_widget.sync_pixels_per_point(ppp);
+            let ppp_changed = self.terminal_widget.sync_pixels_per_point(ppp);
 
             // Synchronise font zoom for the active tab.  Each tab has its own
             // zoom_delta and the font manager only knows one size at a time.
@@ -1333,11 +1889,20 @@ impl eframe::App for FreminalGui {
             let effective = self
                 .tabs
                 .active_tab()
+                .active_pane()
                 .view_state
                 .effective_font_size(self.config.font.size);
-            self.terminal_widget.apply_font_zoom(effective);
+            let zoom_changed = self.terminal_widget.apply_font_zoom(effective);
 
-            // Compute char size once and reuse for both PTY sizing and widget layout.
+            // When pixels-per-point or font zoom changes, every pane's GL
+            // atlas and cached content must be invalidated so glyphs are
+            // re-rasterised at the new size.
+            if ppp_changed || zoom_changed {
+                self.invalidate_all_pane_atlases();
+            }
+
+            // Compute char size once — shared across all panes since all panes
+            // use the same font at the same size.
             // `cell_size()` returns integer pixel dimensions (physical) from swash
             // font metrics.  egui's coordinate system uses logical points, so we
             // convert with `pixels_per_point` when doing layout math.
@@ -1347,69 +1912,49 @@ impl eframe::App for FreminalGui {
             let logical_char_w = f32::approx_from(cell_w_u).unwrap_or(0.0) / ppp;
             let logical_char_h = f32::approx_from(cell_height_u).unwrap_or(0.0) / ppp;
 
-            let available = ui.available_size();
-            let width_chars = (available.x / logical_char_w)
-                .floor()
-                .approx_as::<usize>()
-                .unwrap_or_else(|e| {
-                    error!("Failed to calculate width chars: {e}");
-                    10
-                });
-            let height_chars = ((available.y / logical_char_h).floor())
-                .approx_as::<usize>()
-                .unwrap_or_else(|e| {
-                    error!("Failed to calculate height chars: {e}");
-                    10
-                })
-                .max(1);
+            let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
-            // Debounced resize: only send an InputEvent::Resize when the
-            // character-cell dimensions actually change.
-            let new_size = (width_chars, height_chars);
-            if new_size != self.tabs.active_tab().view_state.last_sent_size {
-                if let Err(e) = self.tabs.active_tab().input_tx.send(InputEvent::Resize(
-                    width_chars,
-                    height_chars,
-                    font_width,
-                    font_height,
-                )) {
-                    error!("Failed to send resize event: {e}");
-                } else {
-                    self.tabs.active_tab_mut().view_state.last_sent_size = new_size;
+            // Drain window commands for ALL tabs and ALL panes within each tab.
+            // The active tab's active pane gets full handling (viewport commands,
+            // reports, title updates, clipboard). All other panes get reports
+            // answered, titles updated, and clipboard handled — only
+            // viewport-mutating commands (resize, move, minimize, fullscreen)
+            // are discarded since a non-active pane must not alter the shared
+            // window geometry.
+            let active_idx = self.tabs.active_index();
+            let active_pane_id_for_drain = self.tabs.active_tab().active_pane;
+            let window_focused = self
+                .tabs
+                .active_tab()
+                .active_pane()
+                .view_state
+                .window_focused;
+            for (idx, tab) in self.tabs.iter_mut().enumerate() {
+                let is_active_tab = idx == active_idx;
+                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes {
+                        let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
+                        handle_window_manipulation(
+                            ui,
+                            &pane.window_cmd_rx,
+                            &pane.pty_write_tx,
+                            font_width,
+                            font_height,
+                            window_width,
+                            &mut pane.title_stack,
+                            &mut pane.title,
+                            &mut pane.bell_active,
+                            &mut pane.view_state.bell_since,
+                            self.config.bell.mode,
+                            self.config.security.allow_clipboard_read,
+                            is_fully_active,
+                            window_focused,
+                        );
+                    }
                 }
             }
 
-            let window_width = ui.input(|i: &egui::InputState| i.content_rect());
-
-            // Drain window commands for ALL tabs.  The active tab gets full
-            // handling (viewport commands, reports, title updates, clipboard).
-            // Inactive tabs get reports answered, titles updated, and clipboard
-            // handled — only viewport-mutating commands (resize, move, minimize,
-            // fullscreen) are discarded since an inactive tab must not alter the
-            // shared window geometry.
-            let active_idx = self.tabs.active_index();
-            let window_focused = self.tabs.active_tab().view_state.window_focused;
-            for (idx, tab) in self.tabs.iter_mut().enumerate() {
-                handle_window_manipulation(
-                    ui,
-                    &tab.window_cmd_rx,
-                    &tab.pty_write_tx,
-                    font_width,
-                    font_height,
-                    window_width,
-                    &mut tab.title_stack,
-                    &mut tab.title,
-                    &mut tab.bell_active,
-                    &mut tab.view_state.bell_since,
-                    self.config.bell.mode,
-                    self.config.security.allow_clipboard_read,
-                    idx == active_idx,
-                    window_focused,
-                );
-            }
-
-            // Update background color based on whether the terminal is in
-            // normal (non-inverted) display mode.
+            // Update background color based on the active pane's display mode.
             //
             // Gated: only call `global_style_mut` when the inputs have
             // changed.  `global_style_mut` triggers `Arc::make_mut` on
@@ -1459,26 +2004,382 @@ impl eframe::App for FreminalGui {
                 self.style_cache = Some(style_key);
             }
 
-            let tab = self.tabs.active_tab_mut();
-            let is_echo_off = self.config.security.password_indicator
-                && tab.echo_off.load(std::sync::atomic::Ordering::Relaxed);
-            let deferred_actions = self.terminal_widget.show(
-                ui,
-                &snap,
-                &mut tab.view_state,
-                &tab.input_tx,
-                &tab.clipboard_rx,
-                &tab.search_buffer_rx,
-                self.settings_modal.is_open || any_menu_open,
-                bg_opacity,
-                &self.binding_map,
-                is_echo_off,
-            );
+            // ── Multi-pane rendering loop ────────────────────────────
+            //
+            // Compute layout rects for every leaf pane in the active tab's
+            // pane tree, then render each one into its allocated rect.
+            // Collect deferred key actions from all panes for dispatch after
+            // the loop.
+
+            let available_rect = ui.available_rect_before_wrap();
+            let active_pane_id = self.tabs.active_tab().active_pane;
+            let zoomed_pane = self.tabs.active_tab().zoomed_pane;
+            let has_multiple_panes = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+            // When a pane is zoomed, render only that pane at full size.
+            // Borders are hidden during zoom since there is only one visible pane.
+            let (pane_layout, border_width) = if let Some(zoomed_id) = zoomed_pane {
+                (vec![(zoomed_id, available_rect)], 0.0)
+            } else {
+                // Width of the border drawn between adjacent panes (logical pixels).
+                let bw: f32 = if has_multiple_panes { 1.0 } else { 0.0 };
+                let layout = self
+                    .tabs
+                    .active_tab()
+                    .pane_tree
+                    .layout(available_rect)
+                    .unwrap_or_default();
+                (layout, bw)
+            };
+
+            let mut all_deferred_actions = Vec::new();
+
+            // Track repaint needs across all panes.
+            let mut shortest_repaint_delay: Option<std::time::Duration> = None;
+
+            let ui_overlay_open = self.settings_modal.is_open || any_menu_open;
+
+            // ── Pane border drag-to-resize ───────────────────────────
+            //
+            // Before rendering panes, place invisible drag sensors on each
+            // split border. This must happen before the per-pane
+            // `scope_builder` calls so that pointer events on the border
+            // are consumed here instead of reaching the terminal widgets.
+            if has_multiple_panes && zoomed_pane.is_none() && !ui_overlay_open {
+                let borders = self
+                    .tabs
+                    .active_tab()
+                    .pane_tree
+                    .split_borders(available_rect, active_pane_id)
+                    .unwrap_or_default();
+
+                // Half-width of the invisible drag sensor zone (pixels
+                // on each side of the 1px border line).
+                let sensor_half: f32 = 3.0;
+
+                for (border_idx, border) in borders.iter().enumerate() {
+                    // Expand the thin 1px border rect into a wider sensor rect.
+                    let sensor_rect = match border.direction {
+                        panes::SplitDirection::Horizontal => {
+                            // Vertical divider — expand horizontally.
+                            let cx = border.rect.center().x;
+                            egui::Rect::from_min_max(
+                                egui::pos2(cx - sensor_half, border.rect.min.y),
+                                egui::pos2(cx + sensor_half, border.rect.max.y),
+                            )
+                        }
+                        panes::SplitDirection::Vertical => {
+                            // Horizontal divider — expand vertically.
+                            let cy = border.rect.center().y;
+                            egui::Rect::from_min_max(
+                                egui::pos2(border.rect.min.x, cy - sensor_half),
+                                egui::pos2(border.rect.max.x, cy + sensor_half),
+                            )
+                        }
+                    };
+
+                    let sensor_id = ui.id().with("pane_border_sensor").with(border_idx);
+                    let response =
+                        ui.interact(sensor_rect, sensor_id, egui::Sense::click_and_drag());
+
+                    // Change cursor when hovering or dragging a border.
+                    if response.hovered() || response.dragged() {
+                        let cursor = match border.direction {
+                            panes::SplitDirection::Horizontal => egui::CursorIcon::ResizeHorizontal,
+                            panes::SplitDirection::Vertical => egui::CursorIcon::ResizeVertical,
+                        };
+                        ui.ctx().set_cursor_icon(cursor);
+                    }
+
+                    // On drag start, record which border we're resizing.
+                    if response.drag_started() {
+                        self.border_drag = Some(PaneBorderDrag {
+                            target_pane: border.first_child_pane,
+                            direction: border.direction,
+                            parent_extent: border.parent_extent,
+                        });
+                    }
+
+                    // While dragging, convert pixel delta to ratio delta.
+                    if response.dragged()
+                        && let Some(drag) = &self.border_drag
+                    {
+                        let delta_px = match drag.direction {
+                            panes::SplitDirection::Horizontal => response.drag_delta().x,
+                            panes::SplitDirection::Vertical => response.drag_delta().y,
+                        };
+
+                        // Convert pixel delta to ratio delta based on
+                        // the dragged split parent's extent along the split axis.
+                        let total_px = drag.parent_extent;
+
+                        if total_px > 0.0 {
+                            let delta_ratio = delta_px / total_px;
+                            if let Err(e) = self.tabs.active_tab_mut().pane_tree.resize_split(
+                                drag.target_pane,
+                                drag.direction,
+                                delta_ratio,
+                            ) {
+                                debug!("Border resize failed: {e}");
+                            }
+                        }
+                    }
+
+                    // Clear drag state when drag ends.
+                    if response.drag_stopped() {
+                        self.border_drag = None;
+                    }
+                }
+            }
+
+            for (pane_id, pane_rect) in &pane_layout {
+                // Shrink the pane rect slightly to leave room for borders.
+                // Each pane edge that is interior (shared with another pane)
+                // gives up half the border width so the total gap equals
+                // `border_width`.
+                let content_rect = if has_multiple_panes {
+                    let half = border_width / 2.0;
+                    let shrink_left = if pane_rect.min.x > available_rect.min.x {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let shrink_right = if pane_rect.max.x < available_rect.max.x {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let shrink_top = if pane_rect.min.y > available_rect.min.y {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let shrink_bottom = if pane_rect.max.y < available_rect.max.y {
+                        half
+                    } else {
+                        0.0
+                    };
+                    egui::Rect::from_min_max(
+                        egui::pos2(pane_rect.min.x + shrink_left, pane_rect.min.y + shrink_top),
+                        egui::pos2(
+                            pane_rect.max.x - shrink_right,
+                            pane_rect.max.y - shrink_bottom,
+                        ),
+                    )
+                } else {
+                    *pane_rect
+                };
+
+                // Per-pane character dimensions from this pane's content rect.
+                let pane_width_chars = (content_rect.width() / logical_char_w)
+                    .floor()
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to calculate pane width chars: {e}");
+                        10
+                    });
+                let pane_height_chars = (content_rect.height() / logical_char_h)
+                    .floor()
+                    .approx_as::<usize>()
+                    .unwrap_or_else(|e| {
+                        error!("Failed to calculate pane height chars: {e}");
+                        10
+                    })
+                    .max(1);
+
+                // Look up the pane mutably for resize + render.
+                let pane_id = *pane_id;
+                let tab = self.tabs.active_tab_mut();
+                let Some(pane) = tab.pane_tree.find_mut(pane_id) else {
+                    // Should never happen — layout returned this id.
+                    error!("Pane {pane_id} not found in tree during render");
+                    continue;
+                };
+
+                // Debounced resize: only send when char dims changed.
+                let new_size = (pane_width_chars, pane_height_chars);
+                if new_size != pane.view_state.last_sent_size {
+                    if let Err(e) = pane.input_tx.send(InputEvent::Resize(
+                        pane_width_chars,
+                        pane_height_chars,
+                        font_width,
+                        font_height,
+                    )) {
+                        error!("Failed to send resize event for {pane_id}: {e}");
+                    } else {
+                        pane.view_state.last_sent_size = new_size;
+                    }
+                }
+
+                // Load this pane's snapshot and sync scroll offset.
+                let pane_snap = pane.arc_swap.load();
+                if pane.view_state.scroll_offset != pane_snap.scroll_offset {
+                    pane.view_state.scroll_offset = pane_snap.scroll_offset;
+                }
+
+                let is_echo_off = self.config.security.password_indicator
+                    && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
+                let is_active = pane_id == active_pane_id;
+
+                // Render this pane into a child UI scoped to its content rect.
+                // show() returns (left_clicked, deferred_key_actions).
+                // left_clicked is true when a primary left-click was pressed inside
+                // this pane's rect — used below for click-to-focus.
+                let show_result =
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |pane_ui| {
+                        self.terminal_widget.show(
+                            pane_ui,
+                            &pane_snap,
+                            &mut pane.view_state,
+                            &pane.render_state,
+                            &mut pane.render_cache,
+                            &pane.input_tx,
+                            &pane.clipboard_rx,
+                            &pane.search_buffer_rx,
+                            ui_overlay_open,
+                            bg_opacity,
+                            &self.binding_map,
+                            is_echo_off,
+                            is_active,
+                        )
+                    });
+                let (left_clicked, deferred_actions) = show_result.inner;
+                all_deferred_actions.extend(deferred_actions);
+
+                // Click-to-focus: if a non-active pane was left-clicked, transfer
+                // keyboard focus to it and send FocusChange events to both panes.
+                if left_clicked && !is_active {
+                    let tab = self.tabs.active_tab_mut();
+                    let old_active = tab.active_pane;
+                    // Notify the previously-active pane that it lost focus.
+                    if let Some(old_pane) = tab.pane_tree.find(old_active)
+                        && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+                    {
+                        error!("Failed to send FocusChange(false) to pane {old_active}: {e}");
+                    }
+                    // Switch focus.
+                    tab.active_pane = pane_id;
+                    // Notify the newly-active pane that it gained focus.
+                    if let Some(new_pane) = tab.pane_tree.find(pane_id)
+                        && let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true))
+                    {
+                        error!("Failed to send FocusChange(true) to pane {pane_id}: {e}");
+                    }
+                }
+
+                // Advance text blink cycle for this pane if it has blinking text.
+                if pane_snap.has_blinking_text {
+                    // Re-borrow after the allocate_new_ui closure.
+                    let tab = self.tabs.active_tab_mut();
+                    if let Some(p) = tab.pane_tree.find_mut(pane_id) {
+                        p.view_state.tick_text_blink();
+                    }
+                }
+
+                // Determine repaint delay for this pane.
+                let cursor_is_blinking = matches!(
+                    pane_snap.cursor_visual_style,
+                    freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
+                        | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
+                        | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
+                );
+                if pane_snap.content_changed || cursor_is_blinking || pane_snap.has_blinking_text {
+                    let delay = if pane_snap.content_changed {
+                        std::time::Duration::from_millis(16)
+                    } else if pane_snap.has_blinking_text {
+                        view_state::TEXT_BLINK_TICK_DURATION
+                    } else {
+                        std::time::Duration::from_millis(500)
+                    };
+                    shortest_repaint_delay =
+                        Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
+                }
+            }
+
+            // ── Pane borders ─────────────────────────────────────────
+            //
+            // Draw tmux-style half-highlighted borders: each split border is
+            // divided at the midpoint along its length. The half adjacent to
+            // the active pane's subtree is drawn in the active color; the
+            // other half gets the inactive color. This makes it visually
+            // clear which pane owns each shared edge.
+            if has_multiple_panes && zoomed_pane.is_none() {
+                let painter = ui.painter();
+                let inactive_color = egui::Color32::from_gray(80);
+                let active_color = egui::Color32::from_rgb(100, 160, 255);
+
+                let border_rects = self
+                    .tabs
+                    .active_tab()
+                    .pane_tree
+                    .split_borders(available_rect, active_pane_id)
+                    .unwrap_or_default();
+
+                for border in &border_rects {
+                    let r = border.rect;
+
+                    // Determine which halves are active/inactive.
+                    // active_in_first == Some(true)  → first half active
+                    // active_in_first == Some(false) → second half active
+                    // active_in_first == None        → both inactive
+                    let (first_color, second_color) = match border.active_in_first {
+                        Some(true) => (active_color, inactive_color),
+                        Some(false) => (inactive_color, active_color),
+                        None => (inactive_color, inactive_color),
+                    };
+
+                    match border.direction {
+                        panes::SplitDirection::Horizontal => {
+                            // Vertical dividing line — split top/bottom.
+                            // First child is left → "first half" = top.
+                            let mid_y = f32::midpoint(r.min.y, r.max.y);
+                            let top = egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, mid_y));
+                            let bot = egui::Rect::from_min_max(egui::pos2(r.min.x, mid_y), r.max);
+
+                            painter.line_segment(
+                                [top.left_top(), top.left_bottom()],
+                                egui::Stroke::new(border_width, first_color),
+                            );
+                            painter.line_segment(
+                                [bot.left_top(), bot.left_bottom()],
+                                egui::Stroke::new(border_width, second_color),
+                            );
+                        }
+                        panes::SplitDirection::Vertical => {
+                            // Horizontal dividing line — split left/right.
+                            // First child is top → "first half" = left.
+                            let mid_x = f32::midpoint(r.min.x, r.max.x);
+                            let left = egui::Rect::from_min_max(r.min, egui::pos2(mid_x, r.max.y));
+                            let right = egui::Rect::from_min_max(egui::pos2(mid_x, r.min.y), r.max);
+
+                            painter.line_segment(
+                                [left.left_top(), left.right_top()],
+                                egui::Stroke::new(border_width, first_color),
+                            );
+                            painter.line_segment(
+                                [right.left_top(), right.right_top()],
+                                egui::Stroke::new(border_width, second_color),
+                            );
+                        }
+                    }
+                }
+            }
 
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
-            for action in deferred_actions {
+            for action in all_deferred_actions {
                 self.dispatch_deferred_action(action);
+            }
+
+            // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
+            if self.pending_close_pane {
+                self.pending_close_pane = false;
+                self.close_focused_pane(ui);
+            }
+
+            // Handle deferred directional focus (needs layout rects).
+            if let Some(dir) = self.pending_focus_direction.take() {
+                self.focus_pane_in_direction(dir, available_rect);
             }
 
             // Keep the window title bar in sync with the active tab's title.
@@ -1488,7 +2389,7 @@ impl eframe::App for FreminalGui {
             // Only issue the viewport command when the title actually changed;
             // calling `send_viewport_cmd` unconditionally every frame triggers
             // an infinite repaint loop (~3 % idle CPU).
-            let active_title = &self.tabs.active_tab().title;
+            let active_title = &self.tabs.active_tab().active_pane().title;
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
@@ -1501,38 +2402,8 @@ impl eframe::App for FreminalGui {
                 ));
             }
 
-            // Only schedule a wakeup when there is work to do:
-            //  - new content arrived (`content_changed`)
-            //  - cursor is blinking (needs toggling every ~500 ms)
-            //  - text is blinking (needs toggling every ~167 ms)
-            //  - first frame (buffers still empty — need at least one full draw)
-            //
-            // A steady cursor with no new content does not need a periodic
-            // repaint; egui will wake on the next user input event instead.
-            let cursor_is_blinking = matches!(
-                snap.cursor_visual_style,
-                freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
-                    | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
-                    | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
-            );
-
-            // Advance the text blink cycle when blinking text is present.
-            if snap.has_blinking_text {
-                self.tabs.active_tab_mut().view_state.tick_text_blink();
-            }
-
-            if snap.content_changed || cursor_is_blinking || snap.has_blinking_text {
-                // Use a 16 ms deadline (~60 fps) for content changes; use the
-                // blink half-period (~500 ms) when only the cursor needs to
-                // toggle; use the fast-blink tick (~167 ms) when text is
-                // blinking.  Pick the shortest applicable interval.
-                let delay = if snap.content_changed {
-                    std::time::Duration::from_millis(16)
-                } else if snap.has_blinking_text {
-                    view_state::TEXT_BLINK_TICK_DURATION
-                } else {
-                    std::time::Duration::from_millis(500)
-                };
+            // Schedule a repaint at the shortest interval needed by any pane.
+            if let Some(delay) = shortest_repaint_delay {
                 ui.ctx().request_repaint_after(delay);
             }
         });
@@ -1575,6 +2446,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self
                         .tabs
                         .active_tab()
+                        .active_pane()
                         .input_tx
                         .send(InputEvent::ThemeChange(theme))
                     {
@@ -1586,11 +2458,23 @@ impl eframe::App for FreminalGui {
                     // the new palette.  Without this, the preview's rebuild
                     // may be the last one, and the Apply-frame snapshot
                     // (with content_changed=false) would skip the rebuild.
-                    self.terminal_widget.invalidate_theme_cache();
+                    for tab in self.tabs.iter_mut() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes {
+                                pane.render_cache.invalidate_theme_cache();
+                            }
+                        }
+                    }
                 }
 
-                self.terminal_widget
-                    .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                let font_changed =
+                    self.terminal_widget
+                        .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                if font_changed {
+                    // Font or ligature config changed — clear each pane's GL
+                    // atlas and force full vertex rebuilds.
+                    self.invalidate_all_pane_atlases();
+                }
                 self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
                     error!(
                         "Failed to rebuild binding map after settings apply: {e}. Using defaults."
@@ -1599,14 +2483,18 @@ impl eframe::App for FreminalGui {
                 });
                 self.config = new_cfg;
 
-                // Notify all tabs of the new theme mode so DECRPM ?2031 returns
-                // the correct locked/dynamic response after the config change.
+                // Notify all panes in all tabs of the new theme mode so DECRPM ?2031
+                // returns the correct locked/dynamic response after the config change.
                 for tab in self.tabs.iter() {
-                    if let Err(e) = tab.input_tx.send(InputEvent::ThemeModeUpdate(
-                        self.config.theme.mode,
-                        self.os_dark_mode,
-                    )) {
-                        error!("Failed to send ThemeModeUpdate after settings apply: {e}");
+                    if let Ok(panes) = tab.pane_tree.iter_panes() {
+                        for pane in panes {
+                            if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                                self.config.theme.mode,
+                                self.os_dark_mode,
+                            )) {
+                                error!("Failed to send ThemeModeUpdate after settings apply: {e}");
+                            }
+                        }
                     }
                 }
             }
@@ -1615,6 +2503,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self
                         .tabs
                         .active_tab()
+                        .active_pane()
                         .input_tx
                         .send(InputEvent::ThemeChange(theme))
                     {
@@ -1628,6 +2517,7 @@ impl eframe::App for FreminalGui {
                     if let Err(e) = self
                         .tabs
                         .active_tab()
+                        .active_pane()
                         .input_tx
                         .send(InputEvent::ThemeChange(theme))
                     {
