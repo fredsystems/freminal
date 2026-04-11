@@ -920,13 +920,13 @@ impl PaneTree {
 fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
     match direction {
         SplitDirection::Horizontal => {
-            let split_x = rect.width().mul_add(ratio, rect.min.x);
+            let split_x = rect.width().mul_add(ratio, rect.min.x).round();
             let left = Rect::from_min_max(rect.min, egui::pos2(split_x, rect.max.y));
             let right = Rect::from_min_max(egui::pos2(split_x, rect.min.y), rect.max);
             (left, right)
         }
         SplitDirection::Vertical => {
-            let split_y = rect.height().mul_add(ratio, rect.min.y);
+            let split_y = rect.height().mul_add(ratio, rect.min.y).round();
             let top = Rect::from_min_max(rect.min, egui::pos2(rect.max.x, split_y));
             let bottom = Rect::from_min_max(egui::pos2(rect.min.x, split_y), rect.max);
             (top, bottom)

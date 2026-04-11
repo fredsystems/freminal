@@ -34,7 +34,6 @@ use super::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
             show_search_bar,
         },
-        shaping::ShapingCache,
     },
     coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, visible_window_start},
     input::write_input_to_terminal,
@@ -558,6 +557,8 @@ pub struct PaneRenderCache {
     pub(super) hover_snap_ptr: usize,
     /// The cursor icon that was last written via `output_mut`.
     pub(super) previous_cursor_icon: CursorIcon,
+    /// Per-pane shaping cache for text layout.
+    pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
 }
 
 impl PaneRenderCache {
@@ -585,6 +586,7 @@ impl PaneRenderCache {
             cached_hovered_url: None,
             hover_snap_ptr: 0,
             previous_cursor_icon: CursorIcon::Default,
+            shaping_cache: crate::gui::shaping::ShapingCache::new(),
         }
     }
 
@@ -599,6 +601,7 @@ impl PaneRenderCache {
     pub fn invalidate_content(&mut self) {
         self.last_rendered_visible = None;
         self.last_rendered_line_widths = None;
+        self.shaping_cache.clear();
     }
 }
 
@@ -628,8 +631,6 @@ impl Default for PaneRenderCache {
 pub struct FreminalTerminalWidget {
     /// Shared font manager — metrics, rasterisation, fallback chain.
     pub(super) font_manager: FontManager,
-    /// Shared shaping cache — reused across all panes (same font config).
-    shaping_cache: ShapingCache,
     /// Whether OpenType ligatures are enabled for text shaping.
     ligatures: bool,
     /// Whether cursor trail animation is enabled (cursor glides to new position).
@@ -659,7 +660,6 @@ impl FreminalTerminalWidget {
 
         Self {
             font_manager: FontManager::new(config, pixels_per_point),
-            shaping_cache: ShapingCache::new(),
             ligatures: config.font.ligatures,
             cursor_trail: config.cursor.trail,
             cursor_trail_duration: Duration::from_millis(u64::from(
@@ -712,12 +712,7 @@ impl FreminalTerminalWidget {
     /// **Must be called before [`Self::cell_size`] each frame** so that resize
     /// calculations in `FreminalGui::ui()` use up-to-date metrics.
     pub fn sync_pixels_per_point(&mut self, ppp: f32) -> bool {
-        if self.font_manager.update_pixels_per_point(ppp) {
-            self.shaping_cache.clear();
-            true
-        } else {
-            false
-        }
+        self.font_manager.update_pixels_per_point(ppp)
     }
 
     /// Render the terminal for one egui frame and process all pending input.
@@ -1201,7 +1196,7 @@ impl FreminalTerminalWidget {
                     .is_empty()
             {
                 // Full rebuild path.
-                let shaped_lines = self.shaping_cache.shape_visible(
+                let shaped_lines = cache.shaping_cache.shape_visible(
                     &snap.visible_chars,
                     &snap.visible_tags,
                     snap.term_width,
@@ -1594,9 +1589,6 @@ impl FreminalTerminalWidget {
         let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
-        if needs_pane_atlas_clear {
-            self.shaping_cache.clear();
-        }
         self.ligatures = new_config.font.ligatures;
         self.cursor_trail = new_config.cursor.trail;
         self.cursor_trail_duration =
@@ -1630,12 +1622,7 @@ impl FreminalTerminalWidget {
     /// resize-detection logic in the render loop (it compares
     /// `available_pixels / cell_size` against `view_state.last_sent_size`).
     pub fn apply_font_zoom(&mut self, effective_size: f32) -> bool {
-        if self.font_manager.set_font_size(effective_size) {
-            self.shaping_cache.clear();
-            true
-        } else {
-            false
-        }
+        self.font_manager.set_font_size(effective_size)
     }
 }
 
