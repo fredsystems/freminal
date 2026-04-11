@@ -17,7 +17,7 @@ startup commands.
 | 55  | Custom Shaders                 | Medium | Pending  |
 | 56  | Session Restore / Startup Cmds | Medium | Pending  |
 | 57  | Render Loop Optimization       | Medium | Complete |
-| 58  | Built-in Multiplexer           | Large  | Active   |
+| 58  | Built-in Multiplexer           | Large  | Complete |
 
 ---
 
