@@ -28,10 +28,10 @@ use crate::buffer_states::modes::{
     decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
+    in_band_resize_mode::InBandResizeMode,
     irm::Irm,
     keypad::KeypadMode,
     lnm::Lnm,
-    modify_other_keys_mode::ModifyOtherKeysMode,
     mouse::{MouseEncoding, MouseTrack},
     private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
@@ -141,7 +141,7 @@ pub enum Mode {
     GraphemeClustering(GraphemeClustering),
     Theming(Theming),
     ApplicationEscapeKey(ApplicationEscapeKey),
-    ModifyOtherKeysMode(ModifyOtherKeysMode),
+    InBandResizeMode(InBandResizeMode),
     PrivateColorRegisters(PrivateColorRegisters),
     UnknownQuery(Vec<u8>),
     Unknown(UnknownMode),
@@ -213,7 +213,7 @@ impl Mode {
             b"?2027" => Self::GraphemeClustering(GraphemeClustering::new(&mode)),
             b"?2031" => Self::Theming(Theming::new(&mode)),
             b"?7727" => Self::ApplicationEscapeKey(ApplicationEscapeKey::new(&mode)),
-            b"?2048" => Self::ModifyOtherKeysMode(ModifyOtherKeysMode::new(&mode)),
+            b"?2048" => Self::InBandResizeMode(InBandResizeMode::new(&mode)),
             _ => {
                 let is_dec = params.first() == Some(&b'?');
                 let output_params = params
@@ -281,7 +281,7 @@ impl ReportMode for Mode {
             }
             Self::Theming(theming) => theming.report(override_mode),
             Self::ApplicationEscapeKey(aek) => aek.report(override_mode),
-            Self::ModifyOtherKeysMode(mok) => mok.report(override_mode),
+            Self::InBandResizeMode(mok) => mok.report(override_mode),
             Self::PrivateColorRegisters(pcr) => pcr.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
             Self::UnknownQuery(v) => {
@@ -334,7 +334,7 @@ impl fmt::Display for Mode {
             Self::GraphemeClustering(grapheme_clustering) => write!(f, "{grapheme_clustering}"),
             Self::Theming(theming) => write!(f, "{theming}"),
             Self::ApplicationEscapeKey(aek) => write!(f, "{aek}"),
-            Self::ModifyOtherKeysMode(mok) => write!(f, "{mok}"),
+            Self::InBandResizeMode(mok) => write!(f, "{mok}"),
             Self::PrivateColorRegisters(pcr) => write!(f, "{pcr}"),
             Self::Unknown(params) => write!(f, "{params}"),
             Self::UnknownQuery(v) => write!(f, "Unknown Query({v:?})"),
@@ -372,24 +372,24 @@ mod tests {
         );
     }
 
-    // ── ?2048 (ModifyOtherKeysMode) ─────────────────────────────────
+    // ── ?2048 (InBandResizeMode) ─────────────────────────────────
 
     #[test]
     fn parse_2048_dec_set() {
         let mode = Mode::terminal_mode_from_params(b"?2048", SetMode::DecSet);
-        assert_eq!(mode, Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Set));
+        assert_eq!(mode, Mode::InBandResizeMode(InBandResizeMode::Set));
     }
 
     #[test]
     fn parse_2048_dec_rst() {
         let mode = Mode::terminal_mode_from_params(b"?2048", SetMode::DecRst);
-        assert_eq!(mode, Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset));
+        assert_eq!(mode, Mode::InBandResizeMode(InBandResizeMode::Reset));
     }
 
     #[test]
     fn parse_2048_dec_query() {
         let mode = Mode::terminal_mode_from_params(b"?2048", SetMode::DecQuery);
-        assert_eq!(mode, Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Query));
+        assert_eq!(mode, Mode::InBandResizeMode(InBandResizeMode::Query));
     }
 
     // ── Report round-trips ──────────────────────────────────────────
@@ -401,8 +401,8 @@ mod tests {
     }
 
     #[test]
-    fn report_modify_other_keys_mode_set() {
-        let mode = Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Set);
+    fn report_in_band_resize_mode_set() {
+        let mode = Mode::InBandResizeMode(InBandResizeMode::Set);
         assert_eq!(mode.report(None), "\x1b[?2048;1$y");
     }
 
@@ -415,8 +415,8 @@ mod tests {
     }
 
     #[test]
-    fn display_modify_other_keys_mode() {
-        let s = format!("{}", Mode::ModifyOtherKeysMode(ModifyOtherKeysMode::Reset));
+    fn display_in_band_resize_mode() {
+        let s = format!("{}", Mode::InBandResizeMode(InBandResizeMode::Reset));
         assert!(!s.is_empty());
     }
     // ── ?69 (DECLRMM) ───────────────────────────────────────────────

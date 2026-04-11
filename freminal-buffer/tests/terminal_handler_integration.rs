@@ -6,7 +6,7 @@
 use freminal_buffer::terminal_handler::TerminalHandler;
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
-use freminal_common::buffer_states::modes::modify_other_keys_mode::ModifyOtherKeysMode;
+use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::pty_write::PtyWrite;
 
@@ -4940,36 +4940,87 @@ fn handler_application_escape_key_query_when_true() {
     }
 }
 
-// ── ModifyOtherKeysMode (?2048) via Mode dispatch ───────────────────────
+// ── InBandResizeMode (?2048) via Mode dispatch ───────────────────────
 
 #[test]
-fn handler_modify_other_keys_mode_dec_set() {
-    let mut handler = TerminalHandler::new(80, 24);
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
-        ModifyOtherKeysMode::Set,
-    ))]);
-    assert_eq!(handler.modify_other_keys_level(), 1);
-}
-
-#[test]
-fn handler_modify_other_keys_mode_dec_rst() {
-    let mut handler = TerminalHandler::new(80, 24);
-    // Set via CSI then reset via DEC mode
-    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
-        ModifyOtherKeysMode::Reset,
-    ))]);
-    assert_eq!(handler.modify_other_keys_level(), 0);
-}
-
-#[test]
-fn handler_modify_other_keys_mode_query_when_level_zero() {
+fn handler_in_band_resize_mode_dec_set() {
+    // Verify that DECSET ?2048 enables in-band resize mode.
+    // We confirm the state via a DECRQM query, which must report mode 1 (set).
     let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
 
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
-        ModifyOtherKeysMode::Query,
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Set,
+    ))]);
+
+    // Drain any immediate in-band-resize notification sent on Set.
+    while rx.try_recv().is_ok() {}
+
+    // Now query — must report mode 1 (set).
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
+    ))]);
+
+    let msg = rx.try_recv().expect("DECRQM query must send a response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?2048;1$y",
+                "DECSET ?2048 must be reported as mode 1 (set)"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+}
+
+#[test]
+fn handler_in_band_resize_mode_dec_rst() {
+    // Verify that DECRST ?2048 disables in-band resize mode.
+    // Set the mode first, then reset it, and confirm via DECRQM.
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    // Enable first.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Set,
+    ))]);
+    // Drain the immediate resize notification.
+    while rx.try_recv().is_ok() {}
+
+    // Now reset via DECRST ?2048.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Reset,
+    ))]);
+
+    // Query — must now report mode 2 (reset).
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
+    ))]);
+
+    let msg = rx.try_recv().expect("DECRQM query must send a response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?2048;2$y",
+                "DECRST ?2048 must be reported as mode 2 (reset)"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+}
+
+#[test]
+fn handler_in_band_resize_mode_query_when_level_zero() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+    let mut handler = TerminalHandler::new(80, 24);
+    handler.set_write_tx(tx);
+
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
     ))]);
 
     let msg = rx.try_recv().expect("expected DECRQM response");
@@ -4986,16 +5037,21 @@ fn handler_modify_other_keys_mode_query_when_level_zero() {
 }
 
 #[test]
-fn handler_modify_other_keys_mode_query_when_level_nonzero() {
+fn handler_in_band_resize_mode_query_when_level_nonzero() {
+    // Verify that after DECSET ?2048 the DECRQM query reports mode 1 (set).
     let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
     let mut handler = TerminalHandler::new(80, 24);
     handler.set_write_tx(tx);
 
-    // Set level to 2 via CSI > 4 ; 2 m
-    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+    // Enable in-band resize via DECSET ?2048.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Set,
+    ))]);
+    // Drain the immediate resize notification sent on Set.
+    while rx.try_recv().is_ok() {}
 
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
-        ModifyOtherKeysMode::Query,
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
     ))]);
 
     let msg = rx.try_recv().expect("expected DECRQM response");
@@ -5004,7 +5060,7 @@ fn handler_modify_other_keys_mode_query_when_level_nonzero() {
             let s = String::from_utf8(bytes).expect("valid UTF-8");
             assert_eq!(
                 s, "\x1b[?2048;1$y",
-                "query when level>0 should report mode 1 (set)"
+                "query when in-band resize is enabled should report mode 1 (set)"
             );
         }
         other => panic!("expected PtyWrite::Write, got {other:?}"),
@@ -5015,16 +5071,65 @@ fn handler_modify_other_keys_mode_query_when_level_nonzero() {
 
 #[test]
 fn handler_csi_set_then_dec_mode_reset_interaction() {
+    // Verify that DECSET ?2048 followed by DECRST ?2048 correctly toggles the
+    // in-band resize state. The CSI `modifyOtherKeys` path (ModifyOtherKeys) and
+    // the DEC-private ?2048 path are independent: resetting ?2048 does not affect
+    // the CSI-level field and vice versa.
+    let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
     let mut handler = TerminalHandler::new(80, 24);
-    // Set via CSI > 4 ; 2 m
-    handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
-    assert_eq!(handler.modify_other_keys_level(), 2);
+    handler.set_write_tx(tx);
 
-    // Reset via DECRST ?2048
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
-        ModifyOtherKeysMode::Reset,
+    // Enable via DECSET ?2048.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Set,
     ))]);
-    assert_eq!(handler.modify_other_keys_level(), 0);
+    // Drain immediate resize notification.
+    while rx.try_recv().is_ok() {}
+
+    // Verify it is enabled.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
+    ))]);
+    let msg = rx
+        .try_recv()
+        .expect("query after Set must produce a response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(s, "\x1b[?2048;1$y", "in-band resize must be set (mode 1)");
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+
+    // Reset via DECRST ?2048.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Reset,
+    ))]);
+
+    // Verify it is now disabled.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
+    ))]);
+    let msg = rx
+        .try_recv()
+        .expect("query after Reset must produce a response");
+    match msg {
+        PtyWrite::Write(bytes) => {
+            let s = String::from_utf8(bytes).expect("valid UTF-8");
+            assert_eq!(
+                s, "\x1b[?2048;2$y",
+                "in-band resize must be reset (mode 2) after DECRST"
+            );
+        }
+        other => panic!("expected PtyWrite::Write, got {other:?}"),
+    }
+
+    // The CSI modifyOtherKeys level is independent — it must still be 0.
+    assert_eq!(
+        handler.modify_other_keys_level(),
+        0,
+        "DECRST ?2048 must not affect the CSI modifyOtherKeys level"
+    );
 }
 
 // ── full_reset clears both fields ───────────────────────────────────────
@@ -5062,8 +5167,8 @@ fn handler_query_without_write_tx_does_not_panic() {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
         ApplicationEscapeKey::Query,
     ))]);
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::ModifyOtherKeysMode(
-        ModifyOtherKeysMode::Query,
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+        InBandResizeMode::Query,
     ))]);
     // If we get here without panicking, the test passes
 }
