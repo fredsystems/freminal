@@ -3,21 +3,24 @@
 ## Goal
 
 Deliver differentiation features: multiple OS windows from a single instance, background
-images, user-provided custom shaders for post-processing effects, and session restore /
-startup commands.
+images, and user-provided custom shaders for post-processing effects.
 
 ---
 
 ## Task Summary
 
-| #   | Feature                        | Scope  | Status   |
-| --- | ------------------------------ | ------ | -------- |
-| 53  | Multiple Windows               | Large  | Pending  |
-| 54  | Background Images              | Medium | Pending  |
-| 55  | Custom Shaders                 | Medium | Pending  |
-| 56  | Session Restore / Startup Cmds | Medium | Pending  |
-| 57  | Render Loop Optimization       | Medium | Complete |
-| 58  | Built-in Multiplexer           | Large  | Complete |
+| #   | Feature                  | Scope  | Status   |
+| --- | ------------------------ | ------ | -------- |
+| 53  | Multiple Windows         | Large  | Pending  |
+| 54  | Background Images        | Medium | Pending  |
+| 55  | Custom Shaders           | Medium | Pending  |
+| 57  | Render Loop Optimization | Medium | Complete |
+| 58  | Built-in Multiplexer     | Large  | Complete |
+
+**Note:** Task 56 (Session Restore / Startup Commands) has been moved to v0.6.0 where it is
+subsumed by Task 61 (Saved Layouts), which provides a superset of the original scope including
+multi-tab/multi-pane layout definitions, variable substitution, and a layout library. See
+`PLAN_VERSION_060.md`.
 
 ---
 
@@ -285,89 +288,20 @@ terminal (brief overlay or title bar message), and fall back to direct rendering
 
 ## Task 56 — Session Restore / Startup Commands
 
-### 56 Overview
+**Status: Moved to v0.6.0.** Subsumed by Task 61 (Saved Layouts) in `PLAN_VERSION_060.md`,
+which provides a superset of this task's scope: multi-tab/multi-pane layout definitions with
+variable substitution, a layout library, save/restore, and auto-restore on startup.
+
+<details>
+<summary>Original design (for reference)</summary>
 
 Configurable startup commands per tab and session layouts that restore a multi-tab arrangement.
 Depends on tabs (Task 36, v0.3.0).
 
-### 56 Design
+See git history for the full original subtask list (7 subtasks covering config, startup tab
+creation, command injection, tab titles, session save/restore, and tests).
 
-**Startup Commands:** Each tab can have a startup command that runs after the shell launches:
-
-```toml
-[[startup.tabs]]
-title = "Server"
-command = "ssh user@server"
-
-[[startup.tabs]]
-title = "Logs"
-command = "tail -f /var/log/syslog"
-directory = "/var/log"
-
-[[startup.tabs]]
-title = "Dev"
-directory = "~/projects/myapp"
-```
-
-On application launch, if `startup.tabs` is configured, create one tab per entry (instead of
-the default single tab). Each tab's shell is started in the specified `directory` (if set) and
-the `command` (if set) is sent as input after the shell is ready.
-
-**Session Save/Restore (stretch goal):** Save the current tab layout (titles, working
-directories, active commands) to a session file. Restore from a session file on startup.
-This is a stretch goal — the minimum viable feature is the TOML startup configuration.
-
-**Config:**
-
-```toml
-[startup]
-# restore_last_session = false
-
-[[startup.tabs]]
-title = "Main"
-# command = ""
-# directory = ""
-# shell = ""  # Override the default shell for this tab
-```
-
-### 56 Subtasks
-
-1. **56.1 — Config: `[startup]` section**
-   Add `StartupConfig` with a `tabs: Vec<StartupTabConfig>` field. Each `StartupTabConfig`
-   has optional `title`, `command`, `directory`, `shell`. Update config_example.toml,
-   home-manager module.
-
-2. **56.2 — Startup tab creation**
-   On application launch, if `startup.tabs` is non-empty, create tabs according to the
-   configuration instead of a single default tab. Pass `directory` and `shell` to the PTY
-   creation function.
-
-3. **56.3 — Startup command injection**
-   After a tab's shell is ready (small delay or detect prompt), send the `command` as
-   keyboard input to that tab's PTY.
-
-4. **56.4 — Tab title from config**
-   If `title` is specified in the startup config, set it as the tab's initial title (before
-   any OSC 0/2 from the shell overrides it).
-
-5. **56.5 — Session save (stretch)**
-   Add a "Save Session" menu item that captures the current tab layout to a TOML file.
-
-6. **56.6 — Session restore (stretch)**
-   Add a `--session` CLI flag and `startup.session_file` config option to restore from a
-   saved session file.
-
-7. **56.7 — Tests**
-   Unit tests: config parsing, startup tab creation. Integration: launch with startup config,
-   verify tabs are created with correct titles.
-
-### 56 Primary Files
-
-- `freminal-common/src/config.rs` (`StartupConfig`, `StartupTabConfig`)
-- `freminal/src/gui/tabs.rs` (startup tab creation)
-- `freminal/src/main.rs` (startup flow)
-- `config_example.toml`
-- `nix/home-manager-module.nix`
+</details>
 
 ---
 
@@ -958,21 +892,19 @@ Adding thread ownership of the tree would require synchronization with no perfor
 Task 53 (Multiple Windows) ── builds on tabs (Task 36, v0.3.0)
 Task 54 (Background Images) ── extends background_opacity (Task 34, complete)
 Task 55 (Custom Shaders) ── extends the GL renderer (Task 1, complete)
-Task 56 (Session Restore) ── depends on tabs (Task 36, v0.3.0)
+Task 56 (Session Restore) ── MOVED to v0.6.0, subsumed by Task 61 (Saved Layouts)
 Task 57 (Render Loop Opt) ── independent; complete
 Task 58 (Built-in Muxing) ── builds on tabs (Task 36, v0.3.0); subsumes A.2
 
 Tasks 54 and 55 are independent of each other.
-Tasks 53, 56, and 58 all depend on tabs but are independent of each other.
+Tasks 53 and 58 depend on tabs but are independent of each other.
 Task 57 is independent of all other v0.5.0 tasks (complete).
 Task 58 is independent of Task 53 (multiple windows) — both can coexist.
 Task 58 subsumes A.2 (Split Panes) from FUTURE_PLANS.md.
 ```
 
-**Recommended order:** Task 57 is complete. Tasks 54 and 55 can start immediately (GL
-renderer work). Tasks 53, 56, and 58 require tabs from v0.3.0 (complete and stable).
-Task 58 (muxing) is the highest-value remaining feature — recommend prioritising it
-after or alongside Task 53.
+**Recommended order:** Tasks 57 and 58 are complete. Tasks 54 and 55 can start immediately
+(GL renderer work). Task 53 requires tabs from v0.3.0 (complete and stable).
 
 ---
 

@@ -11,6 +11,7 @@ For scoped, versioned work see:
 - `PLAN_VERSION_030.md` — v0.3.0 (Daily Driver)
 - `PLAN_VERSION_040.md` — v0.4.0 (Search & Protocol)
 - `PLAN_VERSION_050.md` — v0.5.0 (Multi-Instance & Visual)
+- `PLAN_VERSION_060.md` — v0.6.0 (Replay & Layouts)
 
 ### Severity Ratings
 
@@ -186,4 +187,5 @@ a project website at `freminal.dev`. Separate repository.
 - B.1 (Remote Mux) remains deferred — local muxing is now Task 58 in v0.5.0.
 - B.2, B.3, B.7, and B.8 are deferred pending design decisions — not rejected.
 - A.2 (Split Panes) is subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.
+- Task 56 (Session Restore) is subsumed by Task 61 (Saved Layouts) in v0.6.0.
 - Category C items remain tracked in `MASTER_PLAN.md` with their existing plan documents.
