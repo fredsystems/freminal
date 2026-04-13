@@ -467,6 +467,8 @@ Update this section as tasks complete:
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
 | 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |
+| 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders   |
+| 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders   |
 | 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                   |
 
 ---

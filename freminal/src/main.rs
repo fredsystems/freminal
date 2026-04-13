@@ -44,7 +44,7 @@
 #[macro_use]
 extern crate tracing;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(feature = "playback")]
 use arc_swap::ArcSwap;
@@ -95,6 +95,8 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
 
     let config_path = args.config.clone();
 
+    let window_post = Arc::new(Mutex::new(gui::renderer::WindowPostRenderer::new()));
+
     let initial_pane = gui::panes::Pane {
         id: gui::panes::PaneId::first(),
         arc_swap: channels.arc_swap,
@@ -109,7 +111,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         title_stack: Vec::new(),
         view_state: gui::view_state::ViewState::new(),
         echo_off: channels.echo_off,
-        render_state: gui::terminal::new_render_state(),
+        render_state: gui::terminal::new_render_state(Arc::clone(&window_post)),
         render_cache: gui::terminal::PaneRenderCache::new(),
     };
     let initial_tab = gui::tabs::Tab::new(gui::tabs::TabId::first(), initial_pane);
@@ -120,6 +122,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         args,
         config_path,
         egui_ctx,
+        window_post,
         #[cfg(feature = "playback")]
         false,
     )
@@ -378,6 +381,7 @@ fn main() {
 
         let config_path = args.config.clone();
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
+        let window_post = Arc::new(Mutex::new(gui::renderer::WindowPostRenderer::new()));
         let playback_pane = gui::panes::Pane {
             id: gui::panes::PaneId::first(),
             arc_swap: arc_swap_gui,
@@ -392,7 +396,7 @@ fn main() {
             title_stack: Vec::new(),
             view_state: gui::view_state::ViewState::new(),
             echo_off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            render_state: gui::terminal::new_render_state(),
+            render_state: gui::terminal::new_render_state(Arc::clone(&window_post)),
             render_cache: gui::terminal::PaneRenderCache::new(),
         };
         gui::run(
@@ -401,6 +405,7 @@ fn main() {
             args,
             config_path,
             egui_ctx,
+            window_post,
             is_playback,
         )
     } else {

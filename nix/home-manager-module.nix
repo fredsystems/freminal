@@ -84,7 +84,13 @@ let
       };
 
       uiSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.ui) hide_menu_bar background_opacity;
+        inherit (s.ui)
+          hide_menu_bar
+          background_opacity
+          background_image
+          background_image_mode
+          background_image_opacity
+          ;
       };
 
       tabsSection = lib.filterAttrs (_: v: v != null) {
@@ -101,6 +107,10 @@ let
 
       keybindingsSection = s.keybindings;
 
+      shaderSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.shader) path hot_reload;
+      };
+
       result = {
         version = 1;
         managed_by = "home-manager";
@@ -112,6 +122,7 @@ let
       // lib.optionalAttrs (shellSection != { }) { shell = shellSection; }
       // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; }
       // lib.optionalAttrs (uiSection != { }) { ui = uiSection; }
+      // lib.optionalAttrs (shaderSection != { }) { shader = shaderSection; }
       // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
       // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
@@ -368,6 +379,70 @@ in
           description = ''
             Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
             Null uses the default (1.0).
+          '';
+        };
+
+        background_image = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Path to a background image displayed behind the terminal grid.
+            Supports PNG, JPEG, and WebP. Null disables the background image.
+          '';
+        };
+
+        background_image_mode = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "fill"
+              "fit"
+              "cover"
+              "tile"
+            ]
+          );
+          default = null;
+          description = ''
+            How to fit the background image within the terminal viewport.
+            "fill" stretches to fill (ignores aspect ratio);
+            "fit" letterboxes (preserves aspect ratio, may show empty areas);
+            "cover" crops to fill (preserves aspect ratio, default);
+            "tile" repeats the image.
+            Null uses the default ("cover").
+          '';
+        };
+
+        background_image_opacity = mkOption {
+          type = types.nullOr (types.addCheck types.float (x: x >= 0.0 && x <= 1.0));
+          default = null;
+          description = ''
+            Opacity of the background image (0.0–1.0). Applied on top of the
+            image itself; background_opacity then layers over that.
+            Null uses the default (0.5).
+          '';
+        };
+      };
+
+      shader = {
+        path = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Path to a custom GLSL fragment shader for post-processing.
+            The shader receives these uniforms:
+              uniform sampler2D u_terminal  — the terminal framebuffer texture
+              uniform vec2      u_resolution — viewport size in pixels
+              uniform float     u_time       — elapsed time in seconds
+            Null disables the post-processing pass (default — no FBO overhead).
+          '';
+        };
+
+        hot_reload = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, reload and recompile the shader automatically when the
+            file on disk changes.
+            Null uses the default (true).
           '';
         };
       };

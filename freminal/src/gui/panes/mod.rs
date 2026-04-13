@@ -1038,7 +1038,9 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
-            render_state: crate::gui::terminal::new_render_state(),
+            render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
+                crate::gui::renderer::WindowPostRenderer::new(),
+            ))),
             render_cache: crate::gui::terminal::PaneRenderCache::new(),
         }
     }

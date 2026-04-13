@@ -27,8 +27,8 @@ use super::{
         font_manager::FontManager,
         renderer::{
             CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, TerminalRenderer,
-            build_background_instances, build_cursor_verts_only, build_foreground_instances,
-            build_image_verts,
+            WindowPostRenderer, build_background_instances, build_cursor_verts_only,
+            build_foreground_instances, build_image_verts,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -41,6 +41,7 @@ use super::{
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
 use eframe::egui_glow::CallbackFn;
+use glow::HasContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -430,6 +431,22 @@ fn dispatch_context_menu_action(
     }
 }
 
+/// Represents a pending GPU-side resource update that must be applied inside a
+/// `PaintCallback` (which has access to the GL context).
+///
+/// - [`PendingGpuOp::Load`] — load or replace the resource with the given value.
+/// - [`PendingGpuOp::Clear`] — destroy / reset the resource.
+///
+/// The outer `Option<PendingGpuOp<T>>` on the field indicates *whether* a change
+/// is pending at all (`None` = no pending change this frame).
+#[derive(Debug, Clone)]
+pub(super) enum PendingGpuOp<T> {
+    /// Load or replace the resource with this value.
+    Load(T),
+    /// Destroy / reset the resource.
+    Clear,
+}
+
 /// GPU resources shared between the main thread (vertex building) and the
 /// egui `PaintCallback` closure (draw calls).
 ///
@@ -458,6 +475,23 @@ pub struct RenderState {
     pub(super) cell_height_px: f32,
     /// Background opacity (0.0–1.0), for the instanced background shader.
     pub(super) bg_opacity: f32,
+    /// Background image opacity (0.0–1.0).
+    pub(super) bg_image_opacity: f32,
+    /// Background image fit mode.
+    pub(super) bg_image_mode: freminal_common::config::BackgroundImageMode,
+    /// Shared window-level post-processing renderer.
+    ///
+    /// All panes in the session share one `WindowPostRenderer` (via `Arc<Mutex<…>>`).
+    /// When a user GLSL shader is active, this pane's `PaintCallback` renders its
+    /// terminal content into the window FBO.  A window-level `PaintCallback` registered
+    /// after the pane loop applies the post pass to egui's framebuffer.
+    pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
+    /// Pending background image load/clear to apply on the next `PaintCallback`.
+    ///
+    /// `Some(PendingGpuOp::Load(path))` → load the image at `path`.
+    /// `Some(PendingGpuOp::Clear)` → clear the current image.
+    /// `None` → no pending change this frame.
+    pub(super) pending_bg_image: Option<PendingGpuOp<std::path::PathBuf>>,
 }
 
 impl RenderState {
@@ -469,6 +503,14 @@ impl RenderState {
     pub fn clear_atlas(&mut self) {
         self.atlas.clear();
     }
+
+    /// Schedule a background image load on the next `PaintCallback`.
+    ///
+    /// `path = Some(p)` → load the image at `p`.
+    /// `path = None` → clear the current image.
+    pub fn set_pending_bg_image(&mut self, path: Option<std::path::PathBuf>) {
+        self.pending_bg_image = Some(path.map_or(PendingGpuOp::Clear, PendingGpuOp::Load));
+    }
 }
 
 /// Create a new [`RenderState`] with default (empty) values.
@@ -476,8 +518,11 @@ impl RenderState {
 /// Used when constructing new panes — each pane needs its own GPU render
 /// state since `PaintCallback` closures capture the `Arc<Mutex<RenderState>>`
 /// and execute asynchronously during egui's paint phase.
+///
+/// `window_post` is the shared window-level post-processing renderer.
+/// All panes in the same session share one instance.
 #[must_use]
-pub fn new_render_state() -> Arc<Mutex<RenderState>> {
+pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mutex<RenderState>> {
     Arc::new(Mutex::new(RenderState {
         renderer: TerminalRenderer::new(),
         atlas: GlyphAtlas::default(),
@@ -490,6 +535,10 @@ pub fn new_render_state() -> Arc<Mutex<RenderState>> {
         cell_width_px: 0.0,
         cell_height_px: 0.0,
         bg_opacity: 1.0,
+        bg_image_opacity: 0.5,
+        bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
+        window_post,
+        pending_bg_image: None,
     }))
 }
 
@@ -726,6 +775,8 @@ impl FreminalTerminalWidget {
     /// - `search_buffer_rx` — receives full-buffer search content from the PTY thread.
     /// - `ui_overlay_open` — suppresses terminal input while a modal or menu dropdown is visible.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
+    /// - `bg_image_opacity` — background image opacity (`0.0`–`1.0`) from config.
+    /// - `bg_image_mode` — background image fit mode from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
     /// - `is_active_pane` — whether this pane currently has keyboard focus.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
@@ -746,6 +797,8 @@ impl FreminalTerminalWidget {
         search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
         ui_overlay_open: bool,
         bg_opacity: f32,
+        bg_image_opacity: f32,
+        bg_image_mode: freminal_common::config::BackgroundImageMode,
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
@@ -1286,6 +1339,8 @@ impl FreminalTerminalWidget {
                 rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
                 rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
                 rs_ref.bg_opacity = bg_opacity;
+                rs_ref.bg_image_opacity = bg_image_opacity;
+                rs_ref.bg_image_mode = bg_image_mode;
                 drop(rs);
 
                 // Remember which `visible_chars` allocation we rendered, so
@@ -1321,7 +1376,14 @@ impl FreminalTerminalWidget {
             snap.term_width.approx_as::<f32>().unwrap_or(0.0) * logical_cell_w,
             snap.height.approx_as::<f32>().unwrap_or(0.0) * logical_cell_h,
         );
-        let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+        let (_rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+        // Use the full available pane area as the PaintCallback rect so the
+        // post-process shader covers the entire pane, not just the integer-cell
+        // sub-rect.  The cell-content vertex coordinates are already computed
+        // relative to (0,0) in physical pixels; the FBO is sized to the full
+        // pane dimensions (vp.width_px × vp.height_px), so the shader can
+        // cover any sub-cell padding at the right/bottom edges.
+        let rect = ui.max_rect();
 
         // Hand off the draw call to egui's paint phase via PaintCallback.
         // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
@@ -1345,6 +1407,47 @@ impl FreminalTerminalWidget {
                     error!("GL init failed: {e}");
                     return;
                 }
+
+                // Apply any pending background image changes that arrived from
+                // the config-apply path (these need a GL context).
+                if let Some(pending) = rs.pending_bg_image.take() {
+                    match pending {
+                        PendingGpuOp::Load(ref path) => {
+                            if let Err(e) = rs.renderer.update_background_image(gl, path) {
+                                error!("Failed to load background image: {e}");
+                            }
+                        }
+                        PendingGpuOp::Clear => rs.renderer.clear_background_image(gl),
+                    }
+                }
+
+                // Determine the render target framebuffer.
+                //
+                // When a window-level post-processing shader is active, each pane
+                // renders into the shared window FBO (so the shader can composite the
+                // full window).  When inactive, panes render directly to egui's FBO.
+                let wpr_fbo = {
+                    let wpr = rs
+                        .window_post
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if wpr.is_active() { wpr.fbo() } else { None }
+                };
+
+                // If the window FBO is active, explicitly bind it now.
+                // egui has already set viewport/scissor for this pane's sub-rect,
+                // which persists across FBO binds.  After drawing, draw_with_verts
+                // restores the binding to `restore_fbo` (egui's FBO) so egui
+                // state is clean after the callback.
+                if wpr_fbo.is_some() {
+                    unsafe {
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, wpr_fbo);
+                    }
+                }
+                // The restore-FBO is always egui's intermediate FBO, regardless
+                // of which FBO we rendered into.
+                let restore_fbo = painter.intermediate_fbo();
+
                 if is_cursor_only {
                     // Cursor-only fast path: patch just the cursor quad on the
                     // GPU via `glBufferSubData` (no VBO orphan, no full upload).
@@ -1356,6 +1459,8 @@ impl FreminalTerminalWidget {
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
                     let opacity = rs.bg_opacity;
+                    let bg_image_opacity = rs.bg_image_opacity;
+                    let bg_image_mode = rs.bg_image_mode;
                     // Split borrow: renderer + atlas are disjoint from the
                     // scalar fields and snap_images.
                     let rs_ref: &mut RenderState = &mut rs;
@@ -1377,7 +1482,9 @@ impl FreminalTerminalWidget {
                         cw,
                         ch,
                         opacity,
-                        painter.intermediate_fbo(),
+                        bg_image_opacity,
+                        bg_image_mode,
+                        restore_fbo,
                     );
                 } else {
                     // Full draw path: split-borrow RenderState to pass
@@ -1386,6 +1493,8 @@ impl FreminalTerminalWidget {
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
                     let opacity = rs.bg_opacity;
+                    let bg_image_opacity = rs.bg_image_opacity;
+                    let bg_image_mode = rs.bg_image_mode;
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
@@ -1402,7 +1511,9 @@ impl FreminalTerminalWidget {
                         cw,
                         ch,
                         opacity,
-                        painter.intermediate_fbo(),
+                        bg_image_opacity,
+                        bg_image_mode,
+                        restore_fbo,
                     );
                 }
             })),
@@ -1721,6 +1832,10 @@ mod subtask_1_7_tests {
             cell_width_px: 0.0,
             cell_height_px: 0.0,
             bg_opacity: 1.0,
+            bg_image_opacity: 0.5,
+            bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
+            window_post: Arc::new(Mutex::new(WindowPostRenderer::new())),
+            pending_bg_image: None,
         };
         assert!(rs.bg_instances.is_empty(), "bg_instances should be empty");
         assert!(rs.deco_verts.is_empty(), "deco_verts should be empty");
