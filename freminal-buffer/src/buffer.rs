@@ -1161,10 +1161,17 @@ impl Buffer {
                 }
             } else {
                 // Primary buffer: extra rows become scrollback (handled by
-                // enforce_scrollback_limit later).  Just clamp cursor.
-                if self.cursor.pos.y >= new_height {
-                    self.cursor.pos.y = new_height.saturating_sub(1);
-                }
+                // enforce_scrollback_limit later).  The cursor's absolute row
+                // index is left unchanged — `clamp_cursor_after_resize()` (below)
+                // ensures it stays within `rows.len()`, and `visible_window_start(0)`
+                // already anchors the visible window to the bottom of the buffer.
+                //
+                // Previous code clamped `cursor.pos.y` to `new_height - 1`, which
+                // was wrong: `cursor.pos.y` is an absolute index into `self.rows`,
+                // not a screen-relative position.  That clamp moved the cursor from
+                // its real row (e.g. the shell prompt) into the middle of whatever
+                // content happened to be at row `new_height - 1`, causing the
+                // SIGWINCH-triggered shell redraw to overwrite that content.
             }
         }
 
@@ -5684,18 +5691,47 @@ mod tests_gui_resize {
     }
 
     // ------------------------------------------------------------------
-    // 4. Cursor must clamp within new height
+    // 4. Primary buffer: cursor stays at absolute position after shrink
     // ------------------------------------------------------------------
     #[test]
-    fn resize_clamps_cursor() {
+    fn resize_primary_cursor_stays_at_absolute_position() {
         let mut buf = buffer_with_rows_and_config(10, 80, 10, 1000, false);
+
+        buf.cursor.pos.y = 9; // last row (absolute index into rows[])
+        buf.set_size(80, 5, 0); // shrink height from 10 to 5
+
+        // Primary buffer: cursor.pos.y is an absolute index into rows[], NOT
+        // screen-relative.  Shrinking the height does not remove rows (they
+        // become scrollback), so row 9 is still valid (9 < rows.len() == 10).
+        // The cursor must NOT be clamped to `new_height - 1`.
+        assert_eq!(
+            buf.cursor.pos.y, 9,
+            "primary buffer cursor must keep its absolute row position after shrink"
+        );
+        assert_eq!(
+            buf.rows.len(),
+            10,
+            "primary buffer rows must not be deleted on shrink"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 4b. Alternate buffer: cursor IS clamped on shrink (screen-relative)
+    // ------------------------------------------------------------------
+    #[test]
+    fn resize_alternate_cursor_clamped_on_shrink() {
+        let mut buf = buffer_with_rows_and_config(10, 80, 10, 1000, false);
+        buf.kind = BufferType::Alternate;
 
         buf.cursor.pos.y = 9; // last row
         buf.set_size(80, 5, 0); // shrink
 
+        // Alternate buffer: excess rows are drained from the top, cursor is
+        // adjusted by the number of removed rows.  With 10 rows shrunk to
+        // height 5, 5 rows are removed, cursor moves from 9 to 4.
         assert!(
             buf.cursor.pos.y <= 4,
-            "cursor must clamp into new visible height"
+            "alternate buffer cursor must clamp into new visible height"
         );
     }
 
