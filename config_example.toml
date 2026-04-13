@@ -128,6 +128,55 @@ limit = 4000
 #
 # background_opacity = 1.0
 
+# Path to a background image displayed behind the terminal grid.
+# Supported formats: PNG, JPEG, WebP.
+# Unset (or commented out) disables the background image entirely.
+#
+# background_image = "/path/to/image.png"
+
+# How to fit the background image within the terminal viewport.
+#   "fill"  — stretch to fill the viewport, ignoring aspect ratio
+#   "fit"   — scale to fit within the viewport (letterboxed)
+#   "cover" — scale to cover the viewport, cropping excess (default)
+#   "tile"  — repeat the image in both dimensions
+#
+# background_image_mode = "cover"
+
+# Opacity of the background image (0.0–1.0).
+# Applied on top of the image itself; background_opacity then layers over that.
+# Default: 0.5
+#
+# background_image_opacity = 0.5
+
+## ##############################################################################
+# SHADER SETTINGS
+## ##############################################################################
+[shader]
+# Path to a custom GLSL fragment shader for post-processing effects.
+# When set, the terminal is rendered to an offscreen framebuffer and the
+# shader is applied as a fullscreen pass.
+#
+# The shader receives these uniforms:
+#   uniform sampler2D u_terminal   — the terminal framebuffer texture
+#   uniform vec2      u_resolution — viewport size in pixels
+#   uniform float     u_time       — elapsed time in seconds (for animations)
+#
+# Bundled examples can be found in shaders/examples/:
+#   crt.frag         — CRT scanlines + vignette + chromatic aberration
+#   bloom.frag       — soft glow around bright text
+#   grayscale.frag   — convert output to grayscale
+#   retro_amber.frag — amber phosphor monochrome look
+#
+# When this option is not set, the terminal renders directly to the screen
+# with no framebuffer overhead.
+#
+# path = "/path/to/shader.frag"
+
+# Reload and recompile the shader automatically when the file changes.
+# Default: true. If compilation fails, the previous working shader stays active.
+#
+# hot_reload = true
+
 ## ##############################################################################
 # TAB SETTINGS
 ## ##############################################################################

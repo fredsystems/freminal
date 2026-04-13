@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::gui::colors::internal_color_to_egui_with_alpha;
@@ -11,6 +11,7 @@ use anyhow::Result;
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, CentralPanel, Panel, Pos2, Vec2, ViewportCommand};
+use eframe::egui_glow::CallbackFn;
 use freminal_common::args::Args;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::{Config, TabBarPosition, ThemeMode};
@@ -19,9 +20,11 @@ use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 #[cfg(feature = "playback")]
 use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+use glow::HasContext;
+use renderer::WindowPostRenderer;
 use settings::{SettingsAction, SettingsModal};
 use tabs::{Tab, TabManager};
-use terminal::FreminalTerminalWidget;
+use terminal::{FreminalTerminalWidget, new_render_state};
 
 pub mod atlas;
 pub mod colors;
@@ -190,6 +193,18 @@ struct FreminalGui {
     /// `None` when no border drag is active.
     border_drag: Option<PaneBorderDrag>,
 
+    /// Last modified time of the shader file, used for hot-reload detection.
+    /// `None` when no shader is configured or hot-reload is disabled.
+    shader_last_mtime: Option<std::time::SystemTime>,
+
+    /// Shared window-level post-processing renderer.
+    ///
+    /// All panes across all tabs share one `WindowPostRenderer` (via `Arc<Mutex<…>>`).
+    /// When a user GLSL shader is active, each pane's `PaintCallback` renders its content
+    /// into the shared window FBO.  A single window-level `PaintCallback` registered after
+    /// the pane loop applies the post pass to egui's framebuffer.
+    window_post: Arc<Mutex<WindowPostRenderer>>,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -201,6 +216,7 @@ struct FreminalGui {
 }
 
 impl FreminalGui {
+    #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
     fn new(
         cc: &eframe::CreationContext<'_>,
         initial_tab: Tab,
@@ -208,6 +224,7 @@ impl FreminalGui {
         args: Args,
         egui_ctx: Arc<OnceLock<egui::Context>>,
         config_path: Option<std::path::PathBuf>,
+        window_post: Arc<Mutex<WindowPostRenderer>>,
         #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
         // Sample the OS dark/light preference from egui.
@@ -244,6 +261,8 @@ impl FreminalGui {
             pending_close_pane: false,
             pending_focus_direction: None,
             border_drag: None,
+            shader_last_mtime: None,
+            window_post,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -280,6 +299,37 @@ impl FreminalGui {
                 .send(InputEvent::ThemeChange(theme))
         {
             error!("Failed to send initial ThemeChange to tab: {e}");
+        }
+
+        // Apply initial background image and shader from config (if set).
+        {
+            let initial_bg_path = gui.config.ui.background_image.clone();
+            let initial_shader_src: Option<String> =
+                gui.config.shader.path.as_ref().and_then(|p| {
+                    std::fs::read_to_string(p)
+                        .map_err(|e| {
+                            error!("Failed to read initial shader file '{}': {e}", p.display());
+                        })
+                        .ok()
+                });
+            // Push pending background image to each pane's RenderState.
+            if initial_bg_path.is_some() {
+                for tab in gui.tabs.iter() {
+                    if let Ok(panes) = tab.pane_tree.iter_panes() {
+                        for pane in panes {
+                            if let Ok(mut rs) = pane.render_state.lock() {
+                                rs.set_pending_bg_image(initial_bg_path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            // Push pending shader to the shared WindowPostRenderer.
+            if let Some(src) = initial_shader_src
+                && let Ok(mut wpr) = gui.window_post.lock()
+            {
+                wpr.pending_shader = Some(Some(src));
+            }
         }
 
         gui
@@ -609,7 +659,7 @@ impl FreminalGui {
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
-                    render_state: terminal::new_render_state(),
+                    render_state: new_render_state(Arc::clone(&self.window_post)),
                     render_cache: terminal::PaneRenderCache::new(),
                 };
                 let tab = Tab::new(id, pane);
@@ -693,7 +743,7 @@ impl FreminalGui {
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
-                    render_state: terminal::new_render_state(),
+                    render_state: new_render_state(Arc::clone(&self.window_post)),
                     render_cache: terminal::PaneRenderCache::new(),
                 }) {
                 Ok(id) => id,
@@ -726,6 +776,17 @@ impl FreminalGui {
                 self.os_dark_mode,
             )) {
                 error!("Failed to send ThemeModeUpdate to split pane: {e}");
+            }
+
+            // Propagate any active background image to the new pane so it
+            // renders consistently with existing panes.  The post-process
+            // shader is window-level (shared via WindowPostRenderer) and
+            // does not need per-pane propagation.
+            let new_bg_path = self.config.ui.background_image.clone();
+            if new_bg_path.is_some()
+                && let Ok(mut rs) = new_pane.render_state.lock()
+            {
+                rs.set_pending_bg_image(new_bg_path);
             }
         }
     }
@@ -1751,6 +1812,38 @@ impl eframe::App for FreminalGui {
             }
         }
 
+        // ── Shader hot-reload ─────────────────────────────────────────────────
+        // When hot_reload is enabled and a shader file is configured, check the
+        // file's mtime each frame and push a recompile to all panes if it changed.
+        if self.config.shader.hot_reload
+            && let Some(ref shader_path) = self.config.shader.path.clone()
+        {
+            let new_mtime = std::fs::metadata(shader_path)
+                .and_then(|m| m.modified())
+                .ok();
+            let changed = match (new_mtime, self.shader_last_mtime) {
+                (Some(new), Some(prev)) => new != prev,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if changed {
+                self.shader_last_mtime = new_mtime;
+                match std::fs::read_to_string(shader_path) {
+                    Ok(src) => {
+                        if let Ok(mut wpr) = self.window_post.lock() {
+                            wpr.pending_shader = Some(Some(src));
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Shader hot-reload: failed to read '{}': {e}",
+                            shader_path.display()
+                        );
+                    }
+                }
+            }
+        }
+
         // Poll all tabs for PTY death signals.  When a pane's PTY dies,
         // close that pane.  If it was the last pane in the tab, close the
         // tab.  If it was the last tab, close the application.
@@ -2132,6 +2225,54 @@ impl eframe::App for FreminalGui {
                 }
             }
 
+            // ── Pre-clear the window post-processing FBO ──────────
+            //
+            // When a user GLSL shader is active, all panes render into a
+            // shared window FBO.  We clear it once per frame here, before
+            // any pane draws into it, so stale content from the previous
+            // frame does not bleed through.
+            //
+            // Note: on the very first frame after a shader is enabled,
+            // `is_active()` is still false because the post-process callback
+            // (which compiles the shader and creates the FBO) runs after pane
+            // callbacks.  On that single frame, panes render to egui's FBO
+            // and the post-process pass draws an empty window FBO.  Frame 2
+            // (16ms later, via continuous repaint) is fully correct.
+            {
+                let wpr_active = self
+                    .window_post
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_active();
+
+                if wpr_active {
+                    let wpr_for_clear = Arc::clone(&self.window_post);
+                    ui.painter().add(egui::PaintCallback {
+                        rect: available_rect,
+                        callback: Arc::new(CallbackFn::new(move |info, painter| {
+                            let gl = painter.gl();
+                            let vp = info.viewport_in_pixels();
+                            let mut wpr = wpr_for_clear
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            wpr.ensure_fbo(gl, vp.width_px, vp.height_px);
+                            if let Some(fbo) = wpr.fbo() {
+                                unsafe {
+                                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                                    gl.clear(glow::COLOR_BUFFER_BIT);
+                                    // Restore egui's FBO.
+                                    gl.bind_framebuffer(
+                                        glow::FRAMEBUFFER,
+                                        painter.intermediate_fbo(),
+                                    );
+                                }
+                            }
+                        })),
+                    });
+                }
+            }
+
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.
                 // Each pane edge that is interior (shared with another pane)
@@ -2238,6 +2379,8 @@ impl eframe::App for FreminalGui {
                             &pane.search_buffer_rx,
                             ui_overlay_open,
                             bg_opacity,
+                            self.config.ui.background_image_opacity,
+                            self.config.ui.background_image_mode,
                             &self.binding_map,
                             is_echo_off,
                             is_active,
@@ -2293,6 +2436,86 @@ impl eframe::App for FreminalGui {
                     };
                     shortest_repaint_delay =
                         Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
+                }
+            }
+
+            // ── Window-level post-processing pass ────────────────────
+            //
+            // When a user GLSL shader is active, the window FBO now contains
+            // the composited terminal content from all panes.  We draw it
+            // through the user shader back to egui's framebuffer.
+            //
+            // This callback is registered BEFORE pane borders so the borders
+            // are painted on top of the shader output.
+            {
+                let wpr_check = self
+                    .window_post
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let shader_active = wpr_check.is_active();
+                let pending = wpr_check.pending_shader.is_some();
+                drop(wpr_check);
+
+                if shader_active || pending {
+                    let frame_dt = ui.input(|i| i.stable_dt);
+                    let wpr_for_post = Arc::clone(&self.window_post);
+                    ui.painter().add(egui::PaintCallback {
+                        rect: available_rect,
+                        callback: Arc::new(CallbackFn::new(move |info, painter| {
+                            let gl = painter.gl();
+                            let vp = info.viewport_in_pixels();
+                            let mut wpr = wpr_for_post
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+                            // Lazy-init GPU resources.
+                            if !wpr.initialized()
+                                && let Err(e) = wpr.init(gl)
+                            {
+                                error!("WindowPostRenderer init failed: {e}");
+                                return;
+                            }
+
+                            // Process any pending shader change.
+                            if let Some(pending_shader) = wpr.pending_shader.take() {
+                                match pending_shader {
+                                    Some(src) => {
+                                        if let Err(e) =
+                                            wpr.update_shader(gl, &src, vp.width_px, vp.height_px)
+                                        {
+                                            error!("Shader compilation failed: {e}");
+                                        }
+                                    }
+                                    None => wpr.clear_shader(gl),
+                                }
+                            }
+
+                            // Apply the post-processing pass if the shader is active.
+                            if wpr.is_active() {
+                                wpr.ensure_fbo(gl, vp.width_px, vp.height_px);
+                                // Bind egui's framebuffer as the render target.
+                                unsafe {
+                                    gl.bind_framebuffer(
+                                        glow::FRAMEBUFFER,
+                                        painter.intermediate_fbo(),
+                                    );
+                                }
+
+                                let vp_w = vp.width_px.approx_as::<f32>().unwrap_or(0.0);
+                                let vp_h = vp.height_px.approx_as::<f32>().unwrap_or(0.0);
+                                wpr.draw_post_pass(gl, vp_w, vp_h, frame_dt);
+                            }
+                        })),
+                    });
+
+                    // When the shader is active, request continuous repaints so
+                    // the `u_time` uniform advances smoothly (~60 fps).
+                    if shader_active {
+                        let anim_delay = std::time::Duration::from_millis(16);
+                        shortest_repaint_delay = Some(
+                            shortest_repaint_delay.map_or(anim_delay, |prev| prev.min(anim_delay)),
+                        );
+                    }
                 }
             }
 
@@ -2483,6 +2706,34 @@ impl eframe::App for FreminalGui {
                 });
                 self.config = new_cfg;
 
+                // Apply background image and shader changes to all panes.
+                // The actual GL calls happen in each pane's PaintCallback (needs GL context).
+                {
+                    let new_bg_path = self.config.ui.background_image.clone();
+                    let new_shader_src: Option<String> =
+                        self.config.shader.path.as_ref().and_then(|p| {
+                            std::fs::read_to_string(p)
+                                .map_err(|e| {
+                                    error!("Failed to read shader file '{}': {e}", p.display());
+                                })
+                                .ok()
+                        });
+                    // Per-pane: push background image changes.
+                    for tab in self.tabs.iter() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes() {
+                            for pane in panes {
+                                if let Ok(mut rs) = pane.render_state.lock() {
+                                    rs.set_pending_bg_image(new_bg_path.clone());
+                                }
+                            }
+                        }
+                    }
+                    // Window-level: push shader change.
+                    if let Ok(mut wpr) = self.window_post.lock() {
+                        wpr.pending_shader = Some(new_shader_src);
+                    }
+                }
+
                 // Notify all panes in all tabs of the new theme mode so DECRPM ?2031
                 // returns the correct locked/dynamic response after the config change.
                 for tab in self.tabs.iter() {
@@ -2576,6 +2827,7 @@ pub fn run(
     args: Args,
     config_path: Option<std::path::PathBuf>,
     egui_ctx_lock: Arc<OnceLock<egui::Context>>,
+    window_post: Arc<Mutex<WindowPostRenderer>>,
     #[cfg(feature = "playback")] is_playback: bool,
 ) -> Result<()> {
     let icon = match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png")) {
@@ -2633,6 +2885,7 @@ pub fn run(
                 args,
                 egui_ctx_lock,
                 config_path,
+                window_post,
                 #[cfg(feature = "playback")]
                 is_playback,
             )))

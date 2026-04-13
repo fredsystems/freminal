@@ -6,21 +6,24 @@
 //! GL shader programs, vertex buffers, and draw calls for the terminal renderer.
 //!
 //! [`TerminalRenderer`] owns all GPU state for the custom terminal rendering
-//! pipeline: four shader programs (decoration, instanced background, foreground,
-//! image), VAOs, double-buffered VBOs, and the atlas GL texture.
+//! pipeline: six shader programs (decoration, instanced background, foreground,
+//! image, background image, post-processing), VAOs, double-buffered VBOs, the
+//! atlas GL texture, an optional background image texture, and an optional
+//! offscreen FBO for custom post-processing shaders.
 //!
 //! Rendering is triggered via egui's [`eframe::egui_glow::CallbackFn`] mechanism.
 //! The CPU-side instance/vertex builders live in [`super::vertex`] and are pure
 //! functions that are fully testable without a GL context.
 
-use conv2::{ApproxFrom, ValueFrom};
+use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use eframe::glow::{self, HasContext};
 use tracing::error;
 
 use super::super::atlas::GlyphAtlas;
 use super::shaders::{
-    BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC, DECO_VERT_SRC, FG_FRAG_SRC, FG_VERT_SRC,
-    IMG_FRAG_SRC, IMG_VERT_SRC,
+    BG_IMG_FRAG_SRC, BG_IMG_VERT_SRC, BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC,
+    DECO_VERT_SRC, FG_FRAG_SRC, FG_VERT_SRC, IMG_FRAG_SRC, IMG_VERT_SRC, POST_PASSTHROUGH_FRAG_SRC,
+    POST_VERT_SRC,
 };
 use super::vertex::{
     BG_INSTANCE_FLOATS, CURSOR_QUAD_FLOATS, DECO_VERTEX_FLOATS, FG_INSTANCE_FLOATS,
@@ -142,6 +145,22 @@ pub struct TerminalRenderer {
     /// Populated on first use and evicted when the image is no longer visible.
     image_textures: std::collections::HashMap<u64, glow::Texture>,
 
+    // ---- background image pass ----
+    /// Shader program for the background image quad.
+    bg_img_program: Option<glow::Program>,
+    /// VAO for the background image fullscreen quad.
+    bg_img_vao: Option<glow::VertexArray>,
+    /// VBO for the background image quad vertices (6 × vec2+vec2 = 24 f32s).
+    bg_img_vbo: Option<glow::Buffer>,
+    /// Uploaded background image GL texture.
+    bg_img_texture: Option<glow::Texture>,
+    /// Size (width, height) of the uploaded background image texture, in pixels.
+    bg_img_size: Option<(u32, u32)>,
+    // Background image uniform locations.
+    bg_img_u_viewport: Option<glow::UniformLocation>,
+    bg_img_u_image: Option<glow::UniformLocation>,
+    bg_img_u_opacity: Option<glow::UniformLocation>,
+
     // ---- uniform locations ----
     // instanced background
     bg_inst_u_viewport: Option<glow::UniformLocation>,
@@ -194,6 +213,15 @@ impl TerminalRenderer {
             img_vao: None,
             img_vbo: [None, None],
             image_textures: std::collections::HashMap::new(),
+            // background image
+            bg_img_program: None,
+            bg_img_vao: None,
+            bg_img_vbo: None,
+            bg_img_texture: None,
+            bg_img_size: None,
+            bg_img_u_viewport: None,
+            bg_img_u_image: None,
+            bg_img_u_opacity: None,
             // uniform locations
             bg_inst_u_viewport: None,
             bg_inst_u_cell_width: None,
@@ -229,6 +257,7 @@ impl TerminalRenderer {
         self.init_fg_pass(gl)?;
         self.init_atlas_texture(gl)?;
         self.init_image_pass(gl)?;
+        self.init_bg_image_pass(gl)?;
 
         self.initialized = true;
         Ok(())
@@ -435,6 +464,40 @@ impl TerminalRenderer {
         Ok(())
     }
 
+    /// Initialise the background image pass (shader, VAO, VBO).
+    ///
+    /// No texture is uploaded here — images are loaded on demand via
+    /// [`Self::update_background_image`].
+    fn init_bg_image_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let program = compile_program(gl, BG_IMG_VERT_SRC, BG_IMG_FRAG_SRC, "bg_image")?;
+
+        self.bg_img_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
+        self.bg_img_u_image = unsafe { gl.get_uniform_location(program, "u_bg_image") };
+        self.bg_img_u_opacity = unsafe { gl.get_uniform_location(program, "u_opacity") };
+
+        let vao = unsafe {
+            gl.create_vertex_array()
+                .map_err(|e| format!("create bg_image VAO: {e}"))?
+        };
+        let vbo = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create bg_image VBO: {e}"))?
+        };
+
+        unsafe {
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            setup_img_attribs(gl);
+            gl.bind_vertex_array(None);
+        }
+
+        self.bg_img_program = Some(program);
+        self.bg_img_vao = Some(vao);
+        self.bg_img_vbo = Some(vbo);
+
+        Ok(())
+    }
+
     /// Render a terminal frame from pre-built vertex buffers.
     ///
     /// Used when the vertex buffers were built on the main thread (where
@@ -463,6 +526,8 @@ impl TerminalRenderer {
         cell_width: f32,
         cell_height: f32,
         bg_opacity: f32,
+        bg_image_opacity: f32,
+        bg_image_mode: freminal_common::config::BackgroundImageMode,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
         if !self.initialized {
@@ -483,10 +548,14 @@ impl TerminalRenderer {
         self.upload_fg_instances(gl, fg_instances, buf_idx);
         self.upload_img_verts(gl, image_verts, buf_idx);
 
-        // 3. Draw instanced backgrounds, decorations, foreground, images.
+        // 3. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
 
+        // 3a. Background image (drawn behind everything).
+        self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
+
+        // 3b. Cell backgrounds, decorations, foreground glyphs, inline images.
         self.draw_background_instanced(
             gl,
             bg_instances.len(),
@@ -544,6 +613,8 @@ impl TerminalRenderer {
         cell_width: f32,
         cell_height: f32,
         bg_opacity: f32,
+        bg_image_opacity: f32,
+        bg_image_mode: freminal_common::config::BackgroundImageMode,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) {
         if !self.initialized {
@@ -572,12 +643,11 @@ impl TerminalRenderer {
             upload_verts_sub(gl, vbo, cursor_vert_byte_offset, cursor_verts);
         }
 
-        // 3. Draw instanced backgrounds, decorations, foreground, images
-        //    with the total float counts from the previously uploaded full
-        //    frame.
+        // 3. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
 
+        self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
         self.draw_background_instanced(
             gl,
             bg_inst_total_floats,
@@ -988,6 +1058,172 @@ impl TerminalRenderer {
         }
     }
 
+    /// Load (or replace) the background image texture from a file path.
+    ///
+    /// Decodes the image with the `image` crate (supports PNG, JPEG, WebP,
+    /// and GIF), converts to RGBA8, and uploads to a GL texture.
+    /// Any previously loaded texture is deleted first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the file cannot be read or decoded, or if
+    /// a GL texture object cannot be created.
+    pub fn update_background_image(
+        &mut self,
+        gl: &glow::Context,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        // Delete any previously-loaded texture.
+        self.clear_background_image(gl);
+
+        // Decode the image file.
+        let img = image::open(path)
+            .map_err(|e| format!("load background image '{}': {e}", path.display()))?
+            .into_rgba8();
+        let (w, h) = (img.width(), img.height());
+        let pixels = img.into_raw();
+
+        // Upload to GL.
+        let tex = unsafe {
+            gl.create_texture()
+                .map_err(|e| format!("create bg_img texture: {e}"))?
+        };
+
+        let wi = gl_i32_u32(w);
+        let hi = gl_i32_u32(h);
+
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR.cast_signed(),
+            );
+            // REPEAT so tile mode works; clamped modes stay in [0,1] UV anyway.
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::REPEAT.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::REPEAT.cast_signed(),
+            );
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA.cast_signed(),
+                wi,
+                hi,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&pixels)),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+
+        self.bg_img_texture = Some(tex);
+        self.bg_img_size = Some((w, h));
+        Ok(())
+    }
+
+    /// Delete the current background image texture.
+    ///
+    /// After this call, [`draw_background_image`](Self::draw_background_image)
+    /// is a no-op until a new image is loaded.
+    pub fn clear_background_image(&mut self, gl: &glow::Context) {
+        if let Some(tex) = self.bg_img_texture.take() {
+            unsafe { gl.delete_texture(tex) };
+        }
+        self.bg_img_size = None;
+    }
+
+    /// Draw the background image quad.
+    ///
+    /// UV coordinates are computed from the fit mode:
+    /// - **Fill**: stretch to fill the viewport (UV [0,1]² — may distort).
+    /// - **Fit**: letterbox/pillarbox to preserve aspect ratio.
+    /// - **Cover**: crop to fill viewport without distortion (center-crop).
+    /// - **Tile**: repeat at native pixel scale.
+    ///
+    /// Skips if no texture is loaded (`bg_img_texture` is `None`).
+    fn draw_background_image(
+        &self,
+        gl: &glow::Context,
+        vp_w: f32,
+        vp_h: f32,
+        opacity: f32,
+        mode: freminal_common::config::BackgroundImageMode,
+    ) {
+        let (Some(prog), Some(vao), Some(vbo), Some(tex), Some((img_w, img_h))) = (
+            self.bg_img_program,
+            self.bg_img_vao,
+            self.bg_img_vbo,
+            self.bg_img_texture,
+            self.bg_img_size,
+        ) else {
+            return;
+        };
+
+        // Compute UV rectangle [u0, v0, u1, v1] based on fit mode.
+        let (u0, v0, u1, v1) = compute_bg_uvs(vp_w, vp_h, img_w, img_h, mode);
+
+        // Fullscreen quad covering the viewport (pixel coords: [0,0] → [vp_w, vp_h]).
+        // Layout: vec2 pos (pixels), vec2 uv — 6 vertices (2 triangles).
+        #[rustfmt::skip]
+        let quad: [f32; 24] = [
+            // pos (pixels)      uv
+            0.0,   0.0,          u0, v0,
+            vp_w,  0.0,          u1, v0,
+            0.0,   vp_h,         u0, v1,
+            vp_w,  0.0,          u1, v0,
+            vp_w,  vp_h,         u1, v1,
+            0.0,   vp_h,         u0, v1,
+        ];
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(quad.as_ptr().cast::<u8>(), std::mem::size_of_val(&quad))
+        };
+
+        unsafe {
+            // Upload quad vertices.
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+
+            gl.use_program(Some(prog));
+            if let Some(loc) = &self.bg_img_u_viewport {
+                gl.uniform_2_f32(Some(loc), vp_w, vp_h);
+            }
+            if let Some(loc) = &self.bg_img_u_opacity {
+                gl.uniform_1_f32(Some(loc), opacity);
+            }
+            if let Some(loc) = &self.bg_img_u_image {
+                gl.uniform_1_i32(Some(loc), 2); // TEXTURE2
+            }
+
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            setup_img_attribs(gl);
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+
+            gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
+            gl.use_program(None);
+        }
+    }
+
     /// Free all GPU resources.
     ///
     /// Should be called when the widget is destroyed.
@@ -1053,6 +1289,19 @@ impl TerminalRenderer {
             }
             for tex in self.image_textures.drain() {
                 gl.delete_texture(tex.1);
+            }
+            // Background image resources.
+            if let Some(p) = self.bg_img_program.take() {
+                gl.delete_program(p);
+            }
+            if let Some(v) = self.bg_img_vao.take() {
+                gl.delete_vertex_array(v);
+            }
+            if let Some(b) = self.bg_img_vbo.take() {
+                gl.delete_buffer(b);
+            }
+            if let Some(t) = self.bg_img_texture.take() {
+                gl.delete_texture(t);
             }
         }
 
@@ -1287,5 +1536,632 @@ fn upload_verts_sub(gl: &glow::Context, vbo: glow::Buffer, byte_offset: usize, v
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
         gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, gl_i32(byte_offset), bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Background image UV computation
+// ---------------------------------------------------------------------------
+
+/// Compute UV rectangle `(u0, v0, u1, v1)` for the background image quad.
+///
+/// The UV range describes what portion of the image is displayed and how it
+/// maps to the viewport.  The origin is the top-left corner; V increases
+/// downward (matching OpenGL's default texture coordinate convention when the
+/// image is uploaded top-row-first via `image::DynamicImage::into_rgba8`).
+///
+/// # Modes
+///
+/// | Mode   | Description                                                   |
+/// |--------|---------------------------------------------------------------|
+/// | Fill   | Stretch to fill the viewport; may distort the image.         |
+/// | Fit    | Letterbox / pillarbox: show the full image without distortion.|
+/// | Cover  | Crop to fill the viewport; center-crop; no distortion.       |
+/// | Tile   | Repeat at native image resolution.                           |
+fn compute_bg_uvs(
+    vp_w: f32,
+    vp_h: f32,
+    img_w: u32,
+    img_h: u32,
+    mode: freminal_common::config::BackgroundImageMode,
+) -> (f32, f32, f32, f32) {
+    use freminal_common::config::BackgroundImageMode;
+
+    match mode {
+        BackgroundImageMode::Fill => {
+            // UV covers the entire image regardless of aspect ratio.
+            (0.0, 0.0, 1.0, 1.0)
+        }
+        BackgroundImageMode::Fit => {
+            // Scale uniformly to fit the smaller dimension.
+            let img_aspect = img_w.approx_as::<f32>().unwrap_or(0.0)
+                / img_h.max(1).approx_as::<f32>().unwrap_or(1.0);
+            let vp_aspect = vp_w / vp_h.max(1.0);
+            if img_aspect > vp_aspect {
+                // Image is wider than viewport: letterbox (top/bottom bars).
+                let scale = vp_aspect / img_aspect;
+                let margin = (1.0 - scale) / 2.0;
+                (0.0, margin, 1.0, 1.0 - margin)
+            } else {
+                // Image is taller than viewport: pillarbox (left/right bars).
+                let scale = img_aspect / vp_aspect;
+                let margin = (1.0 - scale) / 2.0;
+                (margin, 0.0, 1.0 - margin, 1.0)
+            }
+        }
+        BackgroundImageMode::Cover => {
+            // Scale uniformly to fill the larger dimension; center-crop.
+            let img_aspect = img_w.approx_as::<f32>().unwrap_or(0.0)
+                / img_h.max(1).approx_as::<f32>().unwrap_or(1.0);
+            let vp_aspect = vp_w / vp_h.max(1.0);
+            if img_aspect > vp_aspect {
+                // Image is wider: crop left/right.
+                let scale = vp_aspect / img_aspect;
+                let margin = (1.0 - scale) / 2.0;
+                (margin, 0.0, 1.0 - margin, 1.0)
+            } else {
+                // Image is taller: crop top/bottom.
+                let scale = img_aspect / vp_aspect;
+                let margin = (1.0 - scale) / 2.0;
+                (0.0, margin, 1.0, 1.0 - margin)
+            }
+        }
+        BackgroundImageMode::Tile => {
+            // Repeat at native pixel density.
+            let u_repeat = vp_w / img_w.max(1).approx_as::<f32>().unwrap_or(1.0);
+            let v_repeat = vp_h / img_h.max(1).approx_as::<f32>().unwrap_or(1.0);
+            (0.0, 0.0, u_repeat, v_repeat)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  WindowPostRenderer — window-level post-processing pass
+// ---------------------------------------------------------------------------
+
+/// Manages a single window-level post-processing FBO and shader program.
+///
+/// All panes share one `WindowPostRenderer` (via `Arc<Mutex<…>>`).  When a
+/// user GLSL shader is active, each pane's `PaintCallback` renders terminal
+/// content into the shared window FBO.  A single window-level `PaintCallback`
+/// (registered after the pane loop) then draws the FBO texture through the
+/// user shader to egui's framebuffer.
+///
+/// When no shader is configured the window FBO is `None` and panes render
+/// directly to egui's framebuffer (unchanged behaviour).
+pub struct WindowPostRenderer {
+    /// Whether GPU resources (program, VAO, VBO) have been created.
+    initialized: bool,
+
+    // ---- post-processing shader + fullscreen quad ----
+    /// Passthrough-or-user post-processing program.
+    program: Option<glow::Program>,
+    /// VAO for the fullscreen NDC quad.
+    vao: Option<glow::VertexArray>,
+    /// VBO for the fullscreen NDC quad.
+    vbo: Option<glow::Buffer>,
+    // Uniform locations.
+    u_terminal: Option<glow::UniformLocation>,
+    u_resolution: Option<glow::UniformLocation>,
+    u_time: Option<glow::UniformLocation>,
+
+    // ---- window FBO (created on demand; None = no active shader) ----
+    /// Offscreen framebuffer for the full window area; `None` when inactive.
+    fbo: Option<glow::Framebuffer>,
+    /// Color attachment texture for the FBO.
+    fbo_texture: Option<glow::Texture>,
+    /// Cached FBO dimensions to detect resizes.
+    fbo_size: Option<(i32, i32)>,
+
+    /// Elapsed time accumulator for the `u_time` uniform (seconds).
+    time: f32,
+
+    /// Pending shader source to compile on the next `PaintCallback`.
+    ///
+    /// `Some(Some(src))` → compile `src` as the user fragment shader.
+    /// `Some(None)` → revert to passthrough and destroy the FBO.
+    /// `None` → no change pending.
+    pub pending_shader: Option<Option<String>>,
+}
+
+impl Default for WindowPostRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WindowPostRenderer {
+    /// Create a new, uninitialized `WindowPostRenderer`.
+    ///
+    /// GPU resources are created lazily on the first call to [`Self::init`].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            initialized: false,
+            program: None,
+            vao: None,
+            vbo: None,
+            u_terminal: None,
+            u_resolution: None,
+            u_time: None,
+            fbo: None,
+            fbo_texture: None,
+            fbo_size: None,
+            time: 0.0,
+            pending_shader: None,
+        }
+    }
+
+    /// Return `true` if GPU resources have been created.
+    #[must_use]
+    pub const fn initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Return `true` if a user shader is active (the window FBO is in use).
+    ///
+    /// When this returns `true`, each pane's `PaintCallback` should render
+    /// into the window FBO rather than egui's framebuffer.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.fbo.is_some()
+    }
+
+    /// Return the window FBO handle, if active.
+    #[must_use]
+    pub const fn fbo(&self) -> Option<glow::Framebuffer> {
+        self.fbo
+    }
+
+    /// Initialise the GPU resources (passthrough shader program + fullscreen quad).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if shader compilation or any GL object creation fails.
+    pub fn init(&mut self, gl: &glow::Context) -> Result<(), String> {
+        let program = compile_program(
+            gl,
+            POST_VERT_SRC,
+            POST_PASSTHROUGH_FRAG_SRC,
+            "wpr_passthrough",
+        )?;
+
+        self.u_terminal = unsafe { gl.get_uniform_location(program, "u_terminal") };
+        self.u_resolution = unsafe { gl.get_uniform_location(program, "u_resolution") };
+        self.u_time = unsafe { gl.get_uniform_location(program, "u_time") };
+
+        let vao = unsafe {
+            gl.create_vertex_array()
+                .map_err(|e| format!("create wpr VAO: {e}"))?
+        };
+        let vbo = unsafe {
+            gl.create_buffer()
+                .map_err(|e| format!("create wpr VBO: {e}"))?
+        };
+
+        // Fullscreen NDC quad: two triangles covering [-1,1]².
+        // Vertex layout: vec2 pos (NDC), vec2 uv.
+        #[rustfmt::skip]
+        let quad: [f32; 24] = [
+            // pos (NDC)    uv
+            -1.0, -1.0,    0.0, 0.0,
+             1.0, -1.0,    1.0, 0.0,
+            -1.0,  1.0,    0.0, 1.0,
+             1.0, -1.0,    1.0, 0.0,
+             1.0,  1.0,    1.0, 1.0,
+            -1.0,  1.0,    0.0, 1.0,
+        ];
+        let bytes = unsafe {
+            std::slice::from_raw_parts(quad.as_ptr().cast::<u8>(), std::mem::size_of_val(&quad))
+        };
+        unsafe {
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+            setup_img_attribs(gl); // same layout: vec2 pos, vec2 uv
+            gl.bind_vertex_array(None);
+        }
+
+        self.program = Some(program);
+        self.vao = Some(vao);
+        self.vbo = Some(vbo);
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// Ensure the window FBO exists and matches `(w, h)` in physical pixels.
+    ///
+    /// Creates or recreates the FBO when missing or resized.  No-op when the
+    /// size has not changed.
+    pub fn ensure_fbo(&mut self, gl: &glow::Context, w: i32, h: i32) {
+        if self.fbo_size == Some((w, h)) {
+            return;
+        }
+
+        // Delete stale FBO + texture.
+        unsafe {
+            if let Some(fbo) = self.fbo.take() {
+                gl.delete_framebuffer(fbo);
+            }
+            if let Some(tex) = self.fbo_texture.take() {
+                gl.delete_texture(tex);
+            }
+        }
+
+        // Create the color texture.
+        let tex = unsafe {
+            match gl.create_texture() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("WindowPostRenderer::ensure_fbo: create texture: {e}");
+                    return;
+                }
+            }
+        };
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE.cast_signed(),
+            );
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA.cast_signed(),
+                w,
+                h,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+
+        // Create the FBO and attach the texture.
+        let fbo = unsafe {
+            match gl.create_framebuffer() {
+                Ok(f) => f,
+                Err(e) => {
+                    error!("WindowPostRenderer::ensure_fbo: create framebuffer: {e}");
+                    gl.delete_texture(tex);
+                    return;
+                }
+            }
+        };
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(tex),
+                0,
+            );
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                error!("WindowPostRenderer::ensure_fbo: FBO incomplete (status {status:#x})");
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(tex);
+                return;
+            }
+        }
+
+        self.fbo = Some(fbo);
+        self.fbo_texture = Some(tex);
+        self.fbo_size = Some((w, h));
+    }
+
+    /// Compile and install a user fragment shader.
+    ///
+    /// On success, replaces the current program and ensures the FBO is created
+    /// for the given viewport dimensions.  On failure, keeps the existing
+    /// program and returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if shader compilation or linking fails.
+    pub fn update_shader(
+        &mut self,
+        gl: &glow::Context,
+        frag_src: &str,
+        vp_w: i32,
+        vp_h: i32,
+    ) -> Result<(), String> {
+        let new_prog = compile_program(gl, POST_VERT_SRC, frag_src, "wpr_user")?;
+
+        let u_terminal = unsafe { gl.get_uniform_location(new_prog, "u_terminal") };
+        let u_resolution = unsafe { gl.get_uniform_location(new_prog, "u_resolution") };
+        let u_time = unsafe { gl.get_uniform_location(new_prog, "u_time") };
+
+        if let Some(old) = self.program.take() {
+            unsafe { gl.delete_program(old) };
+        }
+        self.program = Some(new_prog);
+        self.u_terminal = u_terminal;
+        self.u_resolution = u_resolution;
+        self.u_time = u_time;
+
+        self.ensure_fbo(gl, vp_w, vp_h);
+        Ok(())
+    }
+
+    /// Revert to passthrough shader and destroy the window FBO.
+    ///
+    /// After this call [`is_active`](Self::is_active) returns `false` and panes
+    /// render directly to egui's framebuffer.
+    pub fn clear_shader(&mut self, gl: &glow::Context) {
+        // Destroy FBO + texture.
+        if let Some(fbo) = self.fbo.take() {
+            unsafe { gl.delete_framebuffer(fbo) };
+        }
+        if let Some(tex) = self.fbo_texture.take() {
+            unsafe { gl.delete_texture(tex) };
+        }
+        self.fbo_size = None;
+        self.time = 0.0;
+
+        // Recompile the passthrough shader.
+        match compile_program(
+            gl,
+            POST_VERT_SRC,
+            POST_PASSTHROUGH_FRAG_SRC,
+            "wpr_passthrough",
+        ) {
+            Ok(new_prog) => {
+                let u_terminal = unsafe { gl.get_uniform_location(new_prog, "u_terminal") };
+                let u_resolution = unsafe { gl.get_uniform_location(new_prog, "u_resolution") };
+                let u_time = unsafe { gl.get_uniform_location(new_prog, "u_time") };
+                if let Some(old) = self.program.take() {
+                    unsafe { gl.delete_program(old) };
+                }
+                self.program = Some(new_prog);
+                self.u_terminal = u_terminal;
+                self.u_resolution = u_resolution;
+                self.u_time = u_time;
+            }
+            Err(e) => {
+                error!("WindowPostRenderer::clear_shader: recompile passthrough failed: {e}");
+            }
+        }
+    }
+
+    /// Apply the post-processing pass to the currently bound framebuffer.
+    ///
+    /// Samples the window FBO texture (`self.fbo_texture`) through the user
+    /// shader.  The caller is responsible for binding egui's framebuffer
+    /// before this call and restoring state afterwards.
+    ///
+    /// Advances `self.time` by `delta_seconds`.
+    pub fn draw_post_pass(&mut self, gl: &glow::Context, vp_w: f32, vp_h: f32, delta_seconds: f32) {
+        let (Some(prog), Some(vao), Some(tex)) = (self.program, self.vao, self.fbo_texture) else {
+            return;
+        };
+
+        self.time += delta_seconds;
+
+        unsafe {
+            gl.use_program(Some(prog));
+            if let Some(loc) = &self.u_terminal {
+                gl.uniform_1_i32(Some(loc), 3); // TEXTURE3
+            }
+            if let Some(loc) = &self.u_resolution {
+                gl.uniform_2_f32(Some(loc), vp_w, vp_h);
+            }
+            if let Some(loc) = &self.u_time {
+                gl.uniform_1_f32(Some(loc), self.time);
+            }
+
+            gl.active_texture(glow::TEXTURE3);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.bind_vertex_array(Some(vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
+            gl.use_program(None);
+        }
+    }
+
+    /// Free all GPU resources.
+    ///
+    /// Should be called when the application exits or when the GL context is
+    /// destroyed.
+    pub fn destroy(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some(p) = self.program.take() {
+                gl.delete_program(p);
+            }
+            if let Some(v) = self.vao.take() {
+                gl.delete_vertex_array(v);
+            }
+            if let Some(b) = self.vbo.take() {
+                gl.delete_buffer(b);
+            }
+            if let Some(fbo) = self.fbo.take() {
+                gl.delete_framebuffer(fbo);
+            }
+            if let Some(t) = self.fbo_texture.take() {
+                gl.delete_texture(t);
+            }
+        }
+        self.initialized = false;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::compute_bg_uvs;
+    use freminal_common::config::BackgroundImageMode;
+
+    // Helper: assert two f32 values are approximately equal.
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    // ── BackgroundImageMode::Fill ─────────────────────────────────────
+
+    #[test]
+    fn compute_bg_uvs_fill_returns_full_0_to_1() {
+        // Fill always maps UV (0,0)–(1,1) regardless of dimensions.
+        let (u0, v0, u1, v1) = compute_bg_uvs(1920.0, 1080.0, 800, 600, BackgroundImageMode::Fill);
+        assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
+        assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
+    }
+
+    // ── BackgroundImageMode::Tile ─────────────────────────────────────
+
+    #[test]
+    fn compute_bg_uvs_tile_exact_repeat_count() {
+        // Viewport exactly 3× the image in both dimensions → repeats = 3.
+        let img_w = 100_u32;
+        let img_h = 50_u32;
+        let vp_w = 300.0_f32;
+        let vp_h = 150.0_f32;
+        let (u0, v0, u1, v1) = compute_bg_uvs(vp_w, vp_h, img_w, img_h, BackgroundImageMode::Tile);
+        assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
+        assert!(approx_eq(u1, 3.0), "u repeat should be 3.0, got {u1}");
+        assert!(approx_eq(v1, 3.0), "v repeat should be 3.0, got {v1}");
+    }
+
+    #[test]
+    fn compute_bg_uvs_tile_fractional_repeat() {
+        // Viewport is 1.5× the image.
+        let img_w = 200_u32;
+        let img_h = 200_u32;
+        let vp_w = 300.0_f32;
+        let vp_h = 300.0_f32;
+        let (_, _, u1, v1) = compute_bg_uvs(vp_w, vp_h, img_w, img_h, BackgroundImageMode::Tile);
+        assert!(approx_eq(u1, 1.5), "u repeat should be 1.5, got {u1}");
+        assert!(approx_eq(v1, 1.5), "v repeat should be 1.5, got {v1}");
+    }
+
+    // ── BackgroundImageMode::Fit ──────────────────────────────────────
+
+    #[test]
+    fn compute_bg_uvs_fit_square_image_square_viewport() {
+        // Same aspect ratio → no letterbox/pillarbox.
+        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 400, 400, BackgroundImageMode::Fit);
+        assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
+        assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
+    }
+
+    #[test]
+    fn compute_bg_uvs_fit_wide_image_narrow_viewport_letterboxes() {
+        // Image is 2:1; viewport is 1:1.  Image is wider than viewport →
+        // letterbox: top/bottom UV margins should be nonzero.
+        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 800, 400, BackgroundImageMode::Fit);
+        // Image aspect = 2.0; vp_aspect = 1.0 → img_aspect > vp_aspect branch.
+        // scale = 1.0 / 2.0 = 0.5; margin = (1.0 - 0.5) / 2.0 = 0.25.
+        assert!(
+            approx_eq(u0, 0.0) && approx_eq(u1, 1.0),
+            "u should span 0–1"
+        );
+        assert!(approx_eq(v0, 0.25), "top margin should be 0.25, got {v0}");
+        assert!(
+            approx_eq(v1, 0.75),
+            "bottom margin should be 0.75, got {v1}"
+        );
+    }
+
+    #[test]
+    fn compute_bg_uvs_fit_tall_image_wide_viewport_pillarboxes() {
+        // Image is 1:2 (tall); viewport is 2:1 (wide) → pillarbox.
+        let (u0, v0, u1, v1) = compute_bg_uvs(800.0, 400.0, 400, 800, BackgroundImageMode::Fit);
+        // img_aspect = 0.5; vp_aspect = 2.0 → else branch (pillarbox).
+        // scale = 0.5 / 2.0 = 0.25; margin = (1.0 - 0.25) / 2.0 = 0.375.
+        assert!(
+            approx_eq(v0, 0.0) && approx_eq(v1, 1.0),
+            "v should span 0–1"
+        );
+        assert!(
+            approx_eq(u0, 0.375),
+            "left margin should be 0.375, got {u0}"
+        );
+        assert!(
+            approx_eq(u1, 0.625),
+            "right margin should be 0.625, got {u1}"
+        );
+    }
+
+    // ── BackgroundImageMode::Cover ────────────────────────────────────
+
+    #[test]
+    fn compute_bg_uvs_cover_square_image_square_viewport() {
+        // Same aspect → no crop.
+        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 400, 400, BackgroundImageMode::Cover);
+        assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
+        assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
+    }
+
+    #[test]
+    fn compute_bg_uvs_cover_wide_image_narrow_viewport_crops_sides() {
+        // Image is 2:1; viewport is 1:1.  Cover fills height → crop left/right.
+        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 800, 400, BackgroundImageMode::Cover);
+        // img_aspect=2.0, vp_aspect=1.0 → img wider → crop u (left/right).
+        // scale = 1.0/2.0 = 0.5; margin = 0.25.
+        assert!(
+            approx_eq(v0, 0.0) && approx_eq(v1, 1.0),
+            "v should span 0–1"
+        );
+        assert!(approx_eq(u0, 0.25), "left crop should be 0.25, got {u0}");
+        assert!(approx_eq(u1, 0.75), "right crop should be 0.75, got {u1}");
+    }
+
+    #[test]
+    fn compute_bg_uvs_cover_tall_image_wide_viewport_crops_top_bottom() {
+        // Image is 1:2 (tall); viewport is 2:1 (wide) → crop top/bottom.
+        let (u0, v0, u1, v1) = compute_bg_uvs(800.0, 400.0, 400, 800, BackgroundImageMode::Cover);
+        // img_aspect=0.5; vp_aspect=2.0 → tall → crop v.
+        // scale = 0.5/2.0 = 0.25; margin = 0.375.
+        assert!(
+            approx_eq(u0, 0.0) && approx_eq(u1, 1.0),
+            "u should span 0–1"
+        );
+        assert!(approx_eq(v0, 0.375), "top crop should be 0.375, got {v0}");
+        assert!(
+            approx_eq(v1, 0.625),
+            "bottom crop should be 0.625, got {v1}"
+        );
+    }
+
+    // ── Edge cases ────────────────────────────────────────────────────
+
+    #[test]
+    fn compute_bg_uvs_fill_zero_image_does_not_panic() {
+        // img_w = img_h = 0 → max(1) guard prevents divide-by-zero.
+        let result = std::panic::catch_unwind(|| {
+            compute_bg_uvs(800.0, 600.0, 0, 0, BackgroundImageMode::Fill)
+        });
+        assert!(result.is_ok(), "should not panic with zero-size image");
+    }
+
+    #[test]
+    fn compute_bg_uvs_tile_zero_image_does_not_panic() {
+        let result = std::panic::catch_unwind(|| {
+            compute_bg_uvs(800.0, 600.0, 0, 0, BackgroundImageMode::Tile)
+        });
+        assert!(
+            result.is_ok(),
+            "should not panic with zero-size image in tile mode"
+        );
     }
 }

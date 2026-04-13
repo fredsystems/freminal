@@ -3,14 +3,17 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! GLSL shader source strings for all four terminal rendering passes.
+//! GLSL shader source strings for all terminal rendering passes.
 //!
-//! Four render passes are defined:
+//! Six render passes are defined:
 //! - Decoration pass (`DECO_*`): solid-color quads for underlines, strikethrough,
 //!   cursor, and selection highlights.
 //! - Instanced background pass (`BG_INST_*`): one draw call for all cell backgrounds.
 //! - Foreground pass (`FG_*`): instanced textured glyph quads from the glyph atlas.
 //! - Image pass (`IMG_*`): textured quads for inline images.
+//! - Background image pass (`BG_IMG_*`): full-viewport textured quad for wallpaper.
+//! - Post-processing pass (`POST_*`): fullscreen quad applying a user GLSL fragment shader
+//!   to the terminal FBO texture.
 
 // ---------------------------------------------------------------------------
 //  GLSL shaders  (GL 3.3 core profile)
@@ -177,5 +180,96 @@ void main() {
     // Image pixels are stored as straight RGBA; output premultiplied alpha.
     vec4 c = texture(u_image, v_uv);
     frag_color = vec4(c.rgb * c.a, c.a);
+}
+";
+
+// ---------------------------------------------------------------------------
+//  Background image pass
+// ---------------------------------------------------------------------------
+//
+// A full-viewport textured quad drawn *before* cell backgrounds so that the
+// terminal grid composites on top.  The fit mode (fill / fit / cover / tile)
+// is resolved on the CPU into UV coordinates that are passed per-vertex.
+//
+// Vertex layout: `vec2 a_pos, vec2 a_uv`  (stride = 4 × f32 = 16 bytes)
+// Same layout as the inline image pass so the same VAO setup function is reused.
+
+/// Background image vertex shader — identical to the inline image pass.
+pub(super) const BG_IMG_VERT_SRC: &str = r"#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+
+out vec2 v_uv;
+
+uniform vec2 u_viewport_size;
+
+void main() {
+    vec2 ndc = (a_pos / u_viewport_size) * 2.0 - 1.0;
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    v_uv = a_uv;
+}
+";
+
+/// Background image fragment shader.
+///
+/// Applies `u_opacity` on top of the image's own alpha so that the host
+/// terminal background shows through at the configured opacity.
+pub(super) const BG_IMG_FRAG_SRC: &str = r"#version 330 core
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_bg_image;
+uniform float     u_opacity;   // background_image_opacity (0.0–1.0)
+
+void main() {
+    vec4 c = texture(u_bg_image, v_uv);
+    float alpha = c.a * u_opacity;
+    // Premultiplied alpha output.
+    frag_color = vec4(c.rgb * alpha, alpha);
+}
+";
+
+// ---------------------------------------------------------------------------
+//  Post-processing pass (user custom shader)
+// ---------------------------------------------------------------------------
+//
+// When the user supplies a GLSL fragment shader via `[shader] path = …`, the
+// terminal is first rendered to an offscreen FBO.  The FBO colour texture is
+// then drawn through this fullscreen quad pass, which applies the user shader
+// as a post-processing step.
+//
+// The vertex shader emits a clip-space quad covering the entire viewport.
+// It outputs `v_uv` in [0,1]² for the fragment stage.
+
+/// Post-processing vertex shader — outputs a full-screen clip-space quad.
+///
+/// Consumes clip-space positions and texture coordinates from vertex attributes
+/// (`a_pos` and `a_uv`) for a fullscreen quad submitted by the renderer.
+pub(super) const POST_VERT_SRC: &str = r"#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+
+out vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_uv = a_uv;
+}
+";
+
+/// Post-processing passthrough fragment shader.
+///
+/// Used as a fallback when no user shader is configured (or compilation fails).
+/// Simply samples the terminal texture and outputs it directly.
+pub(super) const POST_PASSTHROUGH_FRAG_SRC: &str = r"#version 330 core
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_terminal;
+uniform vec2      u_resolution;
+uniform float     u_time;
+
+void main() {
+    frag_color = texture(u_terminal, v_uv);
 }
 ";

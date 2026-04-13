@@ -30,6 +30,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub scrollback: ScrollbackConfig,
     pub ui: UiConfig,
+    pub shader: ShaderConfig,
     pub tabs: TabsConfig,
     pub bell: BellConfig,
     pub security: SecurityConfig,
@@ -60,6 +61,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             scrollback: ScrollbackConfig::default(),
             ui: UiConfig::default(),
+            shader: ShaderConfig::default(),
             tabs: TabsConfig::default(),
             bell: BellConfig::default(),
             security: SecurityConfig::default(),
@@ -264,9 +266,25 @@ impl Default for ScrollbackConfig {
     }
 }
 
-/// ---------------------------------------------------------------------------------------------
-///  UI
-/// ---------------------------------------------------------------------------------------------
+// ── UI ────────────────────────────────────────────────────────────────────────
+
+/// How to fit the background image within the terminal viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundImageMode {
+    /// Stretch the image to fill the entire viewport, ignoring aspect ratio.
+    Fill,
+    /// Scale the image to fit within the viewport while preserving aspect ratio
+    /// (letterboxed — empty areas show through to the terminal background).
+    Fit,
+    /// Scale the image to cover the entire viewport while preserving aspect
+    /// ratio (excess is cropped). Default.
+    #[default]
+    Cover,
+    /// Repeat the image in both dimensions (tile pattern).
+    Tile,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -276,6 +294,16 @@ pub struct UiConfig {
     /// Only affects the terminal and menu bar backgrounds; text and content
     /// remain fully opaque.
     pub background_opacity: f32,
+    /// Path to a background image displayed behind the terminal grid.
+    /// Supports PNG, JPEG, and WebP. `None` disables the background image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_image: Option<PathBuf>,
+    /// How to fit the background image within the terminal viewport.
+    /// `"fill"`, `"fit"`, `"cover"` (default), or `"tile"`.
+    pub background_image_mode: BackgroundImageMode,
+    /// Opacity of the background image (0.0–1.0). Applied on top of the
+    /// image itself; `background_opacity` then layers over that. Default: `0.5`.
+    pub background_image_opacity: f32,
 }
 
 impl Default for UiConfig {
@@ -283,6 +311,47 @@ impl Default for UiConfig {
         Self {
             hide_menu_bar: false,
             background_opacity: 1.0,
+            background_image: None,
+            background_image_mode: BackgroundImageMode::Cover,
+            background_image_opacity: 0.5,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Shader
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for user-supplied post-processing GLSL fragment shaders.
+///
+/// When `path` is set, the terminal is rendered to an offscreen framebuffer
+/// and the user's fragment shader is applied as a fullscreen post-processing
+/// pass.  When `path` is `None`, the terminal renders directly to the screen
+/// with no overhead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShaderConfig {
+    /// Path to a custom GLSL fragment shader for post-processing.
+    ///
+    /// The shader receives these uniforms:
+    /// - `uniform sampler2D u_terminal` — the terminal framebuffer texture
+    /// - `uniform vec2 u_resolution` — viewport size in pixels
+    /// - `uniform float u_time` — elapsed time in seconds
+    ///
+    /// `None` disables the post-processing pass (default — no FBO overhead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+
+    /// When `true`, reload and recompile the shader automatically when the
+    /// file on disk changes.  Default: `true`.
+    pub hot_reload: bool,
+}
+
+impl Default for ShaderConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            hot_reload: true,
         }
     }
 }
@@ -439,6 +508,7 @@ struct ConfigPartial {
     pub logging: Option<LoggingConfig>,
     pub scrollback: Option<ScrollbackConfig>,
     pub ui: Option<UiConfig>,
+    pub shader: Option<ShaderConfig>,
     pub tabs: Option<TabsConfig>,
     pub bell: Option<BellConfig>,
     pub security: Option<SecurityConfig>,
@@ -471,6 +541,9 @@ impl Config {
         }
         if let Some(ui) = partial.ui {
             self.ui = ui;
+        }
+        if let Some(shader) = partial.shader {
+            self.shader = shader;
         }
         if let Some(tabs) = partial.tabs {
             self.tabs = tabs;
@@ -564,6 +637,13 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "ui.background_opacity={} out of allowed range (0.0–1.0)",
                 self.ui.background_opacity
+            )));
+        }
+
+        if !(0.0..=1.0).contains(&self.ui.background_image_opacity) {
+            return Err(ConfigError::Validation(format!(
+                "ui.background_image_opacity={} out of allowed range (0.0–1.0)",
+                self.ui.background_image_opacity
             )));
         }
 
@@ -1974,5 +2054,113 @@ trail_duration_ms = 250
         assert_eq!(cfg.dark_name, "catppuccin-mocha");
         assert_eq!(cfg.light_name, "catppuccin-latte");
         assert!(cfg.name.is_none());
+    }
+
+    // ── BackgroundImageMode ────────────────────────────────────────────
+
+    #[test]
+    fn background_image_mode_default_is_cover() {
+        let cfg = UiConfig::default();
+        assert_eq!(cfg.background_image_mode, BackgroundImageMode::Cover);
+    }
+
+    #[test]
+    fn background_image_opacity_default_is_0_5() {
+        let cfg = UiConfig::default();
+        assert!((cfg.background_image_opacity - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn background_image_mode_deserialize_all_variants() {
+        for (toml_val, expected) in [
+            ("\"fill\"", BackgroundImageMode::Fill),
+            ("\"fit\"", BackgroundImageMode::Fit),
+            ("\"cover\"", BackgroundImageMode::Cover),
+            ("\"tile\"", BackgroundImageMode::Tile),
+        ] {
+            let toml_str = format!("[ui]\nbackground_image_mode = {toml_val}\n");
+            let partial: ConfigPartial = toml::from_str(&toml_str).expect("valid TOML");
+            let ui = partial.ui.expect("ui section present");
+            assert_eq!(
+                ui.background_image_mode, expected,
+                "mode {toml_val} should parse to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_image_opacity_out_of_range_fails_validation() {
+        let mut cfg = Config::default();
+        cfg.ui.background_image_opacity = 1.5;
+        let result = cfg.validate();
+        assert!(
+            result.is_err(),
+            "opacity 1.5 should fail validation, got: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("background_image_opacity"),
+            "error should mention background_image_opacity, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn background_image_opacity_at_boundaries_passes_validation() {
+        for opacity in [0.0_f32, 1.0_f32] {
+            let mut cfg = Config::default();
+            cfg.ui.background_image_opacity = opacity;
+            assert!(
+                cfg.validate().is_ok(),
+                "opacity {opacity} should pass validation"
+            );
+        }
+    }
+
+    // ── ShaderConfig ───────────────────────────────────────────────────
+
+    #[test]
+    fn shader_config_default_has_no_path_and_hot_reload_enabled() {
+        let cfg = ShaderConfig::default();
+        assert!(cfg.path.is_none(), "default shader path should be None");
+        assert!(cfg.hot_reload, "hot_reload should default to true");
+    }
+
+    #[test]
+    fn shader_config_deserialize_path_and_hot_reload() {
+        let toml_str = r#"
+[shader]
+path = "/tmp/my.frag"
+hot_reload = false
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        let shader = partial.shader.expect("shader section present");
+        assert_eq!(
+            shader.path.as_deref(),
+            Some(std::path::Path::new("/tmp/my.frag"))
+        );
+        assert!(!shader.hot_reload);
+    }
+
+    #[test]
+    fn shader_config_missing_hot_reload_defaults_true() {
+        let toml_str = r#"
+[shader]
+path = "/tmp/my.frag"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        let shader = partial.shader.expect("shader section present");
+        assert!(
+            shader.hot_reload,
+            "missing hot_reload should default to true"
+        );
+    }
+
+    #[test]
+    fn config_default_shader_is_disabled() {
+        let cfg = Config::default();
+        assert!(
+            cfg.shader.path.is_none(),
+            "default config should have no shader"
+        );
     }
 }
