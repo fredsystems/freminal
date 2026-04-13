@@ -1173,20 +1173,22 @@ impl TerminalRenderer {
             return;
         };
 
-        // Compute UV rectangle [u0, v0, u1, v1] based on fit mode.
-        let (u0, v0, u1, v1) = compute_bg_uvs(vp_w, vp_h, img_w, img_h, mode);
+        // Compute quad position and UV rectangle based on fit mode.
+        let geom = compute_bg_uvs(vp_w, vp_h, img_w, img_h, mode);
+        let (x0, y0, x1, y1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
 
-        // Fullscreen quad covering the viewport (pixel coords: [0,0] → [vp_w, vp_h]).
+        // Background image quad (pixel coords for position, texture coords for UV).
         // Layout: vec2 pos (pixels), vec2 uv — 6 vertices (2 triangles).
         #[rustfmt::skip]
         let quad: [f32; 24] = [
             // pos (pixels)      uv
-            0.0,   0.0,          u0, v0,
-            vp_w,  0.0,          u1, v0,
-            0.0,   vp_h,         u0, v1,
-            vp_w,  0.0,          u1, v0,
-            vp_w,  vp_h,         u1, v1,
-            0.0,   vp_h,         u0, v1,
+            x0,  y0,             u0, v0,
+            x1,  y0,             u1, v0,
+            x0,  y1,             u0, v1,
+            x1,  y0,             u1, v0,
+            x1,  y1,             u1, v1,
+            x0,  y1,             u0, v1,
         ];
 
         let bytes = unsafe {
@@ -1543,12 +1545,28 @@ fn upload_verts_sub(gl: &glow::Context, vbo: glow::Buffer, byte_offset: usize, v
 //  Background image UV computation
 // ---------------------------------------------------------------------------
 
+/// Geometry for the background-image fullscreen quad.
+struct BgQuadGeometry {
+    /// Pixel-space position: (x0, y0, x1, y1).
+    pos: (f32, f32, f32, f32),
+    /// Texture coordinates: (u0, v0, u1, v1).
+    uv: (f32, f32, f32, f32),
+}
+
 /// Compute UV rectangle `(u0, v0, u1, v1)` for the background image quad.
 ///
 /// The UV range describes what portion of the image is displayed and how it
-/// maps to the viewport.  The origin is the top-left corner; V increases
-/// downward (matching OpenGL's default texture coordinate convention when the
-/// image is uploaded top-row-first via `image::DynamicImage::into_rgba8`).
+/// maps to the viewport. The renderer uses a top-left image-space convention
+/// for this path: the origin is the top-left corner and V increases
+/// downward, matching images uploaded top-row-first via
+/// `image::DynamicImage::into_rgba8`.
+///
+/// # Return value
+///
+/// Returns a [`BgQuadGeometry`] containing the pixel-space quad rectangle
+/// and the UV rectangle.  For most modes the quad covers the full viewport;
+/// for `Fit` mode the quad is shrunk to maintain the image's aspect ratio
+/// (letterbox / pillarbox).
 ///
 /// # Modes
 ///
@@ -1564,29 +1582,43 @@ fn compute_bg_uvs(
     img_w: u32,
     img_h: u32,
     mode: freminal_common::config::BackgroundImageMode,
-) -> (f32, f32, f32, f32) {
+) -> BgQuadGeometry {
     use freminal_common::config::BackgroundImageMode;
 
     match mode {
         BackgroundImageMode::Fill => {
             // UV covers the entire image regardless of aspect ratio.
-            (0.0, 0.0, 1.0, 1.0)
+            BgQuadGeometry {
+                pos: (0.0, 0.0, vp_w, vp_h),
+                uv: (0.0, 0.0, 1.0, 1.0),
+            }
         }
         BackgroundImageMode::Fit => {
             // Scale uniformly to fit the smaller dimension.
+            // The quad is shrunk to maintain the image aspect ratio,
+            // producing letterbox (top/bottom bars) or pillarbox
+            // (left/right bars).  UVs always span the full image (0..1).
             let img_aspect = img_w.approx_as::<f32>().unwrap_or(0.0)
                 / img_h.max(1).approx_as::<f32>().unwrap_or(1.0);
             let vp_aspect = vp_w / vp_h.max(1.0);
             if img_aspect > vp_aspect {
                 // Image is wider than viewport: letterbox (top/bottom bars).
-                let scale = vp_aspect / img_aspect;
-                let margin = (1.0 - scale) / 2.0;
-                (0.0, margin, 1.0, 1.0 - margin)
+                // Width fills viewport; height is scaled down.
+                let drawn_h = vp_w / img_aspect;
+                let margin = (vp_h - drawn_h) / 2.0;
+                BgQuadGeometry {
+                    pos: (0.0, margin, vp_w, vp_h - margin),
+                    uv: (0.0, 0.0, 1.0, 1.0),
+                }
             } else {
                 // Image is taller than viewport: pillarbox (left/right bars).
-                let scale = img_aspect / vp_aspect;
-                let margin = (1.0 - scale) / 2.0;
-                (margin, 0.0, 1.0 - margin, 1.0)
+                // Height fills viewport; width is scaled down.
+                let drawn_w = vp_h * img_aspect;
+                let margin = (vp_w - drawn_w) / 2.0;
+                BgQuadGeometry {
+                    pos: (margin, 0.0, vp_w - margin, vp_h),
+                    uv: (0.0, 0.0, 1.0, 1.0),
+                }
             }
         }
         BackgroundImageMode::Cover => {
@@ -1598,19 +1630,28 @@ fn compute_bg_uvs(
                 // Image is wider: crop left/right.
                 let scale = vp_aspect / img_aspect;
                 let margin = (1.0 - scale) / 2.0;
-                (margin, 0.0, 1.0 - margin, 1.0)
+                BgQuadGeometry {
+                    pos: (0.0, 0.0, vp_w, vp_h),
+                    uv: (margin, 0.0, 1.0 - margin, 1.0),
+                }
             } else {
                 // Image is taller: crop top/bottom.
                 let scale = img_aspect / vp_aspect;
                 let margin = (1.0 - scale) / 2.0;
-                (0.0, margin, 1.0, 1.0 - margin)
+                BgQuadGeometry {
+                    pos: (0.0, 0.0, vp_w, vp_h),
+                    uv: (0.0, margin, 1.0, 1.0 - margin),
+                }
             }
         }
         BackgroundImageMode::Tile => {
             // Repeat at native pixel density.
             let u_repeat = vp_w / img_w.max(1).approx_as::<f32>().unwrap_or(1.0);
             let v_repeat = vp_h / img_h.max(1).approx_as::<f32>().unwrap_or(1.0);
-            (0.0, 0.0, u_repeat, v_repeat)
+            BgQuadGeometry {
+                pos: (0.0, 0.0, vp_w, vp_h),
+                uv: (0.0, 0.0, u_repeat, v_repeat),
+            }
         }
     }
 }
@@ -2021,8 +2062,12 @@ mod tests {
 
     #[test]
     fn compute_bg_uvs_fill_returns_full_0_to_1() {
-        // Fill always maps UV (0,0)–(1,1) regardless of dimensions.
-        let (u0, v0, u1, v1) = compute_bg_uvs(1920.0, 1080.0, 800, 600, BackgroundImageMode::Fill);
+        // Fill always maps UV (0,0)–(1,1) and the quad covers the full viewport.
+        let geom = compute_bg_uvs(1920.0, 1080.0, 800, 600, BackgroundImageMode::Fill);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
+        assert!(approx_eq(px0, 0.0) && approx_eq(py0, 0.0));
+        assert!(approx_eq(px1, 1920.0) && approx_eq(py1, 1080.0));
         assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
         assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
     }
@@ -2036,10 +2081,15 @@ mod tests {
         let img_h = 50_u32;
         let vp_w = 300.0_f32;
         let vp_h = 150.0_f32;
-        let (u0, v0, u1, v1) = compute_bg_uvs(vp_w, vp_h, img_w, img_h, BackgroundImageMode::Tile);
+        let geom = compute_bg_uvs(vp_w, vp_h, img_w, img_h, BackgroundImageMode::Tile);
+        let (u0, v0, u1, v1) = geom.uv;
         assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
         assert!(approx_eq(u1, 3.0), "u repeat should be 3.0, got {u1}");
         assert!(approx_eq(v1, 3.0), "v repeat should be 3.0, got {v1}");
+        // Quad covers the full viewport.
+        let (px0, py0, px1, py1) = geom.pos;
+        assert!(approx_eq(px0, 0.0) && approx_eq(py0, 0.0));
+        assert!(approx_eq(px1, vp_w) && approx_eq(py1, vp_h));
     }
 
     #[test]
@@ -2049,7 +2099,8 @@ mod tests {
         let img_h = 200_u32;
         let vp_w = 300.0_f32;
         let vp_h = 300.0_f32;
-        let (_, _, u1, v1) = compute_bg_uvs(vp_w, vp_h, img_w, img_h, BackgroundImageMode::Tile);
+        let geom = compute_bg_uvs(vp_w, vp_h, img_w, img_h, BackgroundImageMode::Tile);
+        let (_, _, u1, v1) = geom.uv;
         assert!(approx_eq(u1, 1.5), "u repeat should be 1.5, got {u1}");
         assert!(approx_eq(v1, 1.5), "v repeat should be 1.5, got {v1}");
     }
@@ -2058,8 +2109,12 @@ mod tests {
 
     #[test]
     fn compute_bg_uvs_fit_square_image_square_viewport() {
-        // Same aspect ratio → no letterbox/pillarbox.
-        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 400, 400, BackgroundImageMode::Fit);
+        // Same aspect ratio → no letterbox/pillarbox; quad fills viewport.
+        let geom = compute_bg_uvs(400.0, 400.0, 400, 400, BackgroundImageMode::Fit);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
+        assert!(approx_eq(px0, 0.0) && approx_eq(py0, 0.0));
+        assert!(approx_eq(px1, 400.0) && approx_eq(py1, 400.0));
         assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
         assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
     }
@@ -2067,47 +2122,62 @@ mod tests {
     #[test]
     fn compute_bg_uvs_fit_wide_image_narrow_viewport_letterboxes() {
         // Image is 2:1; viewport is 1:1.  Image is wider than viewport →
-        // letterbox: top/bottom UV margins should be nonzero.
-        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 800, 400, BackgroundImageMode::Fit);
-        // Image aspect = 2.0; vp_aspect = 1.0 → img_aspect > vp_aspect branch.
-        // scale = 1.0 / 2.0 = 0.5; margin = (1.0 - 0.5) / 2.0 = 0.25.
+        // letterbox: quad is inset vertically (top/bottom pixel-space margins).
+        // UVs span the full image.
+        let geom = compute_bg_uvs(400.0, 400.0, 800, 400, BackgroundImageMode::Fit);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
+        // img_aspect = 2.0; vp_aspect = 1.0 → img_aspect > vp_aspect branch.
+        // drawn_h = 400 / 2.0 = 200; margin = (400 - 200) / 2 = 100.
+        assert!(approx_eq(px0, 0.0), "x0 should be 0, got {px0}");
+        assert!(approx_eq(px1, 400.0), "x1 should be 400, got {px1}");
         assert!(
-            approx_eq(u0, 0.0) && approx_eq(u1, 1.0),
-            "u should span 0–1"
+            approx_eq(py0, 100.0),
+            "top margin should be 100px, got {py0}"
         );
-        assert!(approx_eq(v0, 0.25), "top margin should be 0.25, got {v0}");
         assert!(
-            approx_eq(v1, 0.75),
-            "bottom margin should be 0.75, got {v1}"
+            approx_eq(py1, 300.0),
+            "bottom edge should be 300px, got {py1}"
         );
+        // UVs always span full image for Fit mode.
+        assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
+        assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
     }
 
     #[test]
     fn compute_bg_uvs_fit_tall_image_wide_viewport_pillarboxes() {
-        // Image is 1:2 (tall); viewport is 2:1 (wide) → pillarbox.
-        let (u0, v0, u1, v1) = compute_bg_uvs(800.0, 400.0, 400, 800, BackgroundImageMode::Fit);
+        // Image is 1:2 (tall); viewport is 2:1 (wide) → pillarbox:
+        // quad is inset horizontally (left/right pixel-space margins).
+        let geom = compute_bg_uvs(800.0, 400.0, 400, 800, BackgroundImageMode::Fit);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
         // img_aspect = 0.5; vp_aspect = 2.0 → else branch (pillarbox).
-        // scale = 0.5 / 2.0 = 0.25; margin = (1.0 - 0.25) / 2.0 = 0.375.
+        // drawn_w = 400 * 0.5 = 200; margin = (800 - 200) / 2 = 300.
+        assert!(approx_eq(py0, 0.0), "y0 should be 0, got {py0}");
+        assert!(approx_eq(py1, 400.0), "y1 should be 400, got {py1}");
         assert!(
-            approx_eq(v0, 0.0) && approx_eq(v1, 1.0),
-            "v should span 0–1"
+            approx_eq(px0, 300.0),
+            "left margin should be 300px, got {px0}"
         );
         assert!(
-            approx_eq(u0, 0.375),
-            "left margin should be 0.375, got {u0}"
+            approx_eq(px1, 500.0),
+            "right edge should be 500px, got {px1}"
         );
-        assert!(
-            approx_eq(u1, 0.625),
-            "right margin should be 0.625, got {u1}"
-        );
+        // UVs always span full image for Fit mode.
+        assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
+        assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
     }
 
     // ── BackgroundImageMode::Cover ────────────────────────────────────
 
     #[test]
     fn compute_bg_uvs_cover_square_image_square_viewport() {
-        // Same aspect → no crop.
-        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 400, 400, BackgroundImageMode::Cover);
+        // Same aspect → no crop; quad fills viewport, UVs span full image.
+        let geom = compute_bg_uvs(400.0, 400.0, 400, 400, BackgroundImageMode::Cover);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
+        assert!(approx_eq(px0, 0.0) && approx_eq(py0, 0.0));
+        assert!(approx_eq(px1, 400.0) && approx_eq(py1, 400.0));
         assert!(approx_eq(u0, 0.0) && approx_eq(v0, 0.0));
         assert!(approx_eq(u1, 1.0) && approx_eq(v1, 1.0));
     }
@@ -2115,9 +2185,14 @@ mod tests {
     #[test]
     fn compute_bg_uvs_cover_wide_image_narrow_viewport_crops_sides() {
         // Image is 2:1; viewport is 1:1.  Cover fills height → crop left/right.
-        let (u0, v0, u1, v1) = compute_bg_uvs(400.0, 400.0, 800, 400, BackgroundImageMode::Cover);
+        // Quad covers full viewport; UVs are inset horizontally.
+        let geom = compute_bg_uvs(400.0, 400.0, 800, 400, BackgroundImageMode::Cover);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
         // img_aspect=2.0, vp_aspect=1.0 → img wider → crop u (left/right).
         // scale = 1.0/2.0 = 0.5; margin = 0.25.
+        assert!(approx_eq(px0, 0.0) && approx_eq(py0, 0.0));
+        assert!(approx_eq(px1, 400.0) && approx_eq(py1, 400.0));
         assert!(
             approx_eq(v0, 0.0) && approx_eq(v1, 1.0),
             "v should span 0–1"
@@ -2129,9 +2204,14 @@ mod tests {
     #[test]
     fn compute_bg_uvs_cover_tall_image_wide_viewport_crops_top_bottom() {
         // Image is 1:2 (tall); viewport is 2:1 (wide) → crop top/bottom.
-        let (u0, v0, u1, v1) = compute_bg_uvs(800.0, 400.0, 400, 800, BackgroundImageMode::Cover);
+        // Quad covers full viewport; UVs are inset vertically.
+        let geom = compute_bg_uvs(800.0, 400.0, 400, 800, BackgroundImageMode::Cover);
+        let (px0, py0, px1, py1) = geom.pos;
+        let (u0, v0, u1, v1) = geom.uv;
         // img_aspect=0.5; vp_aspect=2.0 → tall → crop v.
         // scale = 0.5/2.0 = 0.25; margin = 0.375.
+        assert!(approx_eq(px0, 0.0) && approx_eq(py0, 0.0));
+        assert!(approx_eq(px1, 800.0) && approx_eq(py1, 400.0));
         assert!(
             approx_eq(u0, 0.0) && approx_eq(u1, 1.0),
             "u should span 0–1"
@@ -2149,7 +2229,7 @@ mod tests {
     fn compute_bg_uvs_fill_zero_image_does_not_panic() {
         // img_w = img_h = 0 → max(1) guard prevents divide-by-zero.
         let result = std::panic::catch_unwind(|| {
-            compute_bg_uvs(800.0, 600.0, 0, 0, BackgroundImageMode::Fill)
+            compute_bg_uvs(800.0, 600.0, 0, 0, BackgroundImageMode::Fill);
         });
         assert!(result.is_ok(), "should not panic with zero-size image");
     }
@@ -2157,7 +2237,7 @@ mod tests {
     #[test]
     fn compute_bg_uvs_tile_zero_image_does_not_panic() {
         let result = std::panic::catch_unwind(|| {
-            compute_bg_uvs(800.0, 600.0, 0, 0, BackgroundImageMode::Tile)
+            compute_bg_uvs(800.0, 600.0, 0, 0, BackgroundImageMode::Tile);
         });
         assert!(
             result.is_ok(),

@@ -2227,25 +2227,25 @@ impl eframe::App for FreminalGui {
 
             // ── Pre-clear the window post-processing FBO ──────────
             //
-            // When a user GLSL shader is active, all panes render into a
-            // shared window FBO.  We clear it once per frame here, before
-            // any pane draws into it, so stale content from the previous
-            // frame does not bleed through.
+            // When a user GLSL shader is active (or about to become active),
+            // all panes render into a shared window FBO.  We clear it once
+            // per frame here, before any pane draws into it, so stale content
+            // from the previous frame does not bleed through.
             //
-            // Note: on the very first frame after a shader is enabled,
-            // `is_active()` is still false because the post-process callback
-            // (which compiles the shader and creates the FBO) runs after pane
-            // callbacks.  On that single frame, panes render to egui's FBO
-            // and the post-process pass draws an empty window FBO.  Frame 2
-            // (16ms later, via continuous repaint) is fully correct.
+            // We also schedule the pre-clear when `pending_shader` is set so
+            // that the very first frame after a shader is enabled already has
+            // the FBO ready for pane callbacks.  The `ensure_fbo` call inside
+            // the callback creates the FBO on-demand if it doesn't exist yet.
             {
-                let wpr_active = self
+                let wpr_guard = self
                     .window_post
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_active();
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let wpr_active = wpr_guard.is_active();
+                let shader_activation_pending = wpr_guard.pending_shader.is_some();
+                drop(wpr_guard);
 
-                if wpr_active {
+                if wpr_active || shader_activation_pending {
                     let wpr_for_clear = Arc::clone(&self.window_post);
                     ui.painter().add(egui::PaintCallback {
                         rect: available_rect,
@@ -2710,14 +2710,6 @@ impl eframe::App for FreminalGui {
                 // The actual GL calls happen in each pane's PaintCallback (needs GL context).
                 {
                     let new_bg_path = self.config.ui.background_image.clone();
-                    let new_shader_src: Option<String> =
-                        self.config.shader.path.as_ref().and_then(|p| {
-                            std::fs::read_to_string(p)
-                                .map_err(|e| {
-                                    error!("Failed to read shader file '{}': {e}", p.display());
-                                })
-                                .ok()
-                        });
                     // Per-pane: push background image changes.
                     for tab in self.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
@@ -2729,8 +2721,29 @@ impl eframe::App for FreminalGui {
                         }
                     }
                     // Window-level: push shader change.
-                    if let Ok(mut wpr) = self.window_post.lock() {
-                        wpr.pending_shader = Some(new_shader_src);
+                    // Only update if the path is None (clear shader) or the read
+                    // succeeds (new shader source).  On read failure, leave the
+                    // current shader in place and log the error.
+                    match self.config.shader.path.as_ref() {
+                        None => {
+                            // Path cleared — deactivate any active shader.
+                            if let Ok(mut wpr) = self.window_post.lock() {
+                                wpr.pending_shader = Some(None);
+                            }
+                        }
+                        Some(p) => match std::fs::read_to_string(p) {
+                            Ok(src) => {
+                                if let Ok(mut wpr) = self.window_post.lock() {
+                                    wpr.pending_shader = Some(Some(src));
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to read shader file '{}': {e}; keeping current shader",
+                                    p.display()
+                                );
+                            }
+                        },
                     }
                 }
 
