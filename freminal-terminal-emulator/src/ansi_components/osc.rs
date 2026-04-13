@@ -272,6 +272,24 @@ fn dispatch_osc_target(
         OscTarget::ITerm2 => {
             handle_osc_iterm2(raw_params, seq_trace, output);
         }
+        // Known-but-unimplemented OSC targets.  These are recognised
+        // sequences sent by common programs (vim/neovim, zsh, tmux) that
+        // Freminal cannot meaningfully act on (X11 mouse colors, Tektronix
+        // graphics, xcursor shape, color-scheme notifications).  Silently
+        // consumed at trace level to avoid warn! spam during normal use.
+        OscTarget::MouseForeground
+        | OscTarget::MouseBackground
+        | OscTarget::TekForeground
+        | OscTarget::TekBackground
+        | OscTarget::HighlightBackground
+        | OscTarget::HighlightForeground
+        | OscTarget::PointerShape
+        | OscTarget::ColorSchemeNotification => {
+            tracing::trace!(
+                "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}, recent='{}'",
+                seq_trace.as_str()
+            );
+        }
         OscTarget::Unknown => {
             // Unknown OSC sequences are silently consumed (like
             // xterm/VTE).  Downgraded from error!/Invalid to warn!

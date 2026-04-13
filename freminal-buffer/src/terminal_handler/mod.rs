@@ -1936,6 +1936,7 @@ impl TerminalHandler {
                 | Mode::Decnkm(_)
                 | Mode::Decbkm(_)
                 | Mode::AlternateScroll(_)
+                | Mode::Theming(_)
                 | Mode::GraphemeClustering(
                     GraphemeClustering::Unicode | GraphemeClustering::Legacy,
                 ) => {}
@@ -1988,7 +1989,7 @@ impl TerminalHandler {
                 }
 
                 // ── Modes parsed but not yet acted on ─────────────────
-                Mode::NoOp | Mode::Decsclm(_) | Mode::Theming(_) | Mode::Unknown(_) => {
+                Mode::NoOp | Mode::Decsclm(_) | Mode::Unknown(_) => {
                     tracing::warn!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },
