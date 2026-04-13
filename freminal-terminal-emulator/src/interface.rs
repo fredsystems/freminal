@@ -646,6 +646,7 @@ impl TerminalEmulator {
             #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),
+            pointer_shape: self.internal.handler.pointer_shape(),
         }
     }
 

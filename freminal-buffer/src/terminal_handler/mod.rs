@@ -37,6 +37,7 @@ use freminal_common::{
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::{AnsiOscType, ITerm2InlineImageData, UrlResponse},
+        pointer_shape::PointerShape,
         tchar::TChar,
         terminal_output::TerminalOutput,
         terminal_sections::TerminalSections,
@@ -185,6 +186,11 @@ pub struct TerminalHandler {
     /// When `Some`, the cursor is rendered in this color instead of the
     /// theme's `cursor` field.
     cursor_color_override: Option<(u8, u8, u8)>,
+    /// Pointer (mouse cursor) shape requested via OSC 22.
+    ///
+    /// Defaults to `PointerShape::Default` (OS default arrow).
+    /// Reset to `Default` by `OSC 22 ; ST` (empty name) or full reset.
+    pointer_shape: PointerShape,
     /// In-progress iTerm2 multipart file transfer, if any.
     ///
     /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
@@ -342,6 +348,7 @@ impl TerminalHandler {
             fg_color_override: None,
             bg_color_override: None,
             cursor_color_override: None,
+            pointer_shape: PointerShape::Default,
             multipart_state: None,
             kitty_state: None,
             virtual_placements: HashMap::new(),
@@ -405,6 +412,14 @@ impl TerminalHandler {
         self.cursor_color_override
     }
 
+    /// Get the current pointer (mouse cursor) shape requested via OSC 22.
+    ///
+    /// Returns `PointerShape::Default` when no override is active.
+    #[must_use]
+    pub const fn pointer_shape(&self) -> PointerShape {
+        self.pointer_shape
+    }
+
     /// Full terminal reset (RIS — Reset to Initial State).
     ///
     /// Restores the handler and buffer to initial startup state.
@@ -436,6 +451,7 @@ impl TerminalHandler {
         self.fg_color_override = None;
         self.bg_color_override = None;
         self.cursor_color_override = None;
+        self.pointer_shape = PointerShape::Default;
         self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
         self.virtual_placements.clear();
         self.prev_placeholder = None;
@@ -1261,27 +1277,7 @@ impl TerminalHandler {
                 }
             }
             AnsiOscType::Ftcs(marker) => {
-                tracing::debug!("OSC 133 FTCS marker: {marker}");
-                match &marker {
-                    FtcsMarker::PromptStart => {
-                        self.ftcs_state = FtcsState::InPrompt;
-                    }
-                    FtcsMarker::CommandStart => {
-                        self.ftcs_state = FtcsState::InCommand;
-                    }
-                    FtcsMarker::OutputStart => {
-                        self.ftcs_state = FtcsState::InOutput;
-                    }
-                    FtcsMarker::CommandFinished(exit_code) => {
-                        self.last_exit_code = *exit_code;
-                        self.ftcs_state = FtcsState::None;
-                    }
-                    FtcsMarker::PromptProperty(_kind) => {
-                        // Prompt property is informational metadata — it annotates
-                        // the type of the next prompt (initial, continuation, right)
-                        // but does not change the FTCS state machine.
-                    }
-                }
+                self.handle_osc_ftcs(marker);
             }
             AnsiOscType::ITerm2FileInline(data) => {
                 self.handle_iterm2_inline_image(data);
@@ -1332,7 +1328,37 @@ impl TerminalHandler {
                 self.palette.reset_all();
             }
 
+            // OSC 22 — set pointer (mouse cursor) shape.
+            AnsiOscType::SetPointerShape(shape) => {
+                self.pointer_shape = *shape;
+            }
+
             AnsiOscType::NoOp => {}
+        }
+    }
+
+    /// Handle an OSC 133 (FTCS) shell integration marker.
+    fn handle_osc_ftcs(&mut self, marker: &FtcsMarker) {
+        tracing::debug!("OSC 133 FTCS marker: {marker}");
+        match marker {
+            FtcsMarker::PromptStart => {
+                self.ftcs_state = FtcsState::InPrompt;
+            }
+            FtcsMarker::CommandStart => {
+                self.ftcs_state = FtcsState::InCommand;
+            }
+            FtcsMarker::OutputStart => {
+                self.ftcs_state = FtcsState::InOutput;
+            }
+            FtcsMarker::CommandFinished(exit_code) => {
+                self.last_exit_code = *exit_code;
+                self.ftcs_state = FtcsState::None;
+            }
+            FtcsMarker::PromptProperty(_kind) => {
+                // Prompt property is informational metadata — it annotates
+                // the type of the next prompt (initial, continuation, right)
+                // but does not change the FTCS state machine.
+            }
         }
     }
 
@@ -2921,6 +2947,66 @@ mod tests {
             handler.window_commands.len(),
             2,
             "each Bell output should produce one WindowManipulation::Bell"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 22 — pointer shape
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc22_default_pointer_shape_on_new() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(
+            handler.pointer_shape(),
+            freminal_common::buffer_states::pointer_shape::PointerShape::Default,
+            "initial pointer shape must be Default"
+        );
+    }
+
+    #[test]
+    fn osc22_set_and_read_pointer_shape() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPointerShape(
+            freminal_common::buffer_states::pointer_shape::PointerShape::Text,
+        ));
+        assert_eq!(
+            handler.pointer_shape(),
+            freminal_common::buffer_states::pointer_shape::PointerShape::Text,
+            "OSC 22 must update pointer_shape to Text"
+        );
+    }
+
+    #[test]
+    fn osc22_reset_via_default_shape() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPointerShape(
+            freminal_common::buffer_states::pointer_shape::PointerShape::Crosshair,
+        ));
+        handler.handle_osc(&AnsiOscType::SetPointerShape(
+            freminal_common::buffer_states::pointer_shape::PointerShape::Default,
+        ));
+        assert_eq!(
+            handler.pointer_shape(),
+            freminal_common::buffer_states::pointer_shape::PointerShape::Default,
+            "OSC 22 with Default shape must reset to Default"
+        );
+    }
+
+    #[test]
+    fn osc22_full_reset_clears_pointer_shape() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::SetPointerShape(
+            freminal_common::buffer_states::pointer_shape::PointerShape::Pointer,
+        ));
+        handler.full_reset();
+        assert_eq!(
+            handler.pointer_shape(),
+            freminal_common::buffer_states::pointer_shape::PointerShape::Default,
+            "full_reset must clear pointer_shape to Default"
         );
     }
 }

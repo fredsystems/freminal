@@ -6,7 +6,7 @@
 use anyhow::{Error, Result};
 use std::str::FromStr;
 
-use crate::buffer_states::{ftcs::FtcsMarker, url::Url};
+use crate::buffer_states::{ftcs::FtcsMarker, pointer_shape::PointerShape, url::Url};
 use std::fmt;
 
 /// iTerm2 inline image dimension specification.
@@ -161,7 +161,7 @@ pub enum OscTarget {
     /// silently consumed; candidate for future response implementation.
     HighlightForeground,
     /// OSC 22 — set/reset the X11 pointer (mouse cursor) shape.  One-way
-    /// command, no response expected.  Silently consumed.
+    /// command, no response expected.
     PointerShape,
     /// OSC 66 — Konsole/zsh color-scheme notification (one-way; no response).
     /// Silently consumed.
@@ -315,6 +315,10 @@ pub enum AnsiOscType {
     ResetForegroundColor,
     /// OSC 111 — reset the dynamic background color override.
     ResetBackgroundColor,
+    /// OSC 22 — set the pointer (mouse cursor) shape.
+    ///
+    /// An empty name or `"default"` resets to the OS default.
+    SetPointerShape(PointerShape),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -365,6 +369,7 @@ impl std::fmt::Display for AnsiOscType {
             Self::ResetPaletteColor(idx) => write!(f, "ResetPaletteColor({idx:?})"),
             Self::ResetForegroundColor => write!(f, "ResetForegroundColor"),
             Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
+            Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
         }
     }
 }

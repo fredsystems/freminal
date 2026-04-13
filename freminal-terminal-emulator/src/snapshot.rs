@@ -30,6 +30,7 @@ use freminal_common::{
             mouse::{MouseEncoding, MouseTrack},
             rl_bracket::RlBracket,
         },
+        pointer_shape::PointerShape,
         tchar::TChar,
     },
     cursor::CursorVisualStyle,
@@ -293,6 +294,12 @@ pub struct TerminalSnapshot {
     /// the theme's `cursor` field.
     pub cursor_color_override: Option<(u8, u8, u8)>,
 
+    /// Pointer (mouse cursor) shape requested by the application via OSC 22.
+    ///
+    /// The GUI maps this to `egui::CursorIcon` during the render pass.
+    /// `PointerShape::Default` means no override — use the OS default arrow.
+    pub pointer_shape: PointerShape,
+
     /// All inline images referenced by the visible window.
     ///
     /// The map contains only the images that appear in `visible_image_placements`
@@ -376,6 +383,7 @@ impl TerminalSnapshot {
             #[cfg(feature = "playback")]
             playback_info: None,
             cursor_color_override: None,
+            pointer_shape: PointerShape::Default,
         }
     }
 }
@@ -417,5 +425,13 @@ mod tests {
     #[test]
     fn empty_visible_line_widths_is_empty() {
         assert!(TerminalSnapshot::empty().visible_line_widths.is_empty());
+    }
+
+    #[test]
+    fn empty_pointer_shape_is_default() {
+        assert_eq!(
+            TerminalSnapshot::empty().pointer_shape,
+            PointerShape::Default
+        );
     }
 }

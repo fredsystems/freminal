@@ -13,7 +13,7 @@ use crate::gui::{
 
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
-    buffer_states::{tchar::TChar, url::Url},
+    buffer_states::{pointer_shape::PointerShape, tchar::TChar, url::Url},
     config::Config,
     themes::ThemePalette,
 };
@@ -1610,10 +1610,11 @@ impl FreminalTerminalWidget {
                 }
 
                 // Update cursor icon from cached URL state.
+                // URL hover (pointing hand) takes priority over OSC 22 shape.
                 let new_icon = if cache.cached_hovered_url.is_some() {
                     CursorIcon::PointingHand
                 } else {
-                    CursorIcon::Default
+                    pointer_shape_to_cursor_icon(snap.pointer_shape)
                 };
 
                 if new_icon != cache.previous_cursor_icon {
@@ -1639,24 +1640,26 @@ impl FreminalTerminalWidget {
                     }
                 }
             } else {
-                // Mouse left the terminal area.
+                // Mouse left the terminal area — fall back to OSC 22 shape.
                 cache.previous_hover_cell = None;
                 cache.cached_hovered_url = None;
-                if cache.previous_cursor_icon != CursorIcon::Default {
-                    cache.previous_cursor_icon = CursorIcon::Default;
+                let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
+                if cache.previous_cursor_icon != base_icon {
+                    cache.previous_cursor_icon = base_icon;
                     ui.ctx().output_mut(|output| {
-                        output.cursor_icon = CursorIcon::Default;
+                        output.cursor_icon = base_icon;
                     });
                 }
             }
         } else {
-            // No URLs — reset tracking state and ensure default cursor.
+            // No URLs — apply OSC 22 shape (or default if none set).
             cache.previous_hover_cell = None;
             cache.cached_hovered_url = None;
-            if cache.previous_cursor_icon != CursorIcon::Default {
-                cache.previous_cursor_icon = CursorIcon::Default;
+            let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
+            if cache.previous_cursor_icon != base_icon {
+                cache.previous_cursor_icon = base_icon;
                 ui.ctx().output_mut(|output| {
-                    output.cursor_icon = CursorIcon::Default;
+                    output.cursor_icon = base_icon;
                 });
             }
         }
@@ -1740,6 +1743,49 @@ impl FreminalTerminalWidget {
 /// POSIX shell-escape a file path for safe pasting into a terminal.
 ///
 /// Wraps the path in single quotes and escapes any embedded single quotes
+/// Convert a `PointerShape` (from `TerminalSnapshot`) to the corresponding
+/// `egui::CursorIcon`.
+///
+/// `PointerShape::Default` and any value that has no direct egui equivalent
+/// both produce `CursorIcon::Default`.
+const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
+    match shape {
+        PointerShape::Default => CursorIcon::Default,
+        PointerShape::None => CursorIcon::None,
+        PointerShape::Text => CursorIcon::Text,
+        PointerShape::VerticalText => CursorIcon::VerticalText,
+        PointerShape::Pointer => CursorIcon::PointingHand,
+        PointerShape::ContextMenu => CursorIcon::ContextMenu,
+        PointerShape::Help => CursorIcon::Help,
+        PointerShape::Progress => CursorIcon::Progress,
+        PointerShape::Wait => CursorIcon::Wait,
+        PointerShape::Cell => CursorIcon::Cell,
+        PointerShape::Crosshair => CursorIcon::Crosshair,
+        PointerShape::Move => CursorIcon::Move,
+        PointerShape::NoDrop => CursorIcon::NoDrop,
+        PointerShape::NotAllowed => CursorIcon::NotAllowed,
+        PointerShape::Grab => CursorIcon::Grab,
+        PointerShape::Grabbing => CursorIcon::Grabbing,
+        PointerShape::Alias => CursorIcon::Alias,
+        PointerShape::Copy => CursorIcon::Copy,
+        PointerShape::AllScroll => CursorIcon::AllScroll,
+        PointerShape::ResizeHorizontal => CursorIcon::ResizeHorizontal,
+        PointerShape::ResizeVertical => CursorIcon::ResizeVertical,
+        PointerShape::ResizeNeSw => CursorIcon::ResizeNeSw,
+        PointerShape::ResizeNwSe => CursorIcon::ResizeNwSe,
+        PointerShape::ResizeEast => CursorIcon::ResizeEast,
+        PointerShape::ResizeSouthEast => CursorIcon::ResizeSouthEast,
+        PointerShape::ResizeSouth => CursorIcon::ResizeSouth,
+        PointerShape::ResizeSouthWest => CursorIcon::ResizeSouthWest,
+        PointerShape::ResizeWest => CursorIcon::ResizeWest,
+        PointerShape::ResizeNorthWest => CursorIcon::ResizeNorthWest,
+        PointerShape::ResizeNorth => CursorIcon::ResizeNorth,
+        PointerShape::ResizeNorthEast => CursorIcon::ResizeNorthEast,
+        PointerShape::ZoomIn => CursorIcon::ZoomIn,
+        PointerShape::ZoomOut => CursorIcon::ZoomOut,
+    }
+}
+
 /// with the `'\''` idiom.  The result is safe to paste into `sh`, `bash`,
 /// `zsh`, and `fish`.
 fn shell_escape_path(path: &std::path::Path) -> String {

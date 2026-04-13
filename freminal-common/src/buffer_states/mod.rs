@@ -33,6 +33,8 @@ pub mod mode;
 pub mod modes;
 /// OSC parameter types and inline-image data.
 pub mod osc;
+/// `PointerShape` — typed cursor shape set by OSC 22.
+pub mod pointer_shape;
 /// Sixel graphics types.
 pub mod sixel;
 /// `TChar` — a single terminal character with optional wide-character metadata.
