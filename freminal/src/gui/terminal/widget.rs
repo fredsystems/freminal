@@ -604,8 +604,6 @@ pub struct PaneRenderCache {
     /// Pointer identity of the `visible_chars` `Arc` used for the last URL
     /// hover lookup.
     pub(super) hover_snap_ptr: usize,
-    /// The cursor icon that was last written via `output_mut`.
-    pub(super) previous_cursor_icon: CursorIcon,
     /// Per-pane shaping cache for text layout.
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
 }
@@ -634,7 +632,6 @@ impl PaneRenderCache {
             previous_hover_cell: None,
             cached_hovered_url: None,
             hover_snap_ptr: 0,
-            previous_cursor_icon: CursorIcon::Default,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
         }
     }
@@ -1611,18 +1608,17 @@ impl FreminalTerminalWidget {
 
                 // Update cursor icon from cached URL state.
                 // URL hover (pointing hand) takes priority over OSC 22 shape.
+                // Must be set unconditionally every frame because egui resets
+                // output.cursor_icon to Default at the start of each frame.
                 let new_icon = if cache.cached_hovered_url.is_some() {
                     CursorIcon::PointingHand
                 } else {
                     pointer_shape_to_cursor_icon(snap.pointer_shape)
                 };
 
-                if new_icon != cache.previous_cursor_icon {
-                    cache.previous_cursor_icon = new_icon;
-                    ui.ctx().output_mut(|output| {
-                        output.cursor_icon = new_icon;
-                    });
-                }
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = new_icon;
+                });
 
                 // Ctrl+click (Cmd+click on macOS) opens the URL.
                 if let Some(url) = &cache.cached_hovered_url {
@@ -1644,24 +1640,18 @@ impl FreminalTerminalWidget {
                 cache.previous_hover_cell = None;
                 cache.cached_hovered_url = None;
                 let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
-                if cache.previous_cursor_icon != base_icon {
-                    cache.previous_cursor_icon = base_icon;
-                    ui.ctx().output_mut(|output| {
-                        output.cursor_icon = base_icon;
-                    });
-                }
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = base_icon;
+                });
             }
         } else {
             // No URLs — apply OSC 22 shape (or default if none set).
             cache.previous_hover_cell = None;
             cache.cached_hovered_url = None;
             let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
-            if cache.previous_cursor_icon != base_icon {
-                cache.previous_cursor_icon = base_icon;
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = base_icon;
-                });
-            }
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = base_icon;
+            });
         }
 
         // ── Drag-and-drop ────────────────────────────────────────────
