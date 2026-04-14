@@ -25,7 +25,7 @@ use std::{fmt::Debug, io, process::Output, vec};
 use cargo_metadata::MetadataCommand;
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
-use color_eyre::{eyre::Context, Result};
+use color_eyre::{Result, eyre::Context};
 use duct::cmd;
 use tracing::level_filters::LevelFilter;
 use tracing_log::AsTrace;
@@ -373,8 +373,22 @@ fn test_docs() -> Result<()> {
 }
 
 /// Run lib tests for the workspace's default packages
+///
+/// Uses explicit target flags instead of `--all-targets` to exclude
+/// benchmarks.  `--all-targets` is equivalent to `--lib --bins --tests
+/// --benches --examples`; including `--benches` causes Criterion harnesses
+/// to compile and run in test mode, which is unnecessary overhead —
+/// especially in the pre-commit hook.  Benchmark compilation is verified
+/// separately by `bench_compile()`.
 fn test_libs() -> Result<()> {
-    run_cargo(vec!["test", "--all-targets", "--all-features"])
+    run_cargo(vec![
+        "test",
+        "--lib",
+        "--bins",
+        "--tests",
+        "--examples",
+        "--all-features",
+    ])
 }
 
 /// Compile all benchmarks without running them.
@@ -399,7 +413,7 @@ fn test_default_features() -> Result<()> {
     // doesn't leak into this pass — we need to verify the code compiles and
     // passes tests with NO optional features enabled.
     run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
-    run_cargo_no_features(vec!["test", "--all-targets"])?;
+    run_cargo_no_features(vec!["test", "--lib", "--bins", "--tests", "--examples"])?;
     run_cargo_no_features(vec!["test", "--doc"])?;
     Ok(())
 }

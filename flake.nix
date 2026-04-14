@@ -116,6 +116,9 @@
               src = ./.;
               check_rust = true;
               enableXtask = true;
+              rust_options = {
+                xtaskCheck = "pc";
+              };
               extraExcludes = [
                 "^speed_tests/"
                 "^Documents/reference"
