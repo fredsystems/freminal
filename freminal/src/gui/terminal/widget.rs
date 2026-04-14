@@ -1730,14 +1730,11 @@ impl FreminalTerminalWidget {
     }
 }
 
-/// POSIX shell-escape a file path for safe pasting into a terminal.
+/// Convert a [`PointerShape`] (from [`TerminalSnapshot`]) to the corresponding
+/// [`egui::CursorIcon`].
 ///
-/// Wraps the path in single quotes and escapes any embedded single quotes
-/// Convert a `PointerShape` (from `TerminalSnapshot`) to the corresponding
-/// `egui::CursorIcon`.
-///
-/// `PointerShape::Default` and any value that has no direct egui equivalent
-/// both produce `CursorIcon::Default`.
+/// [`PointerShape::Default`] and any value that has no direct egui equivalent
+/// both produce [`CursorIcon::Default`].
 const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
     match shape {
         PointerShape::Default => CursorIcon::Default,
@@ -1776,6 +1773,9 @@ const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
     }
 }
 
+/// POSIX shell-escape a file path for safe pasting into a terminal.
+///
+/// Wraps the path in single quotes and escapes any embedded single quotes
 /// with the `'\''` idiom.  The result is safe to paste into `sh`, `bash`,
 /// `zsh`, and `fish`.
 fn shell_escape_path(path: &std::path::Path) -> String {

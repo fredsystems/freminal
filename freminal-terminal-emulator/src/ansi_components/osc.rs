@@ -188,10 +188,11 @@ impl AnsiOscParser {
     }
 }
 
-/// Extract the cursor-shape name from OSC 22 params and push a  response.
+/// Extract the pointer-shape name from OSC 22 parameters and emit the
+/// corresponding terminal output.
 ///
-///  →  contains the xcursor/CSS name string.
-/// An empty or absent token resets to the default shape.
+/// The second parameter contains the xcursor/CSS name string. An empty or
+/// absent token resets the pointer shape to the default.
 fn handle_osc_pointer_shape(params: &[Option<AnsiOscToken>], output: &mut Vec<TerminalOutput>) {
     let shape_name = params
         .get(1)
