@@ -13,7 +13,7 @@ use crate::gui::{
 
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
-    buffer_states::{tchar::TChar, url::Url},
+    buffer_states::{pointer_shape::PointerShape, tchar::TChar, url::Url},
     config::Config,
     themes::ThemePalette,
 };
@@ -604,8 +604,6 @@ pub struct PaneRenderCache {
     /// Pointer identity of the `visible_chars` `Arc` used for the last URL
     /// hover lookup.
     pub(super) hover_snap_ptr: usize,
-    /// The cursor icon that was last written via `output_mut`.
-    pub(super) previous_cursor_icon: CursorIcon,
     /// Per-pane shaping cache for text layout.
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
 }
@@ -634,7 +632,6 @@ impl PaneRenderCache {
             previous_hover_cell: None,
             cached_hovered_url: None,
             hover_snap_ptr: 0,
-            previous_cursor_icon: CursorIcon::Default,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
         }
     }
@@ -1610,18 +1607,18 @@ impl FreminalTerminalWidget {
                 }
 
                 // Update cursor icon from cached URL state.
+                // URL hover (pointing hand) takes priority over OSC 22 shape.
+                // Must be set unconditionally every frame because egui resets
+                // output.cursor_icon to Default at the start of each frame.
                 let new_icon = if cache.cached_hovered_url.is_some() {
                     CursorIcon::PointingHand
                 } else {
-                    CursorIcon::Default
+                    pointer_shape_to_cursor_icon(snap.pointer_shape)
                 };
 
-                if new_icon != cache.previous_cursor_icon {
-                    cache.previous_cursor_icon = new_icon;
-                    ui.ctx().output_mut(|output| {
-                        output.cursor_icon = new_icon;
-                    });
-                }
+                ui.ctx().output_mut(|output| {
+                    output.cursor_icon = new_icon;
+                });
 
                 // Ctrl+click (Cmd+click on macOS) opens the URL.
                 if let Some(url) = &cache.cached_hovered_url {
@@ -1639,26 +1636,22 @@ impl FreminalTerminalWidget {
                     }
                 }
             } else {
-                // Mouse left the terminal area.
+                // Mouse left the terminal area — fall back to OSC 22 shape.
                 cache.previous_hover_cell = None;
                 cache.cached_hovered_url = None;
-                if cache.previous_cursor_icon != CursorIcon::Default {
-                    cache.previous_cursor_icon = CursorIcon::Default;
-                    ui.ctx().output_mut(|output| {
-                        output.cursor_icon = CursorIcon::Default;
-                    });
-                }
-            }
-        } else {
-            // No URLs — reset tracking state and ensure default cursor.
-            cache.previous_hover_cell = None;
-            cache.cached_hovered_url = None;
-            if cache.previous_cursor_icon != CursorIcon::Default {
-                cache.previous_cursor_icon = CursorIcon::Default;
+                let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
                 ui.ctx().output_mut(|output| {
-                    output.cursor_icon = CursorIcon::Default;
+                    output.cursor_icon = base_icon;
                 });
             }
+        } else {
+            // No URLs — apply OSC 22 shape (or default if none set).
+            cache.previous_hover_cell = None;
+            cache.cached_hovered_url = None;
+            let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = base_icon;
+            });
         }
 
         // ── Drag-and-drop ────────────────────────────────────────────
@@ -1734,6 +1727,49 @@ impl FreminalTerminalWidget {
     /// `available_pixels / cell_size` against `view_state.last_sent_size`).
     pub fn apply_font_zoom(&mut self, effective_size: f32) -> bool {
         self.font_manager.set_font_size(effective_size)
+    }
+}
+
+/// Convert a [`PointerShape`] (from [`TerminalSnapshot`]) to the corresponding
+/// [`egui::CursorIcon`].
+///
+/// [`PointerShape::Default`] and any value that has no direct egui equivalent
+/// both produce [`CursorIcon::Default`].
+const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
+    match shape {
+        PointerShape::Default => CursorIcon::Default,
+        PointerShape::None => CursorIcon::None,
+        PointerShape::Text => CursorIcon::Text,
+        PointerShape::VerticalText => CursorIcon::VerticalText,
+        PointerShape::Pointer => CursorIcon::PointingHand,
+        PointerShape::ContextMenu => CursorIcon::ContextMenu,
+        PointerShape::Help => CursorIcon::Help,
+        PointerShape::Progress => CursorIcon::Progress,
+        PointerShape::Wait => CursorIcon::Wait,
+        PointerShape::Cell => CursorIcon::Cell,
+        PointerShape::Crosshair => CursorIcon::Crosshair,
+        PointerShape::Move => CursorIcon::Move,
+        PointerShape::NoDrop => CursorIcon::NoDrop,
+        PointerShape::NotAllowed => CursorIcon::NotAllowed,
+        PointerShape::Grab => CursorIcon::Grab,
+        PointerShape::Grabbing => CursorIcon::Grabbing,
+        PointerShape::Alias => CursorIcon::Alias,
+        PointerShape::Copy => CursorIcon::Copy,
+        PointerShape::AllScroll => CursorIcon::AllScroll,
+        PointerShape::ResizeHorizontal => CursorIcon::ResizeHorizontal,
+        PointerShape::ResizeVertical => CursorIcon::ResizeVertical,
+        PointerShape::ResizeNeSw => CursorIcon::ResizeNeSw,
+        PointerShape::ResizeNwSe => CursorIcon::ResizeNwSe,
+        PointerShape::ResizeEast => CursorIcon::ResizeEast,
+        PointerShape::ResizeSouthEast => CursorIcon::ResizeSouthEast,
+        PointerShape::ResizeSouth => CursorIcon::ResizeSouth,
+        PointerShape::ResizeSouthWest => CursorIcon::ResizeSouthWest,
+        PointerShape::ResizeWest => CursorIcon::ResizeWest,
+        PointerShape::ResizeNorthWest => CursorIcon::ResizeNorthWest,
+        PointerShape::ResizeNorth => CursorIcon::ResizeNorth,
+        PointerShape::ResizeNorthEast => CursorIcon::ResizeNorthEast,
+        PointerShape::ZoomIn => CursorIcon::ZoomIn,
+        PointerShape::ZoomOut => CursorIcon::ZoomOut,
     }
 }
 

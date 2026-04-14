@@ -10,6 +10,7 @@ use freminal_common::buffer_states::ftcs::parse_ftcs_params;
 use freminal_common::buffer_states::osc::{
     AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
 };
+use freminal_common::buffer_states::pointer_shape::PointerShape;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::osc_clipboard::handle_osc_clipboard;
@@ -187,6 +188,27 @@ impl AnsiOscParser {
     }
 }
 
+/// Extract the pointer-shape name from OSC 22 parameters and emit the
+/// corresponding terminal output.
+///
+/// The second parameter contains the xcursor/CSS name string. An empty or
+/// absent token resets the pointer shape to the default.
+fn handle_osc_pointer_shape(params: &[Option<AnsiOscToken>], output: &mut Vec<TerminalOutput>) {
+    let shape_name = params
+        .get(1)
+        .and_then(|t| {
+            if let Some(AnsiOscToken::String(s)) = t {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("");
+    output.push(TerminalOutput::OscResponse(AnsiOscType::SetPointerShape(
+        PointerShape::from(shape_name),
+    )));
+}
+
 fn dispatch_osc_target(
     osc_target: &OscTarget,
     osc_internal_type: AnsiOscInternalType,
@@ -271,6 +293,27 @@ fn dispatch_osc_target(
         }
         OscTarget::ITerm2 => {
             handle_osc_iterm2(raw_params, seq_trace, output);
+        }
+        // OSC 22 — set the pointer (mouse cursor) shape.
+        OscTarget::PointerShape => {
+            handle_osc_pointer_shape(&params, output);
+        }
+        // Known-but-unimplemented OSC targets.  These are recognised
+        // sequences sent by common programs (vim/neovim, zsh, tmux) that
+        // Freminal cannot meaningfully act on (X11 mouse colors, Tektronix
+        // graphics, color-scheme notifications).  Silently
+        // consumed at trace level to avoid warn! spam during normal use.
+        OscTarget::MouseForeground
+        | OscTarget::MouseBackground
+        | OscTarget::TekForeground
+        | OscTarget::TekBackground
+        | OscTarget::HighlightBackground
+        | OscTarget::HighlightForeground
+        | OscTarget::ColorSchemeNotification => {
+            tracing::trace!(
+                "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}, recent='{}'",
+                seq_trace.as_str()
+            );
         }
         OscTarget::Unknown => {
             // Unknown OSC sequences are silently consumed (like

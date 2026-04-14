@@ -6,7 +6,7 @@
 use anyhow::{Error, Result};
 use std::str::FromStr;
 
-use crate::buffer_states::{ftcs::FtcsMarker, url::Url};
+use crate::buffer_states::{ftcs::FtcsMarker, pointer_shape::PointerShape, url::Url};
 use std::fmt;
 
 /// iTerm2 inline image dimension specification.
@@ -142,6 +142,30 @@ pub enum OscTarget {
     ResetForeground,
     /// OSC 111 — reset text background color to the theme default.
     ResetBackground,
+    /// OSC 13 — mouse cursor foreground color (X11 concept; not applicable to
+    /// GPU-rendered terminals).  Recognised and silently consumed.
+    MouseForeground,
+    /// OSC 14 — mouse cursor background color (X11 concept; not applicable to
+    /// GPU-rendered terminals).  Recognised and silently consumed.
+    MouseBackground,
+    /// OSC 15 — Tektronix foreground color (legacy VT100 graphics mode;
+    /// unimplemented).  Recognised and silently consumed.
+    TekForeground,
+    /// OSC 16 — Tektronix cursor/background color (legacy VT100 graphics mode;
+    /// unimplemented).  Recognised and silently consumed.
+    TekBackground,
+    /// OSC 17 — highlight (selection) background color.  Recognised and
+    /// silently consumed; candidate for future response implementation.
+    HighlightBackground,
+    /// OSC 19 — highlight (selection) foreground color.  Recognised and
+    /// silently consumed; candidate for future response implementation.
+    HighlightForeground,
+    /// OSC 22 — set/reset the X11 pointer (mouse cursor) shape.  One-way
+    /// command, no response expected.
+    PointerShape,
+    /// OSC 66 — Konsole/zsh color-scheme notification (one-way; no response).
+    /// Silently consumed.
+    ColorSchemeNotification,
     Unknown,
     ITerm2,
 }
@@ -186,7 +210,15 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
             AnsiOscToken::OscValue(12) => Self::CursorColor,
+            AnsiOscToken::OscValue(13) => Self::MouseForeground,
+            AnsiOscToken::OscValue(14) => Self::MouseBackground,
+            AnsiOscToken::OscValue(15) => Self::TekForeground,
+            AnsiOscToken::OscValue(16) => Self::TekBackground,
+            AnsiOscToken::OscValue(17) => Self::HighlightBackground,
+            AnsiOscToken::OscValue(19) => Self::HighlightForeground,
+            AnsiOscToken::OscValue(22) => Self::PointerShape,
             AnsiOscToken::OscValue(52) => Self::Clipboard,
+            AnsiOscToken::OscValue(66) => Self::ColorSchemeNotification,
             AnsiOscToken::OscValue(104) => Self::ResetPaletteColor,
             AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
             AnsiOscToken::OscValue(133) => Self::Ftcs,
@@ -283,6 +315,10 @@ pub enum AnsiOscType {
     ResetForegroundColor,
     /// OSC 111 — reset the dynamic background color override.
     ResetBackgroundColor,
+    /// OSC 22 — set the pointer (mouse cursor) shape.
+    ///
+    /// An empty name or `"default"` resets to the OS default.
+    SetPointerShape(PointerShape),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -333,6 +369,7 @@ impl std::fmt::Display for AnsiOscType {
             Self::ResetPaletteColor(idx) => write!(f, "ResetPaletteColor({idx:?})"),
             Self::ResetForegroundColor => write!(f, "ResetForegroundColor"),
             Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
+            Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
         }
     }
 }
