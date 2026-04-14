@@ -25,7 +25,7 @@ use std::{fmt::Debug, io, process::Output, vec};
 use cargo_metadata::MetadataCommand;
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
-use color_eyre::{Result, eyre::Context};
+use color_eyre::{eyre::Context, Result};
 use duct::cmd;
 use tracing::level_filters::LevelFilter;
 use tracing_log::AsTrace;
