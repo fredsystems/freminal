@@ -582,31 +582,10 @@ impl Buffer {
                     return; // nothing left to insert
                 }
 
-                // Scroll-region-aware wrap: if the cursor is at the bottom
-                // margin of the DECSTBM scroll region, scroll the region up
-                // and keep the cursor on the (now-blanked) bottom row — do
-                // NOT advance past the region boundary.
-                let at_region_bottom = self.is_cursor_at_scroll_region_bottom();
-                if at_region_bottom {
-                    self.scroll_region_up_for_wrap();
-                    // row_idx stays the same — it now points to the freshly
-                    // blanked bottom row of the scroll region.
-                } else {
-                    row_idx += 1;
-                }
+                // Scroll-region-aware wrap: advance to the next row,
+                // preserving scrollback on full-screen primary buffers.
+                row_idx = self.advance_row_for_wrap(row_idx, wrap_start_col);
                 col = wrap_start_col;
-
-                if !at_region_bottom {
-                    if row_idx >= self.rows.len() {
-                        // brand new soft-wrap continuation row
-                        self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
-                    } else {
-                        // reuse existing row as a soft-wrap continuation
-                        self.reuse_row_as_softwrap(row_idx);
-                    }
-                }
-
-                self.cursor.pos.y = row_idx;
             }
 
             // ┌─────────────────────────────────────────────┐
@@ -699,30 +678,58 @@ impl Buffer {
                     start += leftover_start;
 
                     // Scroll-region-aware wrap: same logic as PRE-WRAP.
-                    let at_region_bottom = self.is_cursor_at_scroll_region_bottom();
-                    if at_region_bottom {
-                        self.scroll_region_up_for_wrap();
-                    } else {
-                        row_idx += 1;
-                    }
+                    row_idx = self.advance_row_for_wrap(row_idx, wrap_start_col);
                     col = wrap_start_col;
-
-                    // POST-WRAP: we now know a wrap actually occurred.
-                    if !at_region_bottom {
-                        if row_idx >= self.rows.len() {
-                            // brand new continuation
-                            self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
-                        } else {
-                            // reuse existing row as continuation
-                            self.reuse_row_as_softwrap(row_idx);
-                        }
-                    }
-
-                    self.cursor.pos.y = row_idx;
                     // `col` stays wrap_start_col; next iteration writes there.
                 }
             }
         }
+    }
+
+    /// Handle soft-wrap advancement: move the cursor to the next row when a
+    /// line wraps.  Returns the new `row_idx`.
+    ///
+    /// On a full-screen primary buffer the top visible row is preserved as
+    /// scrollback by pushing a new row at the bottom (the `handle_lf` fast-path
+    /// strategy).  For partial DECSTBM regions or alternate buffers the old
+    /// `scroll_region_up_for_wrap` rotation is used.
+    ///
+    /// When the cursor is NOT at the scroll region bottom, a new soft-wrap
+    /// continuation row is either allocated or reused from the existing row
+    /// vector.
+    fn advance_row_for_wrap(&mut self, row_idx: usize, wrap_start_col: usize) -> usize {
+        let at_region_bottom = self.is_cursor_at_scroll_region_bottom();
+        let is_full_screen_region = self.scroll_region_top == 0
+            && self.scroll_region_bottom == self.height.saturating_sub(1);
+
+        let new_row_idx =
+            if at_region_bottom && self.kind == BufferType::Primary && is_full_screen_region {
+                // Full-screen primary: push a new row, advance cursor.
+                // Content naturally scrolls into scrollback via visible_window_start().
+                let next = row_idx + 1;
+                self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
+                next
+            } else if at_region_bottom {
+                self.scroll_region_up_for_wrap();
+                // row_idx stays the same — it now points to the freshly blanked
+                // bottom row of the scroll region.
+                row_idx
+            } else {
+                let next = row_idx + 1;
+                if next >= self.rows.len() {
+                    self.push_row(RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine);
+                } else {
+                    self.reuse_row_as_softwrap(next);
+                }
+                next
+            };
+
+        // Initialise cursor column to the wrap start column — the caller
+        // still needs to set `col = wrap_start_col` in its own local variable,
+        // but we ensure the cursor struct is consistent.
+        self.cursor.pos.x = wrap_start_col;
+        self.cursor.pos.y = new_row_idx;
+        new_row_idx
     }
 
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
@@ -7703,5 +7710,157 @@ mod line_width_tests {
         assert_eq!(buf.rows[0].line_width, LineWidth::DoubleWidth);
         buf.set_cursor_line_width(LineWidth::Normal);
         assert_eq!(buf.rows[0].line_width, LineWidth::Normal);
+    }
+}
+
+/// Regression tests for scrollback preservation during soft-wrap in
+/// `insert_text`.  Before the fix, `scroll_region_up_for_wrap()` used an
+/// in-place rotation (`scroll_slice_up`) that destroyed the top visible
+/// row instead of preserving it in scrollback.  Long soft-wrapped lines
+/// (e.g. a 1539-char direnv export at width 128) would lose ~10 rows of
+/// history.
+#[cfg(test)]
+mod softwrap_scrollback_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    /// Fill a 10-column, 5-row primary buffer with 5 identifiable rows,
+    /// then write a long line that soft-wraps ~6 times.  The original 5
+    /// rows must all survive in scrollback.
+    #[test]
+    fn long_softwrap_preserves_scrollback() {
+        let width = 10;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+
+        // Write 5 full-width identifiable rows.  Each row is exactly
+        // `width` chars so it fills the row without wrapping.  The LF
+        // after each row moves the cursor to the next line.
+        let labels: Vec<String> = (0..height)
+            .map(|i| {
+                let tag = format!("R{i}");
+                // Pad to exactly `width` with a filler character unique to
+                // the row, so every cell is identifiable.
+                // SAFETY for cast: i < height (5), so always fits in u8.
+                #[allow(clippy::cast_possible_truncation)]
+                let filler = (b'a' + i as u8) as char;
+                let pad_len = width - tag.len();
+                format!(
+                    "{tag}{}",
+                    std::iter::repeat_n(filler, pad_len).collect::<String>()
+                )
+            })
+            .collect();
+
+        for label in &labels {
+            buf.insert_text(&t(label));
+            buf.handle_cr();
+            buf.handle_lf();
+        }
+
+        // The 5 LFs pushed the visible window down.  Row 0 in `rows[]`
+        // is now scrollback.  Write a long line that soft-wraps 5 more
+        // times, each wrap pushing another row into scrollback.
+        let long_line: String = "X".repeat(width * 6); // 60 chars → 6 screen rows
+        buf.insert_text(&t(&long_line));
+
+        // We should now have scrollback.  The earliest rows (R0–R4)
+        // must be accessible.
+        let max_off = buf.max_scroll_offset();
+        assert!(
+            max_off >= 5,
+            "expected at least 5 rows of scrollback, got {max_off}"
+        );
+
+        // Scroll all the way back and check the first 5 rows' content.
+        let vis_start_at_max_scroll = buf.visible_window_start(max_off);
+        for i in 0..5 {
+            let row = &buf.rows[vis_start_at_max_scroll + i];
+            let first_char = row.cells().first().map(Cell::into_utf8);
+            let expected_prefix = format!("R{i}");
+            // The row should start with "Ri" (R0, R1, ...).
+            let row_text: String = row.cells().iter().map(Cell::into_utf8).collect();
+            assert!(
+                row_text.starts_with(&expected_prefix),
+                "scrollback row {i} should start with {expected_prefix:?}, got {row_text:?} (first_char={first_char:?})"
+            );
+        }
+    }
+
+    /// Verify that an alternate buffer still uses `scroll_region_up`
+    /// rotation (no scrollback), so we haven't broken alt-screen wrapping.
+    #[test]
+    fn alt_buffer_softwrap_does_not_grow_scrollback() {
+        let width = 10;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+        buf.enter_alternate(0);
+
+        // Fill the screen.
+        for _ in 0..height {
+            buf.insert_text(&t("AAAAAAAAAA"));
+            buf.handle_lf();
+        }
+
+        // Long soft-wrapping line on the alt buffer.
+        let long_line: String = "B".repeat(60);
+        buf.insert_text(&t(&long_line));
+
+        // Alternate buffers must never have scrollback.
+        assert_eq!(
+            buf.max_scroll_offset(),
+            0,
+            "alt buffer must have no scrollback"
+        );
+        assert_eq!(
+            buf.rows.len(),
+            height,
+            "alt buffer row count must stay == height"
+        );
+    }
+
+    /// Ensure that partial DECSTBM regions still use the old rotation
+    /// path (not the new push-row path).  A partial region scroll should
+    /// discard the top line of the region, not grow the buffer.
+    #[test]
+    fn partial_decstbm_softwrap_uses_rotation() {
+        let width = 10;
+        let height = 10;
+        let mut buf = Buffer::new(width, height);
+
+        // Fill the buffer so all `height` rows exist.
+        for i in 0..height {
+            buf.insert_text(&t(&format!("L{i}")));
+            if i < height - 1 {
+                buf.handle_lf();
+            }
+        }
+
+        // Set a partial scroll region: rows 2–7 (0-indexed).
+        buf.scroll_region_top = 2;
+        buf.scroll_region_bottom = 7;
+
+        // Position cursor at the bottom of the scroll region.
+        buf.cursor.pos.y = buf.visible_window_start(0) + 7;
+        buf.cursor.pos.x = 0;
+
+        let initial_row_count = buf.rows.len();
+
+        // Write a long line that wraps several times while at the bottom
+        // of a partial scroll region.
+        let long_line: String = "C".repeat(60);
+        buf.insert_text(&t(&long_line));
+
+        // With a partial DECSTBM, the buffer should NOT grow beyond
+        // the initial size (rotation keeps row count stable).
+        assert_eq!(
+            buf.rows.len(),
+            initial_row_count,
+            "partial DECSTBM wrap must not grow the buffer"
+        );
     }
 }
