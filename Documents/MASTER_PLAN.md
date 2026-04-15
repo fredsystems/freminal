@@ -75,6 +75,7 @@ Task 61 (Saved Layouts).
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
+| 53  | Multiple Windows                         | `PLAN_VERSION_050.md` (Task 53)             | Complete | Task 36 (Tabs)       |
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
 | 59  | FREC v2: Multi-Pane Recording            | `PLAN_VERSION_060.md` (Task 59)             | Pending  | Tasks 32, 58         |
 | 60  | Playback v2: Multi-Pane Replay           | `PLAN_VERSION_060.md` (Task 60)             | Pending  | Task 59              |
@@ -334,7 +335,7 @@ and can be developed in a separate repo in parallel with Task 18.
 
 These tasks are defined in `PLAN_VERSION_050.md`. Task 57 is complete.
 
-- **Task 53** — Multiple Windows (depends on tabs, Task 36)
+- **Task 53** — Multiple Windows (depends on tabs, Task 36) — Complete
 - **Task 54** — Background Images (independent — extends Task 34)
 - **Task 55** — Custom Shaders (independent — extends Task 1 GL renderer)
 - **Task 58** — Built-in Multiplexer / Split Panes (depends on tabs, Task 36; subsumes A.2)
@@ -360,7 +361,7 @@ Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 2
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │                              │
-v0.5.0:       ├── Task 53 (Multiple Windows)
+v0.5.0:       ├── Task 53 (Multiple Windows) ── Complete
               ├── Task 54 (Background Images)
               ├── Task 55 (Custom Shaders)
               ├── Task 57 (Render Loop Opt) ── Complete
@@ -467,6 +468,7 @@ Update this section as tasks complete:
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
 | 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |
+| 53   | 2026-04-15 | 2026-04-15 | All 7 subtasks complete on task-53/multiple-windows                   |
 | 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders   |
 | 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders   |
 | 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                   |
