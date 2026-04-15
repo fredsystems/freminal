@@ -8,12 +8,18 @@ use freminal_terminal_emulator::io::InputEvent;
 use tracing::{error, trace};
 
 impl super::FreminalGui {
+    /// Close the root window, or show a confirmation dialog if secondary
+    /// windows are still open.
+    ///
+    /// When no secondary windows exist, sends `ViewportCommand::Close` to
+    /// terminate the app immediately.  Otherwise sets the
+    /// `show_close_confirmation` flag which causes `ui()` to render a
+    /// modal dialog asking "Close all windows?".
     pub(super) fn close_or_hide_root(&mut self, ctx: &egui::Context) {
         if self.secondary_windows.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            self.root_hidden = true;
+            self.show_close_confirmation = true;
         }
     }
 

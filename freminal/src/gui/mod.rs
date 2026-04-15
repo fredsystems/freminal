@@ -83,9 +83,10 @@ struct PaneBorderDrag {
 /// for secondary windows. Uses u64 to avoid collisions with egui's own IDs.
 static NEXT_VIEWPORT_ID: AtomicU64 = AtomicU64::new(1);
 
-// `os_dark_mode`, `pending_close_pane`, and `pending_new_window` are distinct
-// boolean flags with independent semantics; grouping them into an enum or
-// sub-struct would obscure their purpose without adding clarity.
+// `os_dark_mode`, `pending_close_pane`, `pending_new_window`,
+// `show_close_confirmation`, and `closing_all` are distinct boolean flags
+// with independent semantics; grouping them into an enum or sub-struct
+// would obscure their purpose without adding clarity.
 #[allow(clippy::struct_excessive_bools)]
 struct FreminalGui {
     /// All open terminal tabs, managed by `TabManager`.
@@ -178,11 +179,18 @@ struct FreminalGui {
     /// consumed at the start of `ui()` where `egui::Context` is available.
     pending_new_window: bool,
 
-    /// When `true`, the root window has been hidden because the user closed it
-    /// while secondary windows were still open.  The root stays alive as a
-    /// headless coordinator, re-registering secondary viewports each frame.
-    /// When the last secondary window closes, the app exits.
-    root_hidden: bool,
+    /// When `true`, a confirmation dialog is shown asking the user whether to
+    /// close all windows.  Set by any close path (OS close button, Menu → Quit,
+    /// last pane/tab closed) when secondary windows are still open.  The dialog
+    /// offers "Close All" (terminates every window) or "Cancel" (dismisses).
+    show_close_confirmation: bool,
+
+    /// Set to `true` by the "Close All" confirmation button.  Prevents the
+    /// close-intercept logic from re-cancelling the `ViewportCommand::Close`
+    /// that was just issued.  Without this, the intercept sees `close_requested`
+    /// on the next frame, finds secondary windows still in the list (not yet
+    /// pruned), and sends `CancelClose` — defeating the intentional shutdown.
+    closing_all: bool,
 
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
@@ -244,7 +252,8 @@ impl FreminalGui {
             window_post,
             secondary_windows: Vec::new(),
             pending_new_window: false,
-            root_hidden: false,
+            show_close_confirmation: false,
+            closing_all: false,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -527,15 +536,22 @@ impl eframe::App for FreminalGui {
 
         // ── Root window close intercept ───────────────────────────────────────
         // When the user closes the root window while secondary windows exist,
-        // hide the root instead of destroying it — eframe ties app lifecycle to
-        // ViewportId::ROOT so we cannot let it close.  The root stays alive as
-        // a headless coordinator until all secondaries are gone.
+        // show a confirmation dialog instead of closing immediately — eframe
+        // ties app lifecycle to ViewportId::ROOT so closing it would destroy
+        // all windows.
+        //
+        // Skip the intercept when `closing_all` is true — that means the user
+        // already confirmed "Close All" and the `ViewportCommand::Close` we
+        // sent should be honoured, not re-cancelled.
         let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
-        if close_requested && !self.secondary_windows.is_empty() {
-            // Cancel the OS close and hide the window instead.
-            ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
-            ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
-            self.root_hidden = true;
+        if close_requested && !self.closing_all {
+            if self.secondary_windows.is_empty() {
+                // No other windows — let the close proceed normally.
+            } else {
+                // Cancel the OS close and show a confirmation dialog.
+                ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
+                self.show_close_confirmation = true;
+            }
         }
 
         // ── Secondary window management ───────────────────────────────────────
@@ -599,21 +615,48 @@ impl eframe::App for FreminalGui {
             self.spawn_new_window(ui.ctx());
         }
 
-        // ── Root-hidden coordinator mode ──────────────────────────────────────
-        // When the root window is hidden (user closed it while secondaries were
-        // open), skip all root-window rendering.  Just manage secondary windows
-        // and exit once they're all gone.
-        if self.root_hidden {
-            if self.secondary_windows.is_empty() {
-                // All secondary windows have closed — exit the app.
+        // ── Close-all confirmation dialog ─────────────────────────────────────
+        // When the user attempted to close the root window (or pressed Quit)
+        // while secondary windows are still open, show a modal confirmation.
+        if self.show_close_confirmation {
+            let mut keep_open = true;
+            let mut confirmed_close = false;
+            egui::Window::new("Close All Windows?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Other windows are still open. Close all windows?");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Close All").clicked() {
+                            // Mark all secondary windows as closed so the pruning
+                            // loop stops re-registering them.
+                            for (_, state) in &self.secondary_windows {
+                                if let Ok(mut win) = state.lock() {
+                                    win.closed = true;
+                                }
+                            }
+                            confirmed_close = true;
+                            keep_open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                });
+            if confirmed_close {
+                // Set `closing_all` BEFORE sending `ViewportCommand::Close` so
+                // the close intercept at the top of `ui()` won't re-cancel it
+                // on the next frame.
+                self.closing_all = true;
                 ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-            } else {
-                // Keep the hidden root alive — repaint periodically to service
-                // the secondary window pruning loop above.
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(100));
             }
-            return;
+            if !keep_open {
+                self.show_close_confirmation = false;
+            }
+            // Request a repaint so the dialog remains interactive.
+            ui.ctx().request_repaint();
         }
 
         // Detect OS dark/light preference changes and auto-switch theme when
