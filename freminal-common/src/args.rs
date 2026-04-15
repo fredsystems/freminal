@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 /// Freminal — a modern terminal emulator written in Rust
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "freminal", version, about)]
 pub struct Args {
     /// Path to write session recordings to

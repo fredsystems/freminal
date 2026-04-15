@@ -46,29 +46,40 @@
           desktopItem = pkgs.makeDesktopItem {
             name = "freminal";
             desktopName = "Freminal";
-            comment = "Terminal emulator";
+            comment = "A modern GPU-accelerated terminal emulator";
             exec = "freminal";
             terminal = false;
             categories = [
               "System"
               "TerminalEmulator"
             ];
-            startupNotify = false;
-            icon = "freminal";
-          };
-
-          desktopItemTest = pkgs.makeDesktopItem {
-            name = "freminal-recording";
-            desktopName = "Freminal (recording)";
-            comment = "Terminal emulator";
-            exec = "freminal --recording-path /home/fred/freminal.bin";
-            terminal = false;
-            categories = [
-              "System"
-              "TerminalEmulator"
+            keywords = [
+              "terminal"
+              "shell"
+              "console"
+              "command line"
             ];
             startupNotify = false;
             icon = "freminal";
+
+            # Match the app_id / WM_CLASS that Freminal sets on its windows.
+            # This lets compositors and taskbars associate running windows with
+            # this .desktop entry for icon lookup and window grouping.
+            startupWMClass = "freminal";
+
+            # Each launch from the .desktop entry or application launcher must
+            # spawn a fully independent process. Launchers that honour this key
+            # (e.g. vicinae, GNOME Shell) will never coalesce a new launch into
+            # an already-running instance.
+            singleMainWindow = false;
+
+            # Explicit "New Terminal" action so launchers can offer spawning a
+            # fresh instance even when their default is to focus an existing
+            # window (e.g. vicinae Ctrl+B "open new").
+            actions.new-terminal = {
+              name = "New Terminal";
+              exec = "freminal";
+            };
           };
         in
         {
@@ -89,7 +100,6 @@
 
             desktopItems = [
               desktopItem
-              desktopItemTest
             ];
 
             postInstall = ''

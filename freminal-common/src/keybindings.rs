@@ -25,6 +25,7 @@
 //! | `Ctrl+Shift+T`     | New Tab          |
 //! | `Ctrl+Shift+W`     | Close Tab        |
 //! | `Ctrl+Shift+,`     | Open Settings    |
+//! | `Ctrl+Shift+N`     | New Window       |
 //! | `Shift+PageUp`     | Scroll Page Up   |
 //! | `Shift+PageDown`   | Scroll Page Down |
 //!
@@ -683,6 +684,8 @@ pub enum KeyAction {
     ToggleMenuBar,
     /// Open the settings modal.
     OpenSettings,
+    /// Open a new OS window with an initial tab.
+    NewWindow,
 
     // -- Scrollback ---------------------------------------------------------
     /// Scroll up by one page.
@@ -761,6 +764,7 @@ impl KeyAction {
             Self::ZoomReset => "zoom_reset",
             Self::ToggleMenuBar => "toggle_menu_bar",
             Self::OpenSettings => "open_settings",
+            Self::NewWindow => "new_window",
             Self::ScrollPageUp => "scroll_page_up",
             Self::ScrollPageDown => "scroll_page_down",
             Self::ScrollToTop => "scroll_to_top",
@@ -819,6 +823,7 @@ impl KeyAction {
             Self::ZoomReset => "Zoom Reset",
             Self::ToggleMenuBar => "Toggle Menu Bar",
             Self::OpenSettings => "Open Settings",
+            Self::NewWindow => "New Window",
             Self::ScrollPageUp => "Scroll Page Up",
             Self::ScrollPageDown => "Scroll Page Down",
             Self::ScrollToTop => "Scroll to Top",
@@ -874,6 +879,7 @@ impl KeyAction {
         Self::ZoomReset,
         Self::ToggleMenuBar,
         Self::OpenSettings,
+        Self::NewWindow,
         Self::ScrollPageUp,
         Self::ScrollPageDown,
         Self::ScrollToTop,
@@ -941,6 +947,7 @@ impl FromStr for KeyAction {
             "zoom_reset" => Ok(Self::ZoomReset),
             "toggle_menu_bar" => Ok(Self::ToggleMenuBar),
             "open_settings" => Ok(Self::OpenSettings),
+            "new_window" => Ok(Self::NewWindow),
             "scroll_page_up" => Ok(Self::ScrollPageUp),
             "scroll_page_down" => Ok(Self::ScrollPageDown),
             "scroll_to_top" => Ok(Self::ScrollToTop),
@@ -1281,6 +1288,15 @@ fn register_pane_bindings(map: &mut BindingMap) {
     );
 }
 
+/// Register window management bindings.
+fn register_window_bindings(map: &mut BindingMap) {
+    // Open a new OS window (mirrors "New Tab" but at the window level).
+    map.bind(
+        KeyCombo::new(BindingKey::N, BindingModifiers::CTRL_SHIFT),
+        KeyAction::NewWindow,
+    );
+}
+
 impl Default for BindingMap {
     /// Produce the standard set of key bindings matching common terminal
     /// emulator conventions.
@@ -1289,6 +1305,7 @@ impl Default for BindingMap {
         register_tab_bindings(&mut map);
         register_misc_bindings(&mut map);
         register_pane_bindings(&mut map);
+        register_window_bindings(&mut map);
         map
     }
 }
@@ -1598,7 +1615,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            47,
+            48,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -1960,11 +1977,11 @@ mod tests {
         //        + ScrollLineUp(1) + ScrollLineDown(1)
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
-        //        + ZoomPane(1) = 40
+        //        + ZoomPane(1) + NewWindow(1) = 41
         assert_eq!(
             map.len(),
-            40,
-            "default binding map should have exactly 40 bindings"
+            41,
+            "default binding map should have exactly 41 bindings"
         );
     }
 
