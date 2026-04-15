@@ -142,10 +142,14 @@ static NEXT_VIEWPORT_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Each additional window spawned via `Ctrl+Shift+N` (or the "Window → New
 /// Window" menu) gets one of these. Secondary windows share the same
-/// `egui::Context`, `Config`, `BindingMap`, and `WindowPostRenderer` as the
-/// root window, but own their own `TabManager`, title tracking, and render
-/// state — exactly like a second `FreminalGui` instance without the settings
-/// modal, playback controls, or app lifecycle management.
+/// `egui::Context`, `Config`, and `BindingMap` as the root window (snapshot-
+/// cloned at creation time), but own their own `TabManager`, title tracking,
+/// `WindowPostRenderer`, and render state — exactly like a second `FreminalGui`
+/// instance without the settings modal, playback controls, or app lifecycle
+/// management.
+// `closed`, `pending_close_pane`, and `pending_new_window` are distinct boolean
+// flags with independent semantics; grouping them would obscure their purpose.
+#[allow(clippy::struct_excessive_bools)]
 struct SecondaryWindowState {
     /// All open terminal tabs for this window.
     tabs: TabManager,
@@ -169,6 +173,19 @@ struct SecondaryWindowState {
     /// `None` until the deferred viewport closure runs for the first time.
     terminal_widget: Option<FreminalTerminalWidget>,
 
+    /// Set to `true` when the OS close button is clicked or the window is
+    /// programmatically closed.  The root window's pruning loop checks this
+    /// flag and stops calling `show_viewport_deferred` for this entry,
+    /// causing egui to destroy the OS window and drop the `Arc`, cleaning
+    /// up all PTY threads and resources.
+    closed: bool,
+
+    /// Set to `true` by the `NewWindow` key action or "Window → New Window"
+    /// menu inside this secondary window.  The root window's pruning loop
+    /// consumes this flag and sets `self.pending_new_window = true` to
+    /// trigger spawning of a new OS window from the root context.
+    pending_new_window: bool,
+
     // ── Shared resources (cloned / Arc'd from the root window) ──────────────
     /// A snapshot of the root window's `Config` at the time this window was
     /// opened.  Updated when the root applies settings changes.
@@ -184,9 +201,12 @@ struct SecondaryWindowState {
     /// across all windows in the process.
     pane_id_gen: Arc<Mutex<panes::PaneIdGenerator>>,
 
-    /// Shared window-level post-processing renderer (FBO + custom shader).
-    /// Each pane's `PaintCallback` writes into this; a window-level pass
-    /// applies the post effect.
+    /// Per-window post-processing renderer (FBO + custom shader).
+    ///
+    /// Each secondary window owns its own `WindowPostRenderer` so that pane
+    /// `PaintCallback`s write into this window's FBO — not the root window's.
+    /// Sharing the root's renderer would cause FBO corruption when both windows
+    /// are visible simultaneously.
     window_post: Arc<Mutex<WindowPostRenderer>>,
 
     /// Shared egui context handle (same `Arc<OnceLock<>>` as the root).
@@ -288,12 +308,20 @@ struct FreminalGui {
     /// Each entry is a `(ViewportId, Arc<Mutex<SecondaryWindowState>>)` pair.
     /// The root window registers each secondary window every frame via
     /// `ctx.show_viewport_deferred`. When a secondary window requests close,
-    /// it sets `closed = true` inside the mutex and this list is pruned.
+    /// `run_secondary_window_frame` sets `win.closed = true` and the pruning
+    /// loop stops re-registering that entry, causing egui to destroy the
+    /// viewport and dropping the `Arc` to clean up resources.
     secondary_windows: Vec<(ViewportId, Arc<Mutex<SecondaryWindowState>>)>,
 
     /// Set to `true` by the `NewWindow` key action or "Window → New Window" menu;
     /// consumed at the start of `ui()` where `egui::Context` is available.
     pending_new_window: bool,
+
+    /// When `true`, the root window has been hidden because the user closed it
+    /// while secondary windows were still open.  The root stays alive as a
+    /// headless coordinator, re-registering secondary viewports each frame.
+    /// When the last secondary window closes, the app exits.
+    root_hidden: bool,
 
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
@@ -355,6 +383,7 @@ impl FreminalGui {
             window_post,
             secondary_windows: Vec::new(),
             pending_new_window: false,
+            root_hidden: false,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -459,7 +488,7 @@ impl FreminalGui {
                 ui.separator();
 
                 if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    self.close_or_hide_root(ui.ctx());
                 }
             });
             if freminal_resp.inner.is_some() {
@@ -946,6 +975,14 @@ impl FreminalGui {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_id();
         let tab_id = tabs::TabId::first();
+
+        // Create a fresh WindowPostRenderer for this window.  Secondary windows
+        // must not share the root window's FBO — concurrent pane callbacks from
+        // different OS windows would corrupt each other's framebuffer.
+        let win_post: Arc<Mutex<WindowPostRenderer>> =
+            Arc::new(Mutex::new(WindowPostRenderer::new()));
+        self.copy_root_shader_to(&win_post);
+
         let pane = panes::Pane {
             id: pane_id,
             arc_swap: channels.arc_swap,
@@ -960,10 +997,21 @@ impl FreminalGui {
             title_stack: Vec::new(),
             view_state: view_state::ViewState::new(),
             echo_off: channels.echo_off,
-            render_state: new_render_state(Arc::clone(&self.window_post)),
+            // Each secondary window gets its own WindowPostRenderer so its pane
+            // PaintCallbacks write into this window's FBO — not the root's.
+            render_state: new_render_state(Arc::clone(&win_post)),
             render_cache: terminal::PaneRenderCache::new(),
         };
         let initial_tab = Tab::new(tab_id, pane);
+
+        // Push the background image to the initial pane's render state so it
+        // loads on the first frame (mirrors what FreminalGui::new() does for
+        // the root window's initial panes).
+        if self.config.ui.background_image.is_some()
+            && let Ok(mut rs) = initial_tab.active_pane().render_state.lock()
+        {
+            rs.set_pending_bg_image(self.config.ui.background_image.clone());
+        }
 
         // Notify the new pane of the current theme mode.
         if let Err(e) = initial_tab
@@ -985,11 +1033,13 @@ impl FreminalGui {
             pending_focus_direction: None,
             border_drag: None,
             terminal_widget: None, // lazily initialised on first frame
+            closed: false,
+            pending_new_window: false,
             config: self.config.clone(),
             args: self.args.clone(),
             binding_map: self.binding_map.clone(),
             pane_id_gen: Arc::clone(&self.pane_id_gen),
-            window_post: Arc::clone(&self.window_post),
+            window_post: win_post,
             egui_ctx: Arc::clone(&self.egui_ctx),
         }));
 
@@ -998,7 +1048,8 @@ impl FreminalGui {
 
         let builder = ViewportBuilder::default()
             .with_title("Freminal")
-            .with_app_id("freminal");
+            .with_app_id("freminal")
+            .with_transparent(true);
 
         // Clone the Arc so the closure owns a strong reference.
         let state_clone = Arc::clone(&state);
@@ -1012,6 +1063,66 @@ impl FreminalGui {
         });
 
         self.secondary_windows.push((viewport_id, state));
+    }
+
+    /// Copy the root window's active/pending shader into a new
+    /// `WindowPostRenderer` so it compiles its own copy on the next frame.
+    ///
+    /// If the root has a pending shader change, that pending value is copied.
+    /// Otherwise, if the root already has an active (compiled) shader, the
+    /// source is re-read from the config path.
+    fn copy_root_shader_to(&self, target: &Arc<Mutex<WindowPostRenderer>>) {
+        let root_guard = self
+            .window_post
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let shader_src: Option<Option<String>> = root_guard.pending_shader.as_ref().map_or_else(
+            || {
+                if root_guard.is_active() {
+                    // Root shader is already compiled — read the source from disk.
+                    self.config.shader.path.as_ref().and_then(|p| {
+                        std::fs::read_to_string(p)
+                            .map_err(|e| {
+                                error!(
+                                    "Failed to read shader for new window from '{}': {e}",
+                                    p.display()
+                                );
+                            })
+                            .ok()
+                            .map(Some)
+                    })
+                } else {
+                    None
+                }
+            },
+            |pending| Some(pending.clone()),
+        );
+        drop(root_guard);
+        if let Some(src) = shader_src {
+            target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_shader = Some(src);
+        }
+    }
+
+    /// Close or hide the root window.
+    ///
+    /// If secondary windows are still open, the root is hidden instead of
+    /// destroyed — eframe ties app lifetime to `ViewportId::ROOT`, so
+    /// destroying it would kill the entire process (including all secondary
+    /// windows).  When no secondaries exist the window closes normally.
+    fn close_or_hide_root(&mut self, ctx: &egui::Context) {
+        if self.secondary_windows.is_empty() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        } else {
+            // We cannot destroy ViewportId::ROOT while secondary viewports
+            // are alive — eframe ties the application lifecycle to the root,
+            // so closing it would kill the entire process.  Minimize the root
+            // instead so it gets out of the user's way.
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+            self.root_hidden = true;
+        }
     }
 
     /// Close the focused pane in the active tab.
@@ -1056,7 +1167,7 @@ impl FreminalGui {
             Err(panes::PaneError::CannotCloseLastPane) => {
                 // Last pane in tab — close the tab instead.
                 if self.tabs.tab_count() <= 1 {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    self.close_or_hide_root(ui.ctx());
                     return;
                 }
                 let idx = self.tabs.active_index();
@@ -1417,6 +1528,45 @@ impl FreminalGui {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clear_atlas();
                     pane.render_cache.invalidate_content();
+                }
+            }
+        }
+    }
+
+    /// Push a `pending_shader` change to every secondary window's
+    /// `WindowPostRenderer`.
+    ///
+    /// Called from hot-reload and settings-apply so that secondary windows
+    /// recompile the same shader as the root.
+    ///
+    /// `shader` is `None` to clear the shader, or `Some(source)` to set it.
+    fn propagate_shader_to_secondary_windows(&self, shader: Option<&String>) {
+        let pending = shader.cloned();
+        for (_vid, state) in &self.secondary_windows {
+            if let Ok(win) = state.try_lock()
+                && let Ok(mut wpr) = win.window_post.lock()
+            {
+                wpr.pending_shader = Some(pending.clone());
+            }
+        }
+    }
+
+    /// Push a background image change to every pane in every secondary window.
+    ///
+    /// Called from settings-apply so secondary windows render the same
+    /// background image as the root.
+    fn propagate_bg_image_to_secondary_windows(&self, path: Option<&std::path::PathBuf>) {
+        let owned = path.cloned();
+        for (_vid, state) in &self.secondary_windows {
+            if let Ok(win) = state.try_lock() {
+                for tab in win.tabs.iter() {
+                    if let Ok(panes) = tab.pane_tree.iter_panes() {
+                        for pane in panes {
+                            if let Ok(mut rs) = pane.render_state.lock() {
+                                rs.set_pending_bg_image(owned.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1991,6 +2141,19 @@ impl eframe::App for FreminalGui {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
 
+        // ── Root window close intercept ───────────────────────────────────────
+        // When the user closes the root window while secondary windows exist,
+        // hide the root instead of destroying it — eframe ties app lifecycle to
+        // ViewportId::ROOT so we cannot let it close.  The root stays alive as
+        // a headless coordinator until all secondaries are gone.
+        let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
+        if close_requested && !self.secondary_windows.is_empty() {
+            // Cancel the OS close and hide the window instead.
+            ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
+            ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
+            self.root_hidden = true;
+        }
+
         // ── Secondary window management ───────────────────────────────────────
         // Re-register all live secondary windows on every frame.  egui's deferred
         // viewport API requires the closure to be supplied every frame; stopping
@@ -2000,12 +2163,23 @@ impl eframe::App for FreminalGui {
             let ctx = ui.ctx().clone();
             let mut live: Vec<(ViewportId, Arc<Mutex<SecondaryWindowState>>)> = Vec::new();
             for (vid, state) in self.secondary_windows.drain(..) {
+                // Check if the window has requested to be closed.  When `closed`
+                // is true we stop calling `show_viewport_deferred` for this entry.
+                // egui destroys the OS window because the closure is no longer
+                // supplied, and the `Arc` is dropped here, cleaning up PTY threads.
+                let is_closed = state.try_lock().is_ok_and(|w| w.closed);
+                if is_closed {
+                    // Do NOT re-register — egui will destroy the viewport.
+                    continue;
+                }
+
                 let state_clone = Arc::clone(&state);
                 ctx.show_viewport_deferred(
                     vid,
                     ViewportBuilder::default()
                         .with_title("Freminal")
-                        .with_app_id("freminal"),
+                        .with_app_id("freminal")
+                        .with_transparent(true),
                     move |ui, _class| {
                         let Ok(mut win) = state_clone.try_lock() else {
                             return;
@@ -2018,11 +2192,44 @@ impl eframe::App for FreminalGui {
             self.secondary_windows = live;
         }
 
+        // Collect `pending_new_window` requests from secondary windows and
+        // consume them into the root's own flag.  We do this with a single
+        // `any()` scan to avoid holding a lock while mutating `self`.
+        let any_secondary_wants_new_window = self.secondary_windows.iter().any(|(_, state)| {
+            state.try_lock().is_ok_and(|mut w| {
+                let v = w.pending_new_window;
+                if v {
+                    w.pending_new_window = false;
+                }
+                v
+            })
+        });
+        if any_secondary_wants_new_window {
+            self.pending_new_window = true;
+        }
+
         // Consume the pending_new_window flag set by dispatch_deferred_action or
         // the "Window → New Window" menu.  Must happen here where ctx is available.
         if self.pending_new_window {
             self.pending_new_window = false;
             self.spawn_new_window(ui.ctx());
+        }
+
+        // ── Root-hidden coordinator mode ──────────────────────────────────────
+        // When the root window is hidden (user closed it while secondaries were
+        // open), skip all root-window rendering.  Just manage secondary windows
+        // and exit once they're all gone.
+        if self.root_hidden {
+            if self.secondary_windows.is_empty() {
+                // All secondary windows have closed — exit the app.
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+            } else {
+                // Keep the hidden root alive — repaint periodically to service
+                // the secondary window pruning loop above.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            return;
         }
 
         // Detect OS dark/light preference changes and auto-switch theme when
@@ -2095,8 +2302,9 @@ impl eframe::App for FreminalGui {
                 match std::fs::read_to_string(shader_path) {
                     Ok(src) => {
                         if let Ok(mut wpr) = self.window_post.lock() {
-                            wpr.pending_shader = Some(Some(src));
+                            wpr.pending_shader = Some(Some(src.clone()));
                         }
+                        self.propagate_shader_to_secondary_windows(Some(&src));
                     }
                     Err(e) => {
                         error!(
@@ -2169,7 +2377,7 @@ impl eframe::App for FreminalGui {
                 Err(panes::PaneError::CannotCloseLastPane) => {
                     // Last pane in tab — close the entire tab.
                     if self.tabs.tab_count() <= 1 {
-                        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                        self.close_or_hide_root(ui.ctx());
                         return;
                     }
                     self.close_tab(tab_idx);
@@ -2974,7 +3182,7 @@ impl eframe::App for FreminalGui {
                 // The actual GL calls happen in each pane's PaintCallback (needs GL context).
                 {
                     let new_bg_path = self.config.ui.background_image.clone();
-                    // Per-pane: push background image changes.
+                    // Per-pane: push background image changes (root window).
                     for tab in self.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
@@ -2984,31 +3192,47 @@ impl eframe::App for FreminalGui {
                             }
                         }
                     }
+                    // Per-pane: push background image changes (secondary windows).
+                    self.propagate_bg_image_to_secondary_windows(new_bg_path.as_ref());
                     // Window-level: push shader change.
                     // Only update if the path is None (clear shader) or the read
                     // succeeds (new shader source).  On read failure, leave the
                     // current shader in place and log the error.
-                    match self.config.shader.path.as_ref() {
-                        None => {
-                            // Path cleared — deactivate any active shader.
-                            if let Ok(mut wpr) = self.window_post.lock() {
-                                wpr.pending_shader = Some(None);
-                            }
-                        }
-                        Some(p) => match std::fs::read_to_string(p) {
-                            Ok(src) => {
-                                if let Ok(mut wpr) = self.window_post.lock() {
-                                    wpr.pending_shader = Some(Some(src));
-                                }
-                            }
+                    let shader_pending: Option<String> = self
+                        .config
+                        .shader
+                        .path
+                        .as_ref()
+                        .map_or(Some(None), |p| match std::fs::read_to_string(p) {
+                            Ok(src) => Some(Some(src)),
                             Err(e) => {
                                 error!(
                                     "Failed to read shader file '{}': {e}; keeping current shader",
                                     p.display()
                                 );
+                                None
                             }
-                        },
+                        })
+                        .flatten();
+                    // shader_pending: None means "keep current" (read failed),
+                    // need to distinguish from "clear shader" (path was None).
+                    // Re-derive: if path is None, clear; if path is Some and
+                    // read succeeded, set; if read failed, skip.
+                    let has_shader_path = self.config.shader.path.is_some();
+                    if !has_shader_path {
+                        // Clear shader.
+                        if let Ok(mut wpr) = self.window_post.lock() {
+                            wpr.pending_shader = Some(None);
+                        }
+                        self.propagate_shader_to_secondary_windows(None);
+                    } else if let Some(ref src) = shader_pending {
+                        // Set new shader.
+                        if let Ok(mut wpr) = self.window_post.lock() {
+                            wpr.pending_shader = Some(Some(src.clone()));
+                        }
+                        self.propagate_shader_to_secondary_windows(Some(src));
                     }
+                    // else: read failed — leave current shader in place.
                 }
 
                 // Notify all panes in all tabs of the new theme mode so DECRPM ?2031
@@ -3094,6 +3318,99 @@ impl eframe::App for FreminalGui {
     }
 }
 
+/// Spawn a split pane in a secondary window's active tab.
+///
+/// Mirrors [`FreminalGui::spawn_split_pane`] but operates on a
+/// [`SecondaryWindowState`] rather than the root GUI instance.
+fn spawn_split_pane_in_secondary(
+    win: &mut SecondaryWindowState,
+    direction: panes::SplitDirection,
+    ui: &egui::Ui,
+) {
+    let os_dark_mode = ui.ctx().global_style().visuals.dark_mode;
+    let theme = freminal_common::themes::by_slug(win.config.theme.active_slug(os_dark_mode))
+        .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+
+    let channels =
+        match pty::spawn_pty_tab(&win.args, win.config.scrollback.limit, theme, &win.egui_ctx) {
+            Ok(ch) => ch,
+            Err(e) => {
+                error!("Secondary window: failed to spawn split pane: {e}");
+                return;
+            }
+        };
+
+    let target_id = win.tabs.active_tab().active_pane;
+
+    // Pre-allocate the pane ID so the mutex guard is dropped before we
+    // borrow `win.tabs` mutably (avoids significant_drop_tightening lint).
+    let new_pane_id_alloc = win
+        .pane_id_gen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .next_id();
+
+    let new_pane_id = {
+        let tab = win.tabs.active_tab_mut();
+        match tab.pane_tree.split_with_id(
+            target_id,
+            direction,
+            new_pane_id_alloc,
+            panes::Pane {
+                id: new_pane_id_alloc,
+                arc_swap: channels.arc_swap,
+                input_tx: channels.input_tx,
+                pty_write_tx: channels.pty_write_tx,
+                window_cmd_rx: channels.window_cmd_rx,
+                clipboard_rx: channels.clipboard_rx,
+                search_buffer_rx: channels.search_buffer_rx,
+                pty_dead_rx: channels.pty_dead_rx,
+                title: "Terminal".to_owned(),
+                bell_active: false,
+                title_stack: Vec::new(),
+                view_state: view_state::ViewState::new(),
+                echo_off: channels.echo_off,
+                render_state: new_render_state(Arc::clone(&win.window_post)),
+                render_cache: terminal::PaneRenderCache::new(),
+            },
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                error!("Secondary window: failed to insert split pane: {e}");
+                return;
+            }
+        }
+    };
+
+    let tab = win.tabs.active_tab_mut();
+
+    if let Some(old_pane) = tab.pane_tree.find(target_id)
+        && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+    {
+        error!("Secondary window: FocusChange(false) to {target_id}: {e}");
+    }
+
+    tab.active_pane = new_pane_id;
+
+    if let Some(new_pane) = tab.pane_tree.find(new_pane_id) {
+        if let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true)) {
+            error!("Secondary window: FocusChange(true) to {new_pane_id}: {e}");
+        }
+        if let Err(e) = new_pane.input_tx.send(InputEvent::ThemeModeUpdate(
+            win.config.theme.mode,
+            os_dark_mode,
+        )) {
+            error!("Secondary window: ThemeModeUpdate to split pane: {e}");
+        }
+        let new_bg_path = win.config.ui.background_image.clone();
+        if new_bg_path.is_some()
+            && let Ok(mut rs) = new_pane.render_state.lock()
+        {
+            rs.set_pending_bg_image(new_bg_path);
+        }
+    }
+}
+
 /// Per-frame rendering for a secondary OS window.
 ///
 /// Called by the deferred viewport closure registered in [`FreminalGui::spawn_new_window`]
@@ -3110,6 +3427,10 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
     // Honor close requests from the OS (alt-F4, window button, etc.).
     let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
     if close_requested {
+        // Mark closed so the root pruning loop stops re-registering this window.
+        // This causes egui to destroy the viewport and drops the Arc, which
+        // cleans up PTY threads and OS resources.
+        win.closed = true;
         ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         return;
     }
@@ -3158,6 +3479,7 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
             Err(panes::PaneError::CannotCloseLastPane) => {
                 // Last pane in last tab — close the secondary window.
                 if win.tabs.tab_count() <= 1 {
+                    win.closed = true;
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                     return;
                 }
@@ -3183,6 +3505,152 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
             .view_state
             .scroll_offset = snap.scroll_offset;
     }
+
+    // ── Menu bar ─────────────────────────────────────────────────────────
+    // Show a simplified menu bar for secondary windows.  The root window's
+    // menu bar lives in FreminalGui::ui(); here we only expose the actions
+    // that make sense for a secondary window (no Settings, no playback).
+    let mut any_menu_open = false;
+    Panel::top("sec_menu_bar").show_inside(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
+            // ── Freminal menu ────────────────────────────────────────────
+            let freminal_resp = ui.menu_button("Freminal", |ui| {
+                if ui.button("Quit Window").clicked() {
+                    win.closed = true;
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    ui.close();
+                }
+            });
+            if freminal_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
+            // ── Tab menu ─────────────────────────────────────────────────
+            let tab_resp =
+                ui.menu_button("Tab", |ui| {
+                    if ui.button("New Tab").clicked() {
+                        // Spawn a new tab directly — we have `win` mutably here.
+                        let os_dark = ui.ctx().global_style().visuals.dark_mode;
+                        let theme =
+                            freminal_common::themes::by_slug(win.config.theme.active_slug(os_dark))
+                                .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+                        match pty::spawn_pty_tab(
+                            &win.args,
+                            win.config.scrollback.limit,
+                            theme,
+                            &win.egui_ctx,
+                        ) {
+                            Ok(channels) => {
+                                let tab_id = win.tabs.next_tab_id();
+                                let pane_id = win
+                                    .pane_id_gen
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .next_id();
+                                let pane = panes::Pane {
+                                    id: pane_id,
+                                    arc_swap: channels.arc_swap,
+                                    input_tx: channels.input_tx,
+                                    pty_write_tx: channels.pty_write_tx,
+                                    window_cmd_rx: channels.window_cmd_rx,
+                                    clipboard_rx: channels.clipboard_rx,
+                                    search_buffer_rx: channels.search_buffer_rx,
+                                    pty_dead_rx: channels.pty_dead_rx,
+                                    title: "Terminal".to_owned(),
+                                    bell_active: false,
+                                    title_stack: Vec::new(),
+                                    view_state: view_state::ViewState::new(),
+                                    echo_off: channels.echo_off,
+                                    render_state: new_render_state(Arc::clone(&win.window_post)),
+                                    render_cache: terminal::PaneRenderCache::new(),
+                                };
+                                let new_tab = Tab::new(tab_id, pane);
+                                if let Err(e) = new_tab.active_pane().input_tx.send(
+                                    InputEvent::ThemeModeUpdate(win.config.theme.mode, os_dark),
+                                ) {
+                                    error!("Secondary window menu: ThemeModeUpdate: {e}");
+                                }
+                                win.tabs.add_tab(new_tab);
+                            }
+                            Err(e) => error!("Secondary window menu: new tab failed: {e}"),
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Close Tab").clicked() {
+                        if win.tabs.tab_count() > 1 {
+                            if let Err(e) = win.tabs.close_active_tab() {
+                                error!("Secondary window menu: close tab: {e}");
+                            }
+                        } else {
+                            win.closed = true;
+                            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Next Tab").clicked() {
+                        win.tabs.next_tab();
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                        ui.close();
+                    }
+                    if ui.button("Previous Tab").clicked() {
+                        win.tabs.prev_tab();
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                        ui.close();
+                    }
+                });
+            if tab_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
+            // ── Pane menu ─────────────────────────────────────────────────
+            let pane_resp = ui.menu_button("Pane", |ui| {
+                if ui.button("Split Vertical").clicked() {
+                    spawn_split_pane_in_secondary(win, panes::SplitDirection::Horizontal, ui);
+                    ui.close();
+                }
+                if ui.button("Split Horizontal").clicked() {
+                    spawn_split_pane_in_secondary(win, panes::SplitDirection::Vertical, ui);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Close Pane").clicked() {
+                    win.pending_close_pane = true;
+                    ui.close();
+                }
+                if ui.button("Zoom Pane").clicked() {
+                    let tab = win.tabs.active_tab_mut();
+                    let current = tab.active_pane;
+                    if tab.zoomed_pane == Some(current) {
+                        tab.zoomed_pane = None;
+                    } else {
+                        tab.zoomed_pane = Some(current);
+                    }
+                    let tab = win.tabs.active_tab_mut();
+                    if let Ok(panes_list) = tab.pane_tree.iter_panes_mut() {
+                        for pane in panes_list {
+                            pane.view_state.last_sent_size = (0, 0);
+                        }
+                    }
+                    ui.close();
+                }
+            });
+            if pane_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
+            // ── Window menu ───────────────────────────────────────────────
+            let win_resp = ui.menu_button("Window", |ui| {
+                if ui.button("New Window").clicked() {
+                    win.pending_new_window = true;
+                    ui.close();
+                }
+            });
+            if win_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+        });
+    });
 
     // Tab bar (only when multiple tabs open or config requests it).
     let show_tab_bar = win.tabs.tab_count() > 1 || win.config.tabs.show_single_tab;
@@ -3307,16 +3775,39 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
         //   Phase 1: init + sync + read metrics (widget borrow lives in a block)
         //   Phase 2: tabs/config access (widget re-borrowed only when calling show())
         let ppp = ui.ctx().pixels_per_point();
-        let (_cell_w_u, _cell_h_u, font_width, font_height, logical_char_w, logical_char_h) = {
+        let (
+            _cell_w_u,
+            _cell_h_u,
+            font_width,
+            font_height,
+            logical_char_w,
+            logical_char_h,
+            ppp_changed,
+        ) = {
             let widget = win.terminal_widget(ui.ctx());
-            widget.sync_pixels_per_point(ppp);
+            let ppp_changed = widget.sync_pixels_per_point(ppp);
             let (cw, ch) = widget.cell_size();
             let fw = usize::value_from(cw).unwrap_or(0);
             let fh = usize::value_from(ch).unwrap_or(0);
             let lcw = f32::approx_from(cw).unwrap_or(0.0) / ppp;
             let lch = f32::approx_from(ch).unwrap_or(0.0) / ppp;
-            (cw, ch, fw, fh, lcw, lch) // cw/ch captured as _cell_w_u/_cell_h_u (unused)
+            (cw, ch, fw, fh, lcw, lch, ppp_changed)
         };
+        // If the window moved to a different-DPI monitor, invalidate all pane
+        // atlases so glyphs are re-rasterised at the new pixels-per-point.
+        if ppp_changed {
+            for tab in win.tabs.iter_mut() {
+                if let Ok(panes_list) = tab.pane_tree.iter_panes_mut() {
+                    for pane in panes_list {
+                        pane.render_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clear_atlas();
+                        pane.render_cache.invalidate_content();
+                    }
+                }
+            }
+        }
         // Apply font zoom from effective font size (widget borrow ends above).
         {
             let effective = win
@@ -3428,8 +3919,8 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
         let mut all_deferred_actions = Vec::new();
         let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
-        // Pane border drag-to-resize.
-        if has_multiple_panes && zoomed_pane.is_none() {
+        // Pane border drag-to-resize (suppressed while a menu overlay is open).
+        if has_multiple_panes && zoomed_pane.is_none() && !any_menu_open {
             let borders = win
                 .tabs
                 .active_tab()
@@ -3491,6 +3982,45 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
                 if response.drag_stopped() {
                     win.border_drag = None;
                 }
+            }
+        }
+
+        // ── Pre-clear the window post-processing FBO ──────────────────────
+        // When a user GLSL shader is active (or about to become active),
+        // all panes render into this window's FBO.  Clear it once per frame
+        // here, before any pane draws into it, so stale content from the
+        // previous frame does not bleed through.
+        {
+            let wpr_guard = win
+                .window_post
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let wpr_active = wpr_guard.is_active();
+            let shader_activation_pending = wpr_guard.pending_shader.is_some();
+            drop(wpr_guard);
+
+            if wpr_active || shader_activation_pending {
+                let wpr_for_clear = Arc::clone(&win.window_post);
+                ui.painter().add(egui::PaintCallback {
+                    rect: available_rect,
+                    callback: Arc::new(CallbackFn::new(move |info, painter| {
+                        let gl = painter.gl();
+                        let vp = info.viewport_in_pixels();
+                        let mut wpr = wpr_for_clear
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        wpr.ensure_fbo(gl, vp.width_px, vp.height_px);
+                        if let Some(fbo) = wpr.fbo() {
+                            unsafe {
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                                gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                                gl.clear(glow::COLOR_BUFFER_BIT);
+                                // Restore egui's FBO.
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, painter.intermediate_fbo());
+                            }
+                        }
+                    })),
+                });
             }
         }
 
@@ -3611,7 +4141,7 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
                         &pane.input_tx,
                         &pane.clipboard_rx,
                         &pane.search_buffer_rx,
-                        false, // ui_overlay_open
+                        any_menu_open, // ui_overlay_open — suppress input while menu is open
                         bg_opacity,
                         bg_image_opacity_local,
                         bg_image_mode_local,
@@ -3665,6 +4195,80 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
                 };
                 shortest_repaint_delay =
                     Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
+            }
+        }
+
+        // ── Window-level post-processing pass ─────────────────────────────
+        //
+        // When a user GLSL shader is active, the window FBO now contains the
+        // composited terminal content from all panes.  Draw it through the
+        // user shader back to egui's framebuffer.  Registered BEFORE pane
+        // borders so borders are painted on top of the shader output.
+        {
+            let wpr_check = win
+                .window_post
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let shader_active = wpr_check.is_active();
+            let pending = wpr_check.pending_shader.is_some();
+            drop(wpr_check);
+
+            if shader_active || pending {
+                let frame_dt = ui.input(|i| i.stable_dt);
+                let wpr_for_post = Arc::clone(&win.window_post);
+                ui.painter().add(egui::PaintCallback {
+                    rect: available_rect,
+                    callback: Arc::new(CallbackFn::new(move |info, painter| {
+                        let gl = painter.gl();
+                        let vp = info.viewport_in_pixels();
+                        let mut wpr = wpr_for_post
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+                        // Lazy-init GPU resources.
+                        if !wpr.initialized()
+                            && let Err(e) = wpr.init(gl)
+                        {
+                            error!("Secondary window: WindowPostRenderer init failed: {e}");
+                            return;
+                        }
+
+                        // Process any pending shader change.
+                        if let Some(pending_shader) = wpr.pending_shader.take() {
+                            match pending_shader {
+                                Some(src) => {
+                                    if let Err(e) =
+                                        wpr.update_shader(gl, &src, vp.width_px, vp.height_px)
+                                    {
+                                        error!("Secondary window: shader compilation failed: {e}");
+                                    }
+                                }
+                                None => wpr.clear_shader(gl),
+                            }
+                        }
+
+                        // Apply the post-processing pass if the shader is active.
+                        if wpr.is_active() {
+                            wpr.ensure_fbo(gl, vp.width_px, vp.height_px);
+                            unsafe {
+                                gl.bind_framebuffer(glow::FRAMEBUFFER, painter.intermediate_fbo());
+                            }
+
+                            let vp_w = vp.width_px.approx_as::<f32>().unwrap_or(0.0);
+                            let vp_h = vp.height_px.approx_as::<f32>().unwrap_or(0.0);
+                            wpr.draw_post_pass(gl, vp_w, vp_h, frame_dt);
+                        }
+                    })),
+                });
+
+                // When the shader is active, request continuous repaints so
+                // the `u_time` uniform advances smoothly (~60 fps).
+                if shader_active {
+                    let anim_delay = std::time::Duration::from_millis(16);
+                    shortest_repaint_delay = Some(
+                        shortest_repaint_delay.map_or(anim_delay, |prev| prev.min(anim_delay)),
+                    );
+                }
             }
         }
 
@@ -3781,6 +4385,7 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
                             trace!("Secondary window: cannot close tab: {e}");
                         }
                     } else {
+                        win.closed = true;
                         ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                     }
                 }
@@ -3801,6 +4406,249 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
                 | KeyAction::FocusPaneRight => {
                     win.pending_focus_direction = Some(action);
                 }
+
+                // -- Tab switching --
+                KeyAction::SwitchToTab1 => {
+                    if let Err(e) = win.tabs.switch_to(0) {
+                        trace!("Secondary window: cannot switch to tab 0: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab2 => {
+                    if let Err(e) = win.tabs.switch_to(1) {
+                        trace!("Secondary window: cannot switch to tab 1: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab3 => {
+                    if let Err(e) = win.tabs.switch_to(2) {
+                        trace!("Secondary window: cannot switch to tab 2: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab4 => {
+                    if let Err(e) = win.tabs.switch_to(3) {
+                        trace!("Secondary window: cannot switch to tab 3: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab5 => {
+                    if let Err(e) = win.tabs.switch_to(4) {
+                        trace!("Secondary window: cannot switch to tab 4: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab6 => {
+                    if let Err(e) = win.tabs.switch_to(5) {
+                        trace!("Secondary window: cannot switch to tab 5: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab7 => {
+                    if let Err(e) = win.tabs.switch_to(6) {
+                        trace!("Secondary window: cannot switch to tab 6: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab8 => {
+                    if let Err(e) = win.tabs.switch_to(7) {
+                        trace!("Secondary window: cannot switch to tab 7: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::SwitchToTab9 => {
+                    if let Err(e) = win.tabs.switch_to(8) {
+                        trace!("Secondary window: cannot switch to tab 8: {e}");
+                    } else {
+                        win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    }
+                }
+                KeyAction::MoveTabLeft => win.tabs.move_active_left(),
+                KeyAction::MoveTabRight => win.tabs.move_active_right(),
+
+                // -- Font zoom --
+                KeyAction::ZoomIn => {
+                    let base = win.config.font.size;
+                    let vs = &mut win.tabs.active_tab_mut().active_pane_mut().view_state;
+                    vs.adjust_zoom(base, 1.0);
+                    let effective = vs.effective_font_size(base);
+                    win.terminal_widget(ui.ctx()).apply_font_zoom(effective);
+                    // Invalidate atlases after zoom change.
+                    for tab in win.tabs.iter_mut() {
+                        if let Ok(panes_list) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes_list {
+                                pane.render_state
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .clear_atlas();
+                                pane.render_cache.invalidate_content();
+                            }
+                        }
+                    }
+                }
+                KeyAction::ZoomOut => {
+                    let base = win.config.font.size;
+                    let vs = &mut win.tabs.active_tab_mut().active_pane_mut().view_state;
+                    vs.adjust_zoom(base, -1.0);
+                    let effective = vs.effective_font_size(base);
+                    win.terminal_widget(ui.ctx()).apply_font_zoom(effective);
+                    // Invalidate atlases after zoom change.
+                    for tab in win.tabs.iter_mut() {
+                        if let Ok(panes_list) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes_list {
+                                pane.render_state
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .clear_atlas();
+                                pane.render_cache.invalidate_content();
+                            }
+                        }
+                    }
+                }
+                KeyAction::ZoomReset => {
+                    let base = win.config.font.size;
+                    win.tabs
+                        .active_tab_mut()
+                        .active_pane_mut()
+                        .view_state
+                        .reset_zoom();
+                    win.terminal_widget(ui.ctx()).apply_font_zoom(base);
+                    // Invalidate atlases after zoom reset.
+                    for tab in win.tabs.iter_mut() {
+                        if let Ok(panes_list) = tab.pane_tree.iter_panes_mut() {
+                            for pane in panes_list {
+                                pane.render_state
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .clear_atlas();
+                                pane.render_cache.invalidate_content();
+                            }
+                        }
+                    }
+                }
+
+                // -- Search --
+                KeyAction::OpenSearch => {
+                    win.tabs
+                        .active_tab_mut()
+                        .active_pane_mut()
+                        .view_state
+                        .search_state
+                        .is_open = true;
+                }
+                KeyAction::SearchNext => {
+                    let tab = win.tabs.active_tab_mut();
+                    let pane = tab.active_pane_mut();
+                    pane.view_state.search_state.next_match();
+                    let snap = pane.arc_swap.load();
+                    search::scroll_to_match_and_send(&mut pane.view_state, &snap, &pane.input_tx);
+                }
+                KeyAction::SearchPrev => {
+                    let tab = win.tabs.active_tab_mut();
+                    let pane = tab.active_pane_mut();
+                    pane.view_state.search_state.prev_match();
+                    let snap = pane.arc_swap.load();
+                    search::scroll_to_match_and_send(&mut pane.view_state, &snap, &pane.input_tx);
+                }
+                KeyAction::PrevCommand => {
+                    let tab = win.tabs.active_tab_mut();
+                    let pane = tab.active_pane_mut();
+                    let snap = pane.arc_swap.load();
+                    search::jump_to_prev_command(&mut pane.view_state, &snap);
+                }
+                KeyAction::NextCommand => {
+                    let tab = win.tabs.active_tab_mut();
+                    let pane = tab.active_pane_mut();
+                    let snap = pane.arc_swap.load();
+                    search::jump_to_next_command(&mut pane.view_state, &snap);
+                }
+
+                // -- Split pane management --
+                KeyAction::SplitVertical => {
+                    spawn_split_pane_in_secondary(win, panes::SplitDirection::Horizontal, ui);
+                }
+                KeyAction::SplitHorizontal => {
+                    spawn_split_pane_in_secondary(win, panes::SplitDirection::Vertical, ui);
+                }
+                KeyAction::ResizePaneLeft => {
+                    let id = win.tabs.active_tab().active_pane;
+                    if let Err(e) = win.tabs.active_tab_mut().pane_tree.resize_split(
+                        id,
+                        panes::SplitDirection::Horizontal,
+                        -0.05,
+                    ) {
+                        trace!("Secondary window: cannot resize pane left: {e}");
+                    }
+                }
+                KeyAction::ResizePaneRight => {
+                    let id = win.tabs.active_tab().active_pane;
+                    if let Err(e) = win.tabs.active_tab_mut().pane_tree.resize_split(
+                        id,
+                        panes::SplitDirection::Horizontal,
+                        0.05,
+                    ) {
+                        trace!("Secondary window: cannot resize pane right: {e}");
+                    }
+                }
+                KeyAction::ResizePaneUp => {
+                    let id = win.tabs.active_tab().active_pane;
+                    if let Err(e) = win.tabs.active_tab_mut().pane_tree.resize_split(
+                        id,
+                        panes::SplitDirection::Vertical,
+                        -0.05,
+                    ) {
+                        trace!("Secondary window: cannot resize pane up: {e}");
+                    }
+                }
+                KeyAction::ResizePaneDown => {
+                    let id = win.tabs.active_tab().active_pane;
+                    if let Err(e) = win.tabs.active_tab_mut().pane_tree.resize_split(
+                        id,
+                        panes::SplitDirection::Vertical,
+                        0.05,
+                    ) {
+                        trace!("Secondary window: cannot resize pane down: {e}");
+                    }
+                }
+                KeyAction::ZoomPane => {
+                    let tab = win.tabs.active_tab_mut();
+                    let current = tab.active_pane;
+                    if tab.zoomed_pane == Some(current) {
+                        tab.zoomed_pane = None;
+                    } else {
+                        tab.zoomed_pane = Some(current);
+                    }
+                    // Reset last_sent_size so resize fires next frame.
+                    let tab = win.tabs.active_tab_mut();
+                    if let Ok(panes_list) = tab.pane_tree.iter_panes_mut() {
+                        for pane in panes_list {
+                            pane.view_state.last_sent_size = (0, 0);
+                        }
+                    }
+                }
+
+                // -- Window management --
+                KeyAction::NewWindow => {
+                    // Cannot call spawn_new_window directly (no FreminalGui ref).
+                    // Set a flag; the root window's pruning loop will consume it.
+                    win.pending_new_window = true;
+                }
+
+                // -- Not yet implemented in secondary windows --
+                KeyAction::OpenSettings | KeyAction::RenameTab => {
+                    trace!("Secondary window: no-op deferred action: {action:?}");
+                }
+
+                // These actions are handled at the input layer and should never
+                // reach the deferred dispatch.
                 _ => {
                     trace!("Secondary window: unhandled deferred action: {action:?}");
                 }
@@ -3836,6 +4684,7 @@ fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mut egui::Ui)
                 }
                 Err(panes::PaneError::CannotCloseLastPane) => {
                     if win.tabs.tab_count() <= 1 {
+                        win.closed = true;
                         ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                         return;
                     }

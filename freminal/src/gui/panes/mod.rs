@@ -853,6 +853,35 @@ impl PaneTree {
         Ok(new_id)
     }
 
+    /// Split the pane identified by `target_id` using a pre-allocated `new_id`.
+    ///
+    /// This is a lower-level variant of [`split`] for callers that need to
+    /// pre-allocate the `PaneId` before acquiring other borrows.  The caller is
+    /// responsible for ensuring `new_id` was obtained from the same
+    /// [`PaneIdGenerator`] that manages this tree.
+    ///
+    /// # Errors
+    ///
+    /// - [`PaneError::NotFound`] if `target_id` does not exist.
+    /// - [`PaneError::InvalidState`] if the tree is empty (bug).
+    pub fn split_with_id(
+        &mut self,
+        target_id: PaneId,
+        direction: SplitDirection,
+        new_id: PaneId,
+        new_pane: Pane,
+    ) -> Result<PaneId, PaneError> {
+        let root = self.take_root()?;
+
+        if root.find(target_id).is_none() {
+            self.root = Some(root);
+            return Err(PaneError::NotFound(target_id));
+        }
+
+        self.root = Some(root.split(target_id, direction, new_pane));
+        Ok(new_id)
+    }
+
     /// Close the pane identified by `target_id`, collapsing its parent split.
     ///
     /// # Errors
