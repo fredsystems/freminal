@@ -853,11 +853,11 @@ impl PaneTree {
         Ok(new_id)
     }
 
-    /// Split the pane identified by `target_id` using a pre-allocated `new_id`.
+    /// Split the pane identified by `target_id` using a pre-built `Pane`.
     ///
     /// This is a lower-level variant of [`split`] for callers that need to
     /// pre-allocate the `PaneId` before acquiring other borrows.  The caller is
-    /// responsible for ensuring `new_id` was obtained from the same
+    /// responsible for ensuring `new_pane.id` was obtained from the same
     /// [`PaneIdGenerator`] that manages this tree.
     ///
     /// # Errors
@@ -868,7 +868,6 @@ impl PaneTree {
         &mut self,
         target_id: PaneId,
         direction: SplitDirection,
-        new_id: PaneId,
         new_pane: Pane,
     ) -> Result<PaneId, PaneError> {
         let root = self.take_root()?;
@@ -878,6 +877,7 @@ impl PaneTree {
             return Err(PaneError::NotFound(target_id));
         }
 
+        let new_id = new_pane.id;
         self.root = Some(root.split(target_id, direction, new_pane));
         Ok(new_id)
     }

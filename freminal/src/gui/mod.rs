@@ -1851,23 +1851,23 @@ mod secondary_window_tests {
 
     // ── NEXT_VIEWPORT_ID counter ────────────────────────────────────────────
 
-    /// Each call to `fetch_add` on `NEXT_VIEWPORT_ID` must return a strictly
-    /// increasing value, guaranteeing that concurrent windows never share a
-    /// viewport ID.
+    /// `fetch_add` on `NEXT_VIEWPORT_ID` must return strictly increasing
+    /// values, guaranteeing that concurrent windows never share a viewport
+    /// ID.  Successive `fetch_add(1)` calls must produce distinct values.
+    ///
+    /// Combined into a single test because `NEXT_VIEWPORT_ID` is a process-
+    /// global `AtomicU64` — two tests asserting exact adjacency would race
+    /// when Rust runs tests in parallel.
     #[test]
-    fn next_viewport_id_increases_monotonically() {
+    fn next_viewport_id_increases_monotonically_and_is_distinct() {
         let a = NEXT_VIEWPORT_ID.fetch_add(0, Ordering::Relaxed);
         let b = NEXT_VIEWPORT_ID.fetch_add(1, Ordering::Relaxed);
         let c = NEXT_VIEWPORT_ID.fetch_add(1, Ordering::Relaxed);
-        // b == a (we only peeked with +0), and c == b + 1
+        // b == a (we only peeked with +0), then c == b + 1
         assert_eq!(b, a);
         assert_eq!(c, b + 1);
-    }
 
-    /// Two successive `fetch_add(1)` calls must produce distinct values so
-    /// that two windows opened back-to-back get different viewport IDs.
-    #[test]
-    fn next_viewport_id_successive_calls_are_distinct() {
+        // Two successive fetch_add(1) calls must produce distinct values.
         let id1 = NEXT_VIEWPORT_ID.fetch_add(1, Ordering::Relaxed);
         let id2 = NEXT_VIEWPORT_ID.fetch_add(1, Ordering::Relaxed);
         assert_ne!(id1, id2);

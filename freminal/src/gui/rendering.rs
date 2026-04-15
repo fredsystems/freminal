@@ -303,13 +303,13 @@ pub(super) fn handle_window_manipulation(
                 let available_width = ui.available_width();
                 let width_difference = window_width.width() - available_width;
                 let height_difference = window_width.height() - available_height;
-                let pos_x = (position.y + height_difference)
+                let pos_x = (position.x + width_difference)
                     .approx_as::<usize>()
                     .unwrap_or_else(|e| {
                         error!("Failed to convert position x to usize: {e}. Using 0 as default");
                         0
                     });
-                let pos_y = (position.y + width_difference)
+                let pos_y = (position.y + height_difference)
                     .approx_as::<usize>()
                     .unwrap_or_else(|e| {
                         error!("Failed to convert position y to usize: {e}. Using 0 as default");

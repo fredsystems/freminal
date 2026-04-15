@@ -278,7 +278,6 @@ pub(super) fn spawn_split_pane_in_secondary(
         match tab.pane_tree.split_with_id(
             target_id,
             direction,
-            new_pane_id_alloc,
             panes::Pane {
                 id: new_pane_id_alloc,
                 arc_swap: channels.arc_swap,
