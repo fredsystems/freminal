@@ -1566,7 +1566,10 @@ mod tests {
         // Just calling seq_tracer_ref exercises the uncovered getter
         let trace = p.seq_tracer_ref();
         // New parser should have empty trace
-        assert!(trace.as_str().is_empty() || !trace.as_str().is_empty());
+        assert!(
+            trace.as_str().is_empty(),
+            "new parser trace should be empty"
+        );
     }
 
     // ── 8-bit C1 controls: OSC, APC, fallthrough (lines 253-264) ───────────

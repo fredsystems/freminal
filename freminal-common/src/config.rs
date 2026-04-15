@@ -2237,6 +2237,37 @@ path = "/tmp/my.frag"
         assert!((loaded.font.size - 20.0).abs() < f32::EPSILON);
     }
 
+    /// RAII guard that sets an env var on creation and restores the previous
+    /// value (or removes it) on drop — even if the test panics.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: test code — parallel mutation of this env var is not
+            // expected within the same test binary.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(ref v) = self.prev {
+                    std::env::set_var(self.key, v);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
     #[test]
     fn load_config_via_freminal_config_env_var() {
         // Exercises lines 774-779: FREMINAL_CONFIG env var path.
@@ -2246,15 +2277,9 @@ path = "/tmp/my.frag"
         cfg_to_save.font.size = 18.0;
         save_config(&cfg_to_save, Some(&path)).expect("save_config should succeed");
 
-        // Set the env var and call load_config(None) so it goes through the layered path.
-        // SAFETY: this is test code; the test process is single-threaded at this point.
-        unsafe {
-            std::env::set_var("FREMINAL_CONFIG", path.to_str().unwrap());
-        }
+        // Guard restores the env var even if the test panics.
+        let _guard = EnvVarGuard::set("FREMINAL_CONFIG", path.to_str().unwrap());
         let result = load_config(None);
-        unsafe {
-            std::env::remove_var("FREMINAL_CONFIG");
-        }
 
         let loaded = result.expect("load_config with FREMINAL_CONFIG should succeed");
         assert!((loaded.font.size - 18.0).abs() < f32::EPSILON);

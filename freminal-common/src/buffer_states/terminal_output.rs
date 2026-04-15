@@ -297,7 +297,7 @@ impl std::fmt::Display for TerminalOutput {
                     String::from_utf8_lossy(data)
                 )
             }
-            Self::RequestDeviceNameAndVersion => write!(f, "RequestDeviceNameandVersion"),
+            Self::RequestDeviceNameAndVersion => write!(f, "RequestDeviceNameAndVersion"),
             Self::RequestSecondaryDeviceAttributes { param } => {
                 write!(f, "RequestSecondaryDeviceAttributes({param})")
             }
@@ -436,7 +436,7 @@ mod tests {
         );
         assert_eq!(
             TerminalOutput::RequestDeviceNameAndVersion.to_string(),
-            "RequestDeviceNameandVersion"
+            "RequestDeviceNameAndVersion"
         );
         assert_eq!(
             TerminalOutput::RequestTertiaryDeviceAttributes.to_string(),
