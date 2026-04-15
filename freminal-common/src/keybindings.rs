@@ -2051,4 +2051,110 @@ mod tests {
             assert!(!key.is_alphanumeric(), "{key:?} should not be alphanumeric");
         }
     }
+
+    // --- KeyAction Display ---
+
+    #[test]
+    fn key_action_display_delegates_to_name() {
+        // Exercises `fmt::Display for KeyAction` (lines 899-901).
+        for action in KeyAction::ALL {
+            let display = format!("{action}");
+            assert_eq!(display, action.name(), "Display must equal name()");
+        }
+    }
+
+    // --- BindingKey::name() exhaustive coverage ---
+
+    #[test]
+    fn binding_key_name_all_variants_roundtrip() {
+        // Exercises every arm of `BindingKey::name()` by iterating ALL known keys
+        // and parsing their name() back.  This covers every `name()` arm that
+        // binding_key_parse_* tests did not already hit.
+        let all_keys = [
+            BindingKey::A,
+            BindingKey::B,
+            BindingKey::C,
+            BindingKey::D,
+            BindingKey::E,
+            BindingKey::F,
+            BindingKey::G,
+            BindingKey::H,
+            BindingKey::I,
+            BindingKey::J,
+            BindingKey::K,
+            BindingKey::L,
+            BindingKey::M,
+            BindingKey::N,
+            BindingKey::O,
+            BindingKey::P,
+            BindingKey::Q,
+            BindingKey::R,
+            BindingKey::S,
+            BindingKey::T,
+            BindingKey::U,
+            BindingKey::V,
+            BindingKey::W,
+            BindingKey::X,
+            BindingKey::Y,
+            BindingKey::Z,
+            BindingKey::Num0,
+            BindingKey::Num1,
+            BindingKey::Num2,
+            BindingKey::Num3,
+            BindingKey::Num4,
+            BindingKey::Num5,
+            BindingKey::Num6,
+            BindingKey::Num7,
+            BindingKey::Num8,
+            BindingKey::Num9,
+            BindingKey::F1,
+            BindingKey::F2,
+            BindingKey::F3,
+            BindingKey::F4,
+            BindingKey::F5,
+            BindingKey::F6,
+            BindingKey::F7,
+            BindingKey::F8,
+            BindingKey::F9,
+            BindingKey::F10,
+            BindingKey::F11,
+            BindingKey::F12,
+            BindingKey::ArrowUp,
+            BindingKey::ArrowDown,
+            BindingKey::ArrowLeft,
+            BindingKey::ArrowRight,
+            BindingKey::Home,
+            BindingKey::End,
+            BindingKey::PageUp,
+            BindingKey::PageDown,
+            BindingKey::Insert,
+            BindingKey::Delete,
+            BindingKey::Backspace,
+            BindingKey::Tab,
+            BindingKey::Enter,
+            BindingKey::Space,
+            BindingKey::Escape,
+            BindingKey::Plus,
+            BindingKey::Minus,
+            BindingKey::Equals,
+            BindingKey::Comma,
+            BindingKey::Period,
+            BindingKey::Semicolon,
+            BindingKey::Colon,
+            BindingKey::Slash,
+            BindingKey::Backslash,
+            BindingKey::OpenBracket,
+            BindingKey::CloseBracket,
+            BindingKey::Backtick,
+            BindingKey::Quote,
+            BindingKey::Pipe,
+        ];
+        for key in all_keys {
+            let name = key.name();
+            let parsed: BindingKey = name.parse().unwrap_or_else(|e| {
+                panic!("BindingKey::name() output {name:?} should parse back: {e}")
+            });
+            assert_eq!(key, parsed, "name→parse roundtrip failed for {key:?}");
+        }
+    }
 }

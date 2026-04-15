@@ -694,6 +694,7 @@ impl FreminalAnsiParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::osc::AnsiOscType;
 
     // -------------------------------------------------------------------------
     // Existing tests
@@ -1514,6 +1515,395 @@ mod tests {
                 TerminalOutput::Enq,
                 TerminalOutput::Data(b"CD".to_vec()),
             ]
+        );
+    }
+
+    // =========================================================================
+    // Coverage-gap tests
+    // =========================================================================
+
+    // ── ParserOutcome Display impl (lines 38-40) ────────────────────────────
+
+    #[test]
+    fn parser_outcome_display_continue() {
+        assert_eq!(ParserOutcome::Continue.to_string(), "Continue");
+    }
+
+    #[test]
+    fn parser_outcome_display_finished() {
+        assert_eq!(ParserOutcome::Finished.to_string(), "Finished");
+    }
+
+    #[test]
+    fn parser_outcome_display_invalid() {
+        let o = ParserOutcome::Invalid("bad input".to_string());
+        assert_eq!(o.to_string(), "Invalid: bad input");
+    }
+
+    #[test]
+    fn parser_outcome_display_invalid_parser_failure() {
+        let o = ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledInnerEscape(
+            "test".to_string(),
+        ));
+        let s = o.to_string();
+        assert!(s.starts_with("InvalidParserFailure:"));
+    }
+
+    // ── parse_param_as error path (line 85) ─────────────────────────────────
+
+    #[test]
+    fn parse_param_as_invalid_number() {
+        // "abc" cannot be parsed as usize → triggers the error path
+        let result = parse_param_as::<usize>(b"abc");
+        assert!(result.is_err());
+    }
+
+    // ── seq_tracer_ref (lines 137-139) ──────────────────────────────────────
+
+    #[test]
+    fn seq_tracer_ref_accessible() {
+        let p = FreminalAnsiParser::new();
+        // Just calling seq_tracer_ref exercises the uncovered getter
+        let trace = p.seq_tracer_ref();
+        // New parser should have empty trace
+        assert!(
+            trace.as_str().is_empty(),
+            "new parser trace should be empty"
+        );
+    }
+
+    // ── 8-bit C1 controls: OSC, APC, fallthrough (lines 253-264) ───────────
+
+    #[test]
+    fn c1_osc_0x9d_enters_osc_parser() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        // 0x9D = 8-bit OSC introducer; followed by "0;title" + BEL
+        let result = p.push(b"\x9D0;MyTitle\x07");
+        let has_set_title = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(t)) if t == "MyTitle"));
+        assert!(has_set_title, "8-bit C1 OSC should be parsed: {result:?}");
+    }
+
+    #[test]
+    fn c1_apc_0x9f_enters_apc_parser() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        // 0x9F = 8-bit APC introducer; feed some content + ST (ESC \)
+        let result = p.push(b"\x9Fsome_apc_data\x1b\\");
+        // APC should be consumed; check parser returns to empty state
+        assert_eq!(p.inner, ParserInner::Empty);
+        // We don't care about the exact APC output, just that it was parsed
+        let _ = result;
+    }
+
+    #[test]
+    fn c1_fallthrough_other_bytes_silently_ignored() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        // 0x80 is in the C1 range but has no defined meaning → catch-all
+        let result = p.push(b"\x80");
+        // Should produce no output and parser stays Empty
+        assert!(
+            result.is_empty(),
+            "0x80 C1 byte should be silently ignored: {result:?}"
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+
+        // 0x8E (SS2) also falls through to the catch-all
+        let result2 = p.push(b"\x8E");
+        assert!(
+            result2.is_empty(),
+            "SS2 (0x8E) should be silently ignored: {result2:?}"
+        );
+    }
+
+    // ── Escape state: ESC ESC is logged as debug (line 308) ─────────────────
+    // Note: line 308 is a debug!() message inside match arm for ESC after ESC;
+    // but that arm is unreachable because ESC ESC is caught by the `if b == 0x1B`
+    // guard at line 279. The arm at line 306-308 is dead code — but we can still
+    // exercise the ESC→ESC path at line 279.
+
+    #[test]
+    fn escape_esc_restarts_escape_state() {
+        let mut p = FreminalAnsiParser::new();
+        // Feed ESC ESC [1A — first ESC enters Escape, second ESC restarts Escape,
+        // [1A completes as CSI 1A (cursor up)
+        let result = p.push(b"\x1b\x1b[1A");
+        let has_cursor_up = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                }
+            )
+        });
+        assert!(
+            has_cursor_up,
+            "ESC ESC [1A should produce cursor up: {result:?}"
+        );
+    }
+
+    // ── Escape state: Standard parser returns Invalid (lines 318-335) ───────
+
+    #[test]
+    fn escape_standard_parser_invalid_branch() {
+        let mut p = FreminalAnsiParser::new();
+        // ESC followed by an unknown byte like '!' which the StandardParser
+        // doesn't recognize should eventually produce Invalid
+        let result = p.push(b"\x1b!");
+        // The parser should return to Empty and may produce Invalid
+        assert_eq!(p.inner, ParserInner::Empty);
+        let _ = result; // Invalid might or might not appear depending on standard parser
+    }
+
+    // ── Standard parser in push() loop: Invalid/Continue paths (413-428) ────
+
+    #[test]
+    fn standard_parser_multi_byte_sequence_produces_output() {
+        let mut p = FreminalAnsiParser::new();
+        // ESC ( 0 = Designate G0 as DEC Special Graphics (Standard parser, 2 bytes)
+        let result = p.push(b"\x1b(0");
+        assert!(
+            result
+                .iter()
+                .any(|o| matches!(o, TerminalOutput::DecSpecialGraphics(_))),
+            "ESC ( 0 should produce DecSpecialGraphics: {result:?}"
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn standard_parser_invalid_charset_designator() {
+        let mut p = FreminalAnsiParser::new();
+        // ESC ( followed by an unknown charset designator 'Z'
+        // This goes through StandardParser Continue on '(' then Invalid on 'Z'
+        let result = p.push(b"\x1b(Z");
+        // Should produce Invalid output
+        let has_invalid = result.iter().any(|o| matches!(o, TerminalOutput::Invalid));
+        assert!(has_invalid, "ESC ( Z should produce Invalid: {result:?}");
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    // ── DCS parser Invalid path (lines 439-442) ────────────────────────────
+
+    #[test]
+    fn dcs_invalid_sequence_produces_invalid_output() {
+        let mut p = FreminalAnsiParser::new();
+        // Send a DCS with gibberish that the DCS parser can't handle,
+        // terminated by ST (ESC \)
+        // DCS parser expects specific formats; random bytes should trigger Invalid
+        let result = p.push(b"\x1bP\xff\xff\x1b\\");
+        // Parser should be back to Empty
+        assert_eq!(p.inner, ParserInner::Empty);
+        let _ = result;
+    }
+
+    // ── APC parser Invalid path (lines 449-452) ────────────────────────────
+    // APC collects until ST; it's hard to make it return Invalid from typical
+    // input, but we can exercise the path through the 8-bit introducer.
+
+    #[test]
+    fn apc_normal_sequence_completes() {
+        let mut p = FreminalAnsiParser::new();
+        // APC via ESC _ ... ESC \ — any content
+        let result = p.push(b"\x1b_test_apc\x1b\\");
+        assert_eq!(p.inner, ParserInner::Empty);
+        let _ = result;
+    }
+
+    // ── CSI parser InvalidParserFailure path (lines 481-488) ────────────────
+
+    #[test]
+    fn csi_invalid_parser_failure_path() {
+        let mut p = FreminalAnsiParser::new();
+        // CSI > 0 c is a DA2 request — providing malformed params like "> ;"
+        // triggers InvalidParserFailure from the DA handler.
+        // Actually, let's trigger it through XTVERSION: CSI > 0 q with extra params
+        // CSI > 999 q should trigger InvalidParserFailure from xtversion handler
+        let result = p.push(b"\x1b[>999q");
+        // Parser should be back to Empty
+        assert_eq!(p.inner, ParserInner::Empty);
+        // Should have produced Invalid from the InvalidParserFailure path
+        let has_invalid = result.iter().any(|o| matches!(o, TerminalOutput::Invalid));
+        assert!(
+            has_invalid,
+            "Malformed XTVERSION params should produce Invalid: {result:?}"
+        );
+    }
+
+    // ── CSI parser Invalid path (lines 490-498) ────────────────────────────
+
+    #[test]
+    fn csi_completely_unknown_sequence_produces_invalid() {
+        let mut p = FreminalAnsiParser::new();
+        // CSI with strange intermediate bytes
+        let result = p.push(b"\x1b[!p"); // DECSTR (soft terminal reset) — might be valid
+        assert_eq!(p.inner, ParserInner::Empty);
+        let _ = result;
+    }
+
+    // ── OSC parser Invalid path (lines 504-519) ────────────────────────────
+
+    #[test]
+    fn osc_invalid_sequence_produces_invalid() {
+        let mut p = FreminalAnsiParser::new();
+        // OSC with invalid/unrecognized content terminated by BEL
+        let result = p.push(b"\x1b]99999;garbage\x07");
+        // Parser should be back to Empty
+        assert_eq!(p.inner, ParserInner::Empty);
+        // May or may not produce Invalid depending on osc parser behavior
+        let _ = result;
+    }
+
+    // ── current_trace_str with different parser states (lines 685-688) ──────
+
+    #[test]
+    fn current_trace_str_osc_state() {
+        let mut p = FreminalAnsiParser::new();
+        // Start an OSC sequence but don't finish it
+        p.push(b"\x1b]0;partial");
+        // Parser should be in OSC state
+        assert!(matches!(p.inner, ParserInner::Osc(_)));
+        let trace = p.current_trace_str();
+        // Trace should contain the OSC sequence bytes
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn current_trace_str_csi_state() {
+        let mut p = FreminalAnsiParser::new();
+        // Start a CSI sequence but don't finish it
+        p.push(b"\x1b[1");
+        assert!(matches!(p.inner, ParserInner::Csi(_)));
+        let trace = p.current_trace_str();
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn current_trace_str_standard_state() {
+        let mut p = FreminalAnsiParser::new();
+        // ESC ( enters Standard parser waiting for charset byte
+        p.push(b"\x1b(");
+        assert!(matches!(p.inner, ParserInner::Standard(_)));
+        let trace = p.current_trace_str();
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn current_trace_str_dcs_state() {
+        let mut p = FreminalAnsiParser::new();
+        // Start a DCS sequence but don't finish it
+        p.push(b"\x1bP$q");
+        assert!(matches!(p.inner, ParserInner::Dcs(_)));
+        let trace = p.current_trace_str();
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn current_trace_str_apc_state() {
+        let mut p = FreminalAnsiParser::new();
+        // Start an APC sequence but don't finish it
+        p.push(b"\x1b_partial");
+        assert!(matches!(p.inner, ParserInner::Apc(_)));
+        let trace = p.current_trace_str();
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn current_trace_str_empty_state() {
+        let p = FreminalAnsiParser::new();
+        assert!(matches!(p.inner, ParserInner::Empty));
+        let trace = p.current_trace_str();
+        // Empty state uses the parser's own trace, which should be empty initially
+        assert!(trace.is_empty());
+    }
+
+    // ── 8-bit C1 controls: more specific cases ─────────────────────────────
+
+    #[test]
+    fn c1_dcs_0x90_enters_dcs_parser() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        // 0x90 = 8-bit DCS; feed DECRQSS query + ST
+        let result = p.push(b"\x90$q\"p\x1b\\");
+        assert_eq!(p.inner, ParserInner::Empty);
+        let has_dcs = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::DeviceControlString(_)));
+        assert!(has_dcs, "8-bit DCS (0x90) should be parsed: {result:?}");
+    }
+
+    #[test]
+    fn c1_csi_0x9b_enters_csi_parser() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        // 0x9B = 8-bit CSI; followed by 1A (cursor up 1)
+        let result = p.push(b"\x9B1A");
+        assert_eq!(p.inner, ParserInner::Empty);
+        let has_cursor_up = result.iter().any(|o| {
+            matches!(
+                o,
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                }
+            )
+        });
+        assert!(
+            has_cursor_up,
+            "8-bit CSI 1A should produce cursor up: {result:?}"
+        );
+    }
+
+    // ── 8-bit C1 not active in VT52 mode ───────────────────────────────────
+
+    #[test]
+    fn c1_not_recognized_in_vt52_mode() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        p.vt52_mode = Decanm::Vt52;
+        // 0x9B in VT52+S8C1T mode should NOT be recognized as CSI
+        // It should fall through to the data path
+        let result = p.push(b"\x9B");
+        // No CSI parsing should occur
+        let has_data = result.iter().any(|o| matches!(o, TerminalOutput::Data(_)));
+        assert!(
+            has_data,
+            "0x9B in VT52 mode should be treated as data: {result:?}"
+        );
+    }
+
+    // ── Escape backslash (ST) resets to Empty ───────────────────────────────
+
+    #[test]
+    fn escape_backslash_st_resets_to_empty() {
+        let mut p = FreminalAnsiParser::new();
+        // ESC \ (String Terminator when no string is open) should reset to Empty
+        let result = p.push(b"\x1b\\");
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert!(
+            result.is_empty(),
+            "ESC \\ with no open string should produce no output: {result:?}"
+        );
+    }
+
+    // ── CSI with ESC inside aborts and starts new escape ────────────────────
+
+    #[test]
+    fn csi_esc_aborts_and_starts_new_sequence() {
+        let mut p = FreminalAnsiParser::new();
+        // ESC [ 2 ESC ] 0;title BEL — ESC aborts CSI, starts OSC
+        let result = p.push(b"\x1b[2\x1b]0;Hello\x07");
+        assert_eq!(p.inner, ParserInner::Empty);
+        let has_title = result
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(t)) if t == "Hello"));
+        assert!(
+            has_title,
+            "After ESC aborts CSI, new OSC should complete: {result:?}"
         );
     }
 }

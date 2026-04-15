@@ -319,4 +319,126 @@ mod tests {
         assert!(Arc::ptr_eq(&img.pixels, &pixels_clone));
         assert_eq!(Arc::strong_count(&img.pixels), 2);
     }
+
+    // -----------------------------------------------------------------------
+    // retain_referenced — garbage-collects images not referenced by any cell
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn retain_referenced_keeps_referenced_and_removes_unreferenced() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        let mut store = ImageStore::new();
+        let id1 = next_image_id();
+        let id2 = next_image_id();
+        store.insert(make_test_image(id1, 2, 2));
+        store.insert(make_test_image(id2, 2, 2));
+        assert_eq!(store.len(), 2);
+
+        // Build a row of cells: one references id1, the rest are plain text
+        let placement_id1 = ImagePlacement {
+            image_id: id1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+        };
+        let image_cell = Cell::image_cell(placement_id1, FormatTag::default());
+        let plain_cell = Cell::blank_with_tag(FormatTag::default());
+        let row_data: Vec<Cell> = vec![image_cell, plain_cell];
+
+        // retain_referenced with rows that only reference id1
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+        store.retain_referenced(rows.into_iter());
+
+        // id1 is referenced → still present; id2 is unreferenced → removed
+        assert!(
+            store.contains(id1),
+            "id1 should be retained (it is referenced)"
+        );
+        assert!(
+            !store.contains(id2),
+            "id2 should be removed (not referenced)"
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn retain_referenced_with_empty_store_is_noop() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        let mut store = ImageStore::new();
+        let plain_cell = Cell::blank_with_tag(FormatTag::default());
+        let row_data: Vec<Cell> = vec![plain_cell];
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+
+        // Should not panic; store remains empty
+        store.retain_referenced(rows.into_iter());
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn retain_referenced_with_no_rows_removes_all() {
+        let mut store = ImageStore::new();
+        let id1 = next_image_id();
+        store.insert(make_test_image(id1, 2, 2));
+        assert_eq!(store.len(), 1);
+
+        // No rows provided → no cells reference anything → all removed
+        let rows: Vec<&[crate::cell::Cell]> = vec![];
+        store.retain_referenced(rows.into_iter());
+
+        assert!(
+            store.is_empty(),
+            "all images should be removed when no rows reference them"
+        );
+    }
+
+    #[test]
+    fn retain_referenced_all_images_referenced_keeps_all() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        let mut store = ImageStore::new();
+        let id1 = next_image_id();
+        let id2 = next_image_id();
+        store.insert(make_test_image(id1, 2, 2));
+        store.insert(make_test_image(id2, 2, 2));
+
+        let cell1 = Cell::image_cell(
+            ImagePlacement {
+                image_id: id1,
+                col_in_image: 0,
+                row_in_image: 0,
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+            },
+            FormatTag::default(),
+        );
+        let cell2 = Cell::image_cell(
+            ImagePlacement {
+                image_id: id2,
+                col_in_image: 0,
+                row_in_image: 0,
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+            },
+            FormatTag::default(),
+        );
+        let row_data: Vec<Cell> = vec![cell1, cell2];
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+        store.retain_referenced(rows.into_iter());
+
+        assert_eq!(store.len(), 2, "both images should be retained");
+        assert!(store.contains(id1));
+        assert!(store.contains(id2));
+    }
 }

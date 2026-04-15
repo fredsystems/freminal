@@ -32,3 +32,31 @@ pub fn ansi_parser_inner_csi_finished_cub(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn cub_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_cub(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn cub_empty_defaults_to_1() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_cub(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::SetCursorPosRel {
+                x: Some(-1),
+                y: None
+            }]
+        );
+    }
+}

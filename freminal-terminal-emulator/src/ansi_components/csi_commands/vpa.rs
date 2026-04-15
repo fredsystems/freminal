@@ -108,4 +108,12 @@ mod tests {
             other => panic!("unexpected output: {other:?}"),
         }
     }
+
+    #[test]
+    fn vpa_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_vpa(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
 }

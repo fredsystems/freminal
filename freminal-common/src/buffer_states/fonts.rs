@@ -423,4 +423,59 @@ mod tests {
         assert!(flags.contains(FontDecorations::Italic));
         assert!(flags.contains(FontDecorations::Strikethrough));
     }
+
+    // --- Debug impl coverage ---
+
+    #[test]
+    fn debug_includes_non_single_underline_style() {
+        // When style is active and != Single, fmt::Debug must emit the style entry.
+        // This exercises the `style.is_active() && style != Single` branch (lines 209-211).
+        let mut flags = FontDecorationFlags::empty();
+        flags.set_underline_style(UnderlineStyle::Double);
+        let dbg = format!("{flags:?}");
+        // The debug output must mention "Double" (the non-Single active style).
+        assert!(
+            dbg.contains("Double"),
+            "debug should contain Double, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn debug_does_not_include_single_underline_style() {
+        // Single style is NOT separately emitted (it is implied by Underline in the iterator).
+        let mut flags = FontDecorationFlags::empty();
+        flags.insert(FontDecorations::Underline); // sets Single
+        let dbg = format!("{flags:?}");
+        // "Underline" appears via the iterator; "Single" must not be additionally emitted.
+        assert!(
+            !dbg.contains("Single"),
+            "Single should not appear separately: {dbg}"
+        );
+    }
+
+    #[test]
+    fn debug_empty_flags() {
+        // Empty flags → empty iterator → no underline style entry.
+        let flags = FontDecorationFlags::empty();
+        let dbg = format!("{flags:?}");
+        // Should be "{}" or equivalent empty set notation.
+        assert!(dbg.contains("{}") || dbg == "{}", "empty debug: {dbg}");
+    }
+
+    #[test]
+    fn iter_empty_flags_yields_nothing() {
+        let flags = FontDecorationFlags::empty();
+        assert_eq!(flags.iter().count(), 0);
+    }
+
+    #[test]
+    fn debug_curly_underline_style_in_output() {
+        let mut flags = FontDecorationFlags::empty();
+        flags.set_underline_style(UnderlineStyle::Curly);
+        let dbg = format!("{flags:?}");
+        assert!(
+            dbg.contains("Curly"),
+            "debug should contain Curly, got: {dbg}"
+        );
+    }
 }

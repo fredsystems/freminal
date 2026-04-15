@@ -32,3 +32,30 @@ impl fmt::Display for Url {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_url_with_id() {
+        let url = Url {
+            id: Some("foo".to_string()),
+            url: "https://example.com".to_string(),
+        };
+        let s = url.to_string();
+        assert!(s.contains("foo"), "got: {s}");
+        assert!(s.contains("https://example.com"), "got: {s}");
+    }
+
+    #[test]
+    fn display_url_without_id() {
+        let url = Url {
+            id: None,
+            url: "https://example.com".to_string(),
+        };
+        let s = url.to_string();
+        assert!(s.contains("None"), "got: {s}");
+        assert!(s.contains("https://example.com"), "got: {s}");
+    }
+}

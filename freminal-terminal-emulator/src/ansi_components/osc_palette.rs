@@ -326,4 +326,34 @@ mod tests {
         let output = feed_osc(payload);
         assert!(output.is_empty());
     }
+
+    #[test]
+    fn osc4_invalid_color_spec_no_output() {
+        // OSC 4 ; 7 ; notacolor BEL — parse_color_spec fails → warn, no output
+        let payload = b"4;7;notacolor\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn osc4_valid_palette_color_index_7() {
+        // OSC 4 ; 7 ; rgb:ff/00/00 BEL
+        let payload = b"4;7;rgb:ff/00/00\x07";
+        let output = feed_osc(payload);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(7, 0xff, 0x00, 0x00))
+        ));
+    }
+
+    #[test]
+    fn osc104_invalid_string_index_no_output() {
+        // OSC 104 ; notanumber BEL — fails to parse as u16 → warn, no output
+        // We need to produce a String token rather than OscValue.
+        // A non-numeric string after "104;" will be parsed as an AnsiOscToken::String.
+        let payload = b"104;notanumber\x07";
+        let output = feed_osc(payload);
+        assert!(output.is_empty());
+    }
 }

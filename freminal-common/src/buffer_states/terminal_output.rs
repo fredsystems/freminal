@@ -297,7 +297,7 @@ impl std::fmt::Display for TerminalOutput {
                     String::from_utf8_lossy(data)
                 )
             }
-            Self::RequestDeviceNameAndVersion => write!(f, "RequestDeviceNameandVersion"),
+            Self::RequestDeviceNameAndVersion => write!(f, "RequestDeviceNameAndVersion"),
             Self::RequestSecondaryDeviceAttributes { param } => {
                 write!(f, "RequestSecondaryDeviceAttributes({param})")
             }
@@ -320,5 +320,199 @@ impl std::fmt::Display for TerminalOutput {
             Self::RequestTerminalParameters(ps) => write!(f, "RequestTerminalParameters({ps})"),
             Self::Enq => write!(f, "Enq"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_charset_variants() {
+        assert_eq!(TerminalOutput::CharsetDefault.to_string(), "CharsetDefault");
+        assert_eq!(TerminalOutput::CharsetUTF8.to_string(), "CharsetUTF8");
+        assert_eq!(TerminalOutput::CharsetG0.to_string(), "CharsetG0");
+        assert_eq!(TerminalOutput::CharsetG1.to_string(), "CharsetG1");
+        assert_eq!(TerminalOutput::CharsetG1AsGR.to_string(), "CharsetG1AsGR");
+        assert_eq!(TerminalOutput::CharsetG2.to_string(), "CharsetG2");
+        assert_eq!(TerminalOutput::CharsetG2AsGR.to_string(), "CharsetG2AsGR");
+        assert_eq!(TerminalOutput::CharsetG2AsGL.to_string(), "CharsetG2AsGL");
+        assert_eq!(TerminalOutput::CharsetG3.to_string(), "CharsetG3");
+        assert_eq!(TerminalOutput::CharsetG3AsGR.to_string(), "CharsetG3AsGR");
+        assert_eq!(TerminalOutput::CharsetG3AsGL.to_string(), "CharsetG3AsGL");
+        assert_eq!(TerminalOutput::DecSpecial.to_string(), "DecSpecial");
+        assert_eq!(TerminalOutput::CharsetUK.to_string(), "CharsetUK");
+        assert_eq!(TerminalOutput::CharsetUS.to_string(), "CharsetUS");
+        assert_eq!(TerminalOutput::CharsetUSASCII.to_string(), "CharsetUSASCII");
+        assert_eq!(TerminalOutput::CharsetDutch.to_string(), "CharsetDutch");
+        assert_eq!(TerminalOutput::CharsetFinnish.to_string(), "CharsetFinnish");
+        assert_eq!(TerminalOutput::CharsetFrench.to_string(), "CharsetFrench");
+        assert_eq!(
+            TerminalOutput::CharsetFrenchCanadian.to_string(),
+            "CharsetFrenchCanadian"
+        );
+        assert_eq!(TerminalOutput::CharsetGerman.to_string(), "CharsetGerman");
+        assert_eq!(TerminalOutput::CharsetItalian.to_string(), "CharsetItalian");
+        assert_eq!(
+            TerminalOutput::CharsetNorwegianDanish.to_string(),
+            "CharsetNorwegianDanish"
+        );
+        assert_eq!(TerminalOutput::CharsetSpanish.to_string(), "CharsetSpanish");
+        assert_eq!(TerminalOutput::CharsetSwedish.to_string(), "CharsetSwedish");
+        assert_eq!(TerminalOutput::CharsetSwiss.to_string(), "CharsetSwiss");
+    }
+
+    #[test]
+    fn display_cursor_control_variants() {
+        assert_eq!(TerminalOutput::SaveCursor.to_string(), "SaveCursor");
+        assert_eq!(TerminalOutput::RestoreCursor.to_string(), "RestoreCursor");
+        assert_eq!(
+            TerminalOutput::CursorToLowerLeftCorner.to_string(),
+            "CursorToLowerLeftCorner"
+        );
+        assert_eq!(TerminalOutput::CursorReport.to_string(), "CursorReport");
+    }
+
+    #[test]
+    fn display_device_control_string() {
+        let data = b"hello".to_vec();
+        let s = TerminalOutput::DeviceControlString(data).to_string();
+        assert!(s.contains("DeviceControlString"), "got: {s}");
+        assert!(s.contains("hello"), "got: {s}");
+    }
+
+    #[test]
+    fn display_application_program_command() {
+        let data = b"cmd".to_vec();
+        let s = TerminalOutput::ApplicationProgramCommand(data).to_string();
+        assert!(s.contains("ApplicationProgramCommand"), "got: {s}");
+        assert!(s.contains("cmd"), "got: {s}");
+    }
+
+    #[test]
+    fn display_kitty_keyboard_variants() {
+        assert_eq!(
+            TerminalOutput::KittyKeyboardQuery.to_string(),
+            "KittyKeyboardQuery"
+        );
+        let s = TerminalOutput::KittyKeyboardPush(7).to_string();
+        assert!(s.contains("KittyKeyboardPush"), "got: {s}");
+        assert!(s.contains('7'), "got: {s}");
+        let s2 = TerminalOutput::KittyKeyboardPop(1).to_string();
+        assert!(s2.contains("KittyKeyboardPop"), "got: {s2}");
+        let s3 = TerminalOutput::KittyKeyboardSet { flags: 3, mode: 1 }.to_string();
+        assert!(s3.contains("KittyKeyboardSet"), "got: {s3}");
+    }
+
+    #[test]
+    fn display_enq() {
+        assert_eq!(TerminalOutput::Enq.to_string(), "Enq");
+    }
+
+    #[test]
+    fn display_misc_unit_variants() {
+        assert_eq!(TerminalOutput::ResetDevice.to_string(), "ResetDevice");
+        assert_eq!(TerminalOutput::MemoryLock.to_string(), "MemoryLock");
+        assert_eq!(TerminalOutput::MemoryUnlock.to_string(), "MemoryUnlock");
+        assert_eq!(TerminalOutput::Index.to_string(), "Index");
+        assert_eq!(TerminalOutput::ReverseIndex.to_string(), "ReverseIndex");
+        assert_eq!(TerminalOutput::NextLine.to_string(), "NextLine");
+        assert_eq!(
+            TerminalOutput::HorizontalTabSet.to_string(),
+            "HorizontalTabSet"
+        );
+        assert_eq!(
+            TerminalOutput::EightBitControl.to_string(),
+            "EightBitControl"
+        );
+        assert_eq!(
+            TerminalOutput::SevenBitControl.to_string(),
+            "SevenBitControl"
+        );
+        assert_eq!(
+            TerminalOutput::ScreenAlignmentTest.to_string(),
+            "ScreenAlignmentTest"
+        );
+        assert_eq!(
+            TerminalOutput::RequestDeviceNameAndVersion.to_string(),
+            "RequestDeviceNameAndVersion"
+        );
+        assert_eq!(
+            TerminalOutput::RequestTertiaryDeviceAttributes.to_string(),
+            "RequestTertiaryDeviceAttributes"
+        );
+        assert_eq!(
+            TerminalOutput::AnsiConformanceLevelOne.to_string(),
+            "AnsiConformanceLevelOne"
+        );
+        assert_eq!(
+            TerminalOutput::AnsiConformanceLevelTwo.to_string(),
+            "AnsiConformanceLevelTwo"
+        );
+        assert_eq!(
+            TerminalOutput::AnsiConformanceLevelThree.to_string(),
+            "AnsiConformanceLevelThree"
+        );
+        assert_eq!(
+            TerminalOutput::DoubleLineHeightTop.to_string(),
+            "DoubleLineHeightTop"
+        );
+        assert_eq!(
+            TerminalOutput::DoubleLineHeightBottom.to_string(),
+            "DoubleLineHeightBottom"
+        );
+        assert_eq!(
+            TerminalOutput::SingleWidthLine.to_string(),
+            "SingleWidthLine"
+        );
+        assert_eq!(
+            TerminalOutput::DoubleWidthLine.to_string(),
+            "DoubleWidthLine"
+        );
+        assert_eq!(
+            TerminalOutput::ColorThemeReport.to_string(),
+            "ColorThemeReport"
+        );
+        assert_eq!(
+            TerminalOutput::DeviceStatusReport.to_string(),
+            "DeviceStatusReport"
+        );
+    }
+
+    #[test]
+    fn display_request_terminal_parameters() {
+        let s = TerminalOutput::RequestTerminalParameters(0).to_string();
+        assert!(s.contains("RequestTerminalParameters"), "got: {s}");
+    }
+
+    #[test]
+    fn display_insert_delete_lines() {
+        let s = TerminalOutput::InsertLines(3).to_string();
+        assert_eq!(s, "InsertLines(3)");
+        let s = TerminalOutput::DeleteLines(7).to_string();
+        assert_eq!(s, "DeleteLines(7)");
+    }
+
+    #[test]
+    fn display_set_left_and_right_margins() {
+        let s = TerminalOutput::SetLeftAndRightMargins {
+            left_margin: 2,
+            right_margin: 10,
+        }
+        .to_string();
+        assert_eq!(s, "SetLeftAndRightMargins(2, 10)");
+    }
+
+    #[test]
+    fn display_repeat_character() {
+        let s = TerminalOutput::RepeatCharacter(5).to_string();
+        assert_eq!(s, "RepeatCharacter(5)");
+    }
+
+    #[test]
+    fn display_modify_other_keys() {
+        let s = TerminalOutput::ModifyOtherKeys(2).to_string();
+        assert_eq!(s, "ModifyOtherKeys(2)");
     }
 }

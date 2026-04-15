@@ -33,3 +33,39 @@ pub fn ansi_parser_inner_csi_finished_xtversion(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn xtversion_bare_gt_q_emits_request_device_name_and_version() {
+        // params = b">q": first byte is `>`, second is `q` → param index 1 is b'q'
+        // parse_param_as on b'q' fails → but wait, the function reads params[1].
+        // When called via the CSI dispatcher, params = b">" (the `q` is the terminator).
+        // Simulate the params slice the dispatcher passes: just `b">"`.
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_xtversion(b">", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::RequestDeviceNameAndVersion]);
+    }
+
+    #[test]
+    fn xtversion_gt0_emits_request_device_name_and_version() {
+        // params = b">0": second byte is b'0' → parse_param_as(b"0") = Ok(Some(0)) → request
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_xtversion(b">0", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::RequestDeviceNameAndVersion]);
+    }
+
+    #[test]
+    fn xtversion_gt1_is_invalid() {
+        // params = b">1": second byte is b'1' → parse_param_as(b"1") = Ok(Some(1)) → invalid
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_xtversion(b">1", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+}

@@ -37,3 +37,49 @@ pub fn ansi_parser_inner_csi_finished_decrqm(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn decrqm_dollar_intermediate_emits_dec_query() {
+        // `$` intermediate → DecQuery
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decrqm(b"?1", b"$", b'p', &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        // Should push at least one Mode output
+        assert!(!output.is_empty());
+        assert!(matches!(output[0], TerminalOutput::Mode(_)));
+    }
+
+    #[test]
+    fn decrqm_h_terminator_emits_dec_set() {
+        // terminator `h` → DecSet
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decrqm(b"?25", &[], b'h', &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(!output.is_empty());
+        assert!(matches!(output[0], TerminalOutput::Mode(_)));
+    }
+
+    #[test]
+    fn decrqm_l_terminator_emits_dec_rst() {
+        // terminator `l` → DecRst
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decrqm(b"?25", &[], b'l', &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(!output.is_empty());
+        assert!(matches!(output[0], TerminalOutput::Mode(_)));
+    }
+
+    #[test]
+    fn decrqm_unexpected_terminator_is_invalid() {
+        // terminator `x` → invalid
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decrqm(b"?25", &[], b'x', &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+}

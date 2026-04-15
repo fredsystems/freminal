@@ -731,8 +731,11 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::{
-        buffer_states::terminal_output::TerminalOutput, colors::TerminalColor,
-        cursor::CursorVisualStyle, pty_write::PtyWrite, sgr::SelectGraphicRendition,
+        buffer_states::{modes::s8c1t::S8c1t, terminal_output::TerminalOutput},
+        colors::TerminalColor,
+        cursor::CursorVisualStyle,
+        pty_write::PtyWrite,
+        sgr::SelectGraphicRendition,
     };
 
     use super::TerminalHandler;
@@ -1817,6 +1820,481 @@ mod tests {
     #[test]
     fn parse_csi_params_single() {
         assert_eq!(TerminalHandler::parse_csi_params(b"5"), vec![Some(5)]);
+    }
+
+    // ------------------------------------------------------------------
+    // dispatch_tmux_csi — remaining CSI commands
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tmux_csi_cnl_cursor_next_line() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        // CSI 2 E → cursor next line, move down 2 and to col 1
+        let dispatched = handler.dispatch_tmux_csi(b"2E");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 0, "CNL should reset col to 0");
+        assert_eq!(cursor.y, 6, "CNL should move down 2 from row 4 → row 6");
+    }
+
+    #[test]
+    fn tmux_csi_cpl_cursor_previous_line() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(10));
+        // CSI 3 F → cursor previous line, move up 3 and to col 1
+        let dispatched = handler.dispatch_tmux_csi(b"3F");
+        assert!(dispatched);
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 0, "CPL should reset col to 0");
+        assert_eq!(cursor.y, 6, "CPL should move up 3 from row 9 → row 6");
+    }
+
+    #[test]
+    fn tmux_csi_il_insert_lines() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(1), Some(5));
+        let dispatched = handler.dispatch_tmux_csi(b"2L");
+        assert!(dispatched, "IL should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_dl_delete_lines() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(1), Some(5));
+        let dispatched = handler.dispatch_tmux_csi(b"2M");
+        assert!(dispatched, "DL should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_dch_delete_chars() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"Hello World");
+        handler.handle_cursor_pos(Some(1), Some(1));
+        let dispatched = handler.dispatch_tmux_csi(b"3P");
+        assert!(dispatched, "DCH should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_ech_erase_chars() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"Hello World");
+        handler.handle_cursor_pos(Some(1), Some(1));
+        let dispatched = handler.dispatch_tmux_csi(b"5X");
+        assert!(dispatched, "ECH should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_ich_insert_chars() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"Hello");
+        handler.handle_cursor_pos(Some(1), Some(1));
+        let dispatched = handler.dispatch_tmux_csi(b"2@");
+        assert!(dispatched, "ICH should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_su_scroll_up() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let dispatched = handler.dispatch_tmux_csi(b"3S");
+        assert!(dispatched, "SU should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_sd_scroll_down() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let dispatched = handler.dispatch_tmux_csi(b"2T");
+        assert!(dispatched, "SD should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_decstbm_set_scroll_region() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI 5;20 r → set scroll region rows 5..20
+        let dispatched = handler.dispatch_tmux_csi(b"5;20r");
+        assert!(dispatched, "DECSTBM should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_scosc_save_cursor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        // CSI s (no params) → save cursor
+        let dispatched = handler.dispatch_tmux_csi(b"s");
+        assert!(dispatched, "SCOSC should be handled directly");
+    }
+
+    #[test]
+    fn tmux_csi_scorc_restore_cursor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        handler.buffer.save_cursor();
+        handler.handle_cursor_pos(Some(1), Some(1));
+        // CSI u (no params) → restore cursor
+        let dispatched = handler.dispatch_tmux_csi(b"u");
+        assert!(dispatched, "SCORC should be handled directly");
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 9, "should restore col to 9");
+        assert_eq!(cursor.y, 4, "should restore row to 4");
+    }
+
+    #[test]
+    fn tmux_csi_unknown_terminator_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI n — DSR, not in the direct dispatch table
+        let dispatched = handler.dispatch_tmux_csi(b"6n");
+        assert!(
+            !dispatched,
+            "Unknown CSI should fall through to reparse queue"
+        );
+    }
+
+    #[test]
+    fn tmux_csi_invalid_terminator_byte() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Terminator 0x3F ('?') is below 0x40 range
+        assert!(!handler.dispatch_tmux_csi(b"1;2?"));
+    }
+
+    #[test]
+    fn tmux_csi_hpa_backtick() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(1), Some(5));
+        // CSI 30 ` → HPA, set col to 30
+        let dispatched = handler.dispatch_tmux_csi(b"30`");
+        assert!(dispatched, "HPA should be handled directly");
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 29, "HPA should set col to 30 - 1 = 29");
+    }
+
+    // ------------------------------------------------------------------
+    // DECRQSS — cursor style and DECSCL queries
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn decrqss_cursor_style() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query cursor style: DCS $q SP q ST
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default cursor is BlockCursorSteady = 2
+        assert_eq!(response, "\x1bP1$r2 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_cursor_style_underline() {
+        use freminal_common::cursor::CursorVisualStyle;
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.cursor_visual_style = CursorVisualStyle::UnderlineCursorSteady;
+
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r4 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_cursor_style_vertical_line() {
+        use freminal_common::cursor::CursorVisualStyle;
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.cursor_visual_style = CursorVisualStyle::VerticalLineCursorBlink;
+
+        let dcs = build_dcs_payload(b"$q q");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r5 q\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscl() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Default is 7-bit → c1_mode = 1
+        let dcs = build_dcs_payload(b"$q\"p");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP1$r65;1\"p\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_decscl_eight_bit() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.set_s8c1t_mode(S8c1t::EightBit);
+
+        let dcs = build_dcs_payload(b"$q\"p");
+        handler.handle_device_control_string(&dcs);
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response");
+        };
+        // 8-bit mode: DCS = 0x90, ST = 0x9C
+        // Body: "1$r65;0\"p"
+        let mut expected = Vec::new();
+        expected.push(0x90);
+        expected.extend_from_slice(b"1$r65;0\"p");
+        expected.push(0x9C);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn decrqss_invalid_query_unknown_setting() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Query something unknown ("z" is not a recognized setting)
+        let dcs = build_dcs_payload(b"$qz");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP0$r\x1b\\");
+    }
+
+    // ------------------------------------------------------------------
+    // XTGETTCAP — remaining capabilities
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn xtgettcap_known_capability_smkx() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("smkx");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[?1h\x1b=");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_rmkx() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("rmkx");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("\x1b[?1l\x1b>");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_ut() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_name = TerminalHandler::hex_encode("ut");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"+q");
+        payload.extend_from_slice(hex_name.as_bytes());
+        let dcs = build_dcs_payload(&payload);
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_val_hex = TerminalHandler::hex_encode("");
+        assert_eq!(
+            response,
+            format!("\x1bP1+r{hex_name}={expected_val_hex}\x1b\\")
+        );
+    }
+
+    #[test]
+    fn xtgettcap_invalid_hex_encoding() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "ZZ" is valid hex (but 'Z' is an invalid hex nibble)
+        let dcs = build_dcs_payload(b"+qZZ");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP0+rZZ\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_empty_segment_skipped() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // ";524742" — first segment is empty (skipped), second is "RGB"
+        let dcs = build_dcs_payload(b"+q;524742");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Only one response (for RGB), empty segment skipped
+        assert_eq!(response, "\x1bP1+r524742=382F382F38\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_kitty_keyboard_u_capability() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // "u" → hex "75"
+        let dcs = build_dcs_payload(b"+q75");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        // Default kitty keyboard flags = 0 → "0" → hex "30"
+        assert_eq!(response, "\x1bP1+r75=30\x1b\\");
+    }
+
+    // ------------------------------------------------------------------
+    // hex_nibble edge case
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn hex_nibble_invalid_returns_none() {
+        assert!(TerminalHandler::hex_nibble(b'G').is_none());
+        assert!(TerminalHandler::hex_nibble(b'z').is_none());
+        assert!(TerminalHandler::hex_nibble(b' ').is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // strip_dcs_envelope edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn strip_dcs_envelope_no_p_prefix() {
+        // Input without 'P' prefix: just "hello\x1b\\"
+        let input = b"hello\x1b\\";
+        let stripped = TerminalHandler::strip_dcs_envelope(input);
+        assert_eq!(stripped, b"hello");
+    }
+
+    #[test]
+    fn strip_dcs_envelope_no_st_suffix() {
+        // Input with 'P' prefix but no ST suffix
+        let input = b"Phello";
+        let stripped = TerminalHandler::strip_dcs_envelope(input);
+        assert_eq!(stripped, b"hello");
+    }
+
+    // ------------------------------------------------------------------
+    // tmux passthrough — OSC queuing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tmux_passthrough_osc_queued_to_reparse() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Inner (un-doubled): ESC ] 0;title ESC \
+        // Doubled for tmux: ESC ESC ] 0;title ESC ESC \
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"\x1b\x1b]0;title\x1b\x1b\\");
+
+        handler.handle_tmux_passthrough(&payload);
+
+        // The inner sequence should be in the reparse queue
+        assert!(
+            !handler.tmux_reparse_queue.is_empty(),
+            "OSC should be queued for re-parse"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_csi_handled_queued_to_reparse() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Inner (un-doubled): ESC [ 1 ; 32 m  (SGR — should NOT be direct-dispatched)
+        // Doubled for tmux: ESC ESC [ 1 ; 32 m
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"\x1b\x1b[1;32m");
+
+        handler.handle_tmux_passthrough(&payload);
+
+        // SGR falls through dispatch_tmux_csi, so gets queued to reparse
+        assert!(
+            !handler.tmux_reparse_queue.is_empty(),
+            "Unhandled CSI should be queued for re-parse"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_csi_cup_direct_dispatch() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Inner (un-doubled): ESC [ 5 ; 10 H  (CUP — should be direct-dispatched)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"\x1b\x1b[5;10H");
+
+        handler.handle_tmux_passthrough(&payload);
+
+        // CUP is directly dispatched, should NOT be in reparse queue
+        assert!(
+            handler.tmux_reparse_queue.is_empty(),
+            "CUP should be directly dispatched, not queued"
+        );
+        let cursor = handler.buffer.get_cursor().pos;
+        assert_eq!(cursor.x, 9);
+        assert_eq!(cursor.y, 4);
+    }
+
+    #[test]
+    fn tmux_passthrough_inner_no_esc_prefix() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Payload that un-doubles to "junk" (no ESC prefix)
+        handler.handle_tmux_passthrough(b"junk");
+        assert!(!handler.in_tmux_passthrough);
+    }
+
+    #[test]
+    fn tmux_passthrough_inner_too_short() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Payload that un-doubles to just ESC (one byte, too short)
+        handler.handle_tmux_passthrough(b"\x1b");
+        assert!(!handler.in_tmux_passthrough);
+    }
+
+    // ------------------------------------------------------------------
+    // DCS dispatch — unrecognized sub-command
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dcs_unrecognized_subcommand() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // DCS with unknown prefix (not $q, +q, sixel, or tmux;)
+        let dcs = build_dcs_payload(b"UNKNOWN");
+        handler.handle_device_control_string(&dcs);
+        // Should just log a warning and not panic
     }
 
     /// Integration test: simulate the exact nvim tmux passthrough scenario

@@ -61,3 +61,99 @@ impl fmt::Display for Declrmm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_enabled() ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_enabled_true_for_enabled() {
+        assert!(Declrmm::Enabled.is_enabled());
+    }
+
+    #[test]
+    fn is_enabled_false_for_disabled() {
+        assert!(!Declrmm::Disabled.is_enabled());
+    }
+
+    #[test]
+    fn is_enabled_false_for_query() {
+        assert!(!Declrmm::Query.is_enabled());
+    }
+
+    // ── ReportMode ───────────────────────────────────────────────────
+
+    #[test]
+    fn report_enabled_no_override() {
+        assert_eq!(Declrmm::Enabled.report(None), "\x1b[?69;1$y");
+    }
+
+    #[test]
+    fn report_disabled_no_override() {
+        assert_eq!(Declrmm::Disabled.report(None), "\x1b[?69;2$y");
+    }
+
+    #[test]
+    fn report_query_no_override() {
+        assert_eq!(Declrmm::Query.report(None), "\x1b[?69;0$y");
+    }
+
+    #[test]
+    fn report_with_dec_set_override() {
+        assert_eq!(
+            Declrmm::Disabled.report(Some(SetMode::DecSet)),
+            "\x1b[?69;1$y"
+        );
+    }
+
+    #[test]
+    fn report_with_dec_rst_override() {
+        assert_eq!(
+            Declrmm::Enabled.report(Some(SetMode::DecRst)),
+            "\x1b[?69;2$y"
+        );
+    }
+
+    #[test]
+    fn report_with_dec_query_override() {
+        assert_eq!(
+            Declrmm::Enabled.report(Some(SetMode::DecQuery)),
+            "\x1b[?69;0$y"
+        );
+    }
+
+    // ── Display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn display_enabled() {
+        assert_eq!(
+            Declrmm::Enabled.to_string(),
+            "Left/Right Margin Mode (DECLRMM) Enabled"
+        );
+    }
+
+    #[test]
+    fn display_disabled() {
+        assert_eq!(
+            Declrmm::Disabled.to_string(),
+            "Left/Right Margin Mode (DECLRMM) Disabled"
+        );
+    }
+
+    #[test]
+    fn display_query() {
+        assert_eq!(
+            Declrmm::Query.to_string(),
+            "Left/Right Margin Mode (DECLRMM) Query"
+        );
+    }
+
+    // ── default ──────────────────────────────────────────────────────
+
+    #[test]
+    fn default_is_disabled() {
+        assert_eq!(Declrmm::default(), Declrmm::Disabled);
+    }
+}

@@ -549,4 +549,117 @@ mod tests {
         assert_eq!(*modes[0], Mode::XtExtscrn(XtExtscrn::Alternate));
         assert_eq!(*modes[1], Mode::BracketedPaste(RlBracket::Enabled));
     }
+
+    // ── push() state-machine edge cases ─────────────────────────────────────
+
+    #[test]
+    fn csi_push_to_finished_parser_returns_invalid() {
+        // Feed a complete sequence, then push another byte → should return Invalid.
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        // Complete with 'H' (CUP)
+        parser.ansiparser_inner_csi(b'H', &mut output);
+        // Now push again to a finished parser
+        let result = parser.push(b'A');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+    }
+
+    #[test]
+    fn csi_intermediate_then_param_byte_is_invalid() {
+        // Transition: Params → Intermediates (on `!`) → then a param byte (digit `5`)
+        // The second byte `5` is a CSI param byte (0x30–0x3f) arriving in Intermediates state
+        // → should set state to Invalid.
+        let mut parser = AnsiCsiParser::new();
+        // Push an intermediate byte to enter Intermediates state
+        let r1 = parser.push(b' '); // space (0x20) is a valid CSI intermediate
+        assert_eq!(r1, ParserOutcome::Continue);
+        assert_eq!(parser.state, AnsiCsiParserState::Intermediates);
+        // Now push a param byte (digit) which is invalid in Intermediates state
+        let r2 = parser.push(b'5');
+        assert!(matches!(r2, ParserOutcome::Invalid(_)));
+        assert_eq!(parser.state, AnsiCsiParserState::Invalid);
+    }
+
+    #[test]
+    fn csi_invalid_state_terminator_sets_invalid_finished() {
+        // Enter Invalid state then receive a terminator → InvalidFinished.
+        let mut parser = AnsiCsiParser::new();
+        // Push a non-param, non-intermediate, non-terminator byte (0x01) → Invalid
+        let r1 = parser.push(0x01);
+        assert!(matches!(r1, ParserOutcome::Invalid(_)));
+        assert_eq!(parser.state, AnsiCsiParserState::Invalid);
+        // Push a terminator → InvalidFinished
+        let r2 = parser.push(b'H');
+        assert!(matches!(r2, ParserOutcome::Invalid(_)));
+        assert_eq!(parser.state, AnsiCsiParserState::InvalidFinished);
+        // Push yet another byte to the finished-invalid parser → Invalid
+        let r3 = parser.push(b'A');
+        assert!(matches!(r3, ParserOutcome::Invalid(_)));
+    }
+
+    // ── Non-DEC multi-param mode split ──────────────────────────────────────
+
+    #[test]
+    fn csi_non_dec_multi_param_mode_set() {
+        // ESC[20;4h — non-DEC private, multiple params (splits to two Mode outputs).
+        // Each sub-param is dispatched without the `?` prefix.
+        let output = parse_csi_sequence(b"20;4h");
+        // Both should be Mode outputs (even if NoOp/Unknown)
+        assert!(
+            output.len() >= 2,
+            "expected at least 2 outputs, got {output:?}"
+        );
+        assert!(output.iter().all(|o| matches!(o, TerminalOutput::Mode(_))));
+    }
+
+    // ── DECREQTPARM CSI x ───────────────────────────────────────────────────
+
+    #[test]
+    fn decreqtparm_ps0_emits_request_terminal_parameters() {
+        // ESC[0x → RequestTerminalParameters(0)
+        let output = parse_csi_sequence(b"0x");
+        assert_eq!(output, vec![TerminalOutput::RequestTerminalParameters(0)]);
+    }
+
+    #[test]
+    fn decreqtparm_ps1_emits_request_terminal_parameters_1() {
+        // ESC[1x → RequestTerminalParameters(1)
+        let output = parse_csi_sequence(b"1x");
+        assert_eq!(output, vec![TerminalOutput::RequestTerminalParameters(1)]);
+    }
+
+    #[test]
+    fn decreqtparm_ps2_is_invalid() {
+        // ESC[2x → ps=2 is out of range → Invalid
+        let output = parse_csi_sequence(b"2x");
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
+    fn decreqtparm_with_gt_prefix_is_invalid() {
+        // ESC[>0x → has_gt=true → Invalid
+        let output = parse_csi_sequence(b">0x");
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
+    fn decreqtparm_extra_params_is_invalid() {
+        // ESC[1;2x → has_extra_params=true → Invalid
+        let output = parse_csi_sequence(b"1;2x");
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    // ── Unrecognized CSI final byte ──────────────────────────────────────────
+
+    #[test]
+    fn csi_unrecognized_final_byte_returns_push_result() {
+        // A final byte that is not in the dispatch table (e.g. `w`) → falls through
+        // to the `Finished(_esc) => push_result` arm and returns Finished.
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        // `w` (0x77) is a valid CSI terminator but not dispatched to any handler
+        let result = parser.ansiparser_inner_csi(b'w', &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(output.is_empty());
+    }
 }

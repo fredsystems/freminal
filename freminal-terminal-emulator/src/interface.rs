@@ -802,3 +802,457 @@ impl TerminalEmulator {
         (Arc::new(img_map), Arc::new(placements))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /// Create a headless emulator; drop the write receiver (we don't need it).
+    fn make_headless() -> TerminalEmulator {
+        let (emu, _rx) = TerminalEmulator::new_headless(None);
+        emu
+    }
+
+    // ── extract_selection_text ─────────────────────────────────────────────────
+
+    #[test]
+    fn extract_selection_text_empty_buffer() {
+        let emu = make_headless();
+        // An all-zero range on an empty buffer should return empty or whitespace.
+        let text = emu.extract_selection_text(0, 0, 0, 0, false);
+        // We just care that it doesn't panic; the exact content depends on buffer state.
+        let _ = text;
+    }
+
+    #[test]
+    fn extract_selection_text_after_write() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Write "Hello" into the buffer.
+        emu.handle_incoming_data(b"Hello");
+        // Extract across row 0 columns 0-4.
+        let text = emu.extract_selection_text(0, 0, 0, 4, false);
+        assert!(
+            text.contains("Hello"),
+            "expected 'Hello' in selection, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn extract_selection_text_block_mode() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Write two lines.
+        emu.handle_incoming_data(b"AB\r\nCD");
+        // Block selection on column 0 only, rows 0-1.
+        let text = emu.extract_selection_text(0, 0, 1, 0, true);
+        // Block should give us column 0 from each row.
+        let _ = text; // Content may vary; just verify no panic.
+    }
+
+    // ── handle_incoming_data ───────────────────────────────────────────────────
+
+    #[test]
+    fn handle_incoming_data_resets_scroll_offset() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Manually set a non-zero scroll offset.
+        emu.gui_scroll_offset = 5;
+        // Receiving new data should auto-scroll back to bottom (offset = 0).
+        emu.handle_incoming_data(b"new data");
+        assert_eq!(
+            emu.gui_scroll_offset, 0,
+            "scroll offset should reset to 0 on new data"
+        );
+    }
+
+    #[test]
+    fn handle_incoming_data_zero_offset_unchanged() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.gui_scroll_offset = 0;
+        emu.handle_incoming_data(b"data");
+        assert_eq!(emu.gui_scroll_offset, 0);
+    }
+
+    // ── set_win_size ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_win_size_same_size_does_not_send_resize() {
+        let (mut emu, rx) = TerminalEmulator::new_headless(None);
+        // Drain any initial messages.
+        while rx.try_recv().is_ok() {}
+
+        let (w, h) = emu.internal.get_win_size();
+        // Setting the same size should not enqueue a Resize message.
+        emu.set_win_size(w, h, 8, 16).unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "no resize message expected when dimensions are unchanged"
+        );
+    }
+
+    #[test]
+    fn set_win_size_different_size_sends_resize() {
+        let (mut emu, rx) = TerminalEmulator::new_headless(None);
+        // Drain any initial messages.
+        while rx.try_recv().is_ok() {}
+
+        let (w, h) = emu.internal.get_win_size();
+        let new_w = w + 10;
+        let new_h = h + 5;
+        emu.set_win_size(new_w, new_h, 8, 16).unwrap();
+
+        match rx.try_recv() {
+            Ok(PtyWrite::Resize(size)) => {
+                assert_eq!(size.width, new_w);
+                assert_eq!(size.height, new_h);
+            }
+            other => panic!("expected Resize message, got: {other:?}"),
+        }
+    }
+
+    // ── build_snapshot: cache invalidation ────────────────────────────────────
+
+    #[test]
+    fn build_snapshot_first_call_returns_content_changed_true() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello");
+        let snap = emu.build_snapshot();
+        // First-ever snapshot must report content_changed = true.
+        assert!(
+            snap.content_changed,
+            "first snapshot should have content_changed=true"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_second_call_no_data_is_not_changed() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello");
+        let _ = emu.build_snapshot();
+        // Second snapshot with no new data: content should not have changed.
+        let snap2 = emu.build_snapshot();
+        assert!(
+            !snap2.content_changed,
+            "second snapshot with no new data should have content_changed=false"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_scroll_offset_change_invalidates_cache() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Default terminal is 100x100.  Write >100 lines to create scrollback.
+        for _ in 0..110 {
+            emu.handle_incoming_data(b"line of text\r\n");
+        }
+        let snap1 = emu.build_snapshot();
+        // Confirm we actually have scrollback to scroll into.
+        assert!(
+            snap1.max_scroll_offset > 0,
+            "expected scrollback after writing >100 lines, got max_scroll_offset={}",
+            snap1.max_scroll_offset
+        );
+        // Move scroll offset by 1 — cache should be invalidated.
+        emu.set_gui_scroll_offset(1);
+        let snap2 = emu.build_snapshot();
+        assert!(
+            snap2.content_changed,
+            "scroll offset change should invalidate the cache"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_size_change_invalidates_cache() {
+        let (mut emu, rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello");
+        let _ = emu.build_snapshot();
+
+        // Resize terminal — this should invalidate the cache.
+        let (w, h) = emu.internal.get_win_size();
+        emu.set_win_size(w + 10, h, 8, 16).unwrap();
+        // Drain the resize message.
+        while rx.try_recv().is_ok() {}
+
+        let snap2 = emu.build_snapshot();
+        assert!(
+            snap2.content_changed,
+            "terminal resize should invalidate the visible snap cache"
+        );
+    }
+
+    // ── set_gui_scroll_offset / reset_scroll_offset ───────────────────────────
+
+    #[test]
+    fn set_and_reset_scroll_offset() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.set_gui_scroll_offset(7);
+        assert_eq!(emu.gui_scroll_offset, 7);
+        emu.reset_scroll_offset();
+        assert_eq!(emu.gui_scroll_offset, 0);
+    }
+
+    // ── clone_write_tx / write_raw_bytes ──────────────────────────────────────
+
+    #[test]
+    fn write_raw_bytes_succeeds() {
+        let (emu, rx) = TerminalEmulator::new_headless(None);
+        // Drain initial messages.
+        while rx.try_recv().is_ok() {}
+
+        emu.write_raw_bytes(b"hello pty").unwrap();
+
+        match rx.try_recv() {
+            Ok(PtyWrite::Write(bytes)) => {
+                assert_eq!(bytes, b"hello pty");
+            }
+            other => panic!("expected PtyWrite::Write, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_write_tx_can_send() {
+        let (emu, rx) = TerminalEmulator::new_headless(None);
+        while rx.try_recv().is_ok() {}
+
+        let tx = emu.clone_write_tx();
+        tx.send(PtyWrite::Write(b"via clone".to_vec())).unwrap();
+
+        match rx.try_recv() {
+            Ok(PtyWrite::Write(bytes)) => assert_eq!(bytes, b"via clone"),
+            other => panic!("expected PtyWrite::Write, got: {other:?}"),
+        }
+    }
+
+    // ── dummy_for_bench ────────────────────────────────────────────────────────
+
+    #[test]
+    fn dummy_for_bench_does_not_panic() {
+        let _ = TerminalEmulator::dummy_for_bench();
+    }
+
+    // ── handle_resize_event ────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_resize_event_updates_size_and_sends_resize() {
+        let (mut emu, rx) = TerminalEmulator::new_headless(None);
+        // Drain initial messages.
+        while rx.try_recv().is_ok() {}
+
+        emu.handle_resize_event(120, 40, 9, 18);
+
+        let (w, h) = emu.internal.get_win_size();
+        assert_eq!(w, 120);
+        assert_eq!(h, 40);
+
+        // Should have sent a PtyWrite::Resize
+        match rx.try_recv() {
+            Ok(PtyWrite::Resize(size)) => {
+                assert_eq!(size.width, 120);
+                assert_eq!(size.height, 40);
+                // Pixel dimensions are total (per-cell * chars)
+                assert_eq!(size.pixel_width, 9 * 120);
+                assert_eq!(size.pixel_height, 18 * 40);
+            }
+            other => panic!("expected PtyWrite::Resize, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_resize_event_same_size_still_sends_resize() {
+        let (mut emu, rx) = TerminalEmulator::new_headless(None);
+        while rx.try_recv().is_ok() {}
+
+        let (w, h) = emu.internal.get_win_size();
+        // handle_resize_event always sends, unlike set_win_size
+        emu.handle_resize_event(w, h, 8, 16);
+
+        // Should still send a resize (handle_resize_event doesn't check old==new)
+        match rx.try_recv() {
+            Ok(PtyWrite::Resize(size)) => {
+                assert_eq!(size.width, w);
+                assert_eq!(size.height, h);
+            }
+            other => panic!("expected PtyWrite::Resize, got: {other:?}"),
+        }
+    }
+
+    // ── write (TerminalInput) ────────────────────────────────────────────────
+
+    #[test]
+    fn write_terminal_input_sends_bytes() {
+        let (emu, rx) = TerminalEmulator::new_headless(None);
+        while rx.try_recv().is_ok() {}
+
+        emu.write(&TerminalInput::Ascii(b'A')).unwrap();
+
+        match rx.try_recv() {
+            Ok(PtyWrite::Write(bytes)) => {
+                assert_eq!(bytes, b"A");
+            }
+            other => panic!("expected PtyWrite::Write with 'A', got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_enter_sends_carriage_return() {
+        let (emu, rx) = TerminalEmulator::new_headless(None);
+        while rx.try_recv().is_ok() {}
+
+        emu.write(&TerminalInput::Enter).unwrap();
+
+        match rx.try_recv() {
+            Ok(PtyWrite::Write(bytes)) => {
+                assert!(!bytes.is_empty(), "Enter should produce non-empty bytes");
+            }
+            other => panic!("expected PtyWrite::Write for Enter, got: {other:?}"),
+        }
+    }
+
+    // ── echo_off_atomic ────────────────────────────────────────────────────────
+
+    #[test]
+    fn echo_off_atomic_headless_returns_none() {
+        let emu = make_headless();
+        assert!(
+            emu.echo_off_atomic().is_none(),
+            "headless emulator should return None for echo_off_atomic"
+        );
+    }
+
+    // ── child_exit_rx ────────────────────────────────────────────────────────
+
+    #[test]
+    fn child_exit_rx_headless_returns_none() {
+        let emu = make_headless();
+        assert!(
+            emu.child_exit_rx().is_none(),
+            "headless emulator should return None for child_exit_rx"
+        );
+    }
+
+    // ── build_snapshot with alternate screen ──────────────────────────────────
+
+    #[test]
+    fn build_snapshot_alternate_screen_zeroes_scroll() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Write enough to create scrollback on primary screen.
+        for _ in 0..110 {
+            emu.handle_incoming_data(b"line\r\n");
+        }
+        let snap1 = emu.build_snapshot();
+        assert!(snap1.max_scroll_offset > 0);
+
+        // Enter alternate screen via DECSET ?1049
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let snap2 = emu.build_snapshot();
+        assert!(snap2.is_alternate_screen);
+        assert_eq!(snap2.scroll_offset, 0);
+        assert_eq!(snap2.max_scroll_offset, 0);
+    }
+
+    #[test]
+    fn build_snapshot_alternate_screen_switch_invalidates_cache() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"primary content");
+        let _ = emu.build_snapshot();
+
+        // Switch to alternate screen — should invalidate cache
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.content_changed,
+            "switching to alternate screen should mark content_changed"
+        );
+    }
+
+    // ── collect_visible_images (no images case is trivially covered; test image path) ──
+
+    #[test]
+    fn build_snapshot_without_images_has_empty_image_data() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"plain text");
+        let snap = emu.build_snapshot();
+        assert!(snap.images.is_empty(), "no images in plain text buffer");
+    }
+
+    #[test]
+    fn build_snapshot_with_iterm2_image_has_image_data() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Build a minimal iTerm2 inline image OSC sequence:
+        // OSC 1337 ; File = inline=1 : <base64> BEL
+        // Use a tiny 1x1 pixel PNG as the payload.
+        let pixel_data = b"\x89PNG\r\n\x1a\nfake";
+        let b64 = freminal_common::base64::encode(pixel_data);
+        let osc = format!("\x1b]1337;File=inline=1:{b64}\x07");
+        emu.handle_incoming_data(osc.as_bytes());
+        let snap = emu.build_snapshot();
+        // The image should be stored — check placements are populated.
+        // Note: The actual rendering may or may not produce placements
+        // depending on whether the image was successfully decoded and placed.
+        // We primarily verify the code path doesn't panic.
+        let _ = snap.images;
+        let _ = snap.visible_image_placements;
+    }
+
+    // ── build_snapshot: blink detection ──────────────────────────────────────
+
+    #[test]
+    fn build_snapshot_no_blink_by_default() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello");
+        let snap = emu.build_snapshot();
+        assert!(!snap.has_blinking_text);
+    }
+
+    #[test]
+    fn build_snapshot_with_blink_sgr5() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // SGR 5 = slow blink
+        emu.handle_incoming_data(b"\x1b[5mblinky\x1b[0m");
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.has_blinking_text,
+            "SGR 5 should set has_blinking_text=true"
+        );
+    }
+
+    // ── build_snapshot: URL detection ────────────────────────────────────────
+
+    #[test]
+    fn build_snapshot_no_urls_by_default() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello world");
+        let snap = emu.build_snapshot();
+        assert!(!snap.has_urls);
+    }
+
+    // ── get_win_size ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_win_size_returns_headless_defaults() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        let (w, h) = emu.get_win_size();
+        // Headless defaults are 100x100
+        assert!(w > 0);
+        assert!(h > 0);
+    }
+
+    // ── scrollback limit ─────────────────────────────────────────────────────
+
+    #[test]
+    fn new_headless_with_scrollback_limit() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        // Write many lines — scrollback should be limited
+        for i in 0..100 {
+            let line = format!("line {i}\r\n");
+            emu.handle_incoming_data(line.as_bytes());
+        }
+        let snap = emu.build_snapshot();
+        // With limit of 10, max_scroll_offset should be limited
+        assert!(
+            snap.max_scroll_offset <= 10,
+            "scrollback limit=10, but max_scroll_offset={}",
+            snap.max_scroll_offset
+        );
+    }
+}

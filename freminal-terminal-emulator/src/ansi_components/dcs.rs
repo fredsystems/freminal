@@ -131,3 +131,115 @@ impl DcsParser {
         ParserOutcome::Continue
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DcsParser;
+    use crate::ansi::ParserOutcome;
+    use crate::ansi_components::tracer::SequenceTraceable;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn default_creates_valid_parser() {
+        let parser = DcsParser::default();
+        assert_eq!(parser.sequence, vec![b'P']);
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn new_creates_valid_parser() {
+        let parser = DcsParser::new();
+        assert_eq!(parser.sequence, vec![b'P']);
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn seq_tracer_returns_mutable_reference() {
+        let mut parser = DcsParser::new();
+        // Calling seq_tracer() should give a mutable reference to the internal tracer
+        let tracer = parser.seq_tracer();
+        tracer.push(b'A');
+    }
+
+    #[test]
+    fn seq_tracer_ref_returns_immutable_reference() {
+        let parser = DcsParser::new();
+        // seq_tracer_ref() should return a reference to the internal tracer
+        let tracer = parser.seq_tracer_ref();
+        // The tracer starts empty
+        assert_eq!(tracer.as_str(), "");
+    }
+
+    #[test]
+    fn dcs_parser_accumulates_bytes_until_st() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        // Feed data bytes
+        for &b in b"hello" {
+            let result = parser.dcs_parser_inner(b, &mut output);
+            assert!(matches!(result, ParserOutcome::Continue));
+        }
+        assert!(output.is_empty());
+        // Feed ST: ESC \
+        parser.dcs_parser_inner(0x1b, &mut output);
+        let result = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output.len(), 1);
+        assert!(matches!(&output[0], TerminalOutput::DeviceControlString(_)));
+    }
+
+    #[test]
+    fn dcs_parser_no_terminator_keeps_continuing() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        for &b in b"data without terminator" {
+            let result = parser.dcs_parser_inner(b, &mut output);
+            assert!(matches!(result, ParserOutcome::Continue));
+        }
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn trace_str_returns_string() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        parser.dcs_parser_inner(b'A', &mut output);
+        let trace = parser.trace_str();
+        assert!(trace.contains('A'));
+    }
+
+    #[test]
+    fn contains_string_terminator_false_without_st() {
+        let parser = DcsParser::new();
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn tmux_passthrough_not_false_terminated_by_doubled_esc() {
+        // A tmux passthrough that ends with \x1b\x1b\ should NOT be treated as ST.
+        // Sequence: b"Ptmux;" + data + ESC ESC \
+        let mut parser = DcsParser::new();
+        // Set up a tmux passthrough sequence manually
+        for &b in b"tmux;" {
+            parser.sequence.push(b);
+        }
+        // Add inner ESC ESC \ (doubled ESC = even count → not real ST)
+        parser.sequence.push(0x1b);
+        parser.sequence.push(0x1b);
+        parser.sequence.push(b'\\');
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn tmux_passthrough_terminated_by_single_esc() {
+        // A tmux passthrough ending with a single ESC \ is a real ST.
+        let mut parser = DcsParser::new();
+        for &b in b"tmux;" {
+            parser.sequence.push(b);
+        }
+        // Single ESC \ (odd count → real ST)
+        parser.sequence.push(0x1b);
+        parser.sequence.push(b'\\');
+        assert!(parser.contains_string_terminator());
+    }
+}

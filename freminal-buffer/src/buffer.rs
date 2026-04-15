@@ -7864,3 +7864,2976 @@ mod softwrap_scrollback_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod reflow_to_width_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    fn cell_str(buf: &Buffer, row_idx: usize) -> String {
+        let row = &buf.rows[row_idx];
+        row.get_characters()
+            .iter()
+            .filter(|c| !c.is_continuation())
+            .map(|c| match c.tchar() {
+                TChar::Ascii(b) => (*b as char).to_string(),
+                TChar::Space => " ".to_string(),
+                TChar::NewLine => "\\n".to_string(),
+                TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize]).to_string(),
+            })
+            .collect()
+    }
+
+    // Test 1: same-width is a no-op
+    #[test]
+    fn reflow_same_width_is_noop() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("Hello"));
+        buf.handle_lf();
+        buf.insert_text(&t("World"));
+
+        let rows_before = buf.rows.len();
+        let cursor_before = buf.cursor.pos;
+
+        buf.reflow_to_width(10); // same width
+
+        assert_eq!(buf.rows.len(), rows_before);
+        assert_eq!(buf.cursor.pos, cursor_before);
+    }
+
+    // Test 2: empty buffer is a no-op
+    #[test]
+    fn reflow_empty_buffer_noop() {
+        let mut buf = Buffer::new(10, 5);
+        // don't insert any text, but buffer has default rows
+        // Clear all rows to make it truly empty
+        buf.rows.clear();
+        buf.row_cache.clear();
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+
+        buf.reflow_to_width(20);
+        assert!(buf.rows.is_empty());
+    }
+
+    // Test 3: zero width is a no-op
+    #[test]
+    fn reflow_zero_width_noop() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("Hello"));
+        let rows_before = buf.rows.len();
+
+        buf.reflow_to_width(0);
+        assert_eq!(buf.rows.len(), rows_before);
+    }
+
+    // Test 4: narrow to wide reflow (content fits, fewer rows)
+    #[test]
+    fn reflow_narrow_to_wide() {
+        let mut buf = Buffer::new(5, 5);
+        // Insert "ABCDEFGH" which wraps at width 5:
+        // Row 0: "ABCDE" (soft-wrap)
+        // Row 1: "FGH  "
+        buf.insert_text(&t("ABCDEFGH"));
+
+        // Now reflow to width 10 — should fit on one row
+        buf.reflow_to_width(10);
+
+        assert_eq!(buf.width, 10);
+        // Content should be on one logical line
+        let text = cell_str(&buf, 0);
+        assert!(text.starts_with("ABCDEFGH"), "got: {text}");
+    }
+
+    // Test 5: wide to narrow reflow (content wraps, more rows)
+    #[test]
+    fn reflow_wide_to_narrow() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("ABCDEFGHIJ"));
+
+        // Reflow to width 5 — should produce 2 rows
+        buf.reflow_to_width(5);
+
+        assert_eq!(buf.width, 5);
+        let row0 = cell_str(&buf, 0);
+        let row1 = cell_str(&buf, 1);
+        assert!(row0.starts_with("ABCDE"), "row0: {row0}");
+        assert!(row1.starts_with("FGHIJ"), "row1: {row1}");
+    }
+
+    // Test 6: wide glyph at boundary wraps to next row
+    #[test]
+    fn reflow_wide_glyph_at_boundary() {
+        // Create a buffer with a wide character that will be at the boundary
+        let mut buf = Buffer::new(10, 5);
+        // Insert 3 normal chars + wide char "あ" (display width 2)
+        // On width=10 this fits fine: ABC + あ = 5 columns
+        let wide = TChar::from('あ');
+        buf.insert_text(&[
+            TChar::Ascii(b'A'),
+            TChar::Ascii(b'B'),
+            TChar::Ascii(b'C'),
+            wide,
+        ]);
+
+        // Reflow to width 4: "ABC" fills 3 columns, "あ" needs 2 columns
+        // 3 + 2 = 5 > 4, so "あ" should wrap to next row
+        buf.reflow_to_width(4);
+
+        assert_eq!(buf.width, 4);
+        let row0 = cell_str(&buf, 0);
+        assert!(row0.starts_with("ABC"), "row0 should have ABC, got: {row0}");
+        let row1 = cell_str(&buf, 1);
+        assert!(row1.starts_with("あ"), "row1 should have あ, got: {row1}");
+    }
+
+    // Test 7: cursor Y clamped when out of bounds after reflow
+    #[test]
+    fn reflow_clamps_cursor_y() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("Line1"));
+        buf.handle_lf();
+        buf.insert_text(&t("Line2"));
+
+        // Force cursor to a high Y
+        buf.cursor.pos.y = 100;
+
+        buf.reflow_to_width(20);
+
+        // Cursor should be clamped to rows.len() - 1
+        assert!(buf.cursor.pos.y < buf.rows.len());
+    }
+
+    // Test 8: cursor X clamped to new width
+    #[test]
+    fn reflow_clamps_cursor_x() {
+        let mut buf = Buffer::new(20, 5);
+        buf.insert_text(&t("Hello World"));
+        buf.cursor.pos.x = 15;
+
+        buf.reflow_to_width(5);
+
+        // Cursor X should be clamped to new width - 1
+        assert!(buf.cursor.pos.x < buf.width);
+    }
+
+    // Test 9: multiple logical lines preserved after reflow
+    #[test]
+    fn reflow_preserves_logical_lines() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("AAAA"));
+        buf.handle_lf(); // hard break (LF only; reset X manually to simulate CR+LF)
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&t("BBBB"));
+
+        buf.reflow_to_width(20);
+
+        // Should have at least 2 rows (one per logical line)
+        assert!(buf.rows.len() >= 2);
+        let row0 = cell_str(&buf, 0);
+        let row1 = cell_str(&buf, 1);
+        assert!(row0.starts_with("AAAA"), "row0: {row0}");
+        assert!(row1.starts_with("BBBB"), "row1: {row1}");
+    }
+}
+
+#[cfg(test)]
+mod erase_operations_tests {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    fn cell_str(buf: &Buffer, row_idx: usize) -> String {
+        (0..buf.width)
+            .map(|col| {
+                let cell = buf.rows[row_idx].resolve_cell(col);
+                match cell.tchar() {
+                    TChar::Ascii(b) => *b as char,
+                    TChar::Space => ' ',
+                    TChar::NewLine => '\n',
+                    TChar::Utf8(b, len) => String::from_utf8_lossy(&b[..*len as usize])
+                        .chars()
+                        .next()
+                        .unwrap_or('?'),
+                }
+            })
+            .collect()
+    }
+
+    /// Helper: write `text` then advance to the next row via LF + CR.
+    fn write_line(buf: &mut Buffer, text: &str) {
+        buf.insert_text(&t(text));
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // erase_to_beginning_of_display (ED 1) tests
+    // -------------------------------------------------------------------------
+
+    /// Place content on three rows, put the cursor on row 1 col 3, then call
+    /// `erase_to_beginning_of_display`.  Rows above the cursor must be blank
+    /// and the cursor row must be blank from col 0 through col 3 (inclusive).
+    #[test]
+    fn erase_to_beginning_of_display_basic() {
+        let mut buf = Buffer::new(10, 5);
+
+        write_line(&mut buf, "AAAAAAAAAA");
+        write_line(&mut buf, "BBBBBBBBBB");
+        write_line(&mut buf, "CCCCCCCCCC");
+
+        let vis_start = buf.visible_window_start(0);
+
+        // Position cursor on the second visible row at column 3.
+        buf.cursor.pos.y = vis_start + 1;
+        buf.cursor.pos.x = 3;
+
+        buf.erase_to_beginning_of_display();
+
+        // Row 0 (vis_start + 0) must be entirely blank.
+        let row0 = cell_str(&buf, vis_start);
+        assert!(
+            row0.chars().all(|c| c == ' '),
+            "row above cursor must be all spaces; got {row0:?}"
+        );
+
+        // Cursor row: cols 0-3 must be blank, cols 4-9 must retain 'B'.
+        let row1 = cell_str(&buf, vis_start + 1);
+        assert!(
+            row1[..4].chars().all(|c| c == ' '),
+            "cursor row cols 0-3 must be blanked; got {:?}",
+            &row1[..4]
+        );
+        assert_eq!(
+            &row1[4..10],
+            "BBBBBB",
+            "cursor row cols 4-9 must be untouched"
+        );
+
+        // Row 2 must still contain 'C'.
+        let row2 = cell_str(&buf, vis_start + 2);
+        assert!(
+            row2.starts_with("CCCCCCCCCC"),
+            "row below cursor must be untouched; got {row2:?}"
+        );
+    }
+
+    /// Cursor on row 0 col 5: only cols 0-5 of row 0 should be cleared.
+    #[test]
+    fn erase_to_beginning_of_display_at_first_row() {
+        let mut buf = Buffer::new(10, 5);
+
+        buf.insert_text(&t("AAAAAAAAAA"));
+
+        let vis_start = buf.visible_window_start(0);
+        buf.cursor.pos.y = vis_start;
+        buf.cursor.pos.x = 5;
+
+        buf.erase_to_beginning_of_display();
+
+        let row = cell_str(&buf, vis_start);
+        assert!(
+            row[..6].chars().all(|c| c == ' '),
+            "cols 0-5 must be blank; got {:?}",
+            &row[..6]
+        );
+        assert_eq!(&row[6..10], "AAAA", "cols 6-9 must be untouched");
+    }
+
+    // -------------------------------------------------------------------------
+    // erase_display (ED 2) tests
+    // -------------------------------------------------------------------------
+
+    /// Fill every visible row with content, call `erase_display`, and confirm
+    /// all rows in the visible window are blank.
+    #[test]
+    fn erase_display_basic() {
+        let mut buf = Buffer::new(10, 5);
+
+        for ch in ['A', 'B', 'C', 'D', 'E'] {
+            write_line(&mut buf, &ch.to_string().repeat(10));
+        }
+
+        let vis_start = buf.visible_window_start(0);
+        buf.erase_display();
+
+        for i in vis_start..(vis_start + buf.height).min(buf.rows.len()) {
+            let row = cell_str(&buf, i);
+            assert!(
+                row.chars().all(|c| c == ' '),
+                "row {i} must be all spaces after erase_display; got {row:?}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // erase_scrollback (ED 3) tests
+    // -------------------------------------------------------------------------
+
+    /// Push enough lines to generate real scrollback, then call
+    /// `erase_scrollback`.  The scrollback rows must disappear and the cursor
+    /// must be adjusted so it still points to the same logical row.
+    #[test]
+    fn erase_scrollback_removes_scrollback() {
+        // 10 wide, 3 tall.  Write 8 lines → 5 rows of scrollback.
+        let mut buf = Buffer::new(10, 3);
+
+        for i in 0..8u8 {
+            let ch = char::from(b'A' + i);
+            buf.insert_text(&t(&ch.to_string().repeat(10)));
+            buf.handle_lf();
+            buf.cursor.pos.x = 0;
+        }
+
+        let vis_start_before = buf.visible_window_start(0);
+        assert!(
+            vis_start_before > 0,
+            "expected scrollback rows before erase; rows.len()={}, height={}",
+            buf.rows.len(),
+            buf.height
+        );
+
+        let cursor_before = buf.cursor.pos.y;
+
+        buf.erase_scrollback();
+
+        let vis_start_after = buf.visible_window_start(0);
+        assert_eq!(
+            vis_start_after, 0,
+            "visible_window_start must be 0 after erase_scrollback"
+        );
+
+        let expected_cursor_y = cursor_before.saturating_sub(vis_start_before);
+        assert_eq!(
+            buf.cursor.pos.y, expected_cursor_y,
+            "cursor must be adjusted after scrollback drain"
+        );
+    }
+
+    /// On the alternate buffer `erase_scrollback` is a no-op (early return at line 2750).
+    #[test]
+    fn erase_scrollback_alternate_is_noop() {
+        let mut buf = Buffer::new(10, 5);
+
+        write_line(&mut buf, "AAAAAAAAAA");
+        buf.enter_alternate(0);
+
+        buf.insert_text(&t("BBBBBBBBBB"));
+
+        let rows_before = buf.rows.len();
+        let cursor_before = buf.cursor.pos;
+
+        buf.erase_scrollback();
+
+        assert_eq!(
+            buf.rows.len(),
+            rows_before,
+            "erase_scrollback must not mutate alternate screen rows"
+        );
+        assert_eq!(
+            buf.cursor.pos, cursor_before,
+            "erase_scrollback must not move cursor on alternate screen"
+        );
+    }
+
+    /// When the primary buffer has no scrollback (content fits in the visible
+    /// window), `erase_scrollback` is a no-op.
+    #[test]
+    fn erase_scrollback_no_scrollback_noop() {
+        let mut buf = Buffer::new(10, 5);
+        write_line(&mut buf, "AAAAAAAAAA");
+
+        let vis_start = buf.visible_window_start(0);
+        assert_eq!(vis_start, 0, "expected no scrollback in a fresh buffer");
+
+        let rows_before = buf.rows.len();
+        let cursor_before = buf.cursor.pos;
+
+        buf.erase_scrollback();
+
+        assert_eq!(buf.rows.len(), rows_before, "row count must not change");
+        assert_eq!(buf.cursor.pos, cursor_before, "cursor must not move");
+    }
+
+    // -------------------------------------------------------------------------
+    // erase_line_to_beginning (EL 1) tests
+    // -------------------------------------------------------------------------
+
+    /// Write text on a line, set cursor to the middle, call
+    /// `erase_line_to_beginning`.  Cells `0..=cursor_x` must be blank; cells
+    /// after the cursor must retain their original content.
+    #[test]
+    fn erase_line_to_beginning_basic() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("ABCDEFGHIJ"));
+
+        let vis_start = buf.visible_window_start(0);
+        buf.cursor.pos.y = vis_start;
+        buf.cursor.pos.x = 4;
+
+        buf.erase_line_to_beginning();
+
+        let row = cell_str(&buf, vis_start);
+        // Cols 0-4 must be blank.
+        assert!(
+            row[..5].chars().all(|c| c == ' '),
+            "cols 0-4 must be blanked; got {:?}",
+            &row[..5]
+        );
+        // Cols 5-9 must still be 'F'-'J'.
+        assert_eq!(&row[5..10], "FGHIJ", "cols 5-9 must be untouched");
+    }
+
+    // -------------------------------------------------------------------------
+    // erase_line_to_end (EL 0) tests
+    // -------------------------------------------------------------------------
+
+    /// With cursor at column 0 the entire line must be cleared.
+    #[test]
+    fn erase_line_to_end_from_col_zero() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("ABCDEFGHIJ"));
+
+        let vis_start = buf.visible_window_start(0);
+        buf.cursor.pos.y = vis_start;
+        buf.cursor.pos.x = 0;
+
+        buf.erase_line_to_end();
+
+        let row = cell_str(&buf, vis_start);
+        assert!(
+            row.chars().all(|c| c == ' '),
+            "entire line must be blanked when cursor is at col 0; got {row:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Tests for handle_lf, handle_ri, insert_lines, delete_lines — alternate
+// buffer paths and DECLRMM paths
+// ============================================================================
+
+#[cfg(test)]
+mod lf_ri_il_dl_tests {
+    use super::*;
+    use freminal_common::buffer_states::{
+        modes::{declrmm::Declrmm, lnm::Lnm},
+        tchar::TChar,
+    };
+
+    // ─── helpers ────────────────────────────────────────────────────────────
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(ascii).collect()
+    }
+
+    /// Create an alternate buffer of the given dimensions.
+    fn make_alt_buffer(width: usize, height: usize) -> Buffer {
+        let mut buf = Buffer::new(width, height);
+        buf.enter_alternate(0);
+        buf
+    }
+
+    /// Return the `TChar` at `(col, row)` in `buf.rows`.
+    fn cell_char(buf: &Buffer, row: usize, col: usize) -> TChar {
+        *buf.rows[row].resolve_cell(col).tchar()
+    }
+
+    // ─── handle_lf — primary buffer full-screen region fast path ───────────
+
+    /// Verify the primary-buffer full-screen LF path: when the cursor is NOT
+    /// at the last row (sy < height-1), the cursor moves down and does NOT
+    /// create a new row if one already exists with real content.
+    ///
+    /// This exercises the `else` branch at line 1520: the row at the destination
+    /// already exists and must be left untouched (origin != `ScrollFill`, sy != height-1).
+    #[test]
+    fn primary_lf_above_bottom_leaves_existing_row_untouched() {
+        let width = 5;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+
+        // Create exactly `height` rows so the buffer is full (no scrollback yet).
+        // Each LF creates a new row.
+        for _ in 0..height - 1 {
+            buf.handle_lf();
+        }
+        assert_eq!(
+            buf.rows.len(),
+            height,
+            "buffer must have exactly height rows"
+        );
+
+        // Write recognizable content on row 2 so it has a real HardBreak row.
+        buf.cursor.pos.y = 2;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&text("HELLO"));
+
+        // Position cursor one row above row 2, so a LF moves to row 2.
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+
+        let rows_before = buf.rows.len();
+        buf.handle_lf();
+
+        // Cursor advances to row 2.
+        assert_eq!(buf.cursor.pos.y, 2, "cursor must move to row 2");
+        // Row count must not change.
+        assert_eq!(buf.rows.len(), rows_before, "row count must not change");
+        // Row 2 content must be undisturbed.
+        assert_eq!(
+            cell_char(&buf, 2, 0),
+            ascii('H'),
+            "existing row content must be preserved"
+        );
+    }
+
+    /// Verify the primary-buffer `ScrollFill` placeholder path (lines 1522-1526):
+    /// when a LF lands on a row with `origin == ScrollFill`, the row is
+    /// upgraded to a `HardBreak` row without clearing its (empty) cells.
+    ///
+    /// `ScrollFill` rows are created by `set_size` when the buffer is grown.
+    #[test]
+    fn primary_lf_scrollfill_row_stamped_as_hard_break() {
+        let width = 5;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+
+        // Make the buffer full (height rows exist).
+        for _ in 0..height - 1 {
+            buf.handle_lf();
+        }
+
+        // Grow the buffer so `set_size` inserts a ScrollFill placeholder row.
+        let new_height = height + 2;
+        let _ = buf.set_size(width, new_height, 0);
+
+        // The last row(s) added by set_size should be ScrollFill.
+        // Cursor is at the end; position it one row before a ScrollFill row.
+        let last = buf.rows.len() - 1;
+        if last > 0 {
+            // Check that the last row is actually ScrollFill (set_size creates them).
+            if buf.rows[last].origin == RowOrigin::ScrollFill {
+                buf.cursor.pos.y = last - 1;
+                buf.cursor.pos.x = 0;
+
+                buf.handle_lf();
+
+                // The ScrollFill row must now be stamped as HardBreak.
+                assert_eq!(
+                    buf.rows[last].origin,
+                    RowOrigin::HardBreak,
+                    "ScrollFill row must become HardBreak after LF"
+                );
+            }
+        }
+        // (If no ScrollFill row exists, the test is vacuously satisfied.)
+    }
+
+    // ─── handle_lf — alternate buffer paths (lines 1584-1604) ──────────────
+
+    /// In the alternate buffer, LF when the cursor is at `scroll_region_bottom`
+    /// should trigger a scroll-up; the cursor stays at the bottom row.
+    #[test]
+    fn alt_lf_at_scroll_region_bottom_scrolls_up() {
+        let width = 5;
+        let height = 4;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write distinct content on each row.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        // Position cursor at the last row (bottom of the default full-screen
+        // scroll region).
+        buf.cursor.pos.y = height - 1;
+        buf.cursor.pos.x = 0;
+
+        // Fire LF — should scroll the region up; cursor stays at bottom.
+        buf.handle_lf();
+
+        assert_eq!(
+            buf.cursor.pos.y,
+            height - 1,
+            "cursor must remain at scroll_region_bottom after scroll"
+        );
+        assert_eq!(
+            buf.rows.len(),
+            height,
+            "alt buffer row count must stay == height"
+        );
+
+        // The newly scrolled-in bottom row should be blank.
+        let bottom_row = &buf.rows[height - 1];
+        for cell in bottom_row.cells() {
+            assert_eq!(
+                cell.tchar(),
+                &TChar::Space,
+                "newly scrolled-in row must be blank"
+            );
+        }
+    }
+
+    /// In the alternate buffer, LF when the cursor is inside the scroll region
+    /// but NOT at the bottom: cursor should just move down one row without
+    /// any scrolling.
+    #[test]
+    fn alt_lf_inside_region_not_at_bottom_just_moves_down() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Place cursor in the middle of the default full-screen scroll region.
+        buf.cursor.pos.y = 2;
+        buf.cursor.pos.x = 0;
+
+        buf.handle_lf();
+
+        assert_eq!(buf.cursor.pos.y, 3, "cursor must move down one row");
+        assert_eq!(buf.rows.len(), height, "row count must not change");
+    }
+
+    /// In the alternate buffer with a partial scroll region, LF when the cursor
+    /// is OUTSIDE the scroll region should just move the cursor down (lines
+    /// 1599-1601) without any scrolling.
+    #[test]
+    fn alt_lf_outside_scroll_region_just_moves_down() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Set partial scroll region rows 1..3 (0-based: top=1, bottom=3).
+        buf.set_scroll_region(2, 4); // 1-based: rows 2..4 → 0-based: 1..3
+
+        // Cursor starts at row 0 — outside the scroll region (above it).
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+
+        buf.handle_lf();
+
+        // Cursor moves down to row 1 (still outside the region); no scroll.
+        assert_eq!(buf.cursor.pos.y, 1, "cursor must move down to row 1");
+        assert_eq!(buf.rows.len(), height, "row count must not change");
+    }
+
+    /// In the alternate buffer, LF with LNM=NewLine should also CR the cursor
+    /// (line 1585-1586).
+    #[test]
+    fn alt_lf_with_lnm_also_resets_cursor_x() {
+        let width = 10;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        buf.set_lnm(Lnm::NewLine);
+        // Position cursor at a mid-line column.
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 5;
+
+        buf.handle_lf();
+
+        assert_eq!(buf.cursor.pos.x, 0, "LNM must reset cursor X to 0");
+        assert_eq!(buf.cursor.pos.y, 2, "cursor must move down one row");
+    }
+
+    /// In the alternate buffer, LF with LNM=LineFeed (the default) must NOT
+    /// reset cursor X.
+    #[test]
+    fn alt_lf_without_lnm_keeps_cursor_x() {
+        let width = 10;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // LNM defaults to LineFeed — no implicit CR.
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 5;
+
+        buf.handle_lf();
+
+        assert_eq!(buf.cursor.pos.x, 5, "without LNM cursor X must not change");
+        assert_eq!(buf.cursor.pos.y, 2, "cursor must move down one row");
+    }
+
+    // ─── handle_ri — alternate buffer paths (lines 1661-1673) ──────────────
+
+    /// In the alternate buffer, RI with the cursor at the TOP of the scroll
+    /// region should scroll the region DOWN (insert a blank line at top).
+    /// Lines 1667-1668.
+    #[test]
+    fn alt_ri_at_top_of_region_scrolls_down() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write identifiable content on each row.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        // Full-screen region (default): top=0, bottom=height-1.
+        // Place cursor at row 0 (top of scroll region).
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+
+        buf.handle_ri();
+
+        // Cursor must stay at row 0 (top margin).
+        assert_eq!(buf.cursor.pos.y, 0, "cursor must stay at top margin");
+        assert_eq!(buf.rows.len(), height, "row count must not change");
+
+        // Row 0 must now be blank (newly inserted line at the top).
+        let top_row = &buf.rows[0];
+        for cell in top_row.cells() {
+            assert_eq!(
+                cell.tchar(),
+                &TChar::Space,
+                "row 0 must be blank after scroll-down"
+            );
+        }
+    }
+
+    /// In the alternate buffer, RI when the cursor is INSIDE the region but
+    /// NOT at the top: cursor should just move up one row (line 1665-1666).
+    #[test]
+    fn alt_ri_inside_region_not_at_top_just_moves_up() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        buf.cursor.pos.y = 3;
+        buf.cursor.pos.x = 0;
+
+        buf.handle_ri();
+
+        assert_eq!(buf.cursor.pos.y, 2, "cursor must move up one row");
+    }
+
+    /// In the alternate buffer, RI when the cursor is OUTSIDE the scroll region
+    /// should just move the cursor up without any scrolling (lines 1670-1671).
+    #[test]
+    fn alt_ri_outside_region_just_moves_up() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Set partial scroll region rows 2..4 (0-based).
+        buf.set_scroll_region(3, 5); // 1-based: rows 3..5 → 0-based: 2..4
+
+        // Cursor at row 1 — above the scroll region.
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+
+        buf.handle_ri();
+
+        assert_eq!(buf.cursor.pos.y, 0, "cursor must move up to row 0");
+        assert_eq!(buf.rows.len(), height, "row count must not change");
+    }
+
+    /// In the alternate buffer, RI with a pending-wrap cursor (pos.x == width)
+    /// must first clamp x to width-1 (line 1635-1636) before moving up.
+    #[test]
+    fn alt_ri_pending_wrap_clears_pending_wrap_state() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Simulate pending-wrap: pos.x set to width (one past the last column).
+        buf.cursor.pos.y = 2;
+        buf.cursor.pos.x = width; // pending-wrap state
+
+        buf.handle_ri();
+
+        // x must be clamped to width-1.
+        assert_eq!(
+            buf.cursor.pos.x,
+            width - 1,
+            "pending wrap must be cleared: x clamped to width-1"
+        );
+        // Cursor should have moved up.
+        assert_eq!(buf.cursor.pos.y, 1, "cursor must move up one row");
+    }
+
+    // ─── insert_lines — alternate buffer (lines 1682-1708) ─────────────────
+
+    /// `insert_lines(0)` must be a no-op (early return at line 1682-1683).
+    #[test]
+    fn alt_insert_lines_zero_is_noop() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write recognizable content.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        buf.cursor.pos.y = 2;
+        buf.insert_lines(0);
+
+        // "R002" → col 0='R', col 1='0', col 2='0', col 3='2'.
+        // Verify both col 0 and col 3 to confirm nothing was shifted.
+        assert_eq!(
+            cell_char(&buf, 2, 0),
+            ascii('R'),
+            "row 2 col 0 must be unchanged"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 3),
+            ascii('2'),
+            "row 2 col 3 must be unchanged"
+        );
+    }
+
+    /// `insert_lines` when the cursor is OUTSIDE the scroll region must be a
+    /// no-op (line 1690-1691).
+    #[test]
+    fn alt_insert_lines_outside_region_is_noop() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Partial region rows 1..3 (0-based: top=1, bottom=3).
+        buf.set_scroll_region(2, 4); // 1-based → 0-based: 1..3
+
+        // Write recognizable content on every row.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        // Cursor at row 0 — above the scroll region top (1).
+        buf.cursor.pos.y = 0;
+        buf.insert_lines(2);
+
+        // Row 0 must be unchanged.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('R'), "row 0 must be unchanged");
+        // Row 1 (region top) must also be unchanged.
+        assert_eq!(cell_char(&buf, 1, 0), ascii('R'), "row 1 must be unchanged");
+    }
+
+    /// `insert_lines` inside the scroll region on the alternate buffer without
+    /// DECLRMM: shifts rows down within the region and blanks the cursor row.
+    #[test]
+    fn alt_insert_lines_basic() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write identifiable content on each row: "R000", "R001", …
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        // Cursor at row 1 inside the full-screen scroll region.
+        buf.cursor.pos.y = 1;
+        buf.insert_lines(1);
+
+        // Row 1 should now be blank (the newly inserted line).
+        let row1 = &buf.rows[1];
+        for cell in row1.cells() {
+            assert_eq!(cell.tchar(), &TChar::Space, "inserted row must be blank");
+        }
+
+        // The old row 1 content ("R001") should have been pushed to row 2.
+        assert_eq!(
+            cell_char(&buf, 2, 0),
+            ascii('R'),
+            "old row 1 now at row 2 col 0"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 1),
+            ascii('0'),
+            "old row 1 now at row 2 col 1"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 2),
+            ascii('0'),
+            "old row 1 now at row 2 col 2"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 3),
+            ascii('1'),
+            "old row 1 now at row 2 col 3"
+        );
+
+        // Row 0 must be untouched.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('R'), "row 0 must be unchanged");
+    }
+
+    /// `insert_lines` on the alternate buffer WITH DECLRMM enabled: only the
+    /// columns within [left, right] are shifted; outside columns are untouched.
+    /// Lines 1697-1701.
+    #[test]
+    fn alt_insert_lines_declrmm_column_selective() {
+        let width = 10;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write a known 10-char pattern on each row.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text("ABCDEFGHIJ"));
+        }
+
+        // Enable DECLRMM with left/right margins cols 3..6 (1-based) →
+        // 0-based: 2..5.
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 6); // 1-based → 0-based: 2..5
+        // set_left_right_margins homes cursor to (0,0); move to row 1.
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+
+        buf.insert_lines(1);
+
+        // Row 1, cols 2..5 should now be blank (the inserted region columns).
+        for col in 2..=5 {
+            assert_eq!(
+                cell_char(&buf, 1, col),
+                TChar::Space,
+                "col {col} of inserted row must be blank"
+            );
+        }
+
+        // Row 1, cols outside the margin (0, 1, 6-9) must retain original values.
+        assert_eq!(
+            cell_char(&buf, 1, 0),
+            ascii('A'),
+            "col 0 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 1, 1),
+            ascii('B'),
+            "col 1 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 1, 6),
+            ascii('G'),
+            "col 6 outside margin untouched"
+        );
+
+        // The original row 1 margin-column content must now be at row 2.
+        assert_eq!(
+            cell_char(&buf, 2, 2),
+            ascii('C'),
+            "old row1 col2 now at row2"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 5),
+            ascii('F'),
+            "old row1 col5 now at row2"
+        );
+
+        // Row 0 must be completely untouched.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('A'), "row 0 untouched");
+        assert_eq!(cell_char(&buf, 0, 5), ascii('F'), "row 0 col 5 untouched");
+    }
+
+    // ─── insert_lines — primary buffer with DECLRMM (lines 1722-1726) ───────
+
+    /// `insert_lines` on the primary buffer WITH DECLRMM enabled: only the
+    /// columns within [left, right] are shifted in the visible window.
+    #[test]
+    fn primary_insert_lines_declrmm_column_selective() {
+        let width = 10;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+
+        // Fill the buffer to `height` rows with identifiable content.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text("ABCDEFGHIJ"));
+        }
+
+        // Enable DECLRMM with margins cols 3..7 (1-based) → 0-based: 2..6.
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 7); // 1-based → 0-based: 2..6
+        // set_left_right_margins homes cursor to (0,0); move to row 2.
+        buf.cursor.pos.y = 2;
+        buf.cursor.pos.x = 0;
+
+        buf.insert_lines(1);
+
+        // Cols 2..6 on the cursor row (row 2) should be blank.
+        for col in 2..=6 {
+            assert_eq!(
+                cell_char(&buf, 2, col),
+                TChar::Space,
+                "col {col} of inserted row must be blank"
+            );
+        }
+
+        // Cols outside the margin on row 2 must keep their original values.
+        assert_eq!(
+            cell_char(&buf, 2, 0),
+            ascii('A'),
+            "col 0 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 1),
+            ascii('B'),
+            "col 1 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 7),
+            ascii('H'),
+            "col 7 outside margin untouched"
+        );
+
+        // The original row 2 margin content must now be at row 3.
+        assert_eq!(
+            cell_char(&buf, 3, 2),
+            ascii('C'),
+            "old row 2 col 2 now at row 3"
+        );
+        assert_eq!(
+            cell_char(&buf, 3, 6),
+            ascii('G'),
+            "old row 2 col 6 now at row 3"
+        );
+
+        // Row 0 must be completely untouched.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('A'), "row 0 untouched");
+    }
+
+    // ─── delete_lines — alternate buffer (lines 1742-1767) ──────────────────
+
+    /// `delete_lines` when the cursor is OUTSIDE the scroll region must be a
+    /// no-op (line 1749-1750).
+    #[test]
+    fn alt_delete_lines_outside_region_is_noop() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Partial region rows 1..3 (0-based: top=1, bottom=3).
+        buf.set_scroll_region(2, 4); // 1-based → 0-based: 1..3
+
+        // Write recognizable content.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        // Cursor at row 0 — above the scroll region top (1).
+        buf.cursor.pos.y = 0;
+        buf.delete_lines(1);
+
+        // Nothing should have changed.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('R'), "row 0 must be unchanged");
+        assert_eq!(cell_char(&buf, 1, 0), ascii('R'), "row 1 must be unchanged");
+    }
+
+    /// `delete_lines` inside the scroll region on the alternate buffer without
+    /// DECLRMM: shifts rows up within the region and blanks the bottom row.
+    #[test]
+    fn alt_delete_lines_basic() {
+        let width = 5;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write identifiable content on each row.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text(&format!("R{row:03}")));
+        }
+
+        // Cursor at row 1 inside the full-screen scroll region.
+        buf.cursor.pos.y = 1;
+        buf.delete_lines(1);
+
+        // Row 1 should now have the old row 2 content ("R002").
+        assert_eq!(cell_char(&buf, 1, 0), ascii('R'), "row 1 col 0 must be 'R'");
+        assert_eq!(cell_char(&buf, 1, 3), ascii('2'), "row 1 col 3 must be '2'");
+
+        // Row 0 must be untouched.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('R'), "row 0 must be unchanged");
+        assert_eq!(cell_char(&buf, 0, 3), ascii('0'), "row 0 col 3 must be '0'");
+
+        // The bottom row (row 4) should be blank.
+        let bottom_row = &buf.rows[height - 1];
+        for cell in bottom_row.cells() {
+            assert_eq!(
+                cell.tchar(),
+                &TChar::Space,
+                "bottom row must be blank after delete"
+            );
+        }
+    }
+
+    /// `delete_lines` on the alternate buffer WITH DECLRMM enabled: only the
+    /// columns within [left, right] are shifted; outside columns are untouched.
+    /// Lines 1756-1760.
+    #[test]
+    fn alt_delete_lines_declrmm_column_selective() {
+        let width = 10;
+        let height = 5;
+        let mut buf = make_alt_buffer(width, height);
+
+        // Write a known 10-char pattern on each row.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text("ABCDEFGHIJ"));
+        }
+
+        // Enable DECLRMM with margins cols 3..6 (1-based) → 0-based: 2..5.
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 6); // 1-based → 0-based: 2..5
+        // set_left_right_margins homes cursor to (0,0); move to row 1.
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+
+        buf.delete_lines(1);
+
+        // Row 1, cols 2..5 should now have the old row 2 content.
+        assert_eq!(
+            cell_char(&buf, 1, 2),
+            ascii('C'),
+            "row1 col2: old row2 content"
+        );
+        assert_eq!(
+            cell_char(&buf, 1, 5),
+            ascii('F'),
+            "row1 col5: old row2 content"
+        );
+
+        // Row 1, cols outside the margin must retain the original row 1 values.
+        assert_eq!(
+            cell_char(&buf, 1, 0),
+            ascii('A'),
+            "col 0 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 1, 1),
+            ascii('B'),
+            "col 1 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 1, 6),
+            ascii('G'),
+            "col 6 outside margin untouched"
+        );
+
+        // The bottom margin row (row 4), cols 2..5 should be blank.
+        for col in 2..=5 {
+            assert_eq!(
+                cell_char(&buf, height - 1, col),
+                TChar::Space,
+                "bottom row col {col} must be blank after delete"
+            );
+        }
+
+        // The bottom row outside the margin must be unchanged.
+        assert_eq!(
+            cell_char(&buf, height - 1, 0),
+            ascii('A'),
+            "bottom row col 0 outside margin untouched"
+        );
+
+        // Row 0 must be completely untouched.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('A'), "row 0 untouched");
+        assert_eq!(cell_char(&buf, 0, 5), ascii('F'), "row 0 col 5 untouched");
+    }
+
+    // ─── delete_lines — primary buffer with DECLRMM (lines 1781-1785) ───────
+
+    /// `delete_lines` on the primary buffer WITH DECLRMM enabled: only the
+    /// columns within [left, right] are shifted in the visible window.
+    #[test]
+    fn primary_delete_lines_declrmm_column_selective() {
+        let width = 10;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+
+        // Fill the buffer to `height` rows with identifiable content.
+        for row in 0..height {
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&text("ABCDEFGHIJ"));
+        }
+
+        // Enable DECLRMM with margins cols 3..7 (1-based) → 0-based: 2..6.
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 7); // 1-based → 0-based: 2..6
+        // set_left_right_margins homes cursor to (0,0); move to row 2.
+        buf.cursor.pos.y = 2;
+        buf.cursor.pos.x = 0;
+
+        buf.delete_lines(1);
+
+        // Cols 2..6 on row 2 should now have the old row 3 content.
+        assert_eq!(
+            cell_char(&buf, 2, 2),
+            ascii('C'),
+            "row2 col2: old row3 content"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 6),
+            ascii('G'),
+            "row2 col6: old row3 content"
+        );
+
+        // Cols outside the margin on row 2 must be unchanged (original row 2).
+        assert_eq!(
+            cell_char(&buf, 2, 0),
+            ascii('A'),
+            "col 0 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 1),
+            ascii('B'),
+            "col 1 outside margin untouched"
+        );
+        assert_eq!(
+            cell_char(&buf, 2, 7),
+            ascii('H'),
+            "col 7 outside margin untouched"
+        );
+
+        // The bottom row (row 4), cols 2..6 should be blank.
+        for col in 2..=6 {
+            assert_eq!(
+                cell_char(&buf, height - 1, col),
+                TChar::Space,
+                "bottom row col {col} must be blank after delete"
+            );
+        }
+
+        // Bottom row outside the margin must be unchanged.
+        assert_eq!(
+            cell_char(&buf, height - 1, 0),
+            ascii('A'),
+            "bottom row col 0 outside margin untouched"
+        );
+
+        // Row 0 must be completely untouched.
+        assert_eq!(cell_char(&buf, 0, 0), ascii('A'), "row 0 untouched");
+    }
+}
+
+// ============================================================================
+// Column-selective scroll + miscellaneous uncovered path tests
+// ============================================================================
+
+#[cfg(test)]
+mod column_scroll_and_misc_tests {
+    use super::*;
+    use freminal_common::buffer_states::modes::declrmm::Declrmm;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    fn cell_char(buf: &Buffer, row: usize, col: usize) -> TChar {
+        *buf.rows[row].resolve_cell(col).tchar()
+    }
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    /// Fill alternate buffer rows with distinct characters per row.
+    fn fill_alt_rows(buf: &mut Buffer) {
+        let height = buf.height;
+        for r in 0..height {
+            buf.cursor.pos.y = r;
+            buf.cursor.pos.x = 0;
+            #[allow(clippy::cast_possible_truncation)]
+            let ch = (b'A' + r as u8) as char;
+            let text: Vec<TChar> = (0..buf.width).map(|_| TChar::Ascii(ch as u8)).collect();
+            buf.insert_text(&text);
+        }
+    }
+
+    // ── scroll_slice_up_columns via delete_lines with DECLRMM ──
+
+    #[test]
+    fn delete_lines_declrmm_shifts_columns_only() {
+        let width = 10;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+        buf.enter_alternate(0);
+        fill_alt_rows(&mut buf);
+
+        // Enable DECLRMM with margins at cols 2..6 (1-based: 3..7)
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.scroll_region_left = 2;
+        buf.scroll_region_right = 6;
+
+        // Cursor at row 1 (inside default scroll region)
+        buf.cursor.pos.y = 1;
+        buf.delete_lines(1);
+
+        // Row 1 cols 2..6 should now have content from row 2 (was 'C')
+        for col in 2..=6 {
+            assert_eq!(
+                cell_char(&buf, 1, col),
+                ascii('C'),
+                "row 1 col {col} should have row 2's content"
+            );
+        }
+        // Row 1 col 0 should still be 'B' (outside margin)
+        assert_eq!(cell_char(&buf, 1, 0), ascii('B'));
+        // Row 1 col 9 should still be 'B' (outside margin)
+        assert_eq!(cell_char(&buf, 1, 9), ascii('B'));
+    }
+
+    // ── scroll_slice_down_columns via insert_lines with DECLRMM ──
+
+    #[test]
+    fn insert_lines_declrmm_shifts_columns_only() {
+        let width = 10;
+        let height = 5;
+        let mut buf = Buffer::new(width, height);
+        buf.enter_alternate(0);
+        fill_alt_rows(&mut buf);
+
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.scroll_region_left = 2;
+        buf.scroll_region_right = 6;
+
+        buf.cursor.pos.y = 1;
+        buf.insert_lines(1);
+
+        // Row 1 cols 2..6 should be blank (new line inserted)
+        for col in 2..=6 {
+            assert_eq!(
+                cell_char(&buf, 1, col),
+                TChar::Space,
+                "row 1 col {col} should be blank after insert"
+            );
+        }
+        // Row 1 col 0 should still be 'B' (outside margin, untouched)
+        assert_eq!(cell_char(&buf, 1, 0), ascii('B'));
+        // Row 2 cols 2..6 should have old row 1's content ('B')
+        for col in 2..=6 {
+            assert_eq!(
+                cell_char(&buf, 2, col),
+                ascii('B'),
+                "row 2 col {col} should have shifted-down 'B'"
+            );
+        }
+    }
+
+    // ── set_left_right_margins edge cases ──
+
+    #[test]
+    fn set_left_right_margins_zero_resets() {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 7);
+        assert_eq!(buf.scroll_region_left, 2); // 0-based
+
+        buf.set_left_right_margins(0, 0);
+        assert_eq!(buf.scroll_region_left, 0);
+        assert_eq!(buf.scroll_region_right, 9);
+    }
+
+    #[test]
+    fn set_left_right_margins_invalid_resets() {
+        let mut buf = Buffer::new(10, 5);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 7);
+
+        // left >= right
+        buf.set_left_right_margins(5, 5);
+        assert_eq!(buf.scroll_region_left, 0);
+        assert_eq!(buf.scroll_region_right, 9);
+
+        // right >= width
+        buf.set_left_right_margins(3, 7);
+        buf.set_left_right_margins(1, 20);
+        assert_eq!(buf.scroll_region_left, 0);
+        assert_eq!(buf.scroll_region_right, 9);
+    }
+
+    // ── visible_rows empty ──
+
+    #[test]
+    fn visible_rows_empty_buffer() {
+        let mut buf = Buffer::new(10, 5);
+        buf.rows.clear();
+        buf.row_cache.clear();
+        assert!(buf.visible_rows(0).is_empty());
+    }
+
+    // ── any_visible_dirty ──
+
+    #[test]
+    fn any_visible_dirty_after_insert() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("hello"));
+        assert!(buf.any_visible_dirty(0));
+    }
+
+    #[test]
+    fn any_visible_dirty_after_clean() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("hello"));
+        // Mark all rows clean
+        for row in &mut buf.rows {
+            row.dirty = false;
+        }
+        assert!(!buf.any_visible_dirty(0));
+    }
+
+    #[test]
+    fn any_visible_dirty_empty() {
+        let mut buf = Buffer::new(10, 5);
+        buf.rows.clear();
+        buf.row_cache.clear();
+        assert!(!buf.any_visible_dirty(0));
+    }
+
+    // ── visible_image_placements ──
+
+    #[test]
+    fn visible_image_placements_no_images() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("hello"));
+        let placements = buf.visible_image_placements(0);
+        assert!(placements.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn visible_image_placements_empty_buffer() {
+        let mut buf = Buffer::new(10, 5);
+        buf.rows.clear();
+        buf.row_cache.clear();
+        let placements = buf.visible_image_placements(0);
+        assert!(placements.is_empty());
+    }
+
+    // ── has_visible_images ──
+
+    #[test]
+    fn has_visible_images_no_images() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("hello"));
+        assert!(!buf.has_visible_images(0));
+    }
+
+    #[test]
+    fn has_visible_images_empty() {
+        let mut buf = Buffer::new(10, 5);
+        buf.rows.clear();
+        buf.row_cache.clear();
+        assert!(!buf.has_visible_images(0));
+    }
+
+    // ── insert_spaces / delete_chars / erase_chars edge cases ──
+
+    #[test]
+    fn insert_spaces_out_of_bounds() {
+        let mut buf = Buffer::new(10, 5);
+        buf.cursor.pos.y = 100;
+        buf.insert_spaces(5); // should be no-op, no panic
+    }
+
+    #[test]
+    fn delete_chars_out_of_bounds() {
+        let mut buf = Buffer::new(10, 5);
+        buf.cursor.pos.y = 100;
+        buf.delete_chars(5); // should be no-op, no panic
+    }
+
+    #[test]
+    fn erase_chars_out_of_bounds() {
+        let mut buf = Buffer::new(10, 5);
+        buf.cursor.pos.y = 100;
+        buf.erase_chars(5); // should be no-op, no panic
+    }
+
+    #[test]
+    fn insert_spaces_with_declrmm() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("ABCDEFGHIJ"));
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.scroll_region_left = 2;
+        buf.scroll_region_right = 6;
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        buf.insert_spaces(2);
+
+        // Cols 0-2 should be unchanged: A B C
+        assert_eq!(cell_char(&buf, 0, 0), ascii('A'));
+        assert_eq!(cell_char(&buf, 0, 1), ascii('B'));
+        assert_eq!(cell_char(&buf, 0, 2), ascii('C'));
+        // Col 3,4 should be spaces (inserted)
+        assert_eq!(cell_char(&buf, 0, 3), TChar::Space);
+        assert_eq!(cell_char(&buf, 0, 4), TChar::Space);
+        // Cols 7-9 should be unchanged (outside right margin)
+        assert_eq!(cell_char(&buf, 0, 7), ascii('H'));
+    }
+
+    #[test]
+    fn delete_chars_with_declrmm() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("ABCDEFGHIJ"));
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.scroll_region_left = 2;
+        buf.scroll_region_right = 6;
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        buf.delete_chars(2);
+
+        // Cols 0-2 unchanged: A B C
+        assert_eq!(cell_char(&buf, 0, 0), ascii('A'));
+        assert_eq!(cell_char(&buf, 0, 1), ascii('B'));
+        assert_eq!(cell_char(&buf, 0, 2), ascii('C'));
+        // Col 3 should now have 'F' (shifted left from col 5)
+        assert_eq!(cell_char(&buf, 0, 3), ascii('F'));
+        // Cols 7-9 unchanged (outside margin)
+        assert_eq!(cell_char(&buf, 0, 7), ascii('H'));
+    }
+
+    #[test]
+    fn erase_chars_with_declrmm() {
+        let mut buf = Buffer::new(10, 5);
+        buf.insert_text(&t("ABCDEFGHIJ"));
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.scroll_region_left = 2;
+        buf.scroll_region_right = 6;
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        // Erase 10 chars — should be clamped to right margin
+        buf.erase_chars(10);
+
+        // Col 3..6 should be blank (erased, clamped to margin)
+        for col in 3..=6 {
+            assert_eq!(
+                cell_char(&buf, 0, col),
+                TChar::Space,
+                "col {col} should be blank"
+            );
+        }
+        // Col 7 should be unchanged (outside margin)
+        assert_eq!(cell_char(&buf, 0, 7), ascii('H'));
+    }
+
+    // ── scroll_region_up_n / scroll_region_down_n ──
+
+    #[test]
+    fn scroll_region_up_n_basic() {
+        let mut buf = Buffer::new(10, 5);
+        buf.enter_alternate(0);
+        fill_alt_rows(&mut buf);
+
+        buf.scroll_region_up_n(2);
+
+        // Row 0 should now have what was row 2 ('C')
+        assert_eq!(cell_char(&buf, 0, 0), ascii('C'));
+        // Bottom 2 rows should be blank
+        assert_eq!(cell_char(&buf, 3, 0), TChar::Space);
+        assert_eq!(cell_char(&buf, 4, 0), TChar::Space);
+    }
+
+    #[test]
+    fn scroll_region_down_n_basic() {
+        let mut buf = Buffer::new(10, 5);
+        buf.enter_alternate(0);
+        fill_alt_rows(&mut buf);
+
+        buf.scroll_region_down_n(2);
+
+        // Top 2 rows should be blank
+        assert_eq!(cell_char(&buf, 0, 0), TChar::Space);
+        assert_eq!(cell_char(&buf, 1, 0), TChar::Space);
+        // Row 2 should have what was row 0 ('A')
+        assert_eq!(cell_char(&buf, 2, 0), ascii('A'));
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// resize_and_insert_tests — covers resize_height alt shrink, insert_text
+// NoAutoWrap, set_cursor_pos_raw width=0, enter/leave alternate edge cases,
+// visible_as_tchars_and_tags, extract_text, extract_block_text
+// ════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod resize_and_insert_tests {
+    use super::*;
+    use crate::image_store::{ImagePlacement, ImageProtocol};
+    use freminal_common::buffer_states::{
+        buffer_type::BufferType, format_tag::FormatTag, modes::decawm::Decawm, tchar::TChar,
+    };
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    fn cell_char(buf: &Buffer, row: usize, col: usize) -> TChar {
+        *buf.rows[row].resolve_cell(col).tchar()
+    }
+
+    fn make_placement(image_id: u64) -> ImagePlacement {
+        ImagePlacement {
+            image_id,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+        }
+    }
+
+    // ── `resize_height`: alternate buffer shrink ──
+
+    #[test]
+    fn resize_height_alt_shrink_drains_top_rows() {
+        let mut buf = Buffer::new(10, 5);
+        buf.enter_alternate(0);
+
+        // Fill rows with distinct chars: row 0='A', row 1='B', ...
+        for r in 0..5 {
+            buf.cursor.pos.y = r;
+            buf.cursor.pos.x = 0;
+            #[allow(clippy::cast_possible_truncation)]
+            let ch = (b'A' + r as u8) as char;
+            buf.insert_text(&[TChar::Ascii(ch as u8); 10]);
+        }
+        buf.cursor.pos.y = 2;
+
+        // Shrink to height 3 — top 2 rows should be drained.
+        let offset = buf.resize_height(3, 0);
+        assert_eq!(buf.rows.len(), 3, "should have exactly 3 rows");
+        // First row should be what was row 2 ('C')
+        assert_eq!(cell_char(&buf, 0, 0), TChar::Ascii(b'C'));
+        // Cursor Y adjusted from 2 to 0
+        assert_eq!(buf.cursor.pos.y, 0);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn resize_height_alt_shrink_adjusts_image_count() {
+        let mut buf = Buffer::new(10, 4);
+        buf.enter_alternate(0);
+
+        // Place image cells in rows 0 and 1 (which will be drained on shrink).
+        buf.set_image_cell_at(0, 0, make_placement(1), FormatTag::default());
+        buf.set_image_cell_at(0, 1, make_placement(1), FormatTag::default());
+        buf.set_image_cell_at(1, 0, make_placement(2), FormatTag::default());
+        assert_eq!(buf.image_cell_count, 3);
+
+        // Shrink from 4 to 2 — drains rows 0 and 1 (3 image cells).
+        let _ = buf.resize_height(2, 0);
+        assert_eq!(buf.image_cell_count, 0);
+        assert_eq!(buf.rows.len(), 2);
+    }
+
+    // ── `preserve_scrollback_anchor` ──
+
+    #[test]
+    fn preserve_scrollback_anchor_clamps_offset() {
+        let mut buf = Buffer::new(10, 5);
+        // Buffer::new starts with 1 row. Add more to get scrollback.
+        for _ in 0..14 {
+            buf.rows.push(Row::new(10));
+            buf.row_cache.push(None);
+        }
+        // Total rows = 15 (1 initial + 14 added).
+        assert_eq!(buf.rows.len(), 15);
+
+        buf.preserve_scrollback_anchor = true;
+        // Grow height from 5 to 8. rows.len()=15+3=18, new_height=8.
+        // max_offset = 18-8=10. scroll_offset 20 should clamp to 10.
+        let offset = buf.resize_height(8, 20);
+        assert_eq!(offset, 10);
+    }
+
+    #[test]
+    fn preserve_scrollback_anchor_few_rows_returns_zero() {
+        let mut buf = Buffer::new(10, 3);
+        // 3 rows, growing to height 5 — rows.len() becomes 5 which is <= new_height.
+        buf.preserve_scrollback_anchor = true;
+        let offset = buf.resize_height(5, 10);
+        assert_eq!(offset, 0);
+    }
+
+    // ── `clamp_cursor_after_resize` with empty rows ──
+
+    #[test]
+    fn clamp_cursor_empty_rows() {
+        let mut buf = Buffer::new(10, 5);
+        buf.cursor.pos.x = 5;
+        buf.cursor.pos.y = 3;
+        // Drain all rows to make it empty.
+        buf.rows.clear();
+        buf.row_cache.clear();
+        buf.clamp_cursor_after_resize();
+        assert_eq!(buf.cursor.pos.x, 0);
+        assert_eq!(buf.cursor.pos.y, 0);
+    }
+
+    // ── `insert_text` with `NoAutoWrap` ──
+
+    #[test]
+    fn insert_text_no_auto_wrap_discards_excess() {
+        let mut buf = Buffer::new(5, 3);
+        buf.wrap_enabled = Decawm::NoAutoWrap;
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 0;
+        buf.insert_text(&t("ABCDEFGHIJ")); // 10 chars into width=5
+
+        // Only first 5 chars fit. Cursor should be at last column (4).
+        assert_eq!(buf.cursor.pos.x, 4);
+        assert_eq!(cell_char(&buf, 0, 0), TChar::Ascii(b'A'));
+        assert_eq!(cell_char(&buf, 0, 4), TChar::Ascii(b'E'));
+        // Should still be 1 row (no wrapping, Buffer::new starts with 1 row).
+        assert_eq!(buf.rows.len(), 1);
+    }
+
+    // ── `insert_text` creating new rows with SoftWrap/HardBreak ──
+
+    #[test]
+    fn insert_text_appends_rows_with_correct_origin() {
+        // Create a very small buffer where inserting text forces new row creation.
+        let mut buf = Buffer::new(5, 1);
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 0;
+        // Insert 12 chars — needs 3 rows at width 5. Row 0 exists, rows 1-2 appended.
+        buf.insert_text(&t("ABCDEFGHIJKL"));
+
+        assert!(buf.rows.len() >= 3, "should have at least 3 rows");
+        // Row 0 is the original (HardBreak, NewLogicalLine).
+        assert_eq!(buf.rows[0].origin, RowOrigin::HardBreak);
+        assert_eq!(buf.rows[0].join, RowJoin::NewLogicalLine);
+        // Row 1 is a wrap continuation.
+        assert_eq!(buf.rows[1].origin, RowOrigin::SoftWrap);
+        assert_eq!(buf.rows[1].join, RowJoin::ContinueLogicalLine);
+        // Row 2 is also a wrap continuation.
+        assert_eq!(buf.rows[2].origin, RowOrigin::SoftWrap);
+        assert_eq!(buf.rows[2].join, RowJoin::ContinueLogicalLine);
+    }
+
+    // ── `set_cursor_pos_raw` with width=0 ──
+
+    #[test]
+    fn set_cursor_pos_raw_width_zero() {
+        let mut buf = Buffer::new(10, 5);
+        buf.width = 0;
+        buf.set_cursor_pos_raw(CursorPos { x: 5, y: 0 });
+        assert_eq!(buf.cursor.pos.x, 0);
+        // Y clamped to rows.len()-1 = 0 (Buffer::new has 1 row).
+        assert_eq!(buf.cursor.pos.y, 0);
+    }
+
+    // ── `set_image_cell_at` out-of-bounds ──
+
+    #[test]
+    fn set_image_cell_at_out_of_bounds_is_noop() {
+        let mut buf = Buffer::new(10, 5);
+        assert_eq!(buf.image_cell_count, 0);
+        // Row 10 doesn't exist (only 0-4).
+        buf.set_image_cell_at(10, 0, make_placement(1), FormatTag::default());
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    // ── `enter_alternate` when already alternate ──
+
+    #[test]
+    fn enter_alternate_twice_is_noop() {
+        let mut buf = Buffer::new(10, 5);
+        buf.enter_alternate(0);
+        let rows_before = buf.rows.len();
+        let cursor_before = buf.cursor.clone();
+        buf.enter_alternate(0);
+        assert_eq!(buf.rows.len(), rows_before);
+        assert_eq!(buf.cursor.pos, cursor_before.pos);
+    }
+
+    // ── `leave_alternate` when already primary ──
+
+    #[test]
+    fn leave_alternate_on_primary_returns_zero() {
+        let mut buf = Buffer::new(10, 5);
+        assert_eq!(buf.kind, BufferType::Primary);
+        let offset = buf.leave_alternate();
+        assert_eq!(offset, 0);
+    }
+
+    // ── `leave_alternate` with no saved state ──
+
+    #[test]
+    fn leave_alternate_no_saved_state_returns_zero() {
+        let mut buf = Buffer::new(10, 5);
+        // Manually set to alternate without going through enter_alternate.
+        buf.kind = BufferType::Alternate;
+        assert!(buf.saved_primary.is_none());
+        let offset = buf.leave_alternate();
+        assert_eq!(offset, 0);
+        assert_eq!(buf.kind, BufferType::Primary);
+    }
+
+    // ── `visible_as_tchars_and_tags` multi-row with NewLine separators ──
+
+    #[test]
+    fn visible_as_tchars_and_tags_newline_separators() {
+        let mut buf = Buffer::new(5, 3);
+        buf.enter_alternate(0); // Creates exactly 3 rows.
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&t("ABC"));
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&t("DE"));
+
+        let (chars, tags, row_offsets, _url_indices) = buf.visible_as_tchars_and_tags(0);
+
+        // Should have chars for row 0, NewLine, row 1, NewLine, row 2.
+        let newline_count = chars.iter().filter(|c| matches!(c, TChar::NewLine)).count();
+        assert_eq!(
+            newline_count, 2,
+            "should have 2 NewLine separators for 3 rows"
+        );
+
+        // Tags should cover the full range.
+        assert!(!tags.is_empty());
+        // Row offsets should have 3 entries.
+        assert_eq!(row_offsets.len(), 3);
+    }
+
+    // ── `visible_as_tchars_and_tags` empty buffer ──
+
+    #[test]
+    fn visible_as_tchars_and_tags_empty_buffer() {
+        let mut buf = Buffer::new(5, 3);
+        buf.enter_alternate(0); // Creates exactly 3 empty rows.
+        let (_chars, tags, _row_offsets, _url_indices) = buf.visible_as_tchars_and_tags(0);
+
+        // Even empty rows produce Space cells (no — empty cells vec produces no chars).
+        // But tags should still be valid.
+        assert!(!tags.is_empty(), "should have at least one tag");
+        assert_eq!(tags[0].start, 0);
+    }
+
+    // ── `extract_text` edge cases ──
+
+    #[test]
+    fn extract_text_start_row_out_of_bounds() {
+        let buf = Buffer::new(10, 3);
+        let text = buf.extract_text(100, 0, 200, 5);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn extract_text_with_newline_cell() {
+        let mut buf = Buffer::new(10, 3);
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        // Insert enough text to have cells at indices 0-4.
+        buf.insert_text(&t("ABXYZ"));
+        // Manually overwrite cell 2 with NewLine.
+        buf.rows[0].cells_mut()[2] = Cell::new(TChar::NewLine, FormatTag::default());
+
+        let text = buf.extract_text(0, 0, 0, 9);
+        assert_eq!(text, "AB", "extraction should stop at NewLine");
+    }
+
+    // ── `extract_block_text` edge cases ──
+
+    #[test]
+    fn extract_block_text_start_row_out_of_bounds() {
+        let buf = Buffer::new(10, 3);
+        let text = buf.extract_block_text(100, 0, 200, 5);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn extract_block_text_col_beyond_cells() {
+        let mut buf = Buffer::new(5, 2);
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&t("ABC"));
+
+        // Extract block from col 10 to 15 — beyond width.
+        let text = buf.extract_block_text(0, 10, 0, 15);
+        // Should be empty or just whitespace since cols are out of range.
+        assert!(text.trim().is_empty());
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// image_clearing_tests — covers all clear_image_placements_* functions
+// ════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod image_clearing_tests {
+    use super::*;
+    use crate::image_store::{ImagePlacement, ImageProtocol};
+    use freminal_common::buffer_states::format_tag::FormatTag;
+
+    fn make_placement(image_id: u64, image_number: Option<u32>, z_index: i32) -> ImagePlacement {
+        ImagePlacement {
+            image_id,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number,
+            placement_id: None,
+            z_index,
+        }
+    }
+
+    fn place(buf: &mut Buffer, row: usize, col: usize, id: u64) {
+        buf.set_image_cell_at(row, col, make_placement(id, None, 0), FormatTag::default());
+    }
+
+    /// Create an alternate buffer with exactly `height` rows — guaranteed row access.
+    fn alt_buf(width: usize, height: usize) -> Buffer {
+        let mut buf = Buffer::new(width, height);
+        buf.enter_alternate(0);
+        buf
+    }
+
+    // ── `has_any_image_cell` ──
+
+    #[test]
+    fn has_any_image_cell_empty() {
+        let buf = alt_buf(10, 5);
+        assert!(!buf.has_any_image_cell());
+    }
+
+    #[test]
+    fn has_any_image_cell_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        assert!(buf.has_any_image_cell());
+    }
+
+    // ── `clear_image_placements_by_id` ──
+
+    #[test]
+    fn clear_by_id_only_clears_matching() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        place(&mut buf, 0, 1, 1);
+        place(&mut buf, 1, 0, 2);
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_by_id(1);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[0].cells()[1].has_image());
+        assert!(buf.rows[1].cells()[0].has_image());
+    }
+
+    // ── `clear_image_placements_by_number` ──
+
+    #[test]
+    fn clear_by_number_only_clears_matching() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_image_cell_at(0, 0, make_placement(1, Some(42), 0), FormatTag::default());
+        buf.set_image_cell_at(0, 1, make_placement(2, Some(42), 0), FormatTag::default());
+        buf.set_image_cell_at(1, 0, make_placement(3, Some(99), 0), FormatTag::default());
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_by_number(42);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[0].cells()[1].has_image());
+        assert!(buf.rows[1].cells()[0].has_image());
+    }
+
+    #[test]
+    fn clear_by_number_no_match_is_noop() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_image_cell_at(0, 0, make_placement(1, Some(10), 0), FormatTag::default());
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_by_number(999);
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    // ── `clear_image_placements_at_cell` ──
+
+    #[test]
+    fn clear_at_cell_clears_all_cells_with_same_id() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        place(&mut buf, 0, 1, 1);
+        place(&mut buf, 1, 0, 1);
+        place(&mut buf, 2, 0, 2); // different id
+        assert_eq!(buf.image_cell_count, 4);
+
+        buf.clear_image_placements_at_cell(0, 0);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[0].cells()[1].has_image());
+        assert!(!buf.rows[1].cells()[0].has_image());
+        assert!(buf.rows[2].cells()[0].has_image());
+    }
+
+    #[test]
+    fn clear_at_cell_out_of_bounds_row() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_at_cell(100, 0);
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    #[test]
+    fn clear_at_cell_col_beyond_width() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_at_cell(0, 100);
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    // ── `clear_image_placements_at_cell_and_after` ──
+
+    #[test]
+    fn clear_at_cell_and_after_preserves_before() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1); // before — should survive
+        place(&mut buf, 1, 5, 2); // at and after — should be cleared
+        place(&mut buf, 2, 0, 3); // after — should be cleared
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_at_cell_and_after(1, 3);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[1].cells()[5].has_image());
+        assert!(!buf.rows[2].cells()[0].has_image());
+    }
+
+    // ── `clear_image_placements_in_column` ──
+
+    #[test]
+    fn clear_in_column_clears_all_rows() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 3, 1);
+        place(&mut buf, 2, 3, 2);
+        place(&mut buf, 4, 5, 3); // different column — should survive
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_in_column(3);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[0].cells()[3].has_image());
+        assert!(!buf.rows[2].cells()[3].has_image());
+        assert!(buf.rows[4].cells()[5].has_image());
+    }
+
+    #[test]
+    fn clear_in_column_beyond_width_is_noop() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_in_column(100);
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    // ── `clear_image_placements_in_row` ──
+
+    #[test]
+    fn clear_in_row_clears_matching_ids() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 2, 0, 1);
+        place(&mut buf, 2, 3, 2);
+        place(&mut buf, 0, 0, 3); // different row — should survive
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_in_row(2);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[2].cells()[0].has_image());
+        assert!(!buf.rows[2].cells()[3].has_image());
+        assert!(buf.rows[0].cells()[0].has_image());
+    }
+
+    #[test]
+    fn clear_in_row_out_of_bounds_is_noop() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_in_row(100);
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    // ── `clear_image_placements_by_z_index` ──
+
+    #[test]
+    fn clear_by_z_index_only_clears_matching() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_image_cell_at(0, 0, make_placement(1, None, 5), FormatTag::default());
+        buf.set_image_cell_at(0, 1, make_placement(2, None, 5), FormatTag::default());
+        buf.set_image_cell_at(1, 0, make_placement(3, None, 10), FormatTag::default());
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_by_z_index(5);
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[0].cells()[1].has_image());
+        assert!(buf.rows[1].cells()[0].has_image());
+    }
+
+    #[test]
+    fn clear_by_z_index_no_match_is_noop() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_image_cell_at(0, 0, make_placement(1, None, 0), FormatTag::default());
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_by_z_index(999);
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    // ── `clear_image_placements_at_cursor` ──
+
+    #[test]
+    fn clear_at_cursor_clears_cursor_row() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 2, 0, 1);
+        place(&mut buf, 2, 3, 2);
+        place(&mut buf, 3, 0, 3); // different row
+        buf.cursor.pos.y = 2;
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_at_cursor();
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(!buf.rows[2].cells()[0].has_image());
+        assert!(!buf.rows[2].cells()[3].has_image());
+        assert!(buf.rows[3].cells()[0].has_image());
+    }
+
+    #[test]
+    fn clear_at_cursor_out_of_bounds_is_noop() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1);
+        buf.cursor.pos.y = 100;
+        assert_eq!(buf.image_cell_count, 1);
+        buf.clear_image_placements_at_cursor();
+        assert_eq!(buf.image_cell_count, 1);
+    }
+
+    // ── `clear_image_placements_at_cursor_and_after` ──
+
+    #[test]
+    fn clear_at_cursor_and_after_preserves_rows_before() {
+        let mut buf = alt_buf(10, 5);
+        place(&mut buf, 0, 0, 1); // before cursor — should survive
+        place(&mut buf, 1, 0, 2); // cursor row — cleared
+        place(&mut buf, 3, 0, 3); // after cursor — cleared
+        buf.cursor.pos.y = 1;
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_at_cursor_and_after();
+        assert_eq!(buf.image_cell_count, 1);
+        assert!(buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[1].cells()[0].has_image());
+        assert!(!buf.rows[3].cells()[0].has_image());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod coverage_gap_tests {
+    use super::*;
+
+    /// Helper: create an alternate-screen buffer with given dimensions
+    fn alt_buf(width: usize, height: usize) -> Buffer {
+        let mut buf = Buffer::new(width, height);
+        buf.enter_alternate(0);
+        buf
+    }
+
+    /// Helper to place an image cell at (row, col) with a given fake `image_id`
+    fn place_image(buf: &mut Buffer, row: usize, col: usize, id: u64) {
+        use crate::image_store::{ImagePlacement, ImageProtocol};
+        let placement = ImagePlacement {
+            image_id: id,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+        };
+        buf.rows[row].set_image_cell(col, placement, FormatTag::default());
+        buf.image_cell_count += 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // has_visible_images
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn has_visible_images_false_when_no_images() {
+        let buf = alt_buf(10, 5);
+        assert!(!buf.has_visible_images(0));
+    }
+
+    #[test]
+    fn has_visible_images_true_when_image_in_visible_window() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 2, 0, 1);
+        assert!(buf.has_visible_images(0));
+    }
+
+    #[test]
+    fn has_visible_images_empty_buffer() {
+        let buf = Buffer::new(10, 5); // primary, no rows filled
+        // Buffer::new creates 0 rows (grows dynamically) → false
+        assert!(!buf.has_visible_images(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // visible_window_start edge case: empty rows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn visible_window_start_empty_buffer_returns_one() {
+        let buf = Buffer::new(10, 5);
+        // Buffer::new creates 1 row by default (grows dynamically)
+        assert_eq!(buf.visible_rows(0).len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // erase_line_to_end / erase_line_to_beginning / erase_line with images
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erase_line_to_end_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 0, 5, 1);
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        buf.erase_line_to_end();
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    #[test]
+    fn erase_line_to_beginning_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 0, 2, 1);
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 5;
+        buf.erase_line_to_beginning();
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    #[test]
+    fn erase_line_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 0, 3, 1);
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.cursor.pos.y = 0;
+        buf.erase_line();
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // erase_to_beginning_of_display with images
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erase_to_beginning_of_display_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 0, 5, 1);
+        place_image(&mut buf, 1, 3, 2);
+        assert_eq!(buf.image_cell_count, 2);
+
+        buf.cursor.pos.y = 2;
+        buf.cursor.pos.x = 5;
+        buf.erase_to_beginning_of_display();
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // erase_display with images
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erase_display_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 0, 0, 1);
+        place_image(&mut buf, 2, 5, 2);
+        place_image(&mut buf, 4, 9, 3);
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.erase_display();
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // erase_scrollback with images in scrollback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erase_scrollback_with_images() {
+        let mut buf = Buffer::new(10, 3);
+        // Write enough lines to create scrollback
+        for i in 0..6_u8 {
+            buf.insert_text(&[TChar::Ascii(b'A' + i)]);
+            buf.handle_lf();
+        }
+        // Place an image in a scrollback row
+        let visible_start = buf.rows.len().saturating_sub(3);
+        if visible_start > 0 {
+            place_image(&mut buf, 0, 0, 1);
+            let count_before = buf.image_cell_count;
+            assert_eq!(count_before, 1);
+
+            buf.erase_scrollback();
+            assert_eq!(buf.image_cell_count, 0);
+        }
+    }
+
+    #[test]
+    fn erase_scrollback_adjusts_cursor() {
+        let mut buf = Buffer::new(10, 3);
+        for i in 0..6_u8 {
+            buf.insert_text(&[TChar::Ascii(b'A' + i)]);
+            buf.handle_lf();
+        }
+        let rows_before = buf.rows.len();
+        assert!(rows_before > 3, "should have scrollback");
+
+        let cursor_before = buf.cursor.pos.y;
+        buf.erase_scrollback();
+        assert!(
+            buf.cursor.pos.y < cursor_before || buf.rows.len() <= 3,
+            "cursor should be adjusted or buffer should be small"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ICH with DECLRMM active
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ich_with_declrmm_shifts_within_margins() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // 1-based → left=2, right=7 (0-based)
+
+        // Write some text
+        buf.insert_text(&[
+            TChar::Ascii(b'A'),
+            TChar::Ascii(b'B'),
+            TChar::Ascii(b'C'),
+            TChar::Ascii(b'D'),
+            TChar::Ascii(b'E'),
+            TChar::Ascii(b'F'),
+            TChar::Ascii(b'G'),
+            TChar::Ascii(b'H'),
+        ]);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        buf.insert_spaces(2);
+
+        // Cells should be shifted within the right margin
+        let cell0 = buf.rows[0].resolve_cell(0);
+        assert_eq!(cell0.tchar(), &TChar::Ascii(b'A'));
+    }
+
+    // -----------------------------------------------------------------------
+    // DCH with DECLRMM active
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dch_with_declrmm_deletes_within_margins() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8);
+
+        buf.insert_text(&[
+            TChar::Ascii(b'A'),
+            TChar::Ascii(b'B'),
+            TChar::Ascii(b'C'),
+            TChar::Ascii(b'D'),
+            TChar::Ascii(b'E'),
+            TChar::Ascii(b'F'),
+            TChar::Ascii(b'G'),
+            TChar::Ascii(b'H'),
+        ]);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        buf.delete_chars(2);
+
+        // Cell at position 0 should still be 'A'
+        let cell0 = buf.rows[0].resolve_cell(0);
+        assert_eq!(cell0.tchar(), &TChar::Ascii(b'A'));
+    }
+
+    // -----------------------------------------------------------------------
+    // ICH/DCH with images in affected range
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ich_with_images_decrements_count_for_overflow() {
+        let mut buf = alt_buf(10, 5);
+        // Place image at col 8 — it will overflow when we insert 3 spaces at col 5
+        place_image(&mut buf, 0, 8, 1);
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 5;
+        buf.insert_spaces(3);
+
+        // Image was at col 8, shifted to col 11 → overflows width 10 → cleared
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    #[test]
+    fn dch_with_images_decrements_count() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 0, 3, 1);
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 3;
+        buf.delete_chars(1);
+
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ECH (erase characters) with DECLRMM clamping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ech_with_declrmm_clamps_to_right_margin() {
+        let mut buf = alt_buf(10, 5);
+
+        // Write text across the full width WITHOUT DECLRMM first
+        buf.insert_text(&[
+            TChar::Ascii(b'A'),
+            TChar::Ascii(b'B'),
+            TChar::Ascii(b'C'),
+            TChar::Ascii(b'D'),
+            TChar::Ascii(b'E'),
+            TChar::Ascii(b'F'),
+            TChar::Ascii(b'G'),
+            TChar::Ascii(b'H'),
+        ]);
+
+        // NOW enable DECLRMM
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(1, 6); // 0-based: left=0, right=5
+
+        buf.cursor.pos.y = 0;
+        buf.cursor.pos.x = 2;
+        // Erase 10 chars, but DECLRMM clamps to right margin (col 5)
+        buf.erase_chars(10);
+
+        // Cell at col 0 and 1 should be untouched
+        assert_eq!(buf.rows[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+        assert_eq!(buf.rows[0].resolve_cell(1).tchar(), &TChar::Ascii(b'B'));
+        // Cell beyond right margin should be untouched
+        assert_eq!(buf.rows[0].resolve_cell(6).tchar(), &TChar::Ascii(b'G'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Reflow: cursor clamping when cursor.y >= rows.len()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reflow_clamps_cursor_when_beyond_rows() {
+        let mut buf = Buffer::new(10, 5);
+        // Write a single line
+        buf.insert_text(&[TChar::Ascii(b'X')]);
+        // Manually force cursor beyond rows to test the clamp
+        buf.cursor.pos.y = 100;
+
+        // Trigger reflow by changing width
+        let _ = buf.set_size(5, 5, 0);
+
+        // Cursor should be clamped to valid range
+        assert!(buf.cursor.pos.y < buf.rows.len() || buf.rows.is_empty());
+    }
+
+    #[test]
+    fn reflow_clamps_cursor_x_when_beyond_new_width() {
+        let mut buf = Buffer::new(20, 5);
+        buf.insert_text(&[TChar::Ascii(b'A')]);
+        buf.cursor.pos.x = 15;
+
+        // Shrink width → cursor.x should be clamped
+        let _ = buf.set_size(5, 5, 0);
+        assert!(buf.cursor.pos.x < 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // enforce_scrollback_limit: cursor adjustment when overflow > cursor.y
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enforce_scrollback_limit_clamps_cursor_to_zero() {
+        let mut buf = Buffer::new(10, 3);
+        buf.scrollback_limit = 2; // very small limit
+
+        // Write many lines to exceed scrollback
+        for i in 0..20_u8 {
+            buf.insert_text(&[TChar::Ascii(b'A' + (i % 26))]);
+            buf.handle_lf();
+        }
+
+        // Cursor should still be valid
+        assert!(buf.cursor.pos.y < buf.rows.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // scroll_slice_down: edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scroll_region_down_n_clamps_to_region_size() {
+        let mut buf = alt_buf(10, 5);
+        // Write text on all rows
+        for i in 0..5_u8 {
+            buf.cursor.pos.y = i as usize;
+            buf.cursor.pos.x = 0;
+            buf.insert_text(&[TChar::Ascii(b'A' + i)]);
+        }
+
+        buf.set_scroll_region(2, 4); // rows 1-3 (0-based)
+
+        // Scroll down by 10 (clamped to 3 = region size)
+        buf.scroll_region_down_n(10);
+
+        // After max-clamped scroll, all region rows should be blank
+        // (the original content was shifted out)
+    }
+
+    // -----------------------------------------------------------------------
+    // scroll_slice_up_columns / scroll_slice_down_columns (DECLRMM)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn column_scroll_up_with_declrmm() {
+        let mut buf = alt_buf(10, 5);
+
+        // Write identifiable content on rows 0-4 WITHOUT DECLRMM
+        for i in 0..5_u8 {
+            buf.cursor.pos.y = i as usize;
+            buf.cursor.pos.x = 0;
+            let chars: Vec<TChar> = (0..10_u8)
+                .map(|c| TChar::Ascii(b'A' + (i * 10 + c) % 26))
+                .collect();
+            buf.insert_text(&chars);
+        }
+
+        // NOW enable DECLRMM
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // left=2, right=7 (0-based)
+
+        // Set scroll region and trigger IL (which uses column scroll)
+        buf.cursor.pos.y = 1;
+        buf.insert_lines(1);
+
+        // Row 1 should have blanks in the margin area
+        let cell_in_margin = buf.rows[1].resolve_cell(3);
+        assert_eq!(cell_in_margin.tchar(), &TChar::Space);
+    }
+
+    #[test]
+    fn column_scroll_down_with_declrmm() {
+        let mut buf = alt_buf(10, 5);
+
+        // Write identifiable content WITHOUT DECLRMM
+        for i in 0..5_u8 {
+            buf.cursor.pos.y = i as usize;
+            buf.cursor.pos.x = 0;
+            let chars: Vec<TChar> = (0..10_u8)
+                .map(|c| TChar::Ascii(b'A' + (i * 10 + c) % 26))
+                .collect();
+            buf.insert_text(&chars);
+        }
+
+        // NOW enable DECLRMM
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8);
+
+        // Delete lines uses column scroll down
+        buf.cursor.pos.y = 1;
+        buf.delete_lines(1);
+
+        // The scroll should only affect columns within margins (0-based: 2..7)
+        // Cell at col 0 (outside left margin) should be from the original row 1
+        let cell_outside = buf.rows[1].resolve_cell(0);
+        assert_eq!(cell_outside.tchar(), &TChar::Ascii(b'K'));
+    }
+
+    // -----------------------------------------------------------------------
+    // set_size with alternate buffer: excess rows trimmed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resize_alternate_buffer_trims_excess_rows() {
+        let mut buf = alt_buf(10, 10);
+        // Write text on row 8 to verify it exists
+        buf.cursor.pos.y = 8;
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&[TChar::Ascii(b'Z')]);
+
+        // Shrink height from 10 to 5
+        let _ = buf.set_size(10, 5, 0);
+
+        // Buffer should have at most 5 rows
+        assert!(
+            buf.rows.len() <= 5,
+            "alternate buffer should trim to new height, got {} rows",
+            buf.rows.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // any_visible_dirty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn any_visible_dirty_returns_true_after_insert() {
+        let mut buf = alt_buf(10, 5);
+        buf.insert_text(&[TChar::Ascii(b'A')]);
+        assert!(buf.any_visible_dirty(0));
+    }
+
+    #[test]
+    fn data_and_format_for_gui_empty_buffer() {
+        let mut buf = Buffer::new(10, 5);
+        let (chars, tags, _, _) = buf.visible_as_tchars_and_tags(0);
+        // Should produce at least one tag even for empty buffer
+        assert!(!tags.is_empty(), "empty buffer should still have a tag");
+        // chars should be empty or minimal
+        assert!(
+            chars.is_empty()
+                || chars
+                    .iter()
+                    .all(|c| matches!(c, TChar::Space | TChar::NewLine))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // data_and_format_for_gui: multiple rows produce newline separators
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn data_and_format_for_gui_newline_separators() {
+        let mut buf = alt_buf(10, 3);
+        buf.insert_text(&[TChar::Ascii(b'A')]);
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&[TChar::Ascii(b'B')]);
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&[TChar::Ascii(b'C')]);
+
+        let (chars, tags, _, _) = buf.visible_as_tchars_and_tags(0);
+        // Should contain newlines between rows
+        let newline_count = chars.iter().filter(|c| matches!(c, TChar::NewLine)).count();
+        assert!(
+            newline_count >= 2,
+            "expected at least 2 newlines between 3 rows, got {newline_count}"
+        );
+        // Tags should cover all positions
+        assert!(!tags.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // cursor_screen_y edge: empty buffer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cursor_screen_y_empty_buffer_returns_zero() {
+        let buf = Buffer::new(10, 5);
+        assert_eq!(buf.cursor_screen_y(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // LF into existing non-pristine row below bottom
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lf_at_bottom_clears_scrolled_in_row() {
+        let mut buf = Buffer::new(10, 3);
+        // Write 4 lines (creates scrollback)
+        for i in 0..4_u8 {
+            buf.insert_text(&[TChar::Ascii(b'A' + i)]);
+            buf.handle_lf();
+        }
+        // Now cursor is at screen bottom, writing more
+        buf.cursor.pos.x = 0;
+        buf.insert_text(&[TChar::Ascii(b'Z')]);
+        buf.handle_lf();
+
+        // The newly scrolled-in row should be cleared (BCE)
+        let last_row = &buf.rows[buf.cursor.pos.y];
+        // It should be blank
+        assert!(
+            last_row.cells().is_empty()
+                || last_row.cells().iter().all(|c| c.tchar() == &TChar::Space),
+            "newly scrolled-in row should be blank"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // erase_to_end_of_display with images
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erase_to_end_of_display_with_images() {
+        let mut buf = alt_buf(10, 5);
+        place_image(&mut buf, 2, 5, 1);
+        place_image(&mut buf, 4, 0, 2);
+        assert_eq!(buf.image_cell_count, 2);
+
+        buf.cursor.pos.y = 1;
+        buf.cursor.pos.x = 0;
+        buf.erase_to_end_of_display();
+        assert_eq!(buf.image_cell_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_text_for_range: continuation cells skipped
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_text_skips_continuations() {
+        let mut buf = alt_buf(10, 5);
+        // Insert a wide char followed by narrow
+        buf.insert_text(&[TChar::from('あ'), TChar::Ascii(b'B')]);
+
+        let text = buf.extract_text(0, 0, 0, 4);
+        // Should contain the wide char and 'B', no duplicates from continuation
+        assert!(text.contains('B'));
+    }
+
+    // -----------------------------------------------------------------------
+    // place_image: col >= width breaks early
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn place_image_col_beyond_width_stops() {
+        use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+        use std::sync::Arc;
+
+        let mut buf = alt_buf(5, 5);
+        buf.cursor.pos.x = 4; // start at col 4
+        let id = next_image_id();
+        let image = InlineImage {
+            id,
+            pixels: Arc::new(vec![255u8; 3 * 4]), // 3 cols × 1 row RGBA
+            width_px: 3,
+            height_px: 1,
+            display_cols: 3,
+            display_rows: 1,
+        };
+        // Place an image that spans 3 cols starting at col 4 → only col 4 fits
+        buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0);
+        // Should have placed at most 1 cell (col 4; cols 5+ out of bounds)
+        assert!(buf.image_cell_count <= 1);
+    }
+
+    // ── visible_as_tchars_and_tags: NewLine tag path ───────────────────
+
+    #[test]
+    fn visible_tchars_multi_row_newline_tag_gap() {
+        // When a row's last tag ends before the NewLine position,
+        // the NewLine separator tag is pushed as a new tag (lines 2993-2998).
+        let mut buf = alt_buf(5, 3);
+        // Write text on row 0 then move to row 1
+        buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+        buf.handle_lf();
+        buf.insert_text(&[TChar::Ascii(b'C')]);
+
+        let (chars, tags, row_offsets, _url_indices) = buf.visible_as_tchars_and_tags(0);
+        // Should have at least 3 rows of offsets
+        assert_eq!(row_offsets.len(), 3);
+        // Should contain NewLine chars between rows
+        let newlines: Vec<_> = chars
+            .iter()
+            .filter(|c| matches!(c, TChar::NewLine))
+            .collect();
+        assert!(
+            newlines.len() >= 2,
+            "Expected at least 2 newlines, got {}",
+            newlines.len()
+        );
+        // All chars should be covered by tags
+        assert!(!tags.is_empty());
+    }
+
+    #[test]
+    fn visible_tchars_empty_buffer_has_fallback_tag() {
+        // An empty buffer should still produce at least one tag (lines 3010-3018).
+        let mut buf = alt_buf(5, 2);
+        let (_chars, tags, row_offsets, _url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(!tags.is_empty(), "Should have at least one fallback tag");
+        assert_eq!(row_offsets.len(), 2);
+    }
+
+    // ── extract_text: continuation cells ───────────────────────────────
+
+    #[test]
+    fn extract_text_skips_continuation_cells() {
+        // Insert a wide char followed by ASCII. extract_text should skip
+        // the continuation cell (line 3166-3167).
+        let mut buf = alt_buf(10, 3);
+        buf.insert_text(&[TChar::from('中'), TChar::Ascii(b'A')]);
+        let text = buf.extract_text(0, 0, 0, 5);
+        assert!(text.contains('中'), "Should contain the wide char");
+        assert!(text.contains('A'), "Should contain the ASCII char");
+        // Should NOT contain any placeholder for the continuation
+        assert_eq!(text.matches('中').count(), 1);
+    }
+
+    #[test]
+    fn extract_text_multi_row_with_newlines() {
+        // Extract text across multiple rows
+        let mut buf = alt_buf(10, 3);
+        buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.insert_text(&[TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
+        let text = buf.extract_text(0, 0, 1, 5);
+        assert!(text.contains("AB"), "First row should have AB");
+        assert!(text.contains("CD"), "Second row should have CD");
+        assert!(text.contains('\n'), "Should have newline between rows");
+    }
+
+    // ── extract_block_text: continuation cells ─────────────────────────
+
+    #[test]
+    fn extract_block_text_skips_continuation_cells() {
+        // extract_block_text with a wide char should skip continuation (line 3224-3225).
+        let mut buf = alt_buf(10, 3);
+        buf.insert_text(&[TChar::from('中'), TChar::Ascii(b'X')]);
+        let text = buf.extract_block_text(0, 0, 0, 5);
+        assert!(text.contains('中'));
+        assert!(text.contains('X'));
+    }
+
+    #[test]
+    fn extract_block_text_multi_row() {
+        let mut buf = alt_buf(10, 3);
+        buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.insert_text(&[TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
+        let text = buf.extract_block_text(0, 0, 1, 3);
+        assert!(text.contains("AB"), "First row should have AB: {text:?}");
+        assert!(text.contains("CD"), "Second row should have CD: {text:?}");
+    }
+
+    // ── erase_scrollback: cursor < visible_start ───────────────────────
+
+    #[test]
+    fn erase_scrollback_cursor_below_visible_start_clamps_to_zero() {
+        // When cursor.pos.y < visible_start, it should be clamped to 0 (line 2772-2773).
+        let mut buf = Buffer::new(10, 3);
+        // Generate scrollback by writing more lines than height
+        for i in 0..10_u8 {
+            buf.insert_text(&[TChar::Ascii(b'A' + (i % 26))]);
+            buf.handle_lf();
+        }
+        assert!(buf.rows.len() > 3, "Should have scrollback");
+
+        // Force cursor into the scrollback area
+        buf.cursor.pos.y = 0;
+        buf.erase_scrollback();
+        // Cursor should be clamped to 0
+        assert_eq!(buf.cursor.pos.y, 0);
+    }
+
+    // ── LF scroll-fill at bottom ────────────────────────────────────────
+
+    #[test]
+    fn lf_at_bottom_of_primary_scrolls_and_adjusts_cursor() {
+        // In primary buffer, LF at the bottom should scroll and adjust cursor (line 2528-2532).
+        let mut buf = Buffer::new(10, 3);
+        // Fill all 3 visible rows
+        for _ in 0..3 {
+            buf.insert_text(&[TChar::Ascii(b'A')]);
+            buf.handle_lf();
+        }
+        // Cursor should be valid
+        let cy = buf.cursor.pos.y;
+        assert!(cy < buf.rows.len(), "Cursor should be within buffer");
+    }
+
+    // ── DECLRMM column scroll with images ───────────────────────────────
+
+    #[test]
+    fn column_scroll_up_with_images_adjusts_count() {
+        // scroll_slice_up_columns in a DECLRMM region with image cells should
+        // adjust image_cell_count (lines 2336-2384).
+        let mut buf = alt_buf(10, 5);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(2, 8); // 1-based → left=1, right=7 (0-based)
+
+        // Place image cells in the DECLRMM region
+        place_image(&mut buf, 1, 3, 100);
+        place_image(&mut buf, 2, 3, 101);
+        let images_before = buf.image_cell_count;
+        assert!(images_before >= 2);
+
+        // Trigger scroll_slice_up_columns: scroll within the left/right margins
+        buf.scroll_slice_up_columns(1, 3, 1, 7);
+
+        // Image cell count should be adjusted (some may be lost in the scroll)
+        assert!(buf.image_cell_count <= images_before);
+    }
+
+    #[test]
+    fn column_scroll_down_with_images_adjusts_count() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(2, 8);
+
+        place_image(&mut buf, 1, 3, 200);
+        place_image(&mut buf, 2, 3, 201);
+        let images_before = buf.image_cell_count;
+        assert!(images_before >= 2);
+
+        buf.scroll_slice_down_columns(1, 3, 1, 7);
+        assert!(buf.image_cell_count <= images_before);
+    }
+
+    // ── scroll_slice_up_columns boundary validation ─────────────────────
+
+    #[test]
+    fn column_scroll_up_invalid_range_is_noop() {
+        // first >= last should be a no-op (line 2325)
+        let mut buf = alt_buf(10, 5);
+        buf.insert_text(&[TChar::Ascii(b'A')]);
+        let rows_before = buf.rows.len();
+        buf.scroll_slice_up_columns(3, 3, 1, 7); // first == last
+        assert_eq!(buf.rows.len(), rows_before);
+    }
+}

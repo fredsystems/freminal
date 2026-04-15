@@ -331,4 +331,92 @@ mod tests {
         assert_eq!(handler.ftcs_state(), FtcsState::None);
         assert_eq!(handler.last_exit_code(), None);
     }
+
+    // -----------------------------------------------------------------------
+    // hex_val — unit tests for the ASCII hex-digit converter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hex_val_decimal_digits() {
+        for (byte, expected) in (b'0'..=b'9').zip(0u8..=9u8) {
+            assert_eq!(
+                hex_val(byte),
+                Some(expected),
+                "hex_val({}) should be Some({})",
+                byte as char,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hex_val_lowercase_hex_digits() {
+        for (byte, expected) in (b'a'..=b'f').zip(10u8..=15u8) {
+            assert_eq!(
+                hex_val(byte),
+                Some(expected),
+                "hex_val({}) should be Some({})",
+                byte as char,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hex_val_uppercase_hex_digits() {
+        for (byte, expected) in (b'A'..=b'F').zip(10u8..=15u8) {
+            assert_eq!(
+                hex_val(byte),
+                Some(expected),
+                "hex_val({}) should be Some({})",
+                byte as char,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hex_val_non_hex_chars_return_none() {
+        for byte in [
+            b'G', b'Z', b'g', b'z', b' ', b'!', b'/', b':', b'@', b'[', b'`', b'{',
+        ] {
+            assert_eq!(
+                hex_val(byte),
+                None,
+                "hex_val({}) should be None",
+                byte as char
+            );
+        }
+    }
+
+    #[test]
+    fn hex_val_boundary_chars_just_outside_hex_range() {
+        // b'0' - 1 = b'/' and b'9' + 1 = b':' should both be None
+        assert_eq!(hex_val(b'/'), None);
+        assert_eq!(hex_val(b':'), None);
+        // b'A' - 1 = b'@' and b'F' + 1 = b'G' should both be None
+        assert_eq!(hex_val(b'@'), None);
+        assert_eq!(hex_val(b'G'), None);
+        // b'a' - 1 = b'`' and b'f' + 1 = b'g' should both be None
+        assert_eq!(hex_val(b'`'), None);
+        assert_eq!(hex_val(b'g'), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_osc7_uri additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_osc7_uri_with_percent_encoded_file_url() {
+        // Explicit test for the case mentioned in the task description
+        let result = parse_osc7_uri("file:///home/user/my%20file.txt");
+        assert_eq!(result, Some("/home/user/my file.txt".to_string()));
+    }
+
+    #[test]
+    fn parse_osc7_uri_file_scheme_with_empty_rest() {
+        // "file://" → rest is empty → no slash found for hostname path
+        // rest.starts_with('/') = false, find('/') = None → returns None
+        assert_eq!(parse_osc7_uri("file://"), None);
+    }
 }

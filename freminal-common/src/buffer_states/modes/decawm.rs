@@ -68,3 +68,84 @@ impl fmt::Display for Decawm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── From<LineWrap> ───────────────────────────────────────────────
+
+    #[test]
+    fn from_line_wrap_wrap_is_auto_wrap() {
+        assert_eq!(Decawm::from(LineWrap::Wrap), Decawm::AutoWrap);
+    }
+
+    #[test]
+    fn from_line_wrap_no_wrap_is_no_auto_wrap() {
+        assert_eq!(Decawm::from(LineWrap::NoWrap), Decawm::NoAutoWrap);
+    }
+
+    // ── ReportMode ───────────────────────────────────────────────────
+
+    #[test]
+    fn report_auto_wrap_no_override() {
+        assert_eq!(Decawm::AutoWrap.report(None), "\x1b[?7;1$y");
+    }
+
+    #[test]
+    fn report_no_auto_wrap_no_override() {
+        assert_eq!(Decawm::NoAutoWrap.report(None), "\x1b[?7;2$y");
+    }
+
+    #[test]
+    fn report_query_no_override() {
+        assert_eq!(Decawm::Query.report(None), "\x1b[?7;0$y");
+    }
+
+    #[test]
+    fn report_with_dec_set_override() {
+        assert_eq!(
+            Decawm::NoAutoWrap.report(Some(SetMode::DecSet)),
+            "\x1b[?7;1$y"
+        );
+    }
+
+    #[test]
+    fn report_with_dec_rst_override() {
+        assert_eq!(
+            Decawm::AutoWrap.report(Some(SetMode::DecRst)),
+            "\x1b[?7;2$y"
+        );
+    }
+
+    #[test]
+    fn report_with_dec_query_override() {
+        assert_eq!(
+            Decawm::AutoWrap.report(Some(SetMode::DecQuery)),
+            "\x1b[?7;0$y"
+        );
+    }
+
+    // ── Display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn display_auto_wrap() {
+        assert_eq!(
+            Decawm::AutoWrap.to_string(),
+            "Autowrap Mode (DECAWM) Enabled"
+        );
+    }
+
+    #[test]
+    fn display_no_auto_wrap() {
+        assert_eq!(
+            Decawm::NoAutoWrap.to_string(),
+            "Autowrap Mode (DECAWM) Disabled"
+        );
+    }
+
+    #[test]
+    fn display_query() {
+        assert_eq!(Decawm::Query.to_string(), "Autowrap Mode (DECAWM) Query");
+    }
+}

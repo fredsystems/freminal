@@ -815,3 +815,1529 @@ impl TerminalInput {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::modes::{
+        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
+        keypad::KeypadMode, lnm::Lnm,
+    };
+
+    /// Convenience: call `to_payload` with all-default modes and zero KKP flags.
+    fn to_payload_defaults(input: &TerminalInput) -> TerminalInputPayload {
+        input.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        )
+    }
+
+    /// Convenience: call `to_payload` forcing the KKP path with given flags.
+    fn to_payload_kkp(input: &TerminalInput, flags: u32) -> TerminalInputPayload {
+        input.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            flags,
+            &KeyEventMeta::PRESS,
+        )
+    }
+
+    // ── us_qwerty_shifted ────────────────────────────────────────────────────
+
+    #[test]
+    fn us_qwerty_shifted_digits() {
+        assert_eq!(super::us_qwerty_shifted(b'1'), Some(u32::from(b'!')));
+        assert_eq!(super::us_qwerty_shifted(b'2'), Some(u32::from(b'@')));
+        assert_eq!(super::us_qwerty_shifted(b'3'), Some(u32::from(b'#')));
+        assert_eq!(super::us_qwerty_shifted(b'4'), Some(u32::from(b'$')));
+        assert_eq!(super::us_qwerty_shifted(b'5'), Some(u32::from(b'%')));
+        assert_eq!(super::us_qwerty_shifted(b'6'), Some(u32::from(b'^')));
+        assert_eq!(super::us_qwerty_shifted(b'7'), Some(u32::from(b'&')));
+        assert_eq!(super::us_qwerty_shifted(b'8'), Some(u32::from(b'*')));
+        assert_eq!(super::us_qwerty_shifted(b'9'), Some(u32::from(b'(')));
+        assert_eq!(super::us_qwerty_shifted(b'0'), Some(u32::from(b')')));
+    }
+
+    #[test]
+    fn us_qwerty_shifted_punctuation() {
+        assert_eq!(super::us_qwerty_shifted(b'-'), Some(u32::from(b'_')));
+        assert_eq!(super::us_qwerty_shifted(b'='), Some(u32::from(b'+')));
+        assert_eq!(super::us_qwerty_shifted(b'['), Some(u32::from(b'{')));
+        assert_eq!(super::us_qwerty_shifted(b']'), Some(u32::from(b'}')));
+        assert_eq!(super::us_qwerty_shifted(b'\\'), Some(u32::from(b'|')));
+        assert_eq!(super::us_qwerty_shifted(b';'), Some(u32::from(b':')));
+        assert_eq!(super::us_qwerty_shifted(b'\''), Some(u32::from(b'"')));
+        assert_eq!(super::us_qwerty_shifted(b','), Some(u32::from(b'<')));
+        assert_eq!(super::us_qwerty_shifted(b'.'), Some(u32::from(b'>')));
+        assert_eq!(super::us_qwerty_shifted(b'/'), Some(u32::from(b'?')));
+        assert_eq!(super::us_qwerty_shifted(b'`'), Some(u32::from(b'~')));
+    }
+
+    #[test]
+    fn us_qwerty_shifted_lowercase_letters() {
+        assert_eq!(super::us_qwerty_shifted(b'a'), Some(u32::from(b'A')));
+        assert_eq!(super::us_qwerty_shifted(b'z'), Some(u32::from(b'Z')));
+        assert_eq!(super::us_qwerty_shifted(b'm'), Some(u32::from(b'M')));
+    }
+
+    #[test]
+    fn us_qwerty_shifted_out_of_range() {
+        // Uppercase and non-ASCII have no shifted form
+        assert_eq!(super::us_qwerty_shifted(b'A'), None);
+        assert_eq!(super::us_qwerty_shifted(b'Z'), None);
+        assert_eq!(super::us_qwerty_shifted(0x80), None);
+        assert_eq!(super::us_qwerty_shifted(0x00), None);
+    }
+
+    // ── to_payload: arrow keys ───────────────────────────────────────────────
+
+    #[test]
+    fn arrow_right_normal_mode() {
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[C"));
+    }
+
+    #[test]
+    fn arrow_right_application_mode() {
+        let p = TerminalInput::ArrowRight(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOC"));
+    }
+
+    #[test]
+    fn arrow_right_with_modifier() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2C".to_vec()));
+    }
+
+    #[test]
+    fn arrow_left_normal_mode() {
+        let p = to_payload_defaults(&TerminalInput::ArrowLeft(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[D"));
+    }
+
+    #[test]
+    fn arrow_left_application_mode() {
+        let p = TerminalInput::ArrowLeft(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOD"));
+    }
+
+    #[test]
+    fn arrow_up_normal_mode() {
+        let p = to_payload_defaults(&TerminalInput::ArrowUp(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[A"));
+    }
+
+    #[test]
+    fn arrow_up_application_mode() {
+        let p = TerminalInput::ArrowUp(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOA"));
+    }
+
+    #[test]
+    fn arrow_down_normal_mode() {
+        let p = to_payload_defaults(&TerminalInput::ArrowDown(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[B"));
+    }
+
+    #[test]
+    fn arrow_down_application_mode() {
+        let p = TerminalInput::ArrowDown(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOB"));
+    }
+
+    // ── to_payload: Home/End ─────────────────────────────────────────────────
+
+    #[test]
+    fn home_normal_mode() {
+        let p = to_payload_defaults(&TerminalInput::Home(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[H"));
+    }
+
+    #[test]
+    fn home_application_mode() {
+        let p = TerminalInput::Home(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOH"));
+    }
+
+    #[test]
+    fn home_with_ctrl_modifier() {
+        let mods = KeyModifiers {
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::Home(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;5H".to_vec()));
+    }
+
+    #[test]
+    fn end_normal_mode() {
+        let p = to_payload_defaults(&TerminalInput::End(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[F"));
+    }
+
+    #[test]
+    fn end_application_mode() {
+        let p = TerminalInput::End(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOF"));
+    }
+
+    // ── to_payload: Delete/Insert/PageUp/PageDown ────────────────────────────
+
+    #[test]
+    fn delete_no_modifier() {
+        let p = to_payload_defaults(&TerminalInput::Delete(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[3~"));
+    }
+
+    #[test]
+    fn delete_with_shift() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::Delete(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[3;2~".to_vec()));
+    }
+
+    #[test]
+    fn insert_no_modifier() {
+        let p = to_payload_defaults(&TerminalInput::Insert(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[2~"));
+    }
+
+    #[test]
+    fn insert_with_modifier() {
+        let mods = KeyModifiers {
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::Insert(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[2;5~".to_vec()));
+    }
+
+    #[test]
+    fn pageup_no_modifier() {
+        let p = to_payload_defaults(&TerminalInput::PageUp(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[5~"));
+    }
+
+    #[test]
+    fn pageup_with_modifier() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::PageUp(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[5;2~".to_vec()));
+    }
+
+    #[test]
+    fn pagedown_no_modifier() {
+        let p = to_payload_defaults(&TerminalInput::PageDown(KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[6~"));
+    }
+
+    #[test]
+    fn pagedown_with_modifier() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: true,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::PageDown(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[6;6~".to_vec()));
+    }
+
+    // ── to_payload: Focus events ─────────────────────────────────────────────
+
+    #[test]
+    fn lost_focus_payload() {
+        let p = to_payload_defaults(&TerminalInput::LostFocus);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[O"));
+    }
+
+    #[test]
+    fn in_focus_payload() {
+        let p = to_payload_defaults(&TerminalInput::InFocus);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[I"));
+    }
+
+    // ── to_payload: Function keys F1-F12 without modifiers ──────────────────
+
+    #[test]
+    fn function_keys_f1_f4_ss3_form() {
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(1, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1bOP")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(2, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1bOQ")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(3, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1bOR")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(4, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1bOS")
+        );
+    }
+
+    #[test]
+    fn function_keys_f5_f12_csi_tilde_form() {
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(5, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[15~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(6, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[17~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(7, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[18~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(8, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[19~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(9, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[20~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(10, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[21~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(11, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[23~")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::FunctionKey(12, KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"\x1b[24~")
+        );
+    }
+
+    #[test]
+    fn function_key_f1_with_modifier() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(1, mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2P".to_vec()));
+    }
+
+    #[test]
+    fn function_key_f5_with_modifier() {
+        let mods = KeyModifiers {
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(5, mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;5~".to_vec()));
+    }
+
+    #[test]
+    fn function_key_f12_with_modifier() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(12, mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[24;2~".to_vec()));
+    }
+
+    #[test]
+    fn function_key_unknown_returns_empty() {
+        // F13 is not in the match — hits the fallback `_ =>` arm.
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(13, KeyModifiers::NONE));
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    // ── to_payload: KeyPad ───────────────────────────────────────────────────
+
+    #[test]
+    fn keypad_numeric_mode_sends_raw_byte() {
+        let p = TerminalInput::KeyPad(b'5').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(b'5'));
+    }
+
+    #[test]
+    fn keypad_application_mode_digits() {
+        let payload_for = |c: u8| -> TerminalInputPayload {
+            TerminalInput::KeyPad(c).to_payload(
+                Decckm::Ansi,
+                KeypadMode::Application,
+                0,
+                ApplicationEscapeKey::Reset,
+                Decbkm::BackarrowSendsDel,
+                Lnm::LineFeed,
+                0,
+                &KeyEventMeta::PRESS,
+            )
+        };
+        assert_eq!(payload_for(0), TerminalInputPayload::Many(b"\x1b[Op"));
+        assert_eq!(payload_for(1), TerminalInputPayload::Many(b"\x1b[Oq"));
+        assert_eq!(payload_for(2), TerminalInputPayload::Many(b"\x1b[Or"));
+        assert_eq!(payload_for(3), TerminalInputPayload::Many(b"\x1b[Os"));
+        assert_eq!(payload_for(4), TerminalInputPayload::Many(b"\x1b[Ot"));
+        assert_eq!(payload_for(5), TerminalInputPayload::Many(b"\x1b[Ou"));
+        assert_eq!(payload_for(6), TerminalInputPayload::Many(b"\x1b[Ov"));
+        assert_eq!(payload_for(7), TerminalInputPayload::Many(b"\x1b[Ow"));
+        assert_eq!(payload_for(8), TerminalInputPayload::Many(b"\x1b[Ox"));
+        assert_eq!(payload_for(9), TerminalInputPayload::Many(b"\x1b[Oy"));
+    }
+
+    #[test]
+    fn keypad_application_mode_special_keys() {
+        let payload_for = |c: u8| -> TerminalInputPayload {
+            TerminalInput::KeyPad(c).to_payload(
+                Decckm::Ansi,
+                KeypadMode::Application,
+                0,
+                ApplicationEscapeKey::Reset,
+                Decbkm::BackarrowSendsDel,
+                Lnm::LineFeed,
+                0,
+                &KeyEventMeta::PRESS,
+            )
+        };
+        assert_eq!(payload_for(b'-'), TerminalInputPayload::Many(b"\x1b[Om"));
+        assert_eq!(payload_for(b','), TerminalInputPayload::Many(b"\x1b[Ol"));
+        assert_eq!(payload_for(b'.'), TerminalInputPayload::Many(b"\x1b[On"));
+        assert_eq!(payload_for(b'\n'), TerminalInputPayload::Many(b"\x1b[OM"));
+    }
+
+    #[test]
+    fn keypad_application_mode_unknown_key_fallback() {
+        // A byte not in the match → fallback to Single
+        let p = TerminalInput::KeyPad(b'!').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Application,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(b'!'));
+    }
+
+    // ── to_payload: Enter with LNM ───────────────────────────────────────────
+
+    #[test]
+    fn enter_lnm_normal_sends_cr() {
+        let p = to_payload_defaults(&TerminalInput::Enter);
+        assert_eq!(p, TerminalInputPayload::Single(b'\r'));
+    }
+
+    #[test]
+    fn enter_lnm_newline_sends_crlf() {
+        let p = TerminalInput::Enter.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::NewLine,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x0d\x0a"));
+    }
+
+    // ── to_payload: Backspace with DECBKM ────────────────────────────────────
+
+    #[test]
+    fn backspace_decbkm_del_sends_del() {
+        let p = to_payload_defaults(&TerminalInput::Backspace);
+        assert_eq!(p, TerminalInputPayload::Single(0x7F));
+    }
+
+    #[test]
+    fn backspace_decbkm_bs_sends_bs() {
+        let p = TerminalInput::Backspace.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsBs,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(0x08));
+    }
+
+    // ── to_payload: Escape with ApplicationEscapeKey ─────────────────────────
+
+    #[test]
+    fn escape_plain_sends_esc_byte() {
+        let p = to_payload_defaults(&TerminalInput::Escape);
+        assert_eq!(p, TerminalInputPayload::Single(0x1b));
+    }
+
+    #[test]
+    fn escape_application_escape_key_sends_csi_sequence() {
+        let p = TerminalInput::Escape.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Set,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[27;1;27~".to_vec()));
+    }
+
+    // ── to_payload: Tab ──────────────────────────────────────────────────────
+
+    #[test]
+    fn tab_sends_ctrl_i() {
+        let p = to_payload_defaults(&TerminalInput::Tab);
+        assert_eq!(p, TerminalInputPayload::Single(0x09));
+    }
+
+    // ── to_payload: Ctrl with modifyOtherKeys ────────────────────────────────
+
+    #[test]
+    fn ctrl_c_level0_sends_etx() {
+        let p = TerminalInput::Ctrl(b'c').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0, // modifyOtherKeys=0 → legacy
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(0x03)); // 'c' & 0x1F
+    }
+
+    #[test]
+    fn ctrl_c_level2_sends_csi27_sequence() {
+        let p = TerminalInput::Ctrl(b'c').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            2, // modifyOtherKeys=2
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        // CSI 27 ; 5 ; 99 ~ (ctrl modifier = 5, 'c' = 99)
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[27;5;99~".to_vec()));
+    }
+
+    // ── to_payload_kkp: Ctrl ─────────────────────────────────────────────────
+
+    #[test]
+    fn kkp_ctrl_disambiguate_sends_csi_u() {
+        // Flag 1 (DISAMBIGUATE): Ctrl+c → CSI 99;5u
+        let p = to_payload_kkp(&TerminalInput::Ctrl(b'c'), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_ctrl_report_all_sends_csi_u() {
+        // Flag 8 (REPORT_ALL): Ctrl+c → CSI 99;5u
+        let p = to_payload_kkp(&TerminalInput::Ctrl(b'c'), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_ctrl_uppercase_input_lowercased() {
+        // Ctrl+C (uppercase) → same as Ctrl+c
+        let p = to_payload_kkp(&TerminalInput::Ctrl(b'C'), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5u".to_vec()));
+    }
+
+    // ── to_payload_kkp: Enter ────────────────────────────────────────────────
+
+    #[test]
+    fn kkp_enter_report_all_sends_csi_13u() {
+        let p = to_payload_kkp(&TerminalInput::Enter, 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[13u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_enter_disambiguate_only_lnm_normal_sends_cr() {
+        // Flag 1 only (no report_all): Enter still sends legacy
+        let p = to_payload_kkp(&TerminalInput::Enter, 1);
+        assert_eq!(p, TerminalInputPayload::Single(b'\r'));
+    }
+
+    #[test]
+    fn kkp_enter_disambiguate_only_lnm_newline_sends_crlf() {
+        let p = TerminalInput::Enter.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::NewLine,
+            1, // flag 1 only
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x0d\x0a"));
+    }
+
+    // ── to_payload_kkp: Backspace ────────────────────────────────────────────
+
+    #[test]
+    fn kkp_backspace_report_all_sends_csi_127u() {
+        let p = to_payload_kkp(&TerminalInput::Backspace, 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[127u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_backspace_disambiguate_only_decbkm_del() {
+        // Flag 1 only: legacy path, DECBKM=Del → 0x7F
+        let p = to_payload_kkp(&TerminalInput::Backspace, 1);
+        assert_eq!(p, TerminalInputPayload::Single(0x7F));
+    }
+
+    #[test]
+    fn kkp_backspace_disambiguate_only_decbkm_bs() {
+        let p = TerminalInput::Backspace.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsBs,
+            Lnm::LineFeed,
+            1, // flag 1 only
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(0x08));
+    }
+
+    // ── to_payload_kkp: Tab ──────────────────────────────────────────────────
+
+    #[test]
+    fn kkp_tab_report_all_sends_csi_9u() {
+        let p = to_payload_kkp(&TerminalInput::Tab, 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[9u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_tab_disambiguate_only_sends_legacy() {
+        // Flag 1 only: Tab still sends 0x09
+        let p = to_payload_kkp(&TerminalInput::Tab, 1);
+        assert_eq!(p, TerminalInputPayload::Single(0x09));
+    }
+
+    // ── to_payload_kkp: Escape ───────────────────────────────────────────────
+
+    #[test]
+    fn kkp_escape_disambiguate_sends_csi_27u() {
+        let p = to_payload_kkp(&TerminalInput::Escape, 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[27u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_escape_report_all_sends_csi_27u() {
+        let p = to_payload_kkp(&TerminalInput::Escape, 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[27u".to_vec()));
+    }
+
+    // ── to_payload_kkp: Arrow keys (retain legacy) ───────────────────────────
+
+    #[test]
+    fn kkp_arrow_right_normal_mode() {
+        let p = to_payload_kkp(&TerminalInput::ArrowRight(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[C"));
+    }
+
+    #[test]
+    fn kkp_arrow_right_application_mode() {
+        let p = TerminalInput::ArrowRight(KeyModifiers::NONE).to_payload(
+            Decckm::Application,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOC"));
+    }
+
+    #[test]
+    fn kkp_arrow_left_normal_mode() {
+        let p = to_payload_kkp(&TerminalInput::ArrowLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[D"));
+    }
+
+    #[test]
+    fn kkp_arrow_up_normal_mode() {
+        let p = to_payload_kkp(&TerminalInput::ArrowUp(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[A"));
+    }
+
+    #[test]
+    fn kkp_arrow_down_normal_mode() {
+        let p = to_payload_kkp(&TerminalInput::ArrowDown(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[B"));
+    }
+
+    // ── to_payload_kkp: Home/End ─────────────────────────────────────────────
+
+    #[test]
+    fn kkp_home_normal_mode() {
+        let p = to_payload_kkp(&TerminalInput::Home(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[H"));
+    }
+
+    #[test]
+    fn kkp_end_normal_mode() {
+        let p = to_payload_kkp(&TerminalInput::End(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[F"));
+    }
+
+    // ── to_payload_kkp: Delete/Insert/PageUp/PageDown ────────────────────────
+
+    #[test]
+    fn kkp_delete_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::Delete(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[3~"));
+    }
+
+    #[test]
+    fn kkp_insert_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::Insert(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[2~"));
+    }
+
+    #[test]
+    fn kkp_pageup_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::PageUp(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[5~"));
+    }
+
+    #[test]
+    fn kkp_pagedown_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::PageDown(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[6~"));
+    }
+
+    // ── to_payload_kkp: LostFocus/InFocus ───────────────────────────────────
+
+    #[test]
+    fn kkp_lost_focus() {
+        let p = to_payload_kkp(&TerminalInput::LostFocus, 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[O"));
+    }
+
+    #[test]
+    fn kkp_in_focus() {
+        let p = to_payload_kkp(&TerminalInput::InFocus, 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[I"));
+    }
+
+    // ── to_payload_kkp: Function keys ────────────────────────────────────────
+
+    #[test]
+    fn kkp_function_keys_f1_f4_ss3_form() {
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(1, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Many(b"\x1bOP")
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(2, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Many(b"\x1bOQ")
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(3, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Many(b"\x1bOR")
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(4, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Many(b"\x1bOS")
+        );
+    }
+
+    #[test]
+    fn kkp_function_keys_f5_f12_no_modifier() {
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(5, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Many(b"\x1b[15~")
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(12, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Many(b"\x1b[24~")
+        );
+    }
+
+    #[test]
+    fn kkp_function_key_with_modifier() {
+        let mods = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(5, mods), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_function_key_unknown_returns_empty() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(13, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    // ── to_payload_kkp: KeyPad ───────────────────────────────────────────────
+
+    #[test]
+    fn kkp_keypad_numeric_mode() {
+        let p = TerminalInput::KeyPad(b'5').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(b'5'));
+    }
+
+    #[test]
+    fn kkp_keypad_application_mode() {
+        let p = TerminalInput::KeyPad(0).to_payload(
+            Decckm::Ansi,
+            KeypadMode::Application,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Op"));
+    }
+
+    // ── to_payload_kkp: ASCII plain (report_all flag) ────────────────────────
+
+    #[test]
+    fn kkp_report_all_plain_ascii_sends_csi_u() {
+        // Flag 8: plain 'a' → CSI 97u
+        let p = to_payload_kkp(&TerminalInput::Ascii(b'a'), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[97u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_report_all_uppercase_ascii_sends_shifted_csi_u() {
+        // Flag 8: 'A' → lowercase codepoint 97 with shift modifier 2
+        let p = to_payload_kkp(&TerminalInput::Ascii(b'A'), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[97;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_disambiguate_only_plain_ascii_sends_raw() {
+        // Flag 1 only (no report_all): plain ASCII unchanged
+        let p = to_payload_kkp(&TerminalInput::Ascii(b'x'), 1);
+        assert_eq!(p, TerminalInputPayload::Single(b'x'));
+    }
+
+    // ── build_csi_u: flag 2 (report event type) ─────────────────────────────
+
+    #[test]
+    fn kkp_flag2_report_event_type_appended() {
+        // Flags 1|2: Ctrl+c → CSI 99;5:1u (event type 1=Press is omitted)
+        // Actually Press has no code so it is omitted; the modifier is just 5.
+        let p = TerminalInput::Ctrl(b'c').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1 | 2, // DISAMBIGUATE + REPORT_EVENT_TYPE
+            &KeyEventMeta::PRESS,
+        );
+        // Press event code is None so modifier field stays "5" without ":1"
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_flag2_repeat_event_type_appended() {
+        let meta = KeyEventMeta {
+            event_type: KeyEventType::Repeat,
+            associated_text: None,
+        };
+        let p = TerminalInput::Ctrl(b'c').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1 | 2,
+            &meta,
+        );
+        // Repeat event code = 2: modifier field is "5:2"
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5:2u".to_vec()));
+    }
+
+    // ── build_csi_u: flag 16 (associated text) ───────────────────────────────
+
+    #[test]
+    fn kkp_flag16_associated_text_appended() {
+        let meta = KeyEventMeta {
+            event_type: KeyEventType::Press,
+            associated_text: Some("a".to_string()),
+        };
+        let p = TerminalInput::Ctrl(b'c').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1 | 16, // DISAMBIGUATE + ASSOCIATED_TEXT
+            &meta,
+        );
+        // Third param is "97" (codepoint of 'a')
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5;97u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_flag16_empty_associated_text_omitted() {
+        let meta = KeyEventMeta {
+            event_type: KeyEventType::Press,
+            associated_text: Some(String::new()),
+        };
+        let p = TerminalInput::Ctrl(b'c').to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            1 | 16,
+            &meta,
+        );
+        // Empty associated text is omitted
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[99;5u".to_vec()));
+    }
+
+    // ── LineFeed ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn line_feed_sends_newline_byte() {
+        let p = to_payload_defaults(&TerminalInput::LineFeed);
+        assert_eq!(p, TerminalInputPayload::Single(b'\n'));
+    }
+
+    #[test]
+    fn kkp_line_feed_sends_newline_byte() {
+        let p = to_payload_kkp(&TerminalInput::LineFeed, 1);
+        assert_eq!(p, TerminalInputPayload::Single(b'\n'));
+    }
+
+    // ── KeyEventMeta::PRESS constant ─────────────────────────────────────────
+
+    #[test]
+    fn key_event_meta_press_is_default() {
+        let m = KeyEventMeta::PRESS;
+        assert_eq!(m.event_type, KeyEventType::Press);
+        assert!(m.associated_text.is_none());
+    }
+
+    // ── KeyModifiers::modifier_param ─────────────────────────────────────────
+
+    #[test]
+    fn modifier_param_all_combinations() {
+        // No modifier
+        assert_eq!(KeyModifiers::NONE.modifier_param(), None);
+        // Shift only
+        assert_eq!(
+            KeyModifiers {
+                shift: true,
+                ctrl: false,
+                alt: false
+            }
+            .modifier_param(),
+            Some(2)
+        );
+        // Alt only
+        assert_eq!(
+            KeyModifiers {
+                shift: false,
+                ctrl: false,
+                alt: true
+            }
+            .modifier_param(),
+            Some(3)
+        );
+        // Shift+Alt
+        assert_eq!(
+            KeyModifiers {
+                shift: true,
+                ctrl: false,
+                alt: true
+            }
+            .modifier_param(),
+            Some(4)
+        );
+        // Ctrl only
+        assert_eq!(
+            KeyModifiers {
+                shift: false,
+                ctrl: true,
+                alt: false
+            }
+            .modifier_param(),
+            Some(5)
+        );
+        // Ctrl+Shift
+        assert_eq!(
+            KeyModifiers {
+                shift: true,
+                ctrl: true,
+                alt: false
+            }
+            .modifier_param(),
+            Some(6)
+        );
+        // Ctrl+Alt
+        assert_eq!(
+            KeyModifiers {
+                shift: false,
+                ctrl: true,
+                alt: true
+            }
+            .modifier_param(),
+            Some(7)
+        );
+        // Ctrl+Alt+Shift
+        assert_eq!(
+            KeyModifiers {
+                shift: true,
+                ctrl: true,
+                alt: true
+            }
+            .modifier_param(),
+            Some(8)
+        );
+    }
+
+    // ── Coverage gap tests: legacy to_payload branches ───────────────────────
+
+    const SHIFT: KeyModifiers = KeyModifiers {
+        shift: true,
+        ctrl: false,
+        alt: false,
+    };
+
+    #[test]
+    fn arrow_down_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::ArrowDown(SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2B".to_vec()));
+    }
+
+    #[test]
+    fn f2_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(2, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2Q".to_vec()));
+    }
+
+    #[test]
+    fn f3_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(3, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2R".to_vec()));
+    }
+
+    #[test]
+    fn f4_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(4, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2S".to_vec()));
+    }
+
+    #[test]
+    fn f6_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(6, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[17;2~".to_vec()));
+    }
+
+    #[test]
+    fn f7_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(7, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[18;2~".to_vec()));
+    }
+
+    #[test]
+    fn f8_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(8, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[19;2~".to_vec()));
+    }
+
+    #[test]
+    fn f9_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(9, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[20;2~".to_vec()));
+    }
+
+    #[test]
+    fn f10_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(10, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[21;2~".to_vec()));
+    }
+
+    #[test]
+    fn f11_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(11, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[23;2~".to_vec()));
+    }
+
+    #[test]
+    fn f12_with_modifier_legacy() {
+        let p = to_payload_defaults(&TerminalInput::FunctionKey(12, SHIFT));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[24;2~".to_vec()));
+    }
+
+    // ── Coverage gap tests: KKP path (to_payload_kkp) ────────────────────────
+
+    /// Helper: call `to_payload` with KKP flags and application cursor mode.
+    fn to_payload_kkp_app(input: &TerminalInput, flags: u32) -> TerminalInputPayload {
+        input.to_payload(
+            Decckm::Application,
+            KeypadMode::Application,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            flags,
+            &KeyEventMeta::PRESS,
+        )
+    }
+
+    #[test]
+    fn kkp_ctrl_non_disambiguate_sends_legacy() {
+        // Flags 2 alone: not disambiguate, not report_all → legacy C0
+        let p = to_payload_kkp(&TerminalInput::Ctrl(b'c'), 2);
+        // Legacy C0: Ctrl+C = 0x03
+        assert_eq!(p, TerminalInputPayload::Single(0x03));
+    }
+
+    #[test]
+    fn kkp_escape_non_disambiguate_sends_legacy() {
+        // Flags 2 alone: not disambiguate, not report_all → legacy ESC byte
+        let p = to_payload_kkp(&TerminalInput::Escape, 2);
+        assert_eq!(p, TerminalInputPayload::Single(b'\x1b'));
+    }
+
+    #[test]
+    fn kkp_arrow_right_no_modifier() {
+        // Flag 1 (disambiguate) but arrow keys keep legacy encoding
+        let p = to_payload_kkp(&TerminalInput::ArrowRight(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[C"));
+    }
+
+    #[test]
+    fn kkp_arrow_right_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::ArrowRight(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2C".to_vec()));
+    }
+
+    #[test]
+    fn kkp_arrow_left_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::ArrowLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[D"));
+    }
+
+    #[test]
+    fn kkp_arrow_left_application_mode() {
+        let p = to_payload_kkp_app(&TerminalInput::ArrowLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOD"));
+    }
+
+    #[test]
+    fn kkp_arrow_up_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::ArrowUp(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[A"));
+    }
+
+    #[test]
+    fn kkp_arrow_up_application_mode() {
+        let p = to_payload_kkp_app(&TerminalInput::ArrowUp(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOA"));
+    }
+
+    #[test]
+    fn kkp_arrow_up_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::ArrowUp(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2A".to_vec()));
+    }
+
+    #[test]
+    fn kkp_arrow_down_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::ArrowDown(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[B"));
+    }
+
+    #[test]
+    fn kkp_arrow_down_application_mode() {
+        let p = to_payload_kkp_app(&TerminalInput::ArrowDown(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOB"));
+    }
+
+    #[test]
+    fn kkp_arrow_down_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::ArrowDown(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2B".to_vec()));
+    }
+
+    #[test]
+    fn kkp_home_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::Home(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[H"));
+    }
+
+    #[test]
+    fn kkp_home_application_mode() {
+        let p = to_payload_kkp_app(&TerminalInput::Home(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOH"));
+    }
+
+    #[test]
+    fn kkp_home_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::Home(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2H".to_vec()));
+    }
+
+    #[test]
+    fn kkp_end_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::End(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[F"));
+    }
+
+    #[test]
+    fn kkp_end_application_mode() {
+        let p = to_payload_kkp_app(&TerminalInput::End(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOF"));
+    }
+
+    #[test]
+    fn kkp_end_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::End(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2F".to_vec()));
+    }
+
+    #[test]
+    fn kkp_delete_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::Delete(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[3;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_insert_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::Insert(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[2;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_pageup_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::PageUp(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[5;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_pagedown_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::PageDown(SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[6;2~".to_vec()));
+    }
+
+    // ── KKP: keypad in application mode ──────────────────────────────────────
+
+    #[test]
+    fn kkp_keypad_application_mode_digits() {
+        let expected_suffixes = [b'p', b'q', b'r', b's', b't', b'u', b'v', b'w', b'x', b'y'];
+        for (digit, suffix) in (0u8..=9).zip(expected_suffixes.iter()) {
+            let p = to_payload_kkp_app(&TerminalInput::KeyPad(digit), 1);
+            let expected = [0x1b, b'[', b'O', *suffix];
+            assert_eq!(
+                p,
+                TerminalInputPayload::Many(
+                    // The Many variant holds a &'static [u8]; match the exact expected
+                    match digit {
+                        0 => b"\x1b[Op",
+                        1 => b"\x1b[Oq",
+                        2 => b"\x1b[Or",
+                        3 => b"\x1b[Os",
+                        4 => b"\x1b[Ot",
+                        5 => b"\x1b[Ou",
+                        6 => b"\x1b[Ov",
+                        7 => b"\x1b[Ow",
+                        8 => b"\x1b[Ox",
+                        9 => b"\x1b[Oy",
+                        _ => unreachable!(),
+                    }
+                ),
+                "keypad {digit} in app mode should produce ESC[O{}",
+                expected[3] as char
+            );
+        }
+    }
+
+    #[test]
+    fn kkp_keypad_application_mode_minus() {
+        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'-'), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Om"));
+    }
+
+    #[test]
+    fn kkp_keypad_application_mode_comma() {
+        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b','), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Ol"));
+    }
+
+    #[test]
+    fn kkp_keypad_application_mode_dot() {
+        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'.'), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[On"));
+    }
+
+    #[test]
+    fn kkp_keypad_application_mode_enter() {
+        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'\n'), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[OM"));
+    }
+
+    #[test]
+    fn kkp_keypad_application_mode_unknown() {
+        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'?'), 1);
+        // Unknown keypad key in app mode should fallback to Single
+        assert_eq!(p, TerminalInputPayload::Single(b'?'));
+    }
+
+    // ── KKP: function keys ──────────────────────────────────────────────────
+
+    #[test]
+    fn kkp_f1_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(1, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1bOP"));
+    }
+
+    #[test]
+    fn kkp_f1_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(1, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2P".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f2_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(2, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2Q".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f3_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(3, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2R".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f4_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(4, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2S".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f5_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(5, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[15~"));
+    }
+
+    #[test]
+    fn kkp_f5_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(5, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f6_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(6, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[17;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f7_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(7, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[18;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f8_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(8, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[19;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f9_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(9, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[20;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f10_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(10, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[21;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f11_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(11, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[23;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f12_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(12, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[24;2~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_f6_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(6, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[17~"));
+    }
+
+    #[test]
+    fn kkp_f7_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(7, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[18~"));
+    }
+
+    #[test]
+    fn kkp_f8_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(8, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[19~"));
+    }
+
+    #[test]
+    fn kkp_f9_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(9, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[20~"));
+    }
+
+    #[test]
+    fn kkp_f10_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(10, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[21~"));
+    }
+
+    #[test]
+    fn kkp_f11_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(11, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[23~"));
+    }
+
+    #[test]
+    fn kkp_f12_no_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(12, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[24~"));
+    }
+
+    #[test]
+    fn kkp_f_unknown() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(99, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+}

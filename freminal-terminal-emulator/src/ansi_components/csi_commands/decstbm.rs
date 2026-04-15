@@ -68,3 +68,54 @@ pub fn ansi_parser_inner_csi_finished_decstbm(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn decstbm_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decstbm(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn decstbm_too_many_params_is_invalid() {
+        // More than 2 params → invalid
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decstbm(b"1;10;20", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn decstbm_empty_is_full_screen() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decstbm(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::SetTopAndBottomMargins {
+                top_margin: 1,
+                bottom_margin: usize::MAX,
+            }]
+        );
+    }
+
+    #[test]
+    fn decstbm_valid_margins() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decstbm(b"2;24", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::SetTopAndBottomMargins {
+                top_margin: 2,
+                bottom_margin: 24,
+            }]
+        );
+    }
+}

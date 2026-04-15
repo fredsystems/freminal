@@ -123,3 +123,49 @@ pub fn ansi_parser_inner_csi_finished_decslpp(
     output.push(TerminalOutput::WindowManipulation(parsed));
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn decslpp_non_numeric_params_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decslpp(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+    }
+
+    #[test]
+    fn decslpp_zero_params_is_invalid() {
+        // Empty slice → split produces 0 params, but split gives one empty item.
+        // Actually an empty byte slice → split on `;` gives `[""]` → parse as None.
+        // That gives params.len() == 1, ps1 = MAX → WindowManipulation::try_from fails.
+        let mut output = Vec::new();
+        // We use a known-bad value to test the Err branch from try_from
+        // ps1=usize::MAX → will fail or be handled as invalid by try_from
+        let result = ansi_parser_inner_csi_finished_decslpp(b"999", &mut output);
+        // 999 is not a known WindowManipulation code → InvalidParserFailure
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+    }
+
+    #[test]
+    fn decslpp_known_command_1_param() {
+        // ps1=1 (de-iconify) → valid with 1 param
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decslpp(b"1", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(output[0], TerminalOutput::WindowManipulation(_)));
+    }
+
+    #[test]
+    fn decslpp_known_command_2_params() {
+        // ps1=3, ps2=100, ps3=200 (move window) → 3 params
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decslpp(b"3;100;200", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(output[0], TerminalOutput::WindowManipulation(_)));
+    }
+}

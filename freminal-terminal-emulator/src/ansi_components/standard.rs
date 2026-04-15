@@ -413,3 +413,549 @@ pub const fn is_standard_param(b: u8) -> bool {
             | 0x3d
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::StandardParser;
+    use crate::ansi::ParserOutcome;
+    use freminal_common::buffer_states::line_draw::DecSpecialGraphics;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    /// Feed a two-byte standard escape sequence through the parser.
+    /// The first byte is the intermediate (e.g. `b'#'`), the second is the param/final.
+    fn feed_standard(intermediate: u8, param: u8) -> (Vec<TerminalOutput>, ParserOutcome) {
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        parser.standard_parser_inner(intermediate, &mut output);
+        let result = parser.standard_parser_inner(param, &mut output);
+        (output, result)
+    }
+
+    /// Feed a single-byte standard escape final (no intermediate continuation).
+    fn feed_standard_final(b: u8) -> (Vec<TerminalOutput>, ParserOutcome) {
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        let result = parser.standard_parser_inner(b, &mut output);
+        (output, result)
+    }
+
+    // ------------------------------------------------------------------
+    // State machine — invalid transitions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn invalid_first_byte_transitions_to_invalid() {
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        // 0x01 is not a valid intermediate or final byte
+        let result = parser.standard_parser_inner(0x01, &mut output);
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+    }
+
+    #[test]
+    fn invalid_param_byte_in_waiting_for_final_state() {
+        // Feed a valid intermediate first ('#'), then an invalid param byte (0x01)
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        parser.standard_parser_inner(b'#', &mut output);
+        // Now in Params state; 0x01 is not a valid param byte
+        let result = parser.standard_parser_inner(0x01, &mut output);
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+    }
+
+    #[test]
+    fn push_after_finish_returns_invalid() {
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        // Feed a valid two-byte sequence to completion
+        parser.standard_parser_inner(b'#', &mut output);
+        parser.standard_parser_inner(b'8', &mut output);
+        // Pushing again after finish
+        let result = parser.standard_parser_inner(b'x', &mut output);
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC # — DEC double/single height/width + DECALN
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_hash_3_double_line_height_top() {
+        let (output, result) = feed_standard(b'#', b'3');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::DoubleLineHeightTop]);
+    }
+
+    #[test]
+    fn esc_hash_4_double_line_height_bottom() {
+        let (output, result) = feed_standard(b'#', b'4');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::DoubleLineHeightBottom]);
+    }
+
+    #[test]
+    fn esc_hash_5_single_width_line() {
+        let (output, result) = feed_standard(b'#', b'5');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::SingleWidthLine]);
+    }
+
+    #[test]
+    fn esc_hash_6_double_width_line() {
+        let (output, result) = feed_standard(b'#', b'6');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::DoubleWidthLine]);
+    }
+
+    #[test]
+    fn esc_hash_8_screen_alignment_test() {
+        let (output, result) = feed_standard(b'#', b'8');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::ScreenAlignmentTest]);
+    }
+
+    #[test]
+    fn esc_hash_invalid_param() {
+        // b'0' passes is_standard_param() but is not valid for the '#' dispatch.
+        // So push() succeeds (Finished), then dispatch pushes TerminalOutput::Invalid.
+        let (output, result) = feed_standard(b'#', b'0');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    #[test]
+    fn esc_hash_no_param_returns_invalid() {
+        // intermediate '#' with no valid params state → no intermediates match when None
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        // Only feed intermediate, never a param
+        let result = parser.standard_parser_inner(b'#', &mut output);
+        // Should continue (waiting for param)
+        assert!(matches!(result, ParserOutcome::Continue));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC % — charset default / UTF-8
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_percent_at_charset_default() {
+        let (output, result) = feed_standard(b'%', b'@');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetDefault]);
+    }
+
+    #[test]
+    fn esc_percent_g_charset_utf8() {
+        let (output, result) = feed_standard(b'%', b'G');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetUTF8]);
+    }
+
+    #[test]
+    fn esc_percent_invalid_param() {
+        // b'0' passes is_standard_param() but is not valid for the '%' dispatch.
+        let (output, result) = feed_standard(b'%', b'0');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC ( — G0 charset
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_paren_0_dec_special_graphics_replace() {
+        let (output, result) = feed_standard(b'(', b'0');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(
+            output,
+            vec![TerminalOutput::DecSpecialGraphics(
+                DecSpecialGraphics::Replace
+            )]
+        );
+    }
+
+    #[test]
+    fn esc_paren_b_dec_special_graphics_dont_replace() {
+        let (output, result) = feed_standard(b'(', b'B');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(
+            output,
+            vec![TerminalOutput::DecSpecialGraphics(
+                DecSpecialGraphics::DontReplace
+            )]
+        );
+    }
+
+    #[test]
+    fn esc_paren_c_charset_g0() {
+        let (output, result) = feed_standard(b'(', b'C');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG0]);
+    }
+
+    #[test]
+    fn esc_paren_invalid_param() {
+        let (output, result) = feed_standard(b'(', b'Z');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC ) — G1 charset designators
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_close_paren_0_charset_g1() {
+        let (output, result) = feed_standard(b')', b'0');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG1]);
+    }
+
+    #[test]
+    fn esc_close_paren_b_charset_g1() {
+        let (output, result) = feed_standard(b')', b'B');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG1]);
+    }
+
+    #[test]
+    fn esc_close_paren_c_charset_g1() {
+        let (output, result) = feed_standard(b')', b'C');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG1]);
+    }
+
+    #[test]
+    fn esc_close_paren_invalid_param() {
+        let (output, result) = feed_standard(b')', b'Z');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC * — G2 charset
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_star_c_charset_g2() {
+        let (output, result) = feed_standard(b'*', b'C');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG2]);
+    }
+
+    #[test]
+    fn esc_star_invalid_param() {
+        let (output, result) = feed_standard(b'*', b'Z');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC + — national character set designations
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_plus_0_dec_special_graphics() {
+        let (output, result) = feed_standard(b'+', b'0');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(
+            output,
+            vec![TerminalOutput::DecSpecialGraphics(
+                DecSpecialGraphics::Replace
+            )]
+        );
+    }
+
+    #[test]
+    fn esc_plus_a_charset_uk() {
+        let (output, result) = feed_standard(b'+', b'A');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetUK]);
+    }
+
+    #[test]
+    fn esc_plus_b_charset_us_ascii() {
+        let (output, result) = feed_standard(b'+', b'B');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetUSASCII]);
+    }
+
+    #[test]
+    fn esc_plus_4_charset_dutch() {
+        let (output, result) = feed_standard(b'+', b'4');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetDutch]);
+    }
+
+    #[test]
+    fn esc_plus_5_charset_finnish() {
+        let (output, result) = feed_standard(b'+', b'5');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetFinnish]);
+    }
+
+    #[test]
+    fn esc_plus_r_charset_french() {
+        let (output, result) = feed_standard(b'+', b'R');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetFrench]);
+    }
+
+    #[test]
+    fn esc_plus_q_charset_french_canadian() {
+        let (output, result) = feed_standard(b'+', b'Q');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetFrenchCanadian]);
+    }
+
+    #[test]
+    fn esc_plus_k_charset_german() {
+        let (output, result) = feed_standard(b'+', b'K');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetGerman]);
+    }
+
+    #[test]
+    fn esc_plus_y_charset_italian() {
+        let (output, result) = feed_standard(b'+', b'Y');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetItalian]);
+    }
+
+    #[test]
+    fn esc_plus_e_charset_norwegian_danish() {
+        let (output, result) = feed_standard(b'+', b'E');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetNorwegianDanish]);
+    }
+
+    #[test]
+    fn esc_plus_z_charset_spanish() {
+        let (output, result) = feed_standard(b'+', b'Z');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetSpanish]);
+    }
+
+    #[test]
+    fn esc_plus_h_charset_swedish() {
+        let (output, result) = feed_standard(b'+', b'H');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetSwedish]);
+    }
+
+    #[test]
+    fn esc_plus_eq_charset_swiss() {
+        let (output, result) = feed_standard(b'+', b'=');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetSwiss]);
+    }
+
+    #[test]
+    fn esc_plus_c_charset_finnish_alternate() {
+        let (output, result) = feed_standard(b'+', b'C');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetFinnish]);
+    }
+
+    #[test]
+    fn esc_plus_6_charset_norwegian_danish_alternate() {
+        let (output, result) = feed_standard(b'+', b'6');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetNorwegianDanish]);
+    }
+
+    #[test]
+    fn esc_plus_7_charset_swedish_alternate() {
+        let (output, result) = feed_standard(b'+', b'7');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetSwedish]);
+    }
+
+    #[test]
+    fn esc_plus_invalid_param() {
+        // b'F' passes is_standard_param() but is not valid for the '+' dispatch.
+        let (output, result) = feed_standard(b'+', b'F');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // ESC   (space) — 7-bit/8-bit control & ANSI conformance
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_space_f_seven_bit_control() {
+        let (output, result) = feed_standard(b' ', b'F');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::SevenBitControl]);
+    }
+
+    #[test]
+    fn esc_space_g_eight_bit_control() {
+        let (output, result) = feed_standard(b' ', b'G');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::EightBitControl]);
+    }
+
+    #[test]
+    fn esc_space_l_ansi_conformance_level_one() {
+        let (output, result) = feed_standard(b' ', b'L');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::AnsiConformanceLevelOne]);
+    }
+
+    #[test]
+    fn esc_space_m_ansi_conformance_level_two() {
+        let (output, result) = feed_standard(b' ', b'M');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::AnsiConformanceLevelTwo]);
+    }
+
+    #[test]
+    fn esc_space_n_ansi_conformance_level_three() {
+        let (output, result) = feed_standard(b' ', b'N');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::AnsiConformanceLevelThree]);
+    }
+
+    #[test]
+    fn esc_space_invalid_param() {
+        // b'0' passes is_standard_param() but is not valid for the ' ' dispatch.
+        let (output, result) = feed_standard(b' ', b'0');
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // Single-byte finals (no intermediate)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn esc_7_save_cursor() {
+        let (output, result) = feed_standard_final(b'7');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::SaveCursor]);
+    }
+
+    #[test]
+    fn esc_8_restore_cursor() {
+        let (output, result) = feed_standard_final(b'8');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::RestoreCursor]);
+    }
+
+    #[test]
+    fn esc_eq_application_keypad() {
+        let (output, result) = feed_standard_final(b'=');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::ApplicationKeypadMode]);
+    }
+
+    #[test]
+    fn esc_gt_normal_keypad() {
+        let (output, result) = feed_standard_final(b'>');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::NormalKeypadMode]);
+    }
+
+    #[test]
+    fn esc_upper_m_reverse_index() {
+        let (output, result) = feed_standard_final(b'M');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::ReverseIndex]);
+    }
+
+    #[test]
+    fn esc_upper_d_index() {
+        let (output, result) = feed_standard_final(b'D');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::Index]);
+    }
+
+    #[test]
+    fn esc_upper_e_next_line() {
+        let (output, result) = feed_standard_final(b'E');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::NextLine]);
+    }
+
+    #[test]
+    fn esc_upper_h_horizontal_tab_set() {
+        let (output, result) = feed_standard_final(b'H');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::HorizontalTabSet]);
+    }
+
+    #[test]
+    fn esc_upper_f_cursor_to_lower_left() {
+        let (output, result) = feed_standard_final(b'F');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CursorToLowerLeftCorner]);
+    }
+
+    #[test]
+    fn esc_lower_c_reset_device() {
+        let (output, result) = feed_standard_final(b'c');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::ResetDevice]);
+    }
+
+    #[test]
+    fn esc_lower_n_charset_g2_as_gl() {
+        let (output, result) = feed_standard_final(b'n');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG2AsGL]);
+    }
+
+    #[test]
+    fn esc_lower_o_charset_g3_as_gl() {
+        let (output, result) = feed_standard_final(b'o');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG3AsGL]);
+    }
+
+    #[test]
+    fn esc_pipe_charset_g3_as_gr() {
+        let (output, result) = feed_standard_final(b'|');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG3AsGR]);
+    }
+
+    #[test]
+    fn esc_close_brace_charset_g2_as_gr() {
+        let (output, result) = feed_standard_final(b'}');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG2AsGR]);
+    }
+
+    #[test]
+    fn esc_tilde_charset_g1_as_gr() {
+        let (output, result) = feed_standard_final(b'~');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::CharsetG1AsGR]);
+    }
+
+    #[test]
+    fn esc_unknown_final_returns_invalid() {
+        // 0x07 (BEL) passes is_standard_intermediate_final() but hits the '_' arm
+        // in the dispatch (not a valid ESC sequence final), producing TerminalOutput::Invalid.
+        let (output, result) = feed_standard_final(0x07);
+        assert!(matches!(result, ParserOutcome::Invalid(_)));
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    // ------------------------------------------------------------------
+    // trace_str coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn trace_str_returns_string() {
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        parser.standard_parser_inner(b'#', &mut output);
+        parser.standard_parser_inner(b'8', &mut output);
+        let _ = parser.trace_str();
+    }
+}
