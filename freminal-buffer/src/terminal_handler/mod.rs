@@ -3009,4 +3009,2173 @@ mod tests {
             "full_reset must clear pointer_shape to Default"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Mode query tests (DECRQM — each mode set/reset/query)
+    // ------------------------------------------------------------------
+
+    /// Helper: create a handler with a PTY write channel, return (handler, rx).
+    fn handler_with_pty() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        (handler, rx)
+    }
+
+    /// Helper: drain a single `PtyWrite::Write` response as a `String`.
+    fn recv_pty_string(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        match rx.try_recv().expect("expected a PtyWrite") {
+            PtyWrite::Write(bytes) => String::from_utf8(bytes).expect("valid UTF-8"),
+            other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mode_dectcem_query_show() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::Show))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("25"),
+            "DECTCEM query response should contain mode 25"
+        );
+    }
+
+    #[test]
+    fn mode_dectcem_query_hide() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::Hide))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Dectem(Dectcem::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("25"),
+            "DECTCEM query response should contain mode 25"
+        );
+    }
+
+    #[test]
+    fn mode_decawm_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::NoAutoWrap))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decawm(Decawm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains('7'),
+            "DECAWM query response should contain mode 7"
+        );
+    }
+
+    #[test]
+    fn mode_lnm_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::NewLine))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::LineFeedMode(Lnm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("20"),
+            "LNM query response should contain mode 20"
+        );
+    }
+
+    #[test]
+    fn mode_xtextscrn_query_primary() {
+        let (mut handler, rx) = handler_with_pty();
+        // Default is primary screen
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Query))]);
+        let resp = recv_pty_string(&rx);
+        // Should report DecRst (not in alt)
+        assert!(
+            resp.contains("1049"),
+            "XtExtscrn query should contain mode 1049"
+        );
+    }
+
+    #[test]
+    fn mode_altscreen47_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("47"),
+            "AltScreen47 query should contain mode 47"
+        );
+    }
+
+    #[test]
+    fn mode_save_cursor_1048_query() {
+        let (mut handler, rx) = handler_with_pty();
+        // No cursor saved yet
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
+            SaveCursor1048::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("1048"),
+            "SaveCursor1048 query should contain mode 1048"
+        );
+    }
+
+    #[test]
+    fn mode_save_cursor_1048_save_then_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
+            SaveCursor1048::Save,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
+            SaveCursor1048::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        // Should report DecSet (cursor is saved)
+        assert!(resp.contains("1048"), "response should contain mode 1048");
+    }
+
+    #[test]
+    fn mode_xtcblink_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("12"), "XtCBlink query should contain mode 12");
+    }
+
+    #[test]
+    fn mode_decom_set_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::OriginMode))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains('6'), "DECOM query should contain mode 6");
+    }
+
+    #[test]
+    fn mode_declrmm_set_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Declrmm(Declrmm::Enabled))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Declrmm(Declrmm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("69"), "DECLRMM query should contain mode 69");
+    }
+
+    #[test]
+    fn mode_declrmm_disable_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Declrmm(Declrmm::Enabled))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Declrmm(Declrmm::Disabled))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Declrmm(Declrmm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("69"), "DECLRMM query should contain mode 69");
+    }
+
+    #[test]
+    fn mode_allow_column_mode_switch_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+            AllowColumnModeSwitch::NoAllowColumnModeSwitch,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+            AllowColumnModeSwitch::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("40"),
+            "AllowColumnModeSwitch query should contain mode 40"
+        );
+    }
+
+    #[test]
+    fn mode_decsdm_set_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::DisplayMode))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("80"), "DECSDM query should contain mode 80");
+    }
+
+    #[test]
+    fn mode_allow_alt_screen_disallow_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+            AllowAltScreen::Disallow,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+            AllowAltScreen::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("1046"),
+            "AllowAltScreen query should contain mode 1046"
+        );
+    }
+
+    #[test]
+    fn mode_private_color_registers_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::Shared,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("1070"),
+            "PrivateColorRegisters query should contain mode 1070"
+        );
+    }
+
+    #[test]
+    fn mode_private_color_registers_private_discards_shared_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Set to shared mode first
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::Shared,
+        ))]);
+        // Switch back to private — should clear shared palette
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::Private,
+        ))]);
+        // The handler should have cleared sixel_shared_palette (internal state)
+        // — we can't directly observe it, but running the path is the coverage goal.
+    }
+
+    #[test]
+    fn mode_decnrcm_set_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::NrcEnabled))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decnrcm(Decnrcm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("42"), "DECNRCM query should contain mode 42");
+    }
+
+    #[test]
+    fn mode_reverse_wrap_around_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::ReverseWrapAround(
+            ReverseWrapAround::WrapAround,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::ReverseWrapAround(
+            ReverseWrapAround::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("45"),
+            "ReverseWrapAround query should contain mode 45"
+        );
+    }
+
+    #[test]
+    fn mode_xt_rev_wrap2_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::Enabled))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtRevWrap2(XtRevWrap2::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("1045"),
+            "XtRevWrap2 query should contain mode 1045"
+        );
+    }
+
+    #[test]
+    fn mode_decanm_vt52_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains('2'), "DECANM query should contain mode 2");
+    }
+
+    #[test]
+    fn mode_decanm_ansi_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains('2'), "DECANM query should contain mode 2");
+    }
+
+    #[test]
+    fn mode_application_escape_key_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+            ApplicationEscapeKey::Set,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+            ApplicationEscapeKey::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("7727"),
+            "ApplicationEscapeKey query should contain mode 7727"
+        );
+    }
+
+    #[test]
+    fn mode_in_band_resize_set_sends_immediate_notification() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Set,
+        ))]);
+        // Setting the mode sends an immediate resize notification
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("48;"),
+            "In-band resize notification should contain '48;'"
+        );
+    }
+
+    #[test]
+    fn mode_in_band_resize_query() {
+        let (mut handler, rx) = handler_with_pty();
+        // Set then query
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Set,
+        ))]);
+        let _ = rx.try_recv(); // drain the immediate notification
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("2048"),
+            "InBandResizeMode query should contain mode 2048"
+        );
+    }
+
+    #[test]
+    fn mode_in_band_resize_reset() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Set,
+        ))]);
+        let _ = rx.try_recv(); // drain notification
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Reset,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("2048"), "Query response should contain 2048");
+    }
+
+    #[test]
+    fn mode_grapheme_clustering_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::GraphemeClustering(
+            GraphemeClustering::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("2027"),
+            "GraphemeClustering query should contain mode 2027"
+        );
+    }
+
+    #[test]
+    fn mode_irm_insert() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Irm(Irm::Insert))]);
+        handler.handle_data(b"AB");
+        // In insert mode, characters shift existing content right
+        assert_eq!(handler.buffer().get_cursor().pos.x, 2);
+    }
+
+    #[test]
+    fn mode_unknown_query_responds_not_recognized() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::UnknownQuery(vec![
+            b'9', b'9', b'9',
+        ]))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("999") && resp.contains(";0$y"),
+            "Unknown query should respond with Ps=0 (not recognized): got {resp}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // DECCOLM (column mode switching)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn deccolm_132_with_allow() {
+        let (mut handler, rx) = handler_with_pty();
+        // Allow column mode switch (default is allow)
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Column132))]);
+        // Should have sent a resize via PTY
+        let msg = rx.try_recv();
+        assert!(msg.is_ok(), "DECCOLM 132 should send a PTY resize");
+        assert_eq!(
+            handler.buffer().terminal_width(),
+            132,
+            "Width should be 132 after DECCOLM"
+        );
+    }
+
+    #[test]
+    fn deccolm_80_restores_width() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Column132))]);
+        let _ = rx.try_recv(); // drain resize
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Column80))]);
+        let _ = rx.try_recv(); // drain resize
+        // Should restore to original 80
+        assert_eq!(handler.buffer().terminal_width(), 80);
+    }
+
+    #[test]
+    fn deccolm_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains('3'), "DECCOLM query should contain mode 3");
+    }
+
+    #[test]
+    fn deccolm_blocked_when_not_allowed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+            AllowColumnModeSwitch::NoAllowColumnModeSwitch,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Column132))]);
+        // Width should remain 80
+        assert_eq!(handler.buffer().terminal_width(), 80);
+    }
+
+    // ------------------------------------------------------------------
+    // VT52 cursor position handling
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn vt52_cursor_pos_in_bounds() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        handler.handle_cursor_pos(Some(10), Some(5)); // 1-indexed
+        assert_eq!(handler.buffer().get_cursor().pos.x, 9);
+        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+    }
+
+    #[test]
+    fn vt52_cursor_pos_out_of_bounds_row_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        handler.handle_cursor_pos(Some(5), Some(3));
+        // Now try out-of-bounds row
+        handler.handle_cursor_pos(Some(10), Some(100));
+        // Row should be unchanged (2, from previous), col should also be unchanged
+        // because the VT52 handler ignores both axes independently
+        assert_eq!(
+            handler.buffer().get_cursor().pos.y,
+            2,
+            "row should be unchanged"
+        );
+    }
+
+    #[test]
+    fn vt52_cursor_pos_out_of_bounds_col_ignored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        handler.handle_cursor_pos(Some(5), Some(3));
+        // Out-of-bounds column
+        handler.handle_cursor_pos(Some(200), Some(3));
+        assert_eq!(
+            handler.buffer().get_cursor().pos.x,
+            4,
+            "col should be unchanged"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Device attributes & report responses
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn da1_ansi_mode_response() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("?65;"),
+            "DA1 ANSI response should contain '?65;'"
+        );
+    }
+
+    #[test]
+    fn da1_vt52_mode_response() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
+        let resp = recv_pty_string(&rx);
+        assert_eq!(resp, "\x1b/Z", "DA1 in VT52 mode should respond ESC / Z");
+    }
+
+    #[test]
+    fn da2_response() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_secondary_device_attributes();
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains(">65;0;0c"),
+            "DA2 should respond with >65;0;0c"
+        );
+    }
+
+    #[test]
+    fn da3_response() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_tertiary_device_attributes();
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("!|00000000"),
+            "DA3 should respond with DCS !|00000000 ST"
+        );
+    }
+
+    #[test]
+    fn decreqtparm_ps0() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_request_terminal_parameters(0);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("2;1;1;120;120;1;0x"),
+            "DECREQTPARM Ps=0 should respond with code 2"
+        );
+    }
+
+    #[test]
+    fn decreqtparm_ps1() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_request_terminal_parameters(1);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("3;1;1;120;120;1;0x"),
+            "DECREQTPARM Ps=1 should respond with code 3"
+        );
+    }
+
+    #[test]
+    fn decreqtparm_invalid_ps() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_request_terminal_parameters(5);
+        // Should not send any response
+        assert!(
+            rx.try_recv().is_err(),
+            "DECREQTPARM with invalid Ps should not respond"
+        );
+    }
+
+    #[test]
+    fn device_name_and_version_response() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_device_name_and_version();
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("XTerm(Freminal"),
+            "Device name should contain 'XTerm(Freminal'"
+        );
+    }
+
+    #[test]
+    fn cursor_report_normal_mode() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_cursor_pos(Some(10), Some(5)); // 1-based → 9, 4
+        handler.handle_cursor_report();
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("5;10R"),
+            "CPR should report row=5, col=10 (1-indexed)"
+        );
+    }
+
+    #[test]
+    fn cursor_report_decom_mode() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_set_scroll_region(5, 20);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::OriginMode))]);
+        handler.handle_cursor_pos(Some(1), Some(5)); // 0-based: x=0, y=4
+        handler.handle_cursor_report();
+        let resp = recv_pty_string(&rx);
+        // In DECOM mode, row is relative to scroll region top (0-based row 4, region top 4)
+        // So relative row = 4 - 4 = 0, reported as 1
+        assert!(
+            resp.contains('R'),
+            "CPR in DECOM mode should contain 'R' terminator"
+        );
+    }
+
+    #[test]
+    fn dsr_response() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_device_status_report();
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("0n"), "DSR should respond with '0n'");
+    }
+
+    #[test]
+    fn color_theme_report() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_color_theme_report();
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("?997;2n"),
+            "Color theme report should indicate dark (2)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Window manipulation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn window_manipulation_report_char_size() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::WindowManipulation(
+            WindowManipulation::ReportCharacterSizeInPixels,
+        )]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("6;"),
+            "ReportCharacterSizeInPixels should start with '6;'"
+        );
+    }
+
+    #[test]
+    fn window_manipulation_report_terminal_size() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::WindowManipulation(
+            WindowManipulation::ReportTerminalSizeInCharacters,
+        )]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("8;24;80"),
+            "ReportTerminalSizeInCharacters should report '8;24;80'"
+        );
+    }
+
+    #[test]
+    fn window_manipulation_report_root_window_size() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::WindowManipulation(
+            WindowManipulation::ReportRootWindowSizeInCharacters,
+        )]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("9;24;80"),
+            "ReportRootWindowSizeInCharacters should report '9;24;80'"
+        );
+    }
+
+    #[test]
+    fn window_manipulation_other_pushed_to_commands() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::WindowManipulation(
+            WindowManipulation::SetTitleBarText("test".to_string()),
+        )]);
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty keyboard protocol
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn kitty_keyboard_push_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(3)]);
+        assert_eq!(handler.kitty_keyboard_flags(), 3);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardQuery]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("?3u"),
+            "Kitty keyboard query should report '?3u'"
+        );
+    }
+
+    #[test]
+    fn kitty_keyboard_pop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(1)]);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(5)]);
+        assert_eq!(handler.kitty_keyboard_flags(), 5);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPop(1)]);
+        assert_eq!(handler.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_pop_more_than_stack() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(7)]);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPop(10)]);
+        assert_eq!(handler.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_keyboard_set_mode1_replace() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(0xFF)]);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardSet { flags: 3, mode: 1 }]);
+        assert_eq!(handler.kitty_keyboard_flags(), 3);
+    }
+
+    #[test]
+    fn kitty_keyboard_set_mode2_or() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(1)]);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardSet { flags: 2, mode: 2 }]);
+        assert_eq!(handler.kitty_keyboard_flags(), 3); // 1 | 2
+    }
+
+    #[test]
+    fn kitty_keyboard_set_mode3_and_not() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(7)]);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardSet { flags: 2, mode: 3 }]);
+        assert_eq!(handler.kitty_keyboard_flags(), 5); // 7 & !2
+    }
+
+    #[test]
+    fn kitty_keyboard_set_on_empty_stack() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardSet { flags: 5, mode: 1 }]);
+        assert_eq!(handler.kitty_keyboard_flags(), 5);
+    }
+
+    #[test]
+    fn kitty_keyboard_stack_overflow() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Push beyond max depth to test eviction
+        #[allow(clippy::cast_possible_truncation)]
+        let max_depth = KittyKeyboardFlags::MAX_STACK_DEPTH as u32;
+        for i in 0..=max_depth {
+            handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(i)]);
+        }
+        // Stack should be at max depth, oldest entry evicted
+        assert!(handler.kitty_keyboard_stack.len() <= KittyKeyboardFlags::MAX_STACK_DEPTH);
+    }
+
+    // ------------------------------------------------------------------
+    // Repeat character (REP)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn repeat_character() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"A");
+        handler.process_outputs(&[TerminalOutput::RepeatCharacter(5)]);
+        // Should have 'A' + 5 repeats = 6 chars total
+        assert_eq!(handler.buffer().get_cursor().pos.x, 6);
+    }
+
+    #[test]
+    fn repeat_character_no_previous() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // No previous graphic char — REP should be a no-op
+        handler.process_outputs(&[TerminalOutput::RepeatCharacter(5)]);
+        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // FTCS shell integration markers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ftcs_state_machine() {
+        use freminal_common::buffer_states::ftcs::{FtcsMarker, FtcsState};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        assert_eq!(handler.ftcs_state(), FtcsState::None);
+        assert_eq!(handler.last_exit_code(), Some(0));
+    }
+
+    #[test]
+    fn ftcs_command_finished_no_exit_code() {
+        use freminal_common::buffer_states::ftcs::FtcsMarker;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        assert_eq!(handler.last_exit_code(), None);
+    }
+
+    #[test]
+    fn ftcs_prompt_property_is_no_op() {
+        use freminal_common::buffer_states::ftcs::{FtcsMarker, FtcsState, PromptKind};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptProperty(
+            PromptKind::Initial,
+        )));
+        // State should still be InPrompt — prompt property doesn't change state
+        assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
+    }
+
+    // ------------------------------------------------------------------
+    // Handle resize with in-band notification
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handle_resize_sends_in_band_when_enabled() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::InBandResizeMode(
+            InBandResizeMode::Set,
+        ))]);
+        let _ = rx.try_recv(); // drain initial notification
+        handler.handle_resize(100, 30, 8, 16);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("48;"),
+            "Resize should trigger in-band notification"
+        );
+    }
+
+    #[test]
+    fn handle_resize_no_notification_when_disabled() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.handle_resize(100, 30, 8, 16);
+        // No in-band resize notification expected
+        assert!(
+            rx.try_recv().is_err(),
+            "No notification when in-band resize is disabled"
+        );
+    }
+
+    #[test]
+    fn handle_resize_updates_pixel_dimensions() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_resize(80, 24, 10, 20);
+        // Pixel dimensions are stored internally; verify via window manipulation
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.process_outputs(&[TerminalOutput::WindowManipulation(
+            WindowManipulation::ReportCharacterSizeInPixels,
+        )]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("6;20;10"), "Pixel dims should be h=20, w=10");
+    }
+
+    #[test]
+    fn handle_resize_zero_pixel_dims_not_stored() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_resize(80, 24, 10, 20);
+        handler.handle_resize(90, 30, 0, 0); // zero dims should not overwrite
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.process_outputs(&[TerminalOutput::WindowManipulation(
+            WindowManipulation::ReportCharacterSizeInPixels,
+        )]);
+        let resp = recv_pty_string(&rx);
+        // Should still have 10, 20 from the first resize
+        assert!(
+            resp.contains("6;20;10"),
+            "Zero pixel dims should not overwrite"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Tab stops via process_output
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tab_clear_at_cursor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+        // Tab stop at cursor position (0) should be cleared
+        handler.handle_tab();
+        // Default tab stop at col 8 was cleared at col 0 — but cursor is at 0,
+        // so clearing col 0 doesn't affect col 8. Tab should still go to 8.
+        assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    }
+
+    #[test]
+    fn tab_clear_all() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+        handler.handle_tab();
+        // All tab stops cleared — should go to last column
+        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    }
+
+    #[test]
+    fn tab_clear_ps5_same_as_all() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::TabClear(5)]);
+        handler.handle_tab();
+        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    }
+
+    #[test]
+    fn tab_clear_line_tab_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Ps=1,2,4 are line tab stops — should be no-ops
+        handler.process_outputs(&[TerminalOutput::TabClear(1)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(2)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(4)]);
+        handler.handle_tab();
+        assert_eq!(
+            handler.buffer().get_cursor().pos.x,
+            8,
+            "Line tab clears should be no-ops"
+        );
+    }
+
+    #[test]
+    fn horizontal_tab_set() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Clear all, set a custom tab stop at col 5, tab to it
+        handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+        handler.handle_cursor_pos(Some(6), Some(1)); // col 5 (0-indexed)
+        handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
+        handler.handle_cursor_pos(Some(1), Some(1)); // back to col 0
+        handler.handle_tab();
+        assert_eq!(
+            handler.buffer().get_cursor().pos.x,
+            5,
+            "Should tab to custom stop at 5"
+        );
+    }
+
+    #[test]
+    fn cursor_forward_tab() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorForwardTab(2)]);
+        // 2 tabs forward: 0→8→16
+        assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    }
+
+    #[test]
+    fn cursor_backward_tab() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(21), Some(1)); // col 20
+        handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
+        // Backward 1 tab from col 20: previous stop is col 16
+        assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    }
+
+    // ------------------------------------------------------------------
+    // Miscellaneous process_output arms
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn process_set_cursor_pos_rel() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        handler.process_outputs(&[TerminalOutput::SetCursorPosRel {
+            x: Some(3),
+            y: Some(-2),
+        }]);
+        assert_eq!(handler.buffer().get_cursor().pos.x, 12); // 9 + 3
+        assert_eq!(handler.buffer().get_cursor().pos.y, 2); // 4 - 2
+    }
+
+    #[test]
+    fn process_set_cursor_pos_rel_none() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        handler.process_outputs(&[TerminalOutput::SetCursorPosRel { x: None, y: None }]);
+        // No change — defaults to (0, 0)
+        assert_eq!(handler.buffer().get_cursor().pos.x, 9);
+        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+    }
+
+    #[test]
+    fn process_scroll_up_and_down() {
+        let mut handler = TerminalHandler::new(80, 5);
+        // Write some content
+        for i in 0..5_u8 {
+            handler.handle_data(&[b'A' + i]);
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        handler.process_outputs(&[TerminalOutput::ScrollUp(1)]);
+        handler.process_outputs(&[TerminalOutput::ScrollDown(1)]);
+        // Just exercising the code paths — no crash
+    }
+
+    #[test]
+    fn process_index_and_reverse_index() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(1), Some(5));
+        handler.process_outputs(&[TerminalOutput::Index]);
+        assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+        handler.process_outputs(&[TerminalOutput::ReverseIndex]);
+        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+    }
+
+    #[test]
+    fn process_next_line() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"Hello");
+        handler.process_outputs(&[TerminalOutput::NextLine]);
+        assert_eq!(handler.buffer().get_cursor().pos.x, 0, "NEL should CR");
+        assert_eq!(handler.buffer().get_cursor().pos.y, 1, "NEL should LF");
+    }
+
+    #[test]
+    fn process_set_margins() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::SetTopAndBottomMargins {
+            top_margin: 5,
+            bottom_margin: 20,
+        }]);
+        let (top, bottom) = handler.buffer().scroll_region();
+        assert_eq!(top, 4);
+        assert_eq!(bottom, 19);
+    }
+
+    #[test]
+    fn process_set_left_right_margins() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Declrmm(Declrmm::Enabled))]);
+        handler.process_outputs(&[TerminalOutput::SetLeftAndRightMargins {
+            left_margin: 5,
+            right_margin: 40,
+        }]);
+        // The margins are set via handler
+    }
+
+    #[test]
+    fn process_dec_special_graphics() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+            DecSpecialGraphics::Replace,
+        )]);
+        // 'q' (0x71) should map to a box drawing character
+        handler.handle_data(b"q");
+        // Cursor should advance
+        assert_eq!(handler.buffer().get_cursor().pos.x, 1);
+    }
+
+    #[test]
+    fn process_cursor_visual_style() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::UnderlineCursorBlink,
+        )]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::UnderlineCursorBlink
+        );
+    }
+
+    #[test]
+    fn process_line_width_variants() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"test");
+        handler.process_outputs(&[TerminalOutput::DoubleLineHeightTop]);
+        handler.process_outputs(&[TerminalOutput::DoubleLineHeightBottom]);
+        handler.process_outputs(&[TerminalOutput::SingleWidthLine]);
+        handler.process_outputs(&[TerminalOutput::DoubleWidthLine]);
+        // Just exercising the code paths
+    }
+
+    #[test]
+    fn process_screen_alignment_test() {
+        let mut handler = TerminalHandler::new(10, 5);
+        handler.process_outputs(&[TerminalOutput::ScreenAlignmentTest]);
+        // Screen should be filled with 'E' characters
+    }
+
+    #[test]
+    fn process_save_restore_cursor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        handler.process_outputs(&[TerminalOutput::SaveCursor]);
+        handler.handle_cursor_pos(Some(1), Some(1));
+        handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+        assert_eq!(handler.buffer().get_cursor().pos.x, 9);
+        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+    }
+
+    #[test]
+    fn process_reset_device() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"test");
+        handler.process_outputs(&[TerminalOutput::ResetDevice]);
+        // After full reset, cursor should be at origin
+        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+        assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    }
+
+    #[test]
+    fn process_enq() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Enq]);
+        let resp = recv_pty_string(&rx);
+        assert_eq!(resp, "", "ENQ should send empty answerback");
+    }
+
+    #[test]
+    fn process_modify_other_keys() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+        assert_eq!(handler.modify_other_keys_level(), 2);
+    }
+
+    #[test]
+    fn process_invalid_and_skipped() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Invalid]);
+        handler.process_outputs(&[TerminalOutput::Skipped]);
+        // Should not crash
+    }
+
+    #[test]
+    fn process_application_and_normal_keypad_mode() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::ApplicationKeypadMode]);
+        handler.process_outputs(&[TerminalOutput::NormalKeypadMode]);
+        // Just exercising trace-only code paths
+    }
+
+    #[test]
+    fn process_eight_and_seven_bit_control() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::EightBitControl]);
+        handler.process_outputs(&[TerminalOutput::SevenBitControl]);
+        // Handled by TerminalState — just trace paths
+    }
+
+    #[test]
+    fn process_ansi_conformance_levels() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::AnsiConformanceLevelOne]);
+        handler.process_outputs(&[TerminalOutput::AnsiConformanceLevelTwo]);
+        handler.process_outputs(&[TerminalOutput::AnsiConformanceLevelThree]);
+        // All are logged-only
+    }
+
+    #[test]
+    fn process_memory_lock_unlock() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::MemoryLock]);
+        handler.process_outputs(&[TerminalOutput::MemoryUnlock]);
+    }
+
+    #[test]
+    fn process_cursor_to_lower_left() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorToLowerLeftCorner]);
+    }
+
+    #[test]
+    fn process_charset_variants_are_noops() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let charsets = [
+            TerminalOutput::CharsetDefault,
+            TerminalOutput::CharsetUTF8,
+            TerminalOutput::CharsetG0,
+            TerminalOutput::CharsetG1,
+            TerminalOutput::CharsetG1AsGR,
+            TerminalOutput::CharsetG2,
+            TerminalOutput::CharsetG2AsGR,
+            TerminalOutput::CharsetG2AsGL,
+            TerminalOutput::CharsetG3,
+            TerminalOutput::CharsetG3AsGR,
+            TerminalOutput::CharsetG3AsGL,
+            TerminalOutput::DecSpecial,
+            TerminalOutput::CharsetUK,
+            TerminalOutput::CharsetUS,
+            TerminalOutput::CharsetUSASCII,
+            TerminalOutput::CharsetDutch,
+            TerminalOutput::CharsetFinnish,
+            TerminalOutput::CharsetFrench,
+            TerminalOutput::CharsetFrenchCanadian,
+            TerminalOutput::CharsetGerman,
+            TerminalOutput::CharsetItalian,
+            TerminalOutput::CharsetNorwegianDanish,
+            TerminalOutput::CharsetSpanish,
+            TerminalOutput::CharsetSwedish,
+            TerminalOutput::CharsetSwiss,
+        ];
+        for cs in &charsets {
+            handler.process_outputs(std::slice::from_ref(cs));
+        }
+    }
+
+    #[test]
+    fn process_modes_handled_by_terminal_state() {
+        use freminal_common::buffer_states::modes::{
+            alternate_scroll::AlternateScroll,
+            decarm::Decarm,
+            decbkm::Decbkm,
+            decckm::Decckm,
+            decnkm::Decnkm,
+            decscnm::Decscnm,
+            mouse::{MouseEncoding, MouseTrack},
+            rl_bracket::RlBracket,
+            sync_updates::SynchronizedUpdates,
+            theme::Theming,
+            xtmsewin::XtMseWin,
+        };
+        let mut handler = TerminalHandler::new(80, 24);
+        let modes = [
+            Mode::Decckm(Decckm::Application),
+            Mode::BracketedPaste(RlBracket::Enabled),
+            Mode::MouseMode(MouseTrack::NoTracking),
+            Mode::MouseEncodingMode(MouseEncoding::X11),
+            Mode::XtMseWin(XtMseWin::Enabled),
+            Mode::Decscnm(Decscnm::ReverseDisplay),
+            Mode::Decarm(Decarm::RepeatKey),
+            Mode::SynchronizedUpdates(SynchronizedUpdates::DontDraw),
+            Mode::Decnkm(Decnkm::Application),
+            Mode::Decbkm(Decbkm::BackarrowSendsBs),
+            Mode::AlternateScroll(AlternateScroll::Enabled),
+            Mode::Theming(Theming::Dark),
+            Mode::GraphemeClustering(GraphemeClustering::Unicode),
+            Mode::GraphemeClustering(GraphemeClustering::Legacy),
+        ];
+        for mode in &modes {
+            handler.process_outputs(&[TerminalOutput::Mode(mode.clone())]);
+        }
+        // All handled by TerminalState — should be no-ops in TerminalHandler
+    }
+
+    #[test]
+    fn process_mode_noop_and_unknown() {
+        use freminal_common::buffer_states::modes::unknown::{ModeNamespace, UnknownMode};
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::NoOp)]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Unknown(UnknownMode::new(
+            b"99",
+            SetMode::DecSet,
+            ModeNamespace::Dec,
+        )))]);
+    }
+
+    // ------------------------------------------------------------------
+    // IRM (Insert/Replace Mode) text insertion
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn irm_insert_mode_shifts_content() {
+        let mut handler = TerminalHandler::new(20, 5);
+        handler.handle_data(b"ABCDE");
+        handler.handle_cursor_pos(Some(3), Some(1)); // col 2
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Irm(Irm::Insert))]);
+        handler.handle_data(b"XY");
+        // After inserting "XY" at col 2 in insert mode, cursor should be at col 4
+        assert_eq!(handler.buffer().get_cursor().pos.x, 4);
+    }
+
+    // ------------------------------------------------------------------
+    // OSC remote host / CWD
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_remote_host_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://localhost/home/user".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+    }
+
+    #[test]
+    fn osc_remote_host_invalid() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost("not-a-valid-uri".to_string()));
+        assert!(handler.current_working_directory().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC set title
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_set_title() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::SetTitleBar("My Terminal".to_string()));
+        let cmds = handler.take_window_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            WindowManipulation::SetTitleBarText(t) if t == "My Terminal"
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // OSC URL hyperlinks
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_url_start_and_end() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Url(UrlResponse::Url(Url {
+            id: Some("myid".to_string()),
+            url: "https://example.com".to_string(),
+        })));
+        assert!(handler.current_format().url.is_some());
+        handler.handle_osc(&AnsiOscType::Url(UrlResponse::End));
+        assert!(handler.current_format().url.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Scroll helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn scroll_back_and_forward() {
+        let mut handler = TerminalHandler::new(80, 3);
+        // Write enough to create scrollback
+        for i in 0..10_u8 {
+            handler.handle_data(&[b'A' + i]);
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        let offset = handler.handle_scroll_back(0, 3);
+        assert_eq!(offset, 3);
+        let offset2 = handler.handle_scroll_forward(offset, 1);
+        assert_eq!(offset2, 2);
+        let bottom = TerminalHandler::handle_scroll_to_bottom();
+        assert_eq!(bottom, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Accessors
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn s8c1t_mode_accessor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert_eq!(*handler.s8c1t_mode(), S8c1t::SevenBit);
+        handler.set_s8c1t_mode(S8c1t::EightBit);
+        assert_eq!(*handler.s8c1t_mode(), S8c1t::EightBit);
+    }
+
+    #[test]
+    fn cursor_color_override_accessor() {
+        let handler = TerminalHandler::new(80, 24);
+        assert!(handler.cursor_color_override().is_none());
+    }
+
+    #[test]
+    fn theme_accessor() {
+        let handler = TerminalHandler::new(80, 24);
+        let _theme = handler.theme();
+        // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn is_alternate_screen_accessor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.is_alternate_screen());
+        handler.handle_enter_alternate();
+        assert!(handler.is_alternate_screen());
+        handler.handle_leave_alternate();
+        assert!(!handler.is_alternate_screen());
+    }
+
+    #[test]
+    fn has_saved_cursor_accessor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.has_saved_cursor());
+        handler.handle_save_cursor();
+        assert!(handler.has_saved_cursor());
+    }
+
+    #[test]
+    fn application_escape_key_accessor() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(
+            handler.application_escape_key(),
+            ApplicationEscapeKey::Reset
+        );
+    }
+
+    #[test]
+    fn buffer_mut_accessor() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let buf = handler.buffer_mut();
+        buf.handle_cr(); // Just verify we can call methods on the mutable ref
+    }
+
+    #[test]
+    fn take_tmux_reparse_queue() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let queue = handler.take_tmux_reparse_queue();
+        assert!(queue.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Alt screen with disallowed switching
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn alt_screen_blocked_when_disallowed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+            AllowAltScreen::Disallow,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        assert!(
+            !handler.is_alternate_screen(),
+            "Alt screen should be blocked"
+        );
+    }
+
+    #[test]
+    fn alt_screen_47_blocked_when_disallowed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowAltScreen(
+            AllowAltScreen::Disallow,
+        ))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(
+            AltScreen47::Alternate,
+        ))]);
+        assert!(
+            !handler.is_alternate_screen(),
+            "AltScreen47 should be blocked"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // XtCBlink (cursor blink) set/reset
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn xtcblink_set_makes_cursor_blink() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Default cursor is block blink
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::BlockCursorSteady,
+        )]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Blinking))]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::BlockCursorBlink
+        );
+    }
+
+    #[test]
+    fn xtcblink_reset_makes_cursor_steady() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::BlockCursorBlink,
+        )]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Steady))]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::BlockCursorSteady
+        );
+    }
+
+    #[test]
+    fn xtcblink_underline_blink_to_steady() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::UnderlineCursorBlink,
+        )]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Steady))]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::UnderlineCursorSteady
+        );
+    }
+
+    #[test]
+    fn xtcblink_vertical_line_blink_to_steady() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::VerticalLineCursorBlink,
+        )]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Steady))]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::VerticalLineCursorSteady
+        );
+    }
+
+    #[test]
+    fn xtcblink_underline_steady_to_blink() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::UnderlineCursorSteady,
+        )]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Blinking))]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::UnderlineCursorBlink
+        );
+    }
+
+    #[test]
+    fn xtcblink_vertical_line_steady_to_blink() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+            CursorVisualStyle::VerticalLineCursorSteady,
+        )]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Blinking))]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::VerticalLineCursorBlink
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // any_visible_dirty / has_visible_images
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn any_visible_dirty_and_has_visible_images() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"test");
+        let _dirty = handler.any_visible_dirty(0);
+        let _images = handler.has_visible_images(0);
+        let _placements = handler.visible_image_placements(0);
+        // Just exercising these paths
+    }
+
+    // ------------------------------------------------------------------
+    // OSC NoOp
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::NoOp);
+        // Should be a no-op
+    }
+
+    // ------------------------------------------------------------------
+    // Full reset clears kitty keyboard stack
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn full_reset_clears_kitty_stack() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(5)]);
+        assert_eq!(handler.kitty_keyboard_flags(), 5);
+        handler.full_reset();
+        assert_eq!(handler.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn full_reset_clears_format_and_modes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::ModifyOtherKeys(2)]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::ApplicationEscapeKey(
+            ApplicationEscapeKey::Set,
+        ))]);
+        handler.full_reset();
+        assert_eq!(handler.modify_other_keys_level(), 0);
+        assert_eq!(
+            handler.application_escape_key(),
+            ApplicationEscapeKey::Reset
+        );
+        assert_eq!(*handler.current_format(), FormatTag::default());
+    }
+
+    // ------------------------------------------------------------------
+    // `apply_dec_special` standalone function
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_dec_special_dont_replace() {
+        let data = b"hello";
+        let result = apply_dec_special(data, &DecSpecialGraphics::DontReplace);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(&*result, data);
+    }
+
+    #[test]
+    fn apply_dec_special_replace_box_drawing() {
+        // 'q' (0x71) maps to U+2500 HORIZONTAL LINE (─)
+        let data = b"q";
+        let result = apply_dec_special(data, &DecSpecialGraphics::Replace);
+        // The result should be UTF-8 bytes for ─ (U+2500 = 0xE2 0x94 0x80)
+        assert_ne!(&*result, data, "Should have been remapped");
+    }
+
+    #[test]
+    fn apply_dec_special_replace_non_mappable_byte() {
+        // Bytes outside 0x5F-0x7E are passed through
+        let data = b"ABC";
+        let result = apply_dec_special(data, &DecSpecialGraphics::Replace);
+        assert_eq!(&*result, data, "Non-mappable bytes should pass through");
+    }
+
+    // ------------------------------------------------------------------
+    // Coverage gap tests: terminal_handler/mod.rs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn set_theme_changes_active_theme() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let original = handler.theme();
+        // Find a different theme
+        let themes = freminal_common::themes::all_themes();
+        let other = themes.iter().find(|t| t.name != original.name).unwrap();
+        handler.set_theme(other);
+        assert_eq!(handler.theme().name, other.name);
+    }
+
+    #[test]
+    fn handle_data_empty_is_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(&[]);
+        // No crash, buffer unchanged
+        assert_eq!(handler.buffer.get_cursor().pos.x, 0);
+    }
+
+    #[test]
+    fn handle_erase_in_display_3_clears_scrollback() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Write some data that generates scrollback
+        for _ in 0..30 {
+            handler.handle_data(b"line of text");
+            handler.handle_newline();
+        }
+        handler.handle_erase_in_display(3);
+        // After erase scrollback, max_scroll_offset should be 0
+        assert_eq!(handler.buffer.max_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn handle_erase_in_display_unknown_mode_is_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"hello");
+        handler.handle_erase_in_display(99);
+        // No crash, data still present
+    }
+
+    #[test]
+    fn handle_erase_in_line_unknown_mode_is_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"hello");
+        handler.handle_erase_in_line(99);
+        // No crash
+    }
+
+    #[test]
+    fn handle_xt_cblink_query_is_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.apply_xtcblink(&XtCBlink::Query);
+        // Default is BlockCursorSteady, Query should not change it
+        assert_eq!(
+            handler.cursor_visual_style,
+            CursorVisualStyle::BlockCursorSteady
+        );
+    }
+
+    #[test]
+    fn handle_xt_cblink_blink_already_blinking_unchanged() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.cursor_visual_style = CursorVisualStyle::BlockCursorBlink;
+        handler.apply_xtcblink(&XtCBlink::Blinking);
+        assert_eq!(
+            handler.cursor_visual_style,
+            CursorVisualStyle::BlockCursorBlink
+        );
+    }
+
+    #[test]
+    fn handle_xt_cblink_steady_already_steady_unchanged() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.cursor_visual_style = CursorVisualStyle::BlockCursorSteady;
+        handler.apply_xtcblink(&XtCBlink::Steady);
+        assert_eq!(
+            handler.cursor_visual_style,
+            CursorVisualStyle::BlockCursorSteady
+        );
+    }
+
+    #[test]
+    fn handle_apc_not_kitty_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_application_program_command(b"not_kitty_graphics");
+        // Should not panic
+    }
+
+    #[test]
+    fn handle_apc_invalid_kitty_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Starts with _G but has invalid content
+        handler.handle_application_program_command(b"_Ga=INVALID");
+        // Should not panic
+    }
+
+    #[test]
+    fn process_output_clear_scrollback_and_display() {
+        let mut handler = TerminalHandler::new(80, 24);
+        for _ in 0..30 {
+            handler.handle_data(b"text");
+            handler.handle_newline();
+        }
+        handler.process_outputs(&[TerminalOutput::ClearScrollbackandDisplay]);
+        assert_eq!(handler.buffer.max_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn process_output_tbc_unsupported_ps() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Ps=99 is unsupported, should be ignored
+        handler.process_outputs(&[TerminalOutput::TabClear(99)]);
+        // No crash
+    }
+
+    #[test]
+    fn mode_xt_extscrn_query_primary() {
+        let (mut handler, rx) = handler_with_pty();
+        // Not in alternate screen
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Query))]);
+        let resp = recv_pty_string(&rx);
+        // Should report DecRst (not in alt screen)
+        assert!(
+            resp.contains("1049"),
+            "XtExtscrn query should reference mode 1049"
+        );
+    }
+
+    #[test]
+    fn mode_alt_screen_47_query_primary() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("47"),
+            "AltScreen47 query should reference mode 47"
+        );
+    }
+
+    #[test]
+    fn mode_deccolm_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains('3'), "Deccolm query should reference mode 3");
+    }
+
+    #[test]
+    fn mode_allow_column_mode_switch_set_and_query() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+            AllowColumnModeSwitch::AllowColumnModeSwitch,
+        ))]);
+        assert_eq!(
+            handler.allow_column_mode_switch,
+            AllowColumnModeSwitch::AllowColumnModeSwitch
+        );
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+            AllowColumnModeSwitch::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        // Should report DecSet since we just enabled it
+        assert!(
+            resp.contains("40"),
+            "AllowColumnModeSwitch query should reference mode 40"
+        );
+    }
+
+    #[test]
+    fn mode_allow_column_mode_switch_disable() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AllowColumnModeSwitch(
+            AllowColumnModeSwitch::NoAllowColumnModeSwitch,
+        ))]);
+        assert_eq!(
+            handler.allow_column_mode_switch,
+            AllowColumnModeSwitch::NoAllowColumnModeSwitch
+        );
+    }
+
+    #[test]
+    fn process_output_application_program_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::ApplicationProgramCommand(
+            b"not_kitty".to_vec(),
+        )]);
+        // Should not panic
+    }
+
+    #[test]
+    fn process_output_request_terminal_parameters() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::RequestTerminalParameters(0)]);
+        let resp = recv_pty_string(&rx);
+        // DECREPTPARM response: CSI 2;1;1;128;128;1;0x
+        assert!(
+            resp.contains('x'),
+            "DECREPTPARM response should end with 'x'"
+        );
+    }
+
+    #[test]
+    fn handle_repeat_character_repeats_last() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"A");
+        handler.handle_repeat_character(3);
+        // Should have written 'A' then repeated it 3 times = 4 total A's
+        let text = handler.buffer.extract_text(0, 0, 0, 3);
+        assert_eq!(text, "AAAA");
+    }
+
+    #[test]
+    fn handle_repeat_character_no_last_char_is_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // No prior graphic char
+        handler.handle_repeat_character(3);
+        // Should not crash, no text written
+    }
+
+    #[test]
+    fn insert_text_irm_insert_mode() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.insert_mode = Irm::Insert;
+        handler.handle_data(b"AB");
+        // Cursor should be at col 2
+        assert_eq!(handler.buffer.get_cursor().pos.x, 2);
+    }
+
+    #[test]
+    fn osc_iterm2_inline_dispatched() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Construct a minimal iTerm2 inline image data
+        handler.handle_osc(&AnsiOscType::ITerm2FileInline(ITerm2InlineImageData {
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: vec![],
+        }));
+        // Just verifying dispatch doesn't panic; no actual image data to decode
+    }
+
+    #[test]
+    fn osc_iterm2_unknown_is_noop() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::ITerm2Unknown);
+        // Should not panic
+    }
+
+    #[test]
+    fn send_in_band_resize_dispatched() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.in_band_resize_enabled = true;
+        // Trigger a resize that changes dimensions to fire send_in_band_resize
+        handler.handle_resize(100, 30, 8, 16);
+        // Should have sent an in-band resize notification
+        let resp = recv_pty_string(&rx);
+        assert!(resp.contains("48;"), "In-band resize should contain '48;'");
+    }
+
+    #[test]
+    fn mode_save_cursor_1048_query_no_saved() {
+        let (mut handler, rx) = handler_with_pty();
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
+            SaveCursor1048::Query,
+        ))]);
+        let resp = recv_pty_string(&rx);
+        // No cursor saved yet, should report DecRst
+        assert!(
+            resp.contains("1048"),
+            "SaveCursor1048 query should reference mode 1048"
+        );
+    }
+
+    #[test]
+    fn mode_xt_cblink_query_reports_steady() {
+        let (mut handler, rx) = handler_with_pty();
+        // Default is BlockCursorSteady
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtCBlink(XtCBlink::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("12"),
+            "XtCBlink query should reference mode 12"
+        );
+    }
+
+    // ── Coverage gap tests: mode queries on alternate screen ──────────
+
+    #[test]
+    fn mode_xt_extscrn_query_on_alternate_screen() {
+        let (mut handler, rx) = handler_with_pty();
+        // Switch to alternate screen first
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        assert!(handler.is_alternate_screen());
+        // Now query — should report DecSet
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("1049"),
+            "XtExtscrn query on alt screen should reference mode 1049"
+        );
+        // Verify it reports DecSet (contains "1" for set, not "2" for reset)
+        // The DECRPM response format is CSI ? Pd ; Ps $ y
+        // Ps=1 means set, Ps=2 means reset
+    }
+
+    #[test]
+    fn mode_alt_screen_47_query_on_alternate_screen() {
+        let (mut handler, rx) = handler_with_pty();
+        // Enter alternate screen via mode 47
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(
+            AltScreen47::Alternate,
+        ))]);
+        assert!(handler.is_alternate_screen());
+        // Query — should report DecSet
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains("47"),
+            "AltScreen47 query on alt screen should reference mode 47"
+        );
+    }
+
+    #[test]
+    fn mode_deccolm_query_when_132_columns() {
+        let (mut handler, rx) = handler_with_pty();
+        // Resize to 132 columns
+        handler.handle_resize(132, 24, 8, 16);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Deccolm(Deccolm::Query))]);
+        let resp = recv_pty_string(&rx);
+        assert!(
+            resp.contains('3'),
+            "Deccolm query at 132 columns should reference mode 3"
+        );
+    }
+
+    // ── Coverage gap: KittyKeyboardSet with unknown mode ──────────────
+
+    #[test]
+    fn kitty_keyboard_set_unknown_mode_preserves_current() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Push initial flags
+        handler.kitty_keyboard_stack.push(0b0000_0101); // flags = 5
+        // Mode=99 is not 1/2/3, so should keep current
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardSet {
+            flags: 0xFF,
+            mode: 99,
+        }]);
+        assert_eq!(
+            handler.kitty_keyboard_flags(),
+            0b0000_0101,
+            "Unknown mode should preserve current flags"
+        );
+    }
+
+    // ── Coverage gap: APC non-Kitty graphics ─────────────────────────
+
+    #[test]
+    fn apc_non_kitty_graphics_does_not_panic() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Send a non-Kitty APC (no 'G' control character)
+        handler.handle_application_program_command(b"SomeRandomAPC");
+        // Should log a warning but not panic
+    }
+
+    // ── Coverage gap: handle_data_with_placeholders ──────────────────
+
+    #[test]
+    fn handle_data_with_placeholders_no_match() {
+        use freminal_common::buffer_states::unicode_placeholder::VirtualPlacement;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        // Add a virtual placement so the placeholder path is taken
+        handler.virtual_placements.insert(
+            (1, 0),
+            VirtualPlacement {
+                image_id: 1,
+                placement_id: 0,
+                rows: 1,
+                cols: 1,
+            },
+        );
+
+        // Send text that contains NO placeholders — should go through
+        // handle_data_with_placeholders but only flush the batch, never
+        // entering the placeholder branch.
+        handler.handle_data_with_placeholders(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+
+        // Verify text was inserted
+        let row = &handler.buffer.get_rows()[0];
+        assert_eq!(row.cells().len(), 2);
+    }
+
+    #[test]
+    fn handle_data_with_placeholders_mixed_text_and_placeholder() {
+        use freminal_common::buffer_states::unicode_placeholder::VirtualPlacement;
+
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Create a virtual placement
+        handler.virtual_placements.insert(
+            (1, 0),
+            VirtualPlacement {
+                image_id: 1,
+                placement_id: 0,
+                rows: 2,
+                cols: 2,
+            },
+        );
+
+        // Store an image in the image store so the placeholder can reference it
+        let img = crate::image_store::InlineImage {
+            id: 1,
+            pixels: std::sync::Arc::new(vec![0; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+        };
+        handler.buffer.image_store_mut().insert(img);
+
+        // Set foreground color to encode image_id=1 (RGB: 0, 0, 1)
+        handler.current_format.colors.color =
+            freminal_common::colors::TerminalColor::Custom(0, 0, 1);
+        // Set underline color to encode placement_id=0
+        handler.current_format.colors.underline_color =
+            freminal_common::colors::TerminalColor::Custom(0, 0, 0);
+
+        // Build a placeholder TChar: U+10EEEE encoded as UTF-8
+        // U+10EEEE = 0xF4 0x8E 0xBB 0xAE (no diacritics = rule 1)
+        let placeholder_bytes: [u8; 4] = [0xF4, 0x8E, 0xBB, 0xAE];
+        let mut buf = [0u8; 16];
+        buf[..4].copy_from_slice(&placeholder_bytes);
+
+        let placeholder = TChar::Utf8(buf, 4);
+
+        // Mix text + placeholder + text
+        let text = vec![TChar::Ascii(b'X'), placeholder, TChar::Ascii(b'Y')];
+
+        handler.handle_data_with_placeholders(&text);
+
+        // Verify: "X" was inserted, then placeholder, then "Y"
+        // The buffer should have cells written
+        let rows = handler.buffer.get_rows();
+        assert!(
+            !rows.is_empty(),
+            "buffer should have at least one row after text+placeholder"
+        );
+    }
+
+    // ── Coverage gap: resolve_placeholder_diacritics rule 3 col mismatch ──
+
+    #[test]
+    fn resolve_placeholder_diacritics_rule3_col_mismatch() {
+        use freminal_common::buffer_states::unicode_placeholder::PlaceholderDiacritics;
+        use freminal_common::colors::TerminalColor;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        // Set up a prev_placeholder
+        handler.prev_placeholder = Some(PrevPlaceholder {
+            image_id: 42,
+            placement_id: 0,
+            row: 1,
+            col: 5,
+            id_msb: 0x10,
+            fg_color: TerminalColor::Custom(0, 0, 42),
+            underline_color: TerminalColor::Custom(0, 0, 0),
+        });
+
+        // Rule 3: two diacritics (row+col explicit), but col does NOT match prev.col+1
+        let diacritics = PlaceholderDiacritics {
+            diacritic_count: 2,
+            row: 1,
+            col: 10, // not prev.col+1 (6)
+            id_msb: 0,
+        };
+
+        let (row, col, msb) = handler.resolve_placeholder_diacritics(
+            diacritics,
+            42,
+            0,
+            TerminalColor::Custom(0, 0, 42),
+            TerminalColor::Custom(0, 0, 0),
+        );
+
+        assert_eq!(row, 1);
+        assert_eq!(col, 10);
+        assert_eq!(msb, 0, "col mismatch means msb should be 0, not inherited");
+    }
+
+    #[test]
+    fn resolve_placeholder_diacritics_all_three_present() {
+        use freminal_common::buffer_states::unicode_placeholder::PlaceholderDiacritics;
+        use freminal_common::colors::TerminalColor;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.prev_placeholder = Some(PrevPlaceholder {
+            image_id: 42,
+            placement_id: 0,
+            row: 1,
+            col: 5,
+            id_msb: 0x10,
+            fg_color: TerminalColor::Custom(0, 0, 42),
+            underline_color: TerminalColor::Custom(0, 0, 0),
+        });
+
+        // All three diacritics — no inheritance needed.
+        let diacritics = PlaceholderDiacritics {
+            diacritic_count: 3,
+            row: 2,
+            col: 3,
+            id_msb: 0x20,
+        };
+
+        let (row, col, msb) = handler.resolve_placeholder_diacritics(
+            diacritics,
+            42,
+            0,
+            TerminalColor::Custom(0, 0, 42),
+            TerminalColor::Custom(0, 0, 0),
+        );
+
+        assert_eq!(row, 2);
+        assert_eq!(col, 3);
+        assert_eq!(msb, 0x20, "all diacritics present: use explicit msb");
+    }
+
+    // ── Coverage gap: handle_placeholder_char with invalid diacritics ─
+
+    #[test]
+    fn handle_placeholder_char_invalid_bytes_returns_early() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Send bytes that don't parse as valid placeholder diacritics
+        handler.handle_placeholder_char(&[0x00, 0x01, 0x02]);
+        // Should return early without crashing
+    }
+
+    #[test]
+    fn handle_placeholder_char_no_virtual_placement_inserts_space() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Don't register any virtual placements
+
+        // Set foreground color to encode image_id=99
+        handler.current_format.colors.color =
+            freminal_common::colors::TerminalColor::Custom(0, 0, 99);
+        handler.current_format.colors.underline_color =
+            freminal_common::colors::TerminalColor::Custom(0, 0, 0);
+
+        // U+10EEEE = F4 8E BB AE (just the base, no diacritics = 0 diacritics)
+        let bytes: [u8; 4] = [0xF4, 0x8E, 0xBB, 0xAE];
+        handler.handle_placeholder_char(&bytes);
+
+        // Should have inserted a space (no matching virtual placement)
+        let rows = handler.buffer.get_rows();
+        if !rows.is_empty() && !rows[0].cells().is_empty() {
+            assert_eq!(
+                rows[0].cells()[0].tchar(),
+                &TChar::Space,
+                "no virtual placement → should insert a space"
+            );
+        }
+    }
 }

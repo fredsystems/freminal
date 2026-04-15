@@ -32,3 +32,23 @@ impl fmt::Display for S8c1t {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_seven_bit() {
+        assert_eq!(S8c1t::SevenBit.to_string(), "7-bit C1 Controls (S7C1T)");
+    }
+
+    #[test]
+    fn display_eight_bit() {
+        assert_eq!(S8c1t::EightBit.to_string(), "8-bit C1 Controls (S8C1T)");
+    }
+
+    #[test]
+    fn default_is_seven_bit() {
+        assert_eq!(S8c1t::default(), S8c1t::SevenBit);
+    }
+}

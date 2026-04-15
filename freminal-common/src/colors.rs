@@ -329,3 +329,44 @@ pub fn scale_hex_channel(s: &str) -> Option<u8> {
     };
     u8::try_from(scaled).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_hex_channel_five_digit_returns_none() {
+        // Length 5 is not in 1–4 → the `_ => return None` arm
+        assert_eq!(scale_hex_channel("fffff"), None);
+    }
+
+    #[test]
+    fn scale_hex_channel_empty_returns_none() {
+        // Empty string: from_str_radix will fail → None via `?`
+        assert_eq!(scale_hex_channel(""), None);
+    }
+
+    #[test]
+    fn scale_hex_channel_one_digit() {
+        // 'a' → 0xaa = 170
+        assert_eq!(scale_hex_channel("a"), Some(0xaa));
+    }
+
+    #[test]
+    fn scale_hex_channel_two_digits() {
+        assert_eq!(scale_hex_channel("ff"), Some(0xff));
+        assert_eq!(scale_hex_channel("80"), Some(0x80));
+    }
+
+    #[test]
+    fn scale_hex_channel_three_digits() {
+        // 0xABC >> 4 = 0xAB = 171
+        assert_eq!(scale_hex_channel("ABC"), Some(0xAB));
+    }
+
+    #[test]
+    fn scale_hex_channel_four_digits() {
+        // 0xABCD >> 8 = 0xAB = 171
+        assert_eq!(scale_hex_channel("ABCD"), Some(0xAB));
+    }
+}

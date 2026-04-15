@@ -944,4 +944,163 @@ mod tests {
         assert_eq!(img.width, 5);
         assert_eq!(img.height, 12);
     }
+
+    // --- finish() trim branches ---
+
+    #[test]
+    fn test_sixel_height_trim_via_raster_attributes() {
+        // Raster: declared height = 3, but sixel data fills 2 bands (12 rows).
+        // Since declared_height (3) < actual height (12), finish() must trim.
+        // "\"1;1;2;3 means aspect 1:1, width=2, height=3
+        let inner = b"q\"1;1;2;3#0;2;100;0;0!2~-!2~";
+        let img = parse_sixel(inner).unwrap();
+        // height trimmed to declared 3
+        assert_eq!(img.height, 3);
+        assert_eq!(img.width, 2);
+    }
+
+    #[test]
+    fn test_sixel_width_trim_via_raster_attributes() {
+        // Raster: declared width = 1, actual data is 3 columns wide.
+        // Since declared_width (1) < actual width (3), finish() must trim columns.
+        // "\"1;1;1;6" means aspect 1:1, declared width=1, declared height=6
+        let inner = b"q\"1;1;1;6#0;2;100;0;0~~~";
+        let img = parse_sixel(inner).unwrap();
+        // width trimmed to declared 1
+        assert_eq!(img.width, 1);
+        assert_eq!(img.height, 6);
+        // The remaining pixel should still be red
+        assert_eq!(img.pixels[0], 255, "R");
+        assert_eq!(img.pixels[1], 0, "G");
+        assert_eq!(img.pixels[2], 0, "B");
+    }
+
+    // --- parse_sixel_with_shared_palette: None branch (no 'q') ---
+
+    #[test]
+    fn test_parse_sixel_with_shared_palette_no_q_returns_none() {
+        let palette = [(0u8, 0u8, 0u8); MAX_PALETTE];
+        // No 'q' byte in the input → the `let Some(q_pos)` guard returns (None, palette)
+        let (img, _returned_palette) = parse_sixel_with_shared_palette(b"nodatahere", palette);
+        assert!(img.is_none());
+    }
+
+    #[test]
+    fn test_parse_sixel_with_shared_palette_basic() {
+        // Normal shared-palette parse: single red pixel
+        let palette = [(0u8, 0u8, 0u8); MAX_PALETTE];
+        let inner = b"q#0;2;100;0;0@";
+        let (img, _) = parse_sixel_with_shared_palette(inner, palette);
+        let img = img.unwrap();
+        assert_eq!(img.width, 1);
+        assert_eq!(img.pixels[0], 255);
+    }
+
+    // --- hls_to_rgb remaining sectors ---
+
+    #[test]
+    fn test_hls_to_rgb_sector2_yellow_green() {
+        // Hue 90 → sector 1.5 (sector < 2.0): (secondary, chroma, 0.0)
+        let (r, g, b) = hls_to_rgb(90, 50, 100);
+        // Yellow-green: mostly green, some red, no blue
+        assert!(g > r, "green should dominate: r={r} g={g} b={b}");
+        assert!(b < 10, "blue should be near 0: b={b}");
+    }
+
+    #[test]
+    fn test_hls_to_rgb_sector3_cyan() {
+        // Hue 150 → sector 2.5 (sector < 3.0): (0.0, chroma, secondary)
+        let (r, g, b) = hls_to_rgb(150, 50, 100);
+        // Cyan-ish: mostly green, some blue, no red
+        assert!(r < 10, "red should be near 0: r={r}");
+        assert!(g > b, "green should exceed blue: g={g} b={b}");
+    }
+
+    #[test]
+    fn test_hls_to_rgb_sector4_cyan_blue() {
+        // Hue 210 → sector 3.5 (sector < 4.0): (0.0, secondary, chroma)
+        let (r, g, b) = hls_to_rgb(210, 50, 100);
+        // Cyan-blue: mostly blue, some green, no red
+        assert!(r < 10, "red should be near 0: r={r}");
+        assert!(b > g, "blue should exceed green: g={g} b={b}");
+    }
+
+    #[test]
+    fn test_hls_to_rgb_sector5_magenta() {
+        // Hue 270 → sector 4.5 (sector < 5.0): (secondary, 0.0, chroma)
+        let (r, g, b) = hls_to_rgb(270, 50, 100);
+        // Violet/magenta: blue and some red, no green
+        assert!(g < 10, "green should be near 0: g={g}");
+        assert!(b > r, "blue should exceed red: r={r} b={b}");
+    }
+
+    #[test]
+    fn test_hls_to_rgb_sector6_red_magenta() {
+        // Hue 330 → sector 5.5 (sector >= 5.0): (chroma, 0.0, secondary)
+        let (r, g, b) = hls_to_rgb(330, 50, 100);
+        // Red-magenta: mostly red, some blue, no green
+        assert!(g < 10, "green should be near 0: g={g}");
+        assert!(r > b, "red should exceed blue: r={r} b={b}");
+    }
+
+    // --- skip-other byte branch (line ~511) ---
+
+    #[test]
+    fn test_sixel_skip_unrecognized_bytes() {
+        // Whitespace and other non-control bytes should be silently skipped.
+        // Embed a space and a tab in a valid sixel stream.
+        let inner = b"q#0;2;100;0;0 \t~";
+        let img = parse_sixel(inner).unwrap();
+        // Despite the garbage bytes, one column of all-set pixels should decode.
+        assert_eq!(img.width, 1);
+        assert_eq!(img.height, 6);
+    }
+
+    // --- repeat with count==0 (should use 1) ---
+
+    #[test]
+    fn test_sixel_repeat_count_zero_uses_one() {
+        // !0@ → repeat 0 times → treated as 1 repetition
+        let inner = b"q#0;2;100;0;0!0@";
+        let img = parse_sixel(inner).unwrap();
+        assert_eq!(img.width, 1);
+    }
+
+    // --- non-sixel char after ! (skipped) ---
+
+    #[test]
+    fn test_sixel_repeat_non_sixel_char_skipped() {
+        // !5; → ';' is not in the sixel range 0x3F..=0x7E, the draw is skipped
+        // but the rest of the stream (a valid pixel '@') still decodes.
+        let inner = b"q#0;2;100;0;0!5;@";
+        let img = parse_sixel(inner).unwrap();
+        // '@' (sixel value 1 → bit 0 = top pixel) is still processed.
+        assert_eq!(img.width, 1);
+    }
+
+    // --- finish_into_parts height/width trim (via parse_sixel_with_shared_palette) ---
+
+    #[test]
+    fn test_finish_into_parts_height_trim() {
+        // Two bands of data (12 rows total) but declared height = 3.
+        // finish_into_parts should trim to 3.
+        let palette = [(0u8, 0u8, 0u8); MAX_PALETTE];
+        let inner = b"q\"1;1;2;3#0;2;100;0;0!2~-!2~";
+        let (img, _) = parse_sixel_with_shared_palette(inner, palette);
+        let img = img.unwrap();
+        assert_eq!(img.height, 3);
+        assert_eq!(img.width, 2);
+    }
+
+    #[test]
+    fn test_finish_into_parts_width_trim() {
+        // 3 columns of data but declared width = 1.
+        // finish_into_parts should trim columns to 1.
+        let palette = [(0u8, 0u8, 0u8); MAX_PALETTE];
+        let inner = b"q\"1;1;1;6#0;2;100;0;0~~~";
+        let (img, _) = parse_sixel_with_shared_palette(inner, palette);
+        let img = img.unwrap();
+        assert_eq!(img.width, 1);
+        assert_eq!(img.height, 6);
+    }
 }

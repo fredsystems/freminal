@@ -64,3 +64,114 @@ impl fmt::Display for PrivateColorRegisters {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── new() ────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_dec_set_is_private() {
+        assert_eq!(
+            PrivateColorRegisters::new(&SetMode::DecSet),
+            PrivateColorRegisters::Private
+        );
+    }
+
+    #[test]
+    fn new_dec_rst_is_shared() {
+        assert_eq!(
+            PrivateColorRegisters::new(&SetMode::DecRst),
+            PrivateColorRegisters::Shared
+        );
+    }
+
+    #[test]
+    fn new_dec_query_is_query() {
+        assert_eq!(
+            PrivateColorRegisters::new(&SetMode::DecQuery),
+            PrivateColorRegisters::Query
+        );
+    }
+
+    // ── ReportMode ───────────────────────────────────────────────────
+
+    #[test]
+    fn report_private_no_override() {
+        assert_eq!(
+            PrivateColorRegisters::Private.report(None),
+            "\x1b[?1070;1$y"
+        );
+    }
+
+    #[test]
+    fn report_shared_no_override() {
+        assert_eq!(PrivateColorRegisters::Shared.report(None), "\x1b[?1070;2$y");
+    }
+
+    #[test]
+    fn report_query_no_override() {
+        assert_eq!(PrivateColorRegisters::Query.report(None), "\x1b[?1070;0$y");
+    }
+
+    #[test]
+    fn report_with_dec_set_override() {
+        assert_eq!(
+            PrivateColorRegisters::Shared.report(Some(SetMode::DecSet)),
+            "\x1b[?1070;1$y"
+        );
+    }
+
+    #[test]
+    fn report_with_dec_rst_override() {
+        assert_eq!(
+            PrivateColorRegisters::Private.report(Some(SetMode::DecRst)),
+            "\x1b[?1070;2$y"
+        );
+    }
+
+    #[test]
+    fn report_with_dec_query_override() {
+        assert_eq!(
+            PrivateColorRegisters::Private.report(Some(SetMode::DecQuery)),
+            "\x1b[?1070;0$y"
+        );
+    }
+
+    // ── Display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn display_private() {
+        assert_eq!(
+            PrivateColorRegisters::Private.to_string(),
+            "Private Sixel Color Registers (?1070)"
+        );
+    }
+
+    #[test]
+    fn display_shared() {
+        assert_eq!(
+            PrivateColorRegisters::Shared.to_string(),
+            "Shared Sixel Color Registers (?1070)"
+        );
+    }
+
+    #[test]
+    fn display_query() {
+        assert_eq!(
+            PrivateColorRegisters::Query.to_string(),
+            "Query Sixel Color Registers (?1070)"
+        );
+    }
+
+    // ── default ──────────────────────────────────────────────────────
+
+    #[test]
+    fn default_is_private() {
+        assert_eq!(
+            PrivateColorRegisters::default(),
+            PrivateColorRegisters::Private
+        );
+    }
+}

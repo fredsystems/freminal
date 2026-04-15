@@ -519,4 +519,482 @@ mod tests {
     fn display_auto() {
         assert_eq!(ImageDimension::Auto.to_string(), "auto");
     }
+
+    // ------------------------------------------------------------------
+    // AnsiOscInternalType Display tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn display_osc_internal_query() {
+        assert_eq!(AnsiOscInternalType::Query.to_string(), "Query");
+    }
+
+    #[test]
+    fn display_osc_internal_unknown_none() {
+        let s = AnsiOscInternalType::Unknown(None).to_string();
+        assert!(s.contains("Unknown"), "got: {s}");
+    }
+
+    #[test]
+    fn display_osc_internal_unknown_some() {
+        let token = AnsiOscToken::String("hello".to_string());
+        let s = AnsiOscInternalType::Unknown(Some(token)).to_string();
+        assert!(s.contains("Unknown"), "got: {s}");
+    }
+
+    #[test]
+    fn display_osc_internal_string() {
+        let s = AnsiOscInternalType::String("xterm".to_string()).to_string();
+        assert_eq!(s, "xterm");
+    }
+
+    // ------------------------------------------------------------------
+    // UrlResponse Display tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn display_url_response_end() {
+        assert_eq!(UrlResponse::End.to_string(), "End");
+    }
+
+    #[test]
+    fn display_url_response_url_with_id() {
+        use crate::buffer_states::url::Url;
+        let r = UrlResponse::Url(Url {
+            id: Some("myid".to_string()),
+            url: "https://example.com".to_string(),
+        });
+        let s = r.to_string();
+        assert!(s.contains("Url"), "got: {s}");
+        assert!(s.contains("myid"), "got: {s}");
+    }
+
+    #[test]
+    fn display_url_response_url_no_id() {
+        use crate::buffer_states::url::Url;
+        let r = UrlResponse::Url(Url {
+            id: None,
+            url: "https://example.com".to_string(),
+        });
+        let s = r.to_string();
+        assert!(s.contains("Url"), "got: {s}");
+    }
+
+    // ------------------------------------------------------------------
+    // From<Vec<Option<AnsiOscToken>>> for UrlResponse tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn url_response_from_tokens_with_id() {
+        let tokens = vec![
+            Some(AnsiOscToken::OscValue(8)),
+            Some(AnsiOscToken::String("myid".to_string())),
+            Some(AnsiOscToken::String("https://example.com".to_string())),
+        ];
+        let r = UrlResponse::from(tokens);
+        match r {
+            UrlResponse::Url(url) => {
+                assert_eq!(url.id, Some("myid".to_string()));
+                assert_eq!(url.url, "https://example.com");
+            }
+            UrlResponse::End => panic!("expected Url, got End"),
+        }
+    }
+
+    #[test]
+    fn url_response_from_tokens_without_id() {
+        let tokens = vec![
+            Some(AnsiOscToken::OscValue(8)),
+            None,
+            Some(AnsiOscToken::String("https://example.com".to_string())),
+        ];
+        let r = UrlResponse::from(tokens);
+        match r {
+            UrlResponse::Url(url) => {
+                assert_eq!(url.id, None);
+                assert_eq!(url.url, "https://example.com");
+            }
+            UrlResponse::End => panic!("expected Url, got End"),
+        }
+    }
+
+    #[test]
+    fn url_response_from_tokens_end() {
+        // A pattern that doesn't match either URL arm → End
+        let tokens: Vec<Option<AnsiOscToken>> = vec![None, None];
+        let r = UrlResponse::from(tokens);
+        assert_eq!(r, UrlResponse::End);
+    }
+
+    #[test]
+    fn url_response_from_empty_tokens_is_end() {
+        let tokens: Vec<Option<AnsiOscToken>> = vec![];
+        let r = UrlResponse::from(tokens);
+        assert_eq!(r, UrlResponse::End);
+    }
+
+    // ------------------------------------------------------------------
+    // AnsiOscType Display tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn display_ansi_osc_type_noop() {
+        assert_eq!(AnsiOscType::NoOp.to_string(), "NoOp");
+    }
+
+    #[test]
+    fn display_ansi_osc_set_palette_color() {
+        let s = AnsiOscType::SetPaletteColor(1, 255, 128, 0).to_string();
+        assert!(s.contains("SetPaletteColor"), "got: {s}");
+        assert!(s.contains("255"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_set_pointer_shape() {
+        let s =
+            AnsiOscType::SetPointerShape(crate::buffer_states::pointer_shape::PointerShape::Text)
+                .to_string();
+        assert!(s.contains("SetPointerShape"), "got: {s}");
+        assert!(s.contains("text"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_set_clipboard() {
+        let s = AnsiOscType::SetClipboard("c".to_string(), "hello".to_string()).to_string();
+        assert!(s.contains("SetClipboard"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_query_clipboard() {
+        let s = AnsiOscType::QueryClipboard("c".to_string()).to_string();
+        assert!(s.contains("QueryClipboard"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_reset_palette_color_none() {
+        let s = AnsiOscType::ResetPaletteColor(None).to_string();
+        assert!(s.contains("ResetPaletteColor"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_reset_palette_color_some() {
+        let s = AnsiOscType::ResetPaletteColor(Some(3)).to_string();
+        assert!(s.contains("ResetPaletteColor"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_reset_foreground_color() {
+        assert_eq!(
+            AnsiOscType::ResetForegroundColor.to_string(),
+            "ResetForegroundColor"
+        );
+    }
+
+    #[test]
+    fn display_ansi_osc_reset_background_color() {
+        assert_eq!(
+            AnsiOscType::ResetBackgroundColor.to_string(),
+            "ResetBackgroundColor"
+        );
+    }
+
+    #[test]
+    fn display_ansi_osc_reset_cursor_color() {
+        assert_eq!(
+            AnsiOscType::ResetCursorColor.to_string(),
+            "ResetCursorColor"
+        );
+    }
+
+    #[test]
+    fn display_ansi_osc_iterm2_file_end() {
+        assert_eq!(AnsiOscType::ITerm2FileEnd.to_string(), "ITerm2FileEnd");
+    }
+
+    #[test]
+    fn display_ansi_osc_iterm2_unknown() {
+        assert_eq!(AnsiOscType::ITerm2Unknown.to_string(), "ITerm2Unknown");
+    }
+
+    // ------------------------------------------------------------------
+    // AnsiOscType Display: remaining uncovered variants
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn display_ansi_osc_request_color_query_background() {
+        let s = AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query).to_string();
+        assert!(s.contains("RequestColorQueryBackground"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_request_color_query_foreground() {
+        let s = AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query).to_string();
+        assert!(s.contains("RequestColorQueryForeground"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_ftcs() {
+        use crate::buffer_states::ftcs::FtcsMarker;
+        let s = AnsiOscType::Ftcs(FtcsMarker::PromptStart).to_string();
+        assert!(s.contains("Ftcs"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_set_title_bar() {
+        let s = AnsiOscType::SetTitleBar("my title".to_string()).to_string();
+        assert!(s.contains("SetTitleBar"), "got: {s}");
+        assert!(s.contains("my title"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_url() {
+        use crate::buffer_states::url::Url;
+        let s = AnsiOscType::Url(UrlResponse::Url(Url {
+            id: None,
+            url: "https://example.com".to_string(),
+        }))
+        .to_string();
+        assert!(s.contains("Url"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_remote_host() {
+        let s = AnsiOscType::RemoteHost("user@host".to_string()).to_string();
+        assert!(s.contains("RemoteHost"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_request_color_query_cursor() {
+        let s = AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query).to_string();
+        assert!(s.contains("RequestColorQueryCursor"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_iterm2_file_inline() {
+        let data = ITerm2InlineImageData {
+            name: Some("test.png".to_string()),
+            size: Some(1024),
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: vec![1, 2, 3],
+        };
+        let s = AnsiOscType::ITerm2FileInline(data).to_string();
+        assert!(s.contains("ITerm2FileInline"), "got: {s}");
+        assert!(s.contains("test.png"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_iterm2_multipart_begin() {
+        let data = ITerm2InlineImageData {
+            name: Some("big.png".to_string()),
+            size: Some(4096),
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: vec![],
+        };
+        let s = AnsiOscType::ITerm2MultipartBegin(data).to_string();
+        assert!(s.contains("ITerm2MultipartBegin"), "got: {s}");
+        assert!(s.contains("big.png"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_iterm2_file_part() {
+        let s = AnsiOscType::ITerm2FilePart(vec![0u8; 16]).to_string();
+        assert!(s.contains("ITerm2FilePart"), "got: {s}");
+        assert!(s.contains("16"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_query_palette_color() {
+        let s = AnsiOscType::QueryPaletteColor(7).to_string();
+        assert!(s.contains("QueryPaletteColor"), "got: {s}");
+        assert!(s.contains('7'), "got: {s}");
+    }
+
+    // ------------------------------------------------------------------
+    // OscTarget::from(&AnsiOscToken) — cover the From impl arms
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_target_from_token_title_bar() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(0)),
+            OscTarget::TitleBar
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(2)),
+            OscTarget::TitleBar
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_icon_name() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(1)),
+            OscTarget::IconName
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_palette_color() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(4)),
+            OscTarget::PaletteColor
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_remote_host() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(7)),
+            OscTarget::RemoteHost
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_url() {
+        assert_eq!(OscTarget::from(&AnsiOscToken::OscValue(8)), OscTarget::Url);
+    }
+
+    #[test]
+    fn osc_target_from_token_background() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(11)),
+            OscTarget::Background
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_foreground() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(10)),
+            OscTarget::Foreground
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_cursor_color() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(12)),
+            OscTarget::CursorColor
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_mouse_fg_bg_tek() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(13)),
+            OscTarget::MouseForeground
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(14)),
+            OscTarget::MouseBackground
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(15)),
+            OscTarget::TekForeground
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(16)),
+            OscTarget::TekBackground
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_highlight() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(17)),
+            OscTarget::HighlightBackground
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(19)),
+            OscTarget::HighlightForeground
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_pointer_shape() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(22)),
+            OscTarget::PointerShape
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_clipboard() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(52)),
+            OscTarget::Clipboard
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_color_scheme_notification() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(66)),
+            OscTarget::ColorSchemeNotification
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_reset_palette() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(104)),
+            OscTarget::ResetPaletteColor
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_reset_cursor() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(112)),
+            OscTarget::ResetCursorColor
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_ftcs() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(133)),
+            OscTarget::Ftcs
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_iterm2() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(1337)),
+            OscTarget::ITerm2
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_reset_fg_bg() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(110)),
+            OscTarget::ResetForeground
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(111)),
+            OscTarget::ResetBackground
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_unknown() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(999)),
+            OscTarget::Unknown
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::String("something".to_string())),
+            OscTarget::Unknown
+        );
+    }
 }

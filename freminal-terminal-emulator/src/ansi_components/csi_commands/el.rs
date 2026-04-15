@@ -36,3 +36,49 @@ pub fn ansi_parser_inner_csi_finished_el(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn el_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_el(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn el_empty_clears_line_forwards() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_el(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ClearLineForwards]);
+    }
+
+    #[test]
+    fn el_0_clears_line_forwards() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_el(b"0", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ClearLineForwards]);
+    }
+
+    #[test]
+    fn el_1_clears_line_backwards() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_el(b"1", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ClearLineBackwards]);
+    }
+
+    #[test]
+    fn el_2_clears_entire_line() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_el(b"2", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ClearLine]);
+    }
+}

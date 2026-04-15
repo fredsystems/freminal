@@ -40,3 +40,45 @@ pub fn ansi_parser_inner_csi_finished_cup(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn cup_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_cup(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn cup_empty_defaults_to_row1_col1() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_cup(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn cup_explicit_row_and_col() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_cup(b"5;10", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+    }
+}

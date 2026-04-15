@@ -129,4 +129,20 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn non_numeric_params_is_invalid() {
+        let mut out = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decslrm(b"abc", &mut out);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn too_many_params_is_invalid() {
+        let mut out = Vec::new();
+        let result = ansi_parser_inner_csi_finished_decslrm(b"1;2;3", &mut out);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(out.is_empty());
+    }
 }

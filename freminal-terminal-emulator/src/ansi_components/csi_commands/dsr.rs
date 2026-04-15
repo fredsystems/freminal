@@ -53,3 +53,50 @@ pub fn ansi_parser_inner_csi_finished_dsr(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn dsr_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dsr(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        // DSR pushes Invalid to output before returning the error outcome
+        assert!(output.contains(&TerminalOutput::Invalid));
+    }
+
+    #[test]
+    fn dsr_5_device_status_report() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dsr(b"5", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::DeviceStatusReport]);
+    }
+
+    #[test]
+    fn dsr_6_cursor_report() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dsr(b"6", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::CursorReport]);
+    }
+
+    #[test]
+    fn dsr_private_996_color_theme_report() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dsr(b"?996", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ColorThemeReport]);
+    }
+
+    #[test]
+    fn dsr_unknown_value_emits_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dsr(b"99", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+}

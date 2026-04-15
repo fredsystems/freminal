@@ -692,3 +692,350 @@ impl TerminalState {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // ── hex_preview ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn hex_preview_short_data_no_truncation() {
+        // Data shorter than max_bytes → no "..." suffix
+        let data = &[0x48u8, 0x65, 0x6c];
+        let s = hex_preview(data, 16);
+        assert_eq!(s, "48 65 6c");
+        assert!(!s.ends_with("..."));
+    }
+
+    #[test]
+    fn hex_preview_empty_data() {
+        let s = hex_preview(&[], 16);
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn hex_preview_truncates_and_appends_dots() {
+        // Data longer than max_bytes → truncated + "..."
+        let data: Vec<u8> = (0u8..=5).collect(); // 6 bytes
+        let s = hex_preview(&data, 3);
+        // Only first 3 bytes + "..."
+        assert!(s.ends_with("..."), "expected '...' suffix, got: {s:?}");
+        // First 3 bytes should be "00 01 02"
+        assert!(s.starts_with("00 01 02"), "got: {s:?}");
+    }
+
+    #[test]
+    fn hex_preview_exact_max_bytes_no_truncation() {
+        // Data exactly max_bytes long → no truncation
+        let data = &[0xAAu8, 0xBB, 0xCC];
+        let s = hex_preview(data, 3);
+        assert_eq!(s, "aa bb cc");
+        assert!(!s.ends_with("..."));
+    }
+
+    // ── TerminalState::default and PartialEq ────────────────────────────────
+
+    #[test]
+    fn terminal_state_default_constructs_without_panic() {
+        let state = TerminalState::default();
+        // Should have fresh parser, default modes, no leftover data
+        assert!(state.leftover_data.is_none());
+    }
+
+    #[test]
+    fn terminal_state_partial_eq_two_fresh_states_are_equal() {
+        let a = TerminalState::default();
+        let b = TerminalState::default();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn terminal_state_partial_eq_leftover_data_differs() {
+        let mut a = TerminalState::default();
+        let b = TerminalState::default();
+        a.leftover_data = Some(vec![0xC3]); // incomplete UTF-8
+        assert_ne!(a, b);
+    }
+
+    // ── sync_mode_flags with NoOp/Unknown ───────────────────────────────────
+
+    #[test]
+    fn sync_mode_flags_noop_mode_does_not_panic() {
+        use freminal_common::buffer_states::mode::Mode;
+        let mut state = TerminalState::default();
+        let output = TerminalOutput::Mode(Mode::NoOp);
+        // Must not panic
+        state.sync_mode_flags(&output);
+    }
+
+    #[test]
+    fn sync_mode_flags_unknown_mode_does_not_panic() {
+        use freminal_common::buffer_states::mode::Mode;
+        use freminal_common::buffer_states::modes::unknown::{ModeNamespace, UnknownMode};
+        let mut state = TerminalState::default();
+        let unknown = UnknownMode::new(b"9999", SetMode::DecSet, ModeNamespace::Dec);
+        let output = TerminalOutput::Mode(Mode::Unknown(unknown));
+        state.sync_mode_flags(&output);
+    }
+
+    #[test]
+    fn sync_mode_flags_application_keypad_mode() {
+        use freminal_common::buffer_states::modes::keypad::KeypadMode;
+        let mut state = TerminalState::default();
+        state.sync_mode_flags(&TerminalOutput::ApplicationKeypadMode);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+    }
+
+    #[test]
+    fn sync_mode_flags_normal_keypad_mode() {
+        use freminal_common::buffer_states::modes::keypad::KeypadMode;
+        let mut state = TerminalState::default();
+        state.sync_mode_flags(&TerminalOutput::ApplicationKeypadMode);
+        state.sync_mode_flags(&TerminalOutput::NormalKeypadMode);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+    }
+
+    // ── leftover UTF-8 reassembly ────────────────────────────────────────────
+
+    #[test]
+    fn handle_incoming_data_reassembles_split_utf8() {
+        // Split a 2-byte UTF-8 sequence (é = 0xC3 0xA9) across two calls.
+        // First call: send just the leading byte 0xC3 (incomplete sequence).
+        // Second call: send the continuation byte 0xA9 + a plain ASCII 'A'.
+        let mut state = TerminalState::default();
+
+        // Call 1: leading byte of 2-byte UTF-8 → should be saved as leftover
+        state.handle_incoming_data(&[0xC3]);
+        assert_eq!(
+            state.leftover_data,
+            Some(vec![0xC3]),
+            "leading byte should be held as leftover"
+        );
+
+        // Call 2: continuation + 'A' → should prepend leftover and process "é A"
+        state.handle_incoming_data(&[0xA9, b'A']);
+        assert!(
+            state.leftover_data.is_none(),
+            "leftover should be cleared after reassembly"
+        );
+    }
+
+    #[test]
+    fn handle_incoming_data_ascii_only_no_leftover() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"Hello");
+        assert!(state.leftover_data.is_none());
+    }
+
+    // ── send_terminal_input via write() ──────────────────────────────────────
+
+    #[test]
+    fn write_ascii_sends_single_byte_to_channel() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let state = TerminalState::new(tx, None);
+        state
+            .write(&crate::input::TerminalInput::Ascii(b'A'))
+            .expect("write should succeed");
+        let msg = rx.try_recv().expect("should have received a message");
+        match msg {
+            PtyWrite::Write(bytes) => assert_eq!(bytes, vec![b'A']),
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    #[test]
+    fn write_enter_sends_carriage_return() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let state = TerminalState::new(tx, None);
+        state
+            .write(&crate::input::TerminalInput::Enter)
+            .expect("write should succeed");
+        let msg = rx.try_recv().expect("should have received a message");
+        // Default LNM=Normal → Enter sends CR (0x0D)
+        match msg {
+            PtyWrite::Write(bytes) => assert_eq!(bytes, vec![b'\r']),
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    // ── send_decrpm ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn send_decrpm_sends_response_to_channel() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let state = TerminalState::new(tx, None);
+        let resp = "\x1b[?1;2$y";
+        state.send_decrpm(resp);
+        let msg = rx.try_recv().expect("should have received a message");
+        match msg {
+            PtyWrite::Write(bytes) => assert_eq!(bytes, resp.as_bytes().to_vec()),
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    #[test]
+    fn send_decrpm_on_disconnected_channel_does_not_panic() {
+        // Drop the receiver → send will silently fail but must not panic.
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let state = TerminalState::new(tx, None);
+        drop(rx);
+        // Must not panic
+        state.send_decrpm("\x1b[?1;2$y");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Coverage gap tests
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Line 201: send_focus_event write failure ─────────────────────────────
+    #[test]
+    fn send_focus_event_write_failure_does_not_panic() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut state = TerminalState::new(tx, None);
+        // Enable focus reporting
+        state.modes.focus_reporting = XtMseWin::Enabled;
+        // Drop receiver to cause write failure
+        drop(rx);
+        // Must not panic — error is logged but not propagated
+        state.send_focus_event(true);
+        state.send_focus_event(false);
+    }
+
+    // ── Lines 372-378: Mouse mode query DECRPM for encoding modes ───────────
+    #[test]
+    fn handle_mode_query_mouse_encoding_1006_set() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut state = TerminalState::new(tx, None);
+        // Set mouse encoding to SGR (mode 1006)
+        state.modes.mouse_encoding = MouseEncoding::Sgr;
+        // Query mode 1006 — should report "set" (ps=1)
+        state.sync_mode_flags(&TerminalOutput::Mode(Mode::MouseMode(MouseTrack::Query(
+            1006,
+        ))));
+        let msg = rx.try_recv().expect("should have received DECRPM response");
+        match msg {
+            PtyWrite::Write(bytes) => {
+                let resp = String::from_utf8(bytes).expect("valid UTF-8");
+                assert!(resp.contains("1006;1"), "Expected set (;1), got: {resp:?}");
+            }
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    #[test]
+    fn handle_mode_query_mouse_encoding_1005_reset() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut state = TerminalState::new(tx, None);
+        // Default mouse encoding is X11 (mode 0)
+        // Query mode 1005 — should report "reset" (ps=2) since encoding is X11
+        state.sync_mode_flags(&TerminalOutput::Mode(Mode::MouseMode(MouseTrack::Query(
+            1005,
+        ))));
+        let msg = rx.try_recv().expect("should have received DECRPM response");
+        match msg {
+            PtyWrite::Write(bytes) => {
+                let resp = String::from_utf8(bytes).expect("valid UTF-8");
+                assert!(
+                    resp.contains("1005;2"),
+                    "Expected reset (;2), got: {resp:?}"
+                );
+            }
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    #[test]
+    fn handle_mode_query_mouse_encoding_1016_set() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut state = TerminalState::new(tx, None);
+        // Set mouse encoding to SgrPixels (mode 1016)
+        state.modes.mouse_encoding = MouseEncoding::SgrPixels;
+        // Query mode 1016 — should report "set" (ps=1)
+        state.sync_mode_flags(&TerminalOutput::Mode(Mode::MouseMode(MouseTrack::Query(
+            1016,
+        ))));
+        let msg = rx.try_recv().expect("should have received DECRPM response");
+        match msg {
+            PtyWrite::Write(bytes) => {
+                let resp = String::from_utf8(bytes).expect("valid UTF-8");
+                assert!(resp.contains("1016;1"), "Expected set (;1), got: {resp:?}");
+            }
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    // ── Lines 512-513, 582-584: handle_incoming_data leftover reassembly ────
+    #[test]
+    fn handle_incoming_data_leftover_debug_trace_paths() {
+        let mut state = TerminalState::default();
+        // First call: send leading byte of a 3-byte UTF-8 sequence (e.g. 0xE2)
+        state.handle_incoming_data(&[0xE2]);
+        assert!(state.leftover_data.is_some());
+        // Second call: send part of the continuation (still incomplete)
+        // The leftover from first call will be prepended, but 0xE2 0x80 is still
+        // incomplete (needs one more byte), so we get new leftover
+        state.handle_incoming_data(&[0x80]);
+        assert!(state.leftover_data.is_some());
+        // Third call: complete the sequence
+        state.handle_incoming_data(&[0x94]); // 0xE2 0x80 0x94 = em dash
+        assert!(state.leftover_data.is_none());
+    }
+
+    // ── Lines 674-675: write() with Owned payload ───────────────────────────
+    #[test]
+    fn write_arrow_with_modifier_sends_owned_payload() {
+        use crate::input::{KeyModifiers, TerminalInput};
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let state = TerminalState::new(tx, None);
+        // Arrow right with Shift produces an Owned payload (modified_csi_final)
+        let shift = KeyModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        };
+        state
+            .write(&TerminalInput::ArrowRight(shift))
+            .expect("write should succeed");
+        let msg = rx.try_recv().expect("should have received a message");
+        match msg {
+            PtyWrite::Write(bytes) => {
+                // Shift+Right = ESC [ 1 ; 2 C
+                assert_eq!(bytes, b"\x1b[1;2C");
+            }
+            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+        }
+    }
+
+    // ── drain_tmux_reparse_queue via DCS tmux passthrough ───────────────────
+    #[test]
+    fn drain_tmux_reparse_queue_processes_osc_passthrough() {
+        let mut state = TerminalState::default();
+        // Feed a tmux DCS passthrough containing an OSC title-set sequence:
+        // DCS tmux ; ESC ] 0 ; hello BEL ST
+        // In tmux passthrough, ESCs inside are doubled, so:
+        // ESC P tmux ; ESC ESC ] 0 ; h e l l o BEL ESC \
+        let mut data: Vec<u8> = Vec::new();
+        data.push(0x1b); // ESC
+        data.push(b'P'); // DCS
+        data.extend_from_slice(b"tmux;");
+        data.push(0x1b); // Doubled ESC
+        data.push(0x1b); // (second ESC — tmux doubles them)
+        data.push(b']'); // OSC
+        data.extend_from_slice(b"0;hello");
+        data.push(0x07); // BEL terminator for inner OSC
+        data.push(0x1b); // ESC
+        data.push(b'\\'); // ST to end DCS
+        // Process through the full pipeline — this should queue the OSC
+        // in the tmux reparse queue, and drain_tmux_reparse_queue should
+        // process it.
+        state.handle_incoming_data(&data);
+        // The tmux reparse queue should be drained (empty after processing)
+        let remaining = state.handler.take_tmux_reparse_queue();
+        assert!(
+            remaining.is_empty(),
+            "tmux reparse queue should be drained after handle_incoming_data"
+        );
+    }
+}

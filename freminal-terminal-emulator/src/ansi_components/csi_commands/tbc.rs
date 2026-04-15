@@ -37,3 +37,33 @@ pub fn ansi_parser_inner_csi_finished_tbc(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn tbc_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_tbc(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn tbc_empty_defaults_to_0() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_tbc(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::TabClear(0)]);
+    }
+
+    #[test]
+    fn tbc_explicit_ps_3() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_tbc(b"3", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::TabClear(3)]);
+    }
+}

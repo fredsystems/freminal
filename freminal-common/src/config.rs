@@ -2163,4 +2163,100 @@ path = "/tmp/my.frag"
             "default config should have no shader"
         );
     }
+
+    // --- apply_cli_overrides ---
+
+    #[test]
+    fn apply_cli_overrides_hide_menu_bar() {
+        // Exercises line 589: `self.ui.hide_menu_bar = true` when hide_menu_bar=true.
+        let mut cfg = Config::default();
+        assert!(!cfg.ui.hide_menu_bar);
+        cfg.apply_cli_overrides(None, None, true);
+        assert!(cfg.ui.hide_menu_bar);
+    }
+
+    #[test]
+    fn apply_cli_overrides_hide_menu_bar_false_does_not_change() {
+        // hide_menu_bar=false must NOT override an already-set value.
+        let mut cfg = Config::default();
+        cfg.ui.hide_menu_bar = true; // already true
+        cfg.apply_cli_overrides(None, None, false);
+        assert!(
+            cfg.ui.hide_menu_bar,
+            "false should not clear a previously-set value"
+        );
+    }
+
+    // --- file_log_level ---
+
+    #[test]
+    fn file_log_level_defaults_to_info_when_not_set() {
+        // Exercises line 598: `unwrap_or("info")` when level is None.
+        let cfg = Config::default();
+        assert!(
+            cfg.logging.level.is_none(),
+            "default logging level should be None"
+        );
+        assert_eq!(cfg.file_log_level(), "info");
+    }
+
+    #[test]
+    fn file_log_level_returns_configured_value() {
+        let mut cfg = Config::default();
+        cfg.logging.level = Some("debug".to_string());
+        assert_eq!(cfg.file_log_level(), "debug");
+    }
+
+    // --- save_config / load_config with explicit path ---
+
+    #[test]
+    fn save_config_writes_to_explicit_path() {
+        // Exercises lines 822-824: save writes TOML to a temp file.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("test_config.toml");
+        let cfg = Config::default();
+        save_config(&cfg, Some(&path)).expect("save_config should succeed");
+        assert!(path.exists(), "config file should be created");
+        let contents = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            contents.contains("version"),
+            "written TOML should contain version key"
+        );
+    }
+
+    #[test]
+    fn load_config_from_explicit_path() {
+        // Exercises line 771 equivalent (explicit path loading via load_config).
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("test_config.toml");
+        let mut cfg_to_save = Config::default();
+        cfg_to_save.font.size = 20.0;
+        save_config(&cfg_to_save, Some(&path)).expect("save_config should succeed");
+
+        let loaded = load_config(Some(&path)).expect("load_config should succeed");
+        assert!((loaded.font.size - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn load_config_via_freminal_config_env_var() {
+        // Exercises lines 774-779: FREMINAL_CONFIG env var path.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("env_config.toml");
+        let mut cfg_to_save = Config::default();
+        cfg_to_save.font.size = 18.0;
+        save_config(&cfg_to_save, Some(&path)).expect("save_config should succeed");
+
+        // Set the env var and call load_config(None) so it goes through the layered path.
+        // SAFETY: this is test code; the test process is single-threaded at this point.
+        unsafe {
+            std::env::set_var("FREMINAL_CONFIG", path.to_str().unwrap());
+        }
+        let result = load_config(None);
+        unsafe {
+            std::env::remove_var("FREMINAL_CONFIG");
+        }
+
+        let loaded = result.expect("load_config with FREMINAL_CONFIG should succeed");
+        assert!((loaded.font.size - 18.0).abs() < f32::EPSILON);
+    }
 }

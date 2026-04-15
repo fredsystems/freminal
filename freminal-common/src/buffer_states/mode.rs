@@ -525,4 +525,557 @@ mod tests {
             "default Theming state is Light (per enum #[default])"
         );
     }
+
+    // ── Mode::NoOp ──────────────────────────────────────────────────
+
+    #[test]
+    fn display_noop() {
+        assert_eq!(format!("{}", Mode::NoOp), "NoOp");
+    }
+
+    #[test]
+    fn report_noop() {
+        assert_eq!(Mode::NoOp.report(None), "NoOp");
+    }
+
+    // ── Mode::UnknownQuery ──────────────────────────────────────────
+
+    #[test]
+    fn report_unknown_query_decrpm_format() {
+        let mode = Mode::UnknownQuery(vec![b'4', b'7']);
+        assert_eq!(mode.report(None), "\x1b[?47;0$y");
+    }
+
+    #[test]
+    fn display_unknown_query() {
+        let mode = Mode::UnknownQuery(vec![b'4', b'7']);
+        let s = format!("{mode}");
+        assert!(s.contains("Unknown Query"), "got: {s}");
+    }
+
+    // ── Delegating Display arms ─────────────────────────────────────
+
+    #[test]
+    fn display_decckm() {
+        use super::super::modes::decckm::Decckm;
+        let s = format!("{}", Mode::Decckm(Decckm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decawm() {
+        let s = format!("{}", Mode::Decawm(Decawm::AutoWrap));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_irm() {
+        use super::super::modes::irm::Irm;
+        let s = format!("{}", Mode::Irm(Irm::Insert));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_mouse_encoding_mode() {
+        use super::super::modes::mouse::MouseEncoding;
+        let s = format!("{}", Mode::MouseEncodingMode(MouseEncoding::Sgr));
+        assert!(s.contains("MouseEncoding"), "got: {s}");
+    }
+
+    #[test]
+    fn display_private_color_registers() {
+        use super::super::modes::private_color_registers::PrivateColorRegisters;
+        let s = format!(
+            "{}",
+            Mode::PrivateColorRegisters(PrivateColorRegisters::Private)
+        );
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_unknown_mode() {
+        use super::super::modes::unknown::{ModeNamespace, UnknownMode};
+        let m = UnknownMode::new(b"99", SetMode::DecSet, ModeNamespace::Dec);
+        let s = format!("{}", Mode::Unknown(m));
+        assert!(!s.is_empty());
+    }
+
+    // ── Delegating ReportMode arms ─────────────────────────────────
+
+    #[test]
+    fn report_decawm_auto_wrap() {
+        let mode = Mode::Decawm(Decawm::AutoWrap);
+        assert_eq!(mode.report(None), "\x1b[?7;1$y");
+    }
+
+    #[test]
+    fn report_irm_insert() {
+        use super::super::modes::irm::Irm;
+        let mode = Mode::Irm(Irm::Insert);
+        assert_eq!(mode.report(None), "\x1b[4;1$y");
+    }
+
+    #[test]
+    fn report_private_color_registers_private() {
+        use super::super::modes::private_color_registers::PrivateColorRegisters;
+        let mode = Mode::PrivateColorRegisters(PrivateColorRegisters::Private);
+        assert_eq!(mode.report(None), "\x1b[?1070;1$y");
+    }
+
+    #[test]
+    fn report_mouse_mode_no_tracking() {
+        use super::super::modes::mouse::MouseTrack;
+        let mode = Mode::MouseMode(MouseTrack::NoTracking);
+        // NoTracking → mode_number=0, set_mode=0 (DecRst/None path)
+        assert_eq!(mode.report(None), "\x1b[?0;0$y");
+    }
+
+    #[test]
+    fn report_mouse_encoding_mode_x11() {
+        use super::super::modes::mouse::MouseEncoding;
+        let mode = Mode::MouseEncodingMode(MouseEncoding::X11);
+        // X11 → mode_number=0, set_mode=0 (X11 is default/reset)
+        assert_eq!(mode.report(None), "\x1b[?0;0$y");
+    }
+
+    // ── SetMode Display ─────────────────────────────────────────────
+
+    #[test]
+    fn display_set_mode_dec_set() {
+        assert_eq!(format!("{}", SetMode::DecSet), "Mode Set");
+    }
+
+    #[test]
+    fn display_set_mode_dec_rst() {
+        assert_eq!(format!("{}", SetMode::DecRst), "Mode Reset");
+    }
+
+    #[test]
+    fn display_set_mode_dec_query() {
+        assert_eq!(format!("{}", SetMode::DecQuery), "Mode Query");
+    }
+
+    // ── ReportMode delegates not yet exercised ──────────────────────
+
+    #[test]
+    fn report_allow_alt_screen() {
+        use super::super::modes::allow_alt_screen::AllowAltScreen;
+        let mode = Mode::AllowAltScreen(AllowAltScreen::Allow);
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_allow_column_mode_switch() {
+        use super::super::modes::allow_column_mode_switch::AllowColumnModeSwitch;
+        let mode = Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch);
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_alternate_scroll() {
+        use super::super::modes::alternate_scroll::AlternateScroll;
+        let mode = Mode::AlternateScroll(AlternateScroll::Enabled);
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decarm() {
+        use super::super::modes::decarm::Decarm;
+        let mode = Mode::Decarm(Decarm::RepeatKey);
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decckm() {
+        use super::super::modes::decckm::Decckm;
+        let mode = Mode::Decckm(Decckm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decom() {
+        use super::super::modes::decom::Decom;
+        let mode = Mode::Decom(Decom::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decsdm() {
+        use super::super::modes::decsdm::Decsdm;
+        let mode = Mode::Decsdm(Decsdm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_deccolm() {
+        use super::super::modes::deccolm::Deccolm;
+        let mode = Mode::Deccolm(Deccolm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decnkm() {
+        use super::super::modes::decnkm::Decnkm;
+        let mode = Mode::Decnkm(Decnkm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decbkm() {
+        use super::super::modes::decbkm::Decbkm;
+        let mode = Mode::Decbkm(Decbkm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decnrcm() {
+        use super::super::modes::decnrcm::Decnrcm;
+        let mode = Mode::Decnrcm(Decnrcm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decsclm() {
+        use super::super::modes::decsclm::Decsclm;
+        let mode = Mode::Decsclm(Decsclm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decanm() {
+        use super::super::modes::decanm::Decanm;
+        let mode = Mode::Decanm(Decanm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_dectem() {
+        use super::super::modes::dectcem::Dectcem;
+        let mode = Mode::Dectem(Dectcem::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_decscnm() {
+        use super::super::modes::decscnm::Decscnm;
+        let mode = Mode::Decscnm(Decscnm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_line_feed_mode() {
+        use super::super::modes::lnm::Lnm;
+        let mode = Mode::LineFeedMode(Lnm::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_xt_cblink() {
+        use super::super::modes::xtcblink::XtCBlink;
+        let mode = Mode::XtCBlink(XtCBlink::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_xt_extscrn() {
+        use super::super::modes::xtextscrn::XtExtscrn;
+        let mode = Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_alt_screen47() {
+        use super::super::modes::xtextscrn::AltScreen47;
+        let mode = Mode::AltScreen47(AltScreen47::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_save_cursor1048() {
+        use super::super::modes::xtextscrn::SaveCursor1048;
+        let mode = Mode::SaveCursor1048(SaveCursor1048::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_xt_mse_win() {
+        use super::super::modes::xtmsewin::XtMseWin;
+        let mode = Mode::XtMseWin(XtMseWin::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_bracketed_paste() {
+        use super::super::modes::rl_bracket::RlBracket;
+        let mode = Mode::BracketedPaste(RlBracket::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_reverse_wrap_around() {
+        use super::super::modes::reverse_wrap_around::ReverseWrapAround;
+        let mode = Mode::ReverseWrapAround(ReverseWrapAround::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_xt_rev_wrap2() {
+        use super::super::modes::xt_rev_wrap2::XtRevWrap2;
+        let mode = Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_synchronized_updates() {
+        use super::super::modes::sync_updates::SynchronizedUpdates;
+        let mode = Mode::SynchronizedUpdates(SynchronizedUpdates::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_grapheme_clustering() {
+        use super::super::modes::grapheme::GraphemeClustering;
+        let mode = Mode::GraphemeClustering(GraphemeClustering::new(&SetMode::DecSet));
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn report_unknown_mode() {
+        use super::super::modes::unknown::{ModeNamespace, UnknownMode};
+        let m = UnknownMode::new(b"99", SetMode::DecSet, ModeNamespace::Dec);
+        let mode = Mode::Unknown(m);
+        let s = mode.report(None);
+        assert!(!s.is_empty());
+    }
+
+    // ── Display delegates not yet exercised ─────────────────────────
+
+    #[test]
+    fn display_allow_alt_screen() {
+        use super::super::modes::allow_alt_screen::AllowAltScreen;
+        let s = format!("{}", Mode::AllowAltScreen(AllowAltScreen::Allow));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_allow_column_mode_switch() {
+        use super::super::modes::allow_column_mode_switch::AllowColumnModeSwitch;
+        let s = format!(
+            "{}",
+            Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch)
+        );
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_alternate_scroll() {
+        use super::super::modes::alternate_scroll::AlternateScroll;
+        let s = format!("{}", Mode::AlternateScroll(AlternateScroll::Enabled));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decarm() {
+        use super::super::modes::decarm::Decarm;
+        let s = format!("{}", Mode::Decarm(Decarm::RepeatKey));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decanm() {
+        use super::super::modes::decanm::Decanm;
+        let s = format!("{}", Mode::Decanm(Decanm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decom() {
+        use super::super::modes::decom::Decom;
+        let s = format!("{}", Mode::Decom(Decom::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decsdm() {
+        use super::super::modes::decsdm::Decsdm;
+        let s = format!("{}", Mode::Decsdm(Decsdm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_dectem() {
+        use super::super::modes::dectcem::Dectcem;
+        let s = format!("{}", Mode::Dectem(Dectcem::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decscnm() {
+        use super::super::modes::decscnm::Decscnm;
+        let s = format!("{}", Mode::Decscnm(Decscnm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decsclm() {
+        use super::super::modes::decsclm::Decsclm;
+        let s = format!("{}", Mode::Decsclm(Decsclm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_deccolm() {
+        use super::super::modes::deccolm::Deccolm;
+        let s = format!("{}", Mode::Deccolm(Deccolm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decnkm() {
+        use super::super::modes::decnkm::Decnkm;
+        let s = format!("{}", Mode::Decnkm(Decnkm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decbkm() {
+        use super::super::modes::decbkm::Decbkm;
+        let s = format!("{}", Mode::Decbkm(Decbkm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_decnrcm() {
+        use super::super::modes::decnrcm::Decnrcm;
+        let s = format!("{}", Mode::Decnrcm(Decnrcm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_line_feed_mode() {
+        use super::super::modes::lnm::Lnm;
+        let s = format!("{}", Mode::LineFeedMode(Lnm::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_xt_cblink() {
+        use super::super::modes::xtcblink::XtCBlink;
+        let s = format!("{}", Mode::XtCBlink(XtCBlink::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_mouse_mode() {
+        use super::super::modes::mouse::MouseTrack;
+        let s = format!("{}", Mode::MouseMode(MouseTrack::XtMseX11));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_xt_mse_win() {
+        use super::super::modes::xtmsewin::XtMseWin;
+        let s = format!("{}", Mode::XtMseWin(XtMseWin::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_xt_extscrn() {
+        use super::super::modes::xtextscrn::XtExtscrn;
+        let s = format!("{}", Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_alt_screen47() {
+        use super::super::modes::xtextscrn::AltScreen47;
+        let s = format!("{}", Mode::AltScreen47(AltScreen47::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_save_cursor1048() {
+        use super::super::modes::xtextscrn::SaveCursor1048;
+        let s = format!(
+            "{}",
+            Mode::SaveCursor1048(SaveCursor1048::new(&SetMode::DecSet))
+        );
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_bracketed_paste() {
+        use super::super::modes::rl_bracket::RlBracket;
+        let s = format!("{}", Mode::BracketedPaste(RlBracket::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_reverse_wrap_around() {
+        use super::super::modes::reverse_wrap_around::ReverseWrapAround;
+        let s = format!(
+            "{}",
+            Mode::ReverseWrapAround(ReverseWrapAround::new(&SetMode::DecSet))
+        );
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_xt_rev_wrap2() {
+        use super::super::modes::xt_rev_wrap2::XtRevWrap2;
+        let s = format!("{}", Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecSet)));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_synchronized_updates() {
+        use super::super::modes::sync_updates::SynchronizedUpdates;
+        let s = format!(
+            "{}",
+            Mode::SynchronizedUpdates(SynchronizedUpdates::new(&SetMode::DecSet))
+        );
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_grapheme_clustering() {
+        use super::super::modes::grapheme::GraphemeClustering;
+        let s = format!(
+            "{}",
+            Mode::GraphemeClustering(GraphemeClustering::new(&SetMode::DecSet))
+        );
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_theming() {
+        let s = format!("{}", Mode::Theming(Theming::Dark));
+        assert!(!s.is_empty());
+    }
 }

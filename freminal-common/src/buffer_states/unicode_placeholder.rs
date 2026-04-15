@@ -327,4 +327,33 @@ mod tests {
     fn test_diacritics_table_length() {
         assert_eq!(DIACRITICS.len(), 297);
     }
+
+    // --- color_to_placement_id with PaletteIndex ---
+
+    #[test]
+    fn test_color_to_placement_id_palette_index() {
+        // Exercises the `PaletteIndex(n) => u32::from(*n)` arm (line 173).
+        assert_eq!(color_to_placement_id(&TerminalColor::PaletteIndex(7)), 7);
+        assert_eq!(
+            color_to_placement_id(&TerminalColor::PaletteIndex(255)),
+            255
+        );
+    }
+
+    // --- parse_placeholder_diacritics: 4+ diacritics triggers `_ => break` ---
+
+    #[test]
+    fn test_parse_placeholder_four_diacritics_break() {
+        // Four diacritics: after the first three the loop hits `_ => break` (line 117).
+        // The 4th diacritic must be silently ignored and diacritic_count stays 3.
+        let mut bytes = PLACEHOLDER_UTF8.to_vec();
+        // U+0305 (idx 0), U+030D (idx 1), U+030E (idx 2), U+0310 (idx 3)
+        // U+0310 is at DIACRITICS index 3 per the spec.
+        bytes.extend_from_slice("\u{0305}\u{030D}\u{030E}\u{0310}".as_bytes());
+        let result = parse_placeholder_diacritics(&bytes).unwrap();
+        assert_eq!(result.diacritic_count, 3, "4th diacritic must be ignored");
+        assert_eq!(result.row, 0);
+        assert_eq!(result.col, 1);
+        assert_eq!(result.id_msb, 2);
+    }
 }

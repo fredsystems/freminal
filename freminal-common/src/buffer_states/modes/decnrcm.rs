@@ -121,6 +121,15 @@ mod tests {
     }
 
     #[test]
+    fn decnrcm_report_override_query() {
+        // Exercises the `SetMode::DecQuery` arm in the override_mode match (line 41).
+        assert_eq!(
+            Decnrcm::NrcEnabled.report(Some(SetMode::DecQuery)),
+            "\x1b[?42;0$y"
+        );
+    }
+
+    #[test]
     fn decnrcm_display() {
         assert!(!format!("{}", Decnrcm::NrcEnabled).is_empty());
         assert!(!format!("{}", Decnrcm::NrcDisabled).is_empty());

@@ -35,3 +35,44 @@ pub fn ansi_parser_inner_csi_finished_ed(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn ed_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_ed(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn ed_empty_clears_from_cursor_to_end() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_ed(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::ClearDisplayfromCursortoEndofDisplay]
+        );
+    }
+
+    #[test]
+    fn ed_2_clears_display() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_ed(b"2", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ClearDisplay]);
+    }
+
+    #[test]
+    fn ed_3_clears_scrollback_and_display() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_ed(b"3", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ClearScrollbackandDisplay]);
+    }
+}

@@ -250,6 +250,7 @@ fn strip_ascii_prefix<'a>(haystack: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]>
 #[cfg(test)]
 mod tests {
     use super::super::osc::AnsiOscParser;
+    use super::super::tracer::SequenceTracer;
     use freminal_common::buffer_states::osc::{AnsiOscType, ImageDimension};
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -603,5 +604,124 @@ mod tests {
             }
             other => panic!("Expected ITerm2FileInline, got: {other:?}"),
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Coverage gap tests — exercise error branches via direct function calls
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Helper: create a default `SequenceTracer` for direct-call tests.
+    fn tracer() -> SequenceTracer {
+        SequenceTracer::new()
+    }
+
+    // ── Line 35/37/39: handle_osc_iterm2 — missing first semicolon ──────────
+    #[test]
+    fn osc1337_missing_semicolon_direct_call() {
+        let mut output = Vec::new();
+        // No ';' in raw_params at all
+        super::handle_osc_iterm2(b"1337File=inline=1", &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Line 71: handle_osc_iterm2 — unrecognised sub-command ───────────────
+    #[test]
+    fn osc1337_unrecognised_subcommand_direct_call() {
+        let mut output = Vec::new();
+        super::handle_osc_iterm2(b"1337;SomeOtherCommand=x", &tracer(), &mut output);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown)
+        ));
+    }
+
+    // ── Line 119: unknown key=value pair in File= args ──────────────────────
+    #[test]
+    fn parse_iterm2_file_args_unknown_key() {
+        let data = super::parse_iterm2_file_args("inline=1;boguskey=bogusval");
+        assert!(data.inline);
+        // Unknown keys silently ignored — defaults unchanged
+        assert_eq!(data.name, None);
+    }
+
+    // ── Lines 145: File= missing ':' separator ──────────────────────────────
+    #[test]
+    fn file_missing_colon_direct_call() {
+        let mut output = Vec::new();
+        super::handle_osc_iterm2_file(b"inline=1", &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Lines 154-155: File= non-UTF-8 args ─────────────────────────────────
+    #[test]
+    fn file_non_utf8_args_direct_call() {
+        let mut output = Vec::new();
+        // args portion has invalid UTF-8, then ':' then payload
+        let mut raw = vec![0xFF, 0xFE, b':'];
+        raw.extend_from_slice(b"QUFB"); // "AAA" in base64
+        super::handle_osc_iterm2_file(&raw, &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Lines 162-163: File= non-UTF-8 base64 payload ──────────────────────
+    #[test]
+    fn file_non_utf8_base64_direct_call() {
+        let mut output = Vec::new();
+        // Valid UTF-8 args, then ':', then non-UTF-8 base64 bytes
+        let mut raw = b"inline=1:".to_vec();
+        raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
+        super::handle_osc_iterm2_file(&raw, &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Lines 168-170: File= base64 decode failure ──────────────────────────
+    #[test]
+    fn file_bad_base64_direct_call() {
+        let mut output = Vec::new();
+        // Valid UTF-8 args and payload, but payload is not valid base64
+        super::handle_osc_iterm2_file(b"inline=1:!!!not-base64!!!", &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Lines 174-176: File= empty payload after base64 decode ──────────────
+    #[test]
+    fn file_empty_payload_after_decode_direct_call() {
+        let mut output = Vec::new();
+        // Empty base64 decodes to empty bytes
+        super::handle_osc_iterm2_file(b"inline=1:", &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Lines 195-196: MultipartFile= non-UTF-8 args ────────────────────────
+    #[test]
+    fn multipart_begin_non_utf8_direct_call() {
+        let mut output = Vec::new();
+        super::handle_osc_iterm2_multipart_begin(&[0xFF, 0xFE], &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Line 202: MultipartFile= empty args ─────────────────────────────────
+    #[test]
+    fn multipart_begin_empty_args_direct_call() {
+        let mut output = Vec::new();
+        super::handle_osc_iterm2_multipart_begin(b"", &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Lines 221-222: FilePart= non-UTF-8 base64 ──────────────────────────
+    #[test]
+    fn file_part_non_utf8_direct_call() {
+        let mut output = Vec::new();
+        super::handle_osc_iterm2_file_part(&[0xFF, 0xFE], &tracer(), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // ── Line 230: FilePart= base64 decode failure ───────────────────────────
+    #[test]
+    fn file_part_bad_base64_direct_call() {
+        let mut output = Vec::new();
+        super::handle_osc_iterm2_file_part(b"!!!invalid!!!", &tracer(), &mut output);
+        assert!(output.is_empty());
     }
 }

@@ -398,4 +398,40 @@ mod tests {
     fn default_trait_is_default_variant() {
         assert_eq!(PointerShape::default(), PointerShape::Default);
     }
+
+    // ── Display for all variants ────────────────────────────────────
+
+    #[test]
+    fn display_all_pointer_shape_variants() {
+        assert_eq!(PointerShape::None.to_string(), "none");
+        assert_eq!(PointerShape::VerticalText.to_string(), "vertical-text");
+        assert_eq!(PointerShape::ContextMenu.to_string(), "context-menu");
+        assert_eq!(PointerShape::Help.to_string(), "help");
+        assert_eq!(PointerShape::Progress.to_string(), "progress");
+        assert_eq!(PointerShape::Wait.to_string(), "wait");
+        assert_eq!(PointerShape::Cell.to_string(), "cell");
+        assert_eq!(PointerShape::Crosshair.to_string(), "crosshair");
+        assert_eq!(PointerShape::Move.to_string(), "move");
+        assert_eq!(PointerShape::NoDrop.to_string(), "no-drop");
+        assert_eq!(PointerShape::NotAllowed.to_string(), "not-allowed");
+        assert_eq!(PointerShape::Grab.to_string(), "grab");
+        assert_eq!(PointerShape::Grabbing.to_string(), "grabbing");
+        assert_eq!(PointerShape::Alias.to_string(), "alias");
+        assert_eq!(PointerShape::Copy.to_string(), "copy");
+        assert_eq!(PointerShape::AllScroll.to_string(), "all-scroll");
+        assert_eq!(PointerShape::ResizeHorizontal.to_string(), "col-resize");
+        assert_eq!(PointerShape::ResizeVertical.to_string(), "row-resize");
+        assert_eq!(PointerShape::ResizeNeSw.to_string(), "nesw-resize");
+        assert_eq!(PointerShape::ResizeNwSe.to_string(), "nwse-resize");
+        assert_eq!(PointerShape::ResizeEast.to_string(), "e-resize");
+        assert_eq!(PointerShape::ResizeSouthEast.to_string(), "se-resize");
+        assert_eq!(PointerShape::ResizeSouth.to_string(), "s-resize");
+        assert_eq!(PointerShape::ResizeSouthWest.to_string(), "sw-resize");
+        assert_eq!(PointerShape::ResizeWest.to_string(), "w-resize");
+        assert_eq!(PointerShape::ResizeNorthWest.to_string(), "nw-resize");
+        assert_eq!(PointerShape::ResizeNorth.to_string(), "n-resize");
+        assert_eq!(PointerShape::ResizeNorthEast.to_string(), "ne-resize");
+        assert_eq!(PointerShape::ZoomIn.to_string(), "zoom-in");
+        assert_eq!(PointerShape::ZoomOut.to_string(), "zoom-out");
+    }
 }

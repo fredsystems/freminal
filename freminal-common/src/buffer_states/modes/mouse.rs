@@ -177,3 +177,118 @@ impl fmt::Display for MouseTrack {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── MouseTrack::Query in ReportMode ─────────────────────────────
+
+    #[test]
+    fn report_mouse_track_query_variant_no_override() {
+        // Query(1000): mode_number=1000, falls through DecRst/None → set_mode=0
+        let mode = MouseTrack::Query(1000);
+        assert_eq!(mode.report(None), "\x1b[?1000;0$y");
+    }
+
+    #[test]
+    fn report_mouse_track_query_variant_dec_set_override() {
+        // With DecSet override, Query is treated same as NoTracking → set_mode=0
+        let mode = MouseTrack::Query(1000);
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?1000;0$y");
+    }
+
+    #[test]
+    fn report_mouse_track_query_variant_dec_rst_override() {
+        let mode = MouseTrack::Query(9);
+        assert_eq!(mode.report(Some(SetMode::DecRst)), "\x1b[?9;0$y");
+    }
+
+    #[test]
+    fn report_mouse_track_query_variant_dec_query_override() {
+        let mode = MouseTrack::Query(1003);
+        assert_eq!(mode.report(Some(SetMode::DecQuery)), "\x1b[?1003;0$y");
+    }
+
+    // ── MouseTrack::Query Display ────────────────────────────────────
+
+    #[test]
+    fn display_mouse_track_query() {
+        let s = MouseTrack::Query(1000).to_string();
+        assert_eq!(s, "Query Mouse Tracking(1000)");
+    }
+
+    // ── MouseTrack active variants in ReportMode ────────────────────
+
+    #[test]
+    fn report_mouse_track_x11_set_no_override() {
+        let mode = MouseTrack::XtMseX11;
+        // None path → NoTracking check fails (is X11) → set_mode=2
+        assert_eq!(mode.report(None), "\x1b[?1000;2$y");
+    }
+
+    #[test]
+    fn report_mouse_track_xt_mse_x10_dec_set_override() {
+        let mode = MouseTrack::XtMsex10;
+        // DecSet: not NoTracking and not Query → set_mode=1
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?9;1$y");
+    }
+
+    #[test]
+    fn report_mouse_track_no_tracking_dec_set() {
+        let mode = MouseTrack::NoTracking;
+        // DecSet: NoTracking → i32::from(false) = 0
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?0;0$y");
+    }
+
+    // ── MouseEncoding ReportMode edge cases ─────────────────────────
+
+    #[test]
+    fn report_mouse_encoding_sgr_dec_set_override() {
+        let mode = MouseEncoding::Sgr;
+        // DecSet: Sgr != X11 → set_mode=1
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?1006;1$y");
+    }
+
+    #[test]
+    fn report_mouse_encoding_sgr_no_override() {
+        let mode = MouseEncoding::Sgr;
+        // None: Sgr != X11 → set_mode=2
+        assert_eq!(mode.report(None), "\x1b[?1006;2$y");
+    }
+
+    #[test]
+    fn report_mouse_encoding_x11_dec_set_override() {
+        let mode = MouseEncoding::X11;
+        // DecSet: X11 == X11 → i32::from(false) = 0
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?0;0$y");
+    }
+
+    #[test]
+    fn report_mouse_encoding_dec_query_override() {
+        let mode = MouseEncoding::Utf8;
+        assert_eq!(mode.report(Some(SetMode::DecQuery)), "\x1b[?1005;0$y");
+    }
+
+    // ── MouseEncoding Display ────────────────────────────────────────
+
+    #[test]
+    fn display_mouse_encoding_all_variants() {
+        assert_eq!(MouseEncoding::X11.to_string(), "X11");
+        assert_eq!(MouseEncoding::Utf8.to_string(), "Utf8");
+        assert_eq!(MouseEncoding::Sgr.to_string(), "Sgr");
+        assert_eq!(MouseEncoding::SgrPixels.to_string(), "SgrPixels");
+    }
+
+    // ── MouseTrack Display all variants ─────────────────────────────
+
+    #[test]
+    fn display_mouse_track_all_variants() {
+        assert_eq!(MouseTrack::NoTracking.to_string(), "NoTracking");
+        assert_eq!(MouseTrack::XtMsex10.to_string(), "XtMsex10");
+        assert_eq!(MouseTrack::XtMseX11.to_string(), "XtMseX11");
+        assert_eq!(MouseTrack::XtMseHilite.to_string(), "XtMseHilite");
+        assert_eq!(MouseTrack::XtMseBtn.to_string(), "XtMseBtn");
+        assert_eq!(MouseTrack::XtMseAny.to_string(), "XtMseAny");
+    }
+}

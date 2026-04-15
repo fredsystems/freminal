@@ -70,3 +70,104 @@ impl fmt::Display for Irm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── new() ────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_dec_set_is_insert() {
+        assert_eq!(Irm::new(&SetMode::DecSet), Irm::Insert);
+    }
+
+    #[test]
+    fn new_dec_rst_is_replace() {
+        assert_eq!(Irm::new(&SetMode::DecRst), Irm::Replace);
+    }
+
+    #[test]
+    fn new_dec_query_is_query() {
+        assert_eq!(Irm::new(&SetMode::DecQuery), Irm::Query);
+    }
+
+    // ── is_insert() ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_insert_true_for_insert() {
+        assert!(Irm::Insert.is_insert());
+    }
+
+    #[test]
+    fn is_insert_false_for_replace() {
+        assert!(!Irm::Replace.is_insert());
+    }
+
+    #[test]
+    fn is_insert_false_for_query() {
+        assert!(!Irm::Query.is_insert());
+    }
+
+    // ── ReportMode ───────────────────────────────────────────────────
+
+    #[test]
+    fn report_insert_no_override() {
+        assert_eq!(Irm::Insert.report(None), "\x1b[4;1$y");
+    }
+
+    #[test]
+    fn report_replace_no_override() {
+        assert_eq!(Irm::Replace.report(None), "\x1b[4;2$y");
+    }
+
+    #[test]
+    fn report_query_no_override() {
+        assert_eq!(Irm::Query.report(None), "\x1b[4;0$y");
+    }
+
+    #[test]
+    fn report_with_dec_set_override() {
+        assert_eq!(Irm::Replace.report(Some(SetMode::DecSet)), "\x1b[4;1$y");
+    }
+
+    #[test]
+    fn report_with_dec_rst_override() {
+        assert_eq!(Irm::Insert.report(Some(SetMode::DecRst)), "\x1b[4;2$y");
+    }
+
+    #[test]
+    fn report_with_dec_query_override() {
+        assert_eq!(Irm::Replace.report(Some(SetMode::DecQuery)), "\x1b[4;0$y");
+    }
+
+    // ── Display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn display_replace() {
+        assert_eq!(
+            Irm::Replace.to_string(),
+            "Insert/Replace Mode (IRM) — Replace (default)"
+        );
+    }
+
+    #[test]
+    fn display_insert() {
+        assert_eq!(
+            Irm::Insert.to_string(),
+            "Insert/Replace Mode (IRM) — Insert"
+        );
+    }
+
+    #[test]
+    fn display_query() {
+        assert_eq!(Irm::Query.to_string(), "Insert/Replace Mode (IRM) — Query");
+    }
+
+    // ── default ──────────────────────────────────────────────────────
+
+    #[test]
+    fn default_is_replace() {
+        assert_eq!(Irm::default(), Irm::Replace);
+    }
+}

@@ -297,3 +297,237 @@ pub fn handle_custom_color(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+    use freminal_common::colors::TerminalColor;
+    use freminal_common::sgr::SelectGraphicRendition;
+
+    #[test]
+    fn sgr_empty_params_emits_reset() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Reset)]
+        );
+    }
+
+    #[test]
+    fn sgr_gt_prefix_delegates_to_modify_other_keys() {
+        // `>4;1` → modifyOtherKeys level 1
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b">4;1", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ModifyOtherKeys(1)]);
+    }
+
+    #[test]
+    fn sgr_gt4_no_level_resets_modify_other_keys() {
+        // `>4` (no level) → modifyOtherKeys level 0 (reset)
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b">4", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::ModifyOtherKeys(0)]);
+    }
+
+    #[test]
+    fn sgr_semicolon_form_truecolor_fg() {
+        // `38;2;255;128;0` → truecolor foreground
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"38;2;255;128;0", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+                TerminalColor::Custom(255, 128, 0)
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_semicolon_form_256_color_bg() {
+        // `48;5;200` → 256-color background palette index 200
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"48;5;200", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Background(
+                TerminalColor::PaletteIndex(200)
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_semicolon_form_truecolor_underline_color() {
+        // `58;2;0;255;0` → truecolor underline color
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"58;2;0;255;0", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
+                TerminalColor::Custom(0, 255, 0)
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_bare_38_no_subparams_resets_fg_to_default() {
+        // bare `38` (no mode after) → Foreground(Default)
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"38", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+                TerminalColor::Default
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_bare_48_no_subparams_resets_bg_to_default() {
+        // bare `48` → Background(DefaultBackground)
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"48", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Background(
+                TerminalColor::DefaultBackground
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_bare_58_no_subparams_resets_underline_color_to_default() {
+        // bare `58` → UnderlineColor(DefaultUnderlineColor)
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"58", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
+                TerminalColor::DefaultUnderlineColor
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_truecolor_fg() {
+        // `38:2::255:0:0` → truecolor foreground via colon form
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"38:2::255:0:0", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+                TerminalColor::Custom(255, 0, 0)
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_256_color_bg() {
+        // `48:5:200` → 256-color background via colon form
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"48:5:200", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Background(
+                TerminalColor::PaletteIndex(200)
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_curly_underline() {
+        // `4:3` → curly underline
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"4:3", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(matches!(
+            output[0],
+            TerminalOutput::Sgr(SelectGraphicRendition::UnderlineWithStyle(_))
+        ));
+    }
+
+    #[test]
+    fn sgr_colon_form_underline_off() {
+        // `4:0` → no underline (SGR 24)
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"4:0", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::NotUnderlined)]
+        );
+    }
+
+    #[test]
+    fn sgr_unknown_color_mode_emits_invalid() {
+        // `38;9;1;2;3` → mode=9 is unknown → Invalid for the color, then remaining
+        // params (1=Bold, 2=Faint, 3=Italic) are processed normally.
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"38;9;1;2;3", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![
+                TerminalOutput::Invalid,
+                TerminalOutput::Sgr(
+                    crate::ansi_components::csi_commands::sgr::SelectGraphicRendition::Bold
+                ),
+                TerminalOutput::Sgr(
+                    crate::ansi_components::csi_commands::sgr::SelectGraphicRendition::Faint
+                ),
+                TerminalOutput::Sgr(
+                    crate::ansi_components::csi_commands::sgr::SelectGraphicRendition::Italic
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn sgr_non_numeric_param_emits_invalid() {
+        // non-numeric param (parse error → Simple(None)) → Invalid
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"abc", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
+    fn sgr_256_color_fg_semicolon() {
+        // `38;5;100` → Foreground(PaletteIndex(100))
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"38;5;100", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+                TerminalColor::PaletteIndex(100)
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_256_color_underline_semicolon() {
+        // `58;5;42` → UnderlineColor(PaletteIndex(42))
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"58;5;42", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
+                TerminalColor::PaletteIndex(42)
+            ))]
+        );
+    }
+}

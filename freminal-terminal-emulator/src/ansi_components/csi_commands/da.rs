@@ -100,3 +100,99 @@ pub fn ansi_parser_inner_csi_finished_da(
         "Invalid intermediates for Send DA: {params:?}, intermediates={intermediates:?}",
     )))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn da_primary_empty_params_emits_request_device_attributes() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b"", &[], &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::RequestDeviceAttributes]);
+    }
+
+    #[test]
+    fn da_primary_zero_param_emits_request_device_attributes() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b"0", &[], &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::RequestDeviceAttributes]);
+    }
+
+    #[test]
+    fn da_primary_non_zero_param_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b"1", &[], &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn da_secondary_bare_gt_intermediate_emits_secondary_param0() {
+        // `>` in intermediates, no params → DA2 with param=0
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b"", b">", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 }]
+        );
+    }
+
+    #[test]
+    fn da_secondary_gt_param_byte_emits_secondary_param0() {
+        // `>` as first param byte, nothing else → DA2 with param=0
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b">", &[], &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 }]
+        );
+    }
+
+    #[test]
+    fn da_secondary_gt0_emits_secondary_param0() {
+        // `>0` → DA2 with param=0
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b">0", &[], &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 }]
+        );
+    }
+
+    #[test]
+    fn da_secondary_multi_params_is_invalid() {
+        // `>1;2` → invalid (multiple numeric params after `>`)
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b">1;2", &[], &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn da_tertiary_eq_intermediate_emits_tertiary() {
+        // `=` in intermediates → Tertiary DA
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b"", b"=", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::RequestTertiaryDeviceAttributes]
+        );
+    }
+
+    #[test]
+    fn da_invalid_intermediates_is_invalid() {
+        // some unknown intermediate → last fallthrough
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_da(b"0", b"!", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+}

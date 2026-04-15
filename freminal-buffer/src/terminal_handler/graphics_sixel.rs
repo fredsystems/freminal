@@ -453,4 +453,107 @@ mod tests {
             cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Shared palette mode (?1070 reset) — exercises the shared-palette code path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sixel_shared_palette_mode_places_image() {
+        use freminal_common::buffer_states::{
+            mode::{Mode, SetMode},
+            modes::private_color_registers::PrivateColorRegisters,
+            terminal_output::TerminalOutput,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Switch to shared color register mode (CSI ? 1070 l → DecRst)
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::new(&SetMode::DecRst),
+        ))]);
+
+        let initial_len = handler.buffer().image_store().len();
+
+        // Paint a simple red image in shared palette mode
+        let sixel_body = b"#1;2;100;0;0#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(
+            handler.buffer().image_store().len(),
+            initial_len + 1,
+            "Sixel (shared palette) should place an image in the image store"
+        );
+        assert!(
+            handler.buffer().has_any_image_cell(),
+            "Sixel (shared palette) should place image cells"
+        );
+    }
+
+    #[test]
+    fn sixel_shared_palette_persists_across_images() {
+        use freminal_common::buffer_states::{
+            mode::{Mode, SetMode},
+            modes::private_color_registers::PrivateColorRegisters,
+            terminal_output::TerminalOutput,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Enable shared palette mode
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::new(&SetMode::DecRst),
+        ))]);
+
+        let initial_len = handler.buffer().image_store().len();
+
+        // First image: defines color 5 as green and paints it
+        let sixel_body1 = b"#5;2;0;100;0#5~";
+        let dcs1 = build_sixel_dcs(b"", sixel_body1);
+        handler.handle_device_control_string(&dcs1);
+
+        // Second image: uses color 5 without redefining it (relies on shared palette)
+        let sixel_body2 = b"#5~";
+        let dcs2 = build_sixel_dcs(b"", sixel_body2);
+        handler.handle_device_control_string(&dcs2);
+
+        // Both images should have been stored
+        assert_eq!(
+            handler.buffer().image_store().len(),
+            initial_len + 2,
+            "Two images should be stored in shared palette mode"
+        );
+    }
+
+    #[test]
+    fn sixel_shared_palette_empty_body_no_image() {
+        use freminal_common::buffer_states::{
+            mode::{Mode, SetMode},
+            modes::private_color_registers::PrivateColorRegisters,
+            terminal_output::TerminalOutput,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Enable shared palette mode
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::PrivateColorRegisters(
+            PrivateColorRegisters::new(&SetMode::DecRst),
+        ))]);
+
+        // Empty sixel body → zero-dimension image → no cells placed
+        let dcs = build_sixel_dcs(b"", b"");
+        handler.handle_device_control_string(&dcs);
+
+        assert!(
+            !handler.buffer().has_any_image_cell(),
+            "Empty Sixel body (shared palette) should not produce image cells"
+        );
+    }
 }

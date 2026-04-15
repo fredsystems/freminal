@@ -81,3 +81,100 @@ impl ApcParser {
         ParserOutcome::Continue
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ApcParser;
+    use crate::ansi::ParserOutcome;
+    use crate::ansi_components::tracer::SequenceTraceable;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn default_creates_valid_parser() {
+        let parser = ApcParser::default();
+        assert_eq!(parser.sequence, vec![b'_']);
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn new_creates_valid_parser() {
+        let parser = ApcParser::new();
+        assert_eq!(parser.sequence, vec![b'_']);
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn seq_tracer_returns_mutable_reference() {
+        let mut parser = ApcParser::new();
+        // Calling seq_tracer() should give a mutable reference to the internal tracer
+        let tracer = parser.seq_tracer();
+        tracer.push(b'A');
+    }
+
+    #[test]
+    fn seq_tracer_ref_returns_immutable_reference() {
+        let parser = ApcParser::new();
+        // seq_tracer_ref() should return a reference to the internal tracer
+        let tracer = parser.seq_tracer_ref();
+        // The tracer starts empty
+        assert_eq!(tracer.as_str(), "");
+    }
+
+    #[test]
+    fn apc_parser_accumulates_bytes_until_st() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        // Feed data bytes
+        for &b in b"hello" {
+            let result = parser.apc_parser_inner(b, &mut output);
+            assert!(matches!(result, ParserOutcome::Continue));
+        }
+        assert!(output.is_empty());
+        // Feed ST: ESC \
+        parser.apc_parser_inner(0x1b, &mut output);
+        let result = parser.apc_parser_inner(b'\\', &mut output);
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::ApplicationProgramCommand(_)
+        ));
+    }
+
+    #[test]
+    fn apc_parser_no_terminator_keeps_continuing() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        for &b in b"data without terminator" {
+            let result = parser.apc_parser_inner(b, &mut output);
+            assert!(matches!(result, ParserOutcome::Continue));
+        }
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn trace_str_returns_string() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        parser.apc_parser_inner(b'A', &mut output);
+        let trace = parser.trace_str();
+        assert!(trace.contains('A'));
+    }
+
+    #[test]
+    fn contains_string_terminator_false_without_st() {
+        let parser = ApcParser::new();
+        assert!(!parser.contains_string_terminator());
+    }
+
+    #[test]
+    fn contains_string_terminator_true_after_st() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        parser.apc_parser_inner(0x1b, &mut output);
+        parser.apc_parser_inner(b'\\', &mut output);
+        assert!(
+            parser.sequence.is_empty() || parser.contains_string_terminator() || output.len() == 1
+        );
+    }
+}

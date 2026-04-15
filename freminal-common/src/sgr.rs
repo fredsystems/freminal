@@ -191,3 +191,152 @@ impl SelectGraphicRendition {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // --- from_usize coverage for previously-uncovered SGR codes ---
+
+    #[test]
+    fn from_usize_font_codes() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(10),
+            SelectGraphicRendition::PrimaryFont
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(11),
+            SelectGraphicRendition::AlternativeFont1
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(12),
+            SelectGraphicRendition::AlternativeFont2
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(13),
+            SelectGraphicRendition::AlternativeFont3
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(14),
+            SelectGraphicRendition::AlternativeFont4
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(15),
+            SelectGraphicRendition::AlternativeFont5
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(16),
+            SelectGraphicRendition::AlternativeFont6
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(17),
+            SelectGraphicRendition::AlternativeFont7
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(18),
+            SelectGraphicRendition::AlternativeFont8
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(19),
+            SelectGraphicRendition::AlternativeFont9
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(20),
+            SelectGraphicRendition::FontFranktur
+        );
+    }
+
+    #[test]
+    fn from_usize_not_blinking_and_proportional_spacing() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(25),
+            SelectGraphicRendition::NotBlinking
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(26),
+            SelectGraphicRendition::ProportionalSpacing
+        );
+    }
+
+    #[test]
+    fn from_usize_38_error_arm_returns_foreground_default() {
+        // 38 without colour components triggers the error-log arm → Foreground(Default)
+        assert_eq!(
+            SelectGraphicRendition::from_usize(38),
+            SelectGraphicRendition::Foreground(TerminalColor::Default)
+        );
+    }
+
+    #[test]
+    fn from_usize_48_error_arm_returns_background_default() {
+        // 48 without colour components triggers the error-log arm → Background(DefaultBackground)
+        assert_eq!(
+            SelectGraphicRendition::from_usize(48),
+            SelectGraphicRendition::Background(TerminalColor::DefaultBackground)
+        );
+    }
+
+    #[test]
+    fn from_usize_50_to_55() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(50),
+            SelectGraphicRendition::DisableProportionalSpacing
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(51),
+            SelectGraphicRendition::Framed
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(52),
+            SelectGraphicRendition::Encircled
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(53),
+            SelectGraphicRendition::Overlined
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(54),
+            SelectGraphicRendition::NotFramedOrEncircled
+        );
+        assert_eq!(
+            SelectGraphicRendition::from_usize(55),
+            SelectGraphicRendition::NotOverlined
+        );
+    }
+
+    // --- from_usize_color coverage ---
+
+    #[test]
+    fn from_usize_color_58_underline_custom() {
+        let result = SelectGraphicRendition::from_usize_color(58, 10, 20, 30).unwrap();
+        assert_eq!(
+            result,
+            SelectGraphicRendition::UnderlineColor(TerminalColor::Custom(10, 20, 30))
+        );
+    }
+
+    #[test]
+    fn from_usize_color_unknown_val() {
+        let result = SelectGraphicRendition::from_usize_color(99, 0, 0, 0).unwrap();
+        assert_eq!(result, SelectGraphicRendition::Unknown(99));
+    }
+
+    #[test]
+    fn from_usize_color_38_foreground_custom() {
+        let result = SelectGraphicRendition::from_usize_color(38, 255, 128, 0).unwrap();
+        assert_eq!(
+            result,
+            SelectGraphicRendition::Foreground(TerminalColor::Custom(255, 128, 0))
+        );
+    }
+
+    #[test]
+    fn from_usize_color_48_background_custom() {
+        let result = SelectGraphicRendition::from_usize_color(48, 0, 64, 128).unwrap();
+        assert_eq!(
+            result,
+            SelectGraphicRendition::Background(TerminalColor::Custom(0, 64, 128))
+        );
+    }
+}

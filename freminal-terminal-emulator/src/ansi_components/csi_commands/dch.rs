@@ -30,3 +30,33 @@ pub fn ansi_parser_inner_csi_finished_dch(
 
     ParserOutcome::Finished
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+
+    #[test]
+    fn dch_non_numeric_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dch(b"abc", &mut output);
+        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn dch_empty_defaults_to_1() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dch(b"", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Delete(1)]);
+    }
+
+    #[test]
+    fn dch_explicit_count() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_dch(b"7", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Delete(7)]);
+    }
+}
