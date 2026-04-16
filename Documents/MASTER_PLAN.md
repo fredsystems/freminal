@@ -86,6 +86,7 @@ Task 61 (Saved Layouts).
 | 64  | Multi-window parity                      | `PLAN_VERSION_060.md` (Task 64)             | Complete | Task 63              |
 | 65  | Frame pacing + idle optimization         | `PLAN_VERSION_060.md` (Task 65)             | Pending  | Task 63              |
 | 66  | Cleanup + eframe removal                 | `PLAN_VERSION_060.md` (Task 66)             | Pending  | Task 64              |
+| 67  | Window spawn truncation diagnostic       | `PLAN_VERSION_060.md` (Task 67)             | Pending  | Task 64              |
 
 ---
 
