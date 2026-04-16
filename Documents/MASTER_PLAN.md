@@ -84,8 +84,8 @@ Task 61 (Saved Layouts).
 | 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_060.md` (Task 62)             | Complete | None                 |
 | 63  | Single-window migration                  | `PLAN_VERSION_060.md` (Task 63)             | Complete | Task 62              |
 | 64  | Multi-window parity                      | `PLAN_VERSION_060.md` (Task 64)             | Complete | Task 63              |
-| 65  | Frame pacing + idle optimization         | `PLAN_VERSION_060.md` (Task 65)             | Pending  | Task 63              |
-| 66  | Cleanup + eframe removal                 | `PLAN_VERSION_060.md` (Task 66)             | Pending  | Task 64              |
+| 65  | Frame pacing + idle optimization         | `PLAN_VERSION_060.md` (Task 65)             | Complete | Task 63              |
+| 66  | Cleanup + eframe removal                 | `PLAN_VERSION_060.md` (Task 66)             | Complete | Task 64              |
 | 67  | Window spawn truncation diagnostic       | `PLAN_VERSION_060.md` (Task 67)             | Pending  | Task 64              |
 
 ---
@@ -480,6 +480,8 @@ Update this section as tasks complete:
 | 62   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-62/freminal-windowing                   |
 | 63   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-63/single-window-migration              |
 | 64   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-64/multi-window-parity                  |
+| 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete             |
+| 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                |
 
 ---
 
