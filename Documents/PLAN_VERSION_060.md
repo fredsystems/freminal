@@ -14,13 +14,13 @@ egui integration — keeping the `freminal` binary crate focused on terminal-spe
 
 ## Task Summary
 
-| #   | Feature                               | Scope  | Status  | Dependencies |
-| --- | ------------------------------------- | ------ | ------- | ------------ |
-| 62  | freminal-windowing crate + event loop | Large  | Pending | None         |
-| 63  | Single-window migration               | Large  | Pending | Task 62      |
-| 64  | Multi-window parity                   | Large  | Pending | Task 63      |
-| 65  | Frame pacing + idle optimization      | Medium | Pending | Task 63      |
-| 66  | Cleanup + eframe removal              | Medium | Pending | Task 64      |
+| #   | Feature                               | Scope  | Status   | Dependencies |
+| --- | ------------------------------------- | ------ | -------- | ------------ |
+| 62  | freminal-windowing crate + event loop | Large  | Complete | None         |
+| 63  | Single-window migration               | Large  | Pending  | Task 62      |
+| 64  | Multi-window parity                   | Large  | Pending  | Task 63      |
+| 65  | Frame pacing + idle optimization      | Medium | Pending  | Task 63      |
+| 66  | Cleanup + eframe removal              | Medium | Pending  | Task 64      |
 
 ---
 

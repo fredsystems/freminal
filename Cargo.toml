@@ -5,6 +5,7 @@ members = [
   "freminal-buffer",
   "freminal-common",
   "freminal-terminal-emulator",
+  "freminal-windowing",
   "portable-pty",
   "xtask",
 ]
@@ -56,7 +57,11 @@ egui = { version = "0.34.1", default-features = false, features = [
   "default_fonts",
   "persistence",
 ] }
+egui-winit = "0.34.1"
+egui_glow = { version = "0.34.1", default-features = false }
 filedescriptor = "0.8.3"
+glutin = "0.32.3"
+glutin-winit = "0.5.0"
 fontdb = "0.23.0"
 futures = "0.3.32"
 glow = "0.17.0"
@@ -73,6 +78,7 @@ nix = "0.31.2"
 open = "5.3.3"
 predicates = "3.1.4"
 proptest = "1.11.0"
+raw-window-handle = "0.6.2"
 regex = "1.12.3"
 rustc-hash = "2.1.2"
 rustybuzz = "0.20.1"
@@ -99,6 +105,7 @@ unicode-segmentation = "1.13.2"
 unicode-width = "0.2.2"
 vergen = { version = "9.1.0", features = ["build", "cargo", "rustc", "si"] }
 winapi = "0.3.9"
+winit = { version = "0.30.13", features = ["rwh_06"] }
 winreg = "0.56.0"
 
 [workspace.metadata.cargo-machete]

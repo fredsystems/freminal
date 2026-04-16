@@ -1,0 +1,27 @@
+[package]
+name = "freminal-windowing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Windowing layer for Freminal: winit + glutin + egui integration"
+documentation.workspace = true
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui-winit.workspace = true
+egui_glow.workspace = true
+glow.workspace = true
+glutin.workspace = true
+glutin-winit.workspace = true
+raw-window-handle.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+winit.workspace = true
+
+[[example]]
+name = "hello"
+path = "examples/hello.rs"
