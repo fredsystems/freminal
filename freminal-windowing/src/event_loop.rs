@@ -404,7 +404,7 @@ fn process_viewport_command(window: &Window, cmd: egui::ViewportCommand, should_
     }
 }
 
-/// Entry point — replaces `eframe::run_native()`.
+/// Entry point — replaces the old `eframe::run_native()` call.
 ///
 /// Creates the event loop, opens the initial window with the given config,
 /// and runs the application until all windows are closed.

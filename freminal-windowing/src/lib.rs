@@ -35,7 +35,7 @@ pub struct WindowConfig {
     pub app_id: Option<String>,
 }
 
-/// The application trait that `freminal` implements instead of `eframe::App`.
+/// The application trait that `freminal` implements.
 pub trait App {
     /// Called once per window per frame, only when a redraw is needed.
     ///

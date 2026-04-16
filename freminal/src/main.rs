@@ -17,7 +17,7 @@
 //!   ├─ After each batch: publishes Arc<TerminalSnapshot> via ArcSwap
 //!   └─ Sends WindowCommand to GUI for Report*/Viewport handling
 //!
-//! GUI Thread (eframe update() — pure render, no mutation)
+//! GUI Thread (update() — pure render, no mutation)
 //!   ├─ Loads TerminalSnapshot from ArcSwap (atomic, lock-free)
 //!   ├─ Sends InputEvent through crossbeam channel
 //!   ├─ Sends PtyWrite directly for Report* responses
@@ -182,7 +182,7 @@ fn main() {
     //   - Stdout layer: INFO by default (or RUST_LOG override)
     //   - File layer:   config-specified level (default DEBUG), always on
     //
-    // Both layers share framework silencers (winit, wgpu, eframe, egui = off)
+    // Both layers share framework silencers (winit, wgpu, egui = off)
     // unless --show-all-debug is set.
 
     // Stdout filter: INFO default, RUST_LOG override, framework silencers.
@@ -194,7 +194,7 @@ fn main() {
         let mut filter = EnvFilter::builder()
             .with_default_directive(Level::INFO.into())
             .from_env_lossy();
-        for spec in &["winit=off", "wgpu=off", "eframe=off", "egui=off"] {
+        for spec in &["winit=off", "wgpu=off", "egui=off"] {
             match spec.parse::<Directive>() {
                 Ok(d) => filter = filter.add_directive(d),
                 Err(e) => {
@@ -223,7 +223,7 @@ fn main() {
         let mut filter = EnvFilter::builder()
             .with_default_directive(file_default_directive)
             .from_env_lossy();
-        for spec in &["winit=off", "wgpu=off", "eframe=off", "egui=off"] {
+        for spec in &["winit=off", "wgpu=off", "egui=off"] {
             match spec.parse::<Directive>() {
                 Ok(d) => filter = filter.add_directive(d),
                 Err(e) => {
