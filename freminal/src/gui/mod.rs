@@ -590,6 +590,17 @@ impl eframe::App for FreminalGui {
                 live.push((vid, state));
             }
             self.secondary_windows = live;
+
+            // Ensure every secondary (deferred) viewport gets a repaint
+            // whenever the root window repaints.  Without this, compositor-
+            // initiated resizes on tiling Wayland go unnoticed because the
+            // deferred closure only runs as part of the root frame — if no
+            // explicit repaint is requested for the child viewport, eframe
+            // may skip it, leaving the GL framebuffer stretched at the old
+            // size until the user interacts with the child window.
+            for (vid, _) in &self.secondary_windows {
+                ctx.request_repaint_of(*vid);
+            }
         }
 
         // Collect `pending_new_window` requests from secondary windows and
