@@ -17,10 +17,10 @@ images, and user-provided custom shaders for post-processing effects.
 | 57  | Render Loop Optimization | Medium | Complete |
 | 58  | Built-in Multiplexer     | Large  | Complete |
 
-**Note:** Task 56 (Session Restore / Startup Commands) has been moved to v0.6.0 where it is
+**Note:** Task 56 (Session Restore / Startup Commands) has been moved to v0.7.0 where it is
 subsumed by Task 61 (Saved Layouts), which provides a superset of the original scope including
 multi-tab/multi-pane layout definitions, variable substitution, and a layout library. See
-`PLAN_VERSION_060.md`.
+`PLAN_VERSION_070.md`.
 
 ---
 
@@ -301,7 +301,7 @@ terminal (brief overlay or title bar message), and fall back to direct rendering
 
 ## Task 56 — Session Restore / Startup Commands
 
-**Status: Moved to v0.6.0.** Subsumed by Task 61 (Saved Layouts) in `PLAN_VERSION_060.md`,
+**Status: Moved to v0.7.0.** Subsumed by Task 61 (Saved Layouts) in `PLAN_VERSION_070.md`,
 which provides a superset of this task's scope: multi-tab/multi-pane layout definitions with
 variable substitution, a layout library, save/restore, and auto-restore on startup.
 
@@ -905,7 +905,7 @@ Adding thread ownership of the tree would require synchronization with no perfor
 Task 53 (Multiple Windows) ── builds on tabs (Task 36, v0.3.0)
 Task 54 (Background Images) ── extends background_opacity (Task 34, complete)
 Task 55 (Custom Shaders) ── extends the GL renderer (Task 1, complete)
-Task 56 (Session Restore) ── MOVED to v0.6.0, subsumed by Task 61 (Saved Layouts)
+Task 56 (Session Restore) ── MOVED to v0.7.0, subsumed by Task 61 (Saved Layouts)
 Task 57 (Render Loop Opt) ── independent; complete
 Task 58 (Built-in Muxing) ── builds on tabs (Task 36, v0.3.0); subsumes A.2
 

@@ -370,25 +370,24 @@ fn dispatch_context_menu_action(
     };
 
     match action {
-        ContextMenuAction::Copy => {
-            if let Some((start, end)) = view_state.selection.normalised() {
-                if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
-                    start_row: start.row,
-                    start_col: start.col,
-                    end_row: end.row,
-                    end_col: end.col,
-                    is_block: view_state.selection.is_block,
-                }) {
-                    error!("Context menu: failed to send ExtractSelection: {e}");
-                } else if let Ok(text) =
-                    clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
-                    && !text.is_empty()
-                {
-                    ui.ctx().copy_text(text);
-                    view_state.selection.clear();
-                }
+        ContextMenuAction::Copy if let Some((start, end)) = view_state.selection.normalised() => {
+            if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
+                start_row: start.row,
+                start_col: start.col,
+                end_row: end.row,
+                end_col: end.col,
+                is_block: view_state.selection.is_block,
+            }) {
+                error!("Context menu: failed to send ExtractSelection: {e}");
+            } else if let Ok(text) =
+                clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                && !text.is_empty()
+            {
+                ui.ctx().copy_text(text);
+                view_state.selection.clear();
             }
         }
+        ContextMenuAction::Copy => {}
         ContextMenuAction::Paste => {
             // Ask the platform to inject an Event::Paste on the next frame.
             // egui-winit reads the system clipboard internally and delivers
@@ -1409,11 +1408,12 @@ impl FreminalTerminalWidget {
                 // the config-apply path (these need a GL context).
                 if let Some(pending) = rs.pending_bg_image.take() {
                     match pending {
-                        PendingGpuOp::Load(ref path) => {
-                            if let Err(e) = rs.renderer.update_background_image(gl, path) {
-                                error!("Failed to load background image: {e}");
-                            }
+                        PendingGpuOp::Load(ref path)
+                            if let Err(e) = rs.renderer.update_background_image(gl, path) =>
+                        {
+                            error!("Failed to load background image: {e}");
                         }
+                        PendingGpuOp::Load(_) => {}
                         PendingGpuOp::Clear => rs.renderer.clear_background_image(gl),
                     }
                 }

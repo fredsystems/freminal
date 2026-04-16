@@ -963,18 +963,37 @@ impl Buffer {
             return;
         }
 
+        let old_cursor_y = self.cursor.pos.y;
+        let old_cursor_x = self.cursor.pos.x;
+
         // Take ownership of the old rows
         let old_rows = std::mem::take(&mut self.rows);
 
-        // 1) Group rows into logical lines based on RowJoin
+        // 1) Group rows into logical lines based on RowJoin.
+        //    While grouping, identify which logical line contains the cursor
+        //    and compute the cursor's flat cell offset within that line.
         let mut logical_lines: Vec<Vec<Row>> = Vec::new();
         let mut current_line: Vec<Row> = Vec::new();
 
-        for row in old_rows {
+        let mut cursor_logical_line: Option<usize> = None;
+        let mut cursor_flat_offset: usize = 0;
+
+        for (old_row_idx, row) in old_rows.into_iter().enumerate() {
             if row.join == RowJoin::NewLogicalLine && !current_line.is_empty() {
                 logical_lines.push(current_line);
                 current_line = Vec::new();
             }
+
+            if old_row_idx == old_cursor_y {
+                cursor_logical_line = Some(logical_lines.len());
+                // Flat offset = cells from preceding rows in this logical line + cursor X.
+                cursor_flat_offset = current_line
+                    .iter()
+                    .map(|r| r.get_characters().len())
+                    .sum::<usize>()
+                    + old_cursor_x;
+            }
+
             current_line.push(row);
         }
         if !current_line.is_empty() {
@@ -983,16 +1002,22 @@ impl Buffer {
 
         // 2) For each logical line, flatten its cells and re-wrap
         let mut new_rows: Vec<Row> = Vec::new();
+        let mut new_cursor_y: Option<usize> = None;
+        let mut new_cursor_x: Option<usize> = None;
 
-        for line in logical_lines {
+        for (line_idx, line) in logical_lines.into_iter().enumerate() {
             // Determine origin for the first row of this logical line.
             let first_origin = line.first().map_or(RowOrigin::HardBreak, |r| r.origin);
+            let is_cursor_line = cursor_logical_line == Some(line_idx);
 
             // Flatten all rows in this logical line into a single Vec<Cell>
             let mut flat_cells: Vec<Cell> = Vec::new();
             for row in &line {
                 flat_cells.extend(row.get_characters().iter().cloned());
             }
+
+            // Record where this logical line's new rows start (for cursor mapping).
+            let line_start_idx = new_rows.len();
 
             if flat_cells.is_empty() {
                 // Empty logical line → keep a single empty row
@@ -1001,6 +1026,10 @@ impl Buffer {
                     first_origin,
                     RowJoin::NewLogicalLine,
                 ));
+                if is_cursor_line {
+                    new_cursor_y = Some(new_rows.len() - 1);
+                    new_cursor_x = Some(old_cursor_x.min(new_width.saturating_sub(1)));
+                }
                 continue;
             }
 
@@ -1093,6 +1122,31 @@ impl Buffer {
 
                 new_rows.push(Row::from_cells(new_width, origin, join, cur_cells));
             }
+
+            // If this logical line contains the cursor, map the old cursor
+            // position to the correct new row and column.
+            if is_cursor_line {
+                let mut flat_col: usize = 0;
+                let mut found = false;
+                for (i, new_row) in new_rows[line_start_idx..].iter().enumerate() {
+                    let row_cells = new_row.get_characters().len();
+                    if flat_col + row_cells > cursor_flat_offset {
+                        new_cursor_y = Some(line_start_idx + i);
+                        new_cursor_x = Some(cursor_flat_offset - flat_col);
+                        found = true;
+                        break;
+                    }
+                    flat_col += row_cells;
+                }
+                if !found {
+                    // Cursor is past the end of content (in blank space).
+                    // Place it on the last row of this logical line.
+                    let last_row_idx = new_rows.len() - 1;
+                    let last_row_len = new_rows[last_row_idx].get_characters().len();
+                    new_cursor_y = Some(last_row_idx);
+                    new_cursor_x = Some(cursor_flat_offset.saturating_sub(flat_col) + last_row_len);
+                }
+            }
         }
 
         // 3) Install the new rows and update width
@@ -1106,20 +1160,19 @@ impl Buffer {
         // merged cells.
         self.image_cell_count = self.rows.iter().map(Row::count_image_cells).sum();
 
-        // 4) Ensure cursor is in bounds (scroll_offset is always reset to 0 by the
-        //    caller after a reflow — returned from set_size).
-        if self.cursor.pos.y >= self.rows.len() {
+        // 4) Remap cursor position based on reflow tracking.
+        if let (Some(cy), Some(cx)) = (new_cursor_y, new_cursor_x) {
+            self.cursor.pos.y = cy.min(self.rows.len().saturating_sub(1));
+            self.cursor.pos.x = cx.min(self.width.saturating_sub(1));
+        } else if self.cursor.pos.y >= self.rows.len() {
             if self.rows.is_empty() {
                 self.cursor.pos.y = 0;
             } else {
                 self.cursor.pos.y = self.rows.len() - 1;
             }
             self.cursor.pos.x = 0;
-        } else {
-            // Clamp X to the new width
-            if self.cursor.pos.x >= self.width {
-                self.cursor.pos.x = self.width.saturating_sub(1);
-            }
+        } else if self.cursor.pos.x >= self.width {
+            self.cursor.pos.x = self.width.saturating_sub(1);
         }
     }
 
@@ -8038,6 +8091,76 @@ mod reflow_to_width_tests {
         let row1 = cell_str(&buf, 1);
         assert!(row0.starts_with("AAAA"), "row0: {row0}");
         assert!(row1.starts_with("BBBB"), "row1: {row1}");
+    }
+
+    // Test 10: cursor Y is remapped when lines before cursor wrap to more rows
+    #[test]
+    fn reflow_remaps_cursor_y_on_narrow() {
+        let mut buf = Buffer::new(10, 5);
+        // Row 0: "ABCDEFGHIJ" (10 chars, fills full width)
+        buf.insert_text(&t("ABCDEFGHIJ"));
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        // Row 1: "XY" (cursor is here)
+        buf.insert_text(&t("XY"));
+
+        // Cursor should be at row 1
+        assert_eq!(buf.cursor.pos.y, 1);
+        assert_eq!(buf.cursor.pos.x, 2);
+
+        // Reflow to width 5: "ABCDEFGHIJ" splits into 2 rows, "XY" stays 1 row
+        // Row 0: "ABCDE"
+        // Row 1: "FGHIJ"
+        // Row 2: "XY"
+        buf.reflow_to_width(5);
+
+        assert_eq!(buf.rows.len(), 3);
+        assert_eq!(
+            buf.cursor.pos.y, 2,
+            "cursor should move to row 2 (was row 1 before reflow)"
+        );
+        assert_eq!(buf.cursor.pos.x, 2, "cursor X should be preserved");
+    }
+
+    // Test 11: cursor on a row that itself wraps — cursor X remapped to new row
+    #[test]
+    fn reflow_remaps_cursor_on_wrapping_row() {
+        let mut buf = Buffer::new(10, 5);
+        // Row 0: "ABCDEFGHIJ" — cursor at col 7
+        buf.insert_text(&t("ABCDEFGHIJ"));
+        buf.cursor.pos.x = 7;
+        buf.cursor.pos.y = 0;
+
+        // Reflow to width 5:
+        // Row 0: "ABCDE"
+        // Row 1: "FGHIJ" — old col 7 maps to flat offset 7, row 1 col 2
+        buf.reflow_to_width(5);
+
+        assert_eq!(buf.rows.len(), 2);
+        assert_eq!(
+            buf.cursor.pos.y, 1,
+            "cursor should be on row 1 (second half)"
+        );
+        assert_eq!(buf.cursor.pos.x, 2, "cursor should be at col 2 in new row");
+    }
+
+    // Test 12: cursor past end of content (in blank space) is preserved
+    #[test]
+    fn reflow_cursor_in_blank_space() {
+        let mut buf = Buffer::new(10, 5);
+        // Row 0: "AB" (2 cells), cursor at col 8 (in blank space)
+        buf.insert_text(&t("AB"));
+        buf.cursor.pos.x = 8;
+        buf.cursor.pos.y = 0;
+
+        // Reflow to width 5: "AB" fits in one row, cursor was at col 8
+        // flat_offset = 8, but flat_cells.len() = 2
+        // Cursor should land on row 0 at col 8 (past content but still valid)
+        buf.reflow_to_width(5);
+
+        assert_eq!(buf.cursor.pos.y, 0);
+        // Cursor X should be clamped to new_width - 1 = 4
+        assert_eq!(buf.cursor.pos.x, 4);
     }
 }
 

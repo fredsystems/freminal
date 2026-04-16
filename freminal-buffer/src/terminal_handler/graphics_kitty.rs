@@ -665,22 +665,26 @@ impl TerminalHandler {
                 self.buffer.image_store_mut().clear();
                 self.virtual_placements.clear();
             }
-            KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter => {
-                if let Some(image_id) = cmd.control.image_id {
-                    let id = u64::from(image_id);
-                    tracing::debug!("Kitty graphics: deleting image id={id}");
-                    self.buffer.clear_image_placements_by_id(id);
-                    self.buffer.image_store_mut().remove(id);
-                    self.virtual_placements
-                        .retain(|&(img_id, _), _| img_id != id);
-                }
+            KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter
+                if let Some(image_id) = cmd.control.image_id =>
+            {
+                let id = u64::from(image_id);
+                tracing::debug!("Kitty graphics: deleting image id={id}");
+                self.buffer.clear_image_placements_by_id(id);
+                self.buffer.image_store_mut().remove(id);
+                self.virtual_placements
+                    .retain(|&(img_id, _), _| img_id != id);
             }
-            KittyDeleteTarget::ByNumber | KittyDeleteTarget::ByNumberCursorOrAfter => {
-                if let Some(number) = cmd.control.image_number {
-                    tracing::debug!("Kitty graphics: deleting image number={number}");
-                    self.buffer.clear_image_placements_by_number(number);
-                }
+            KittyDeleteTarget::ByNumber | KittyDeleteTarget::ByNumberCursorOrAfter
+                if let Some(number) = cmd.control.image_number =>
+            {
+                tracing::debug!("Kitty graphics: deleting image number={number}");
+                self.buffer.clear_image_placements_by_number(number);
             }
+            KittyDeleteTarget::ById
+            | KittyDeleteTarget::ByIdCursorOrAfter
+            | KittyDeleteTarget::ByNumber
+            | KittyDeleteTarget::ByNumberCursorOrAfter => {}
             KittyDeleteTarget::AtCursor => {
                 tracing::debug!("Kitty graphics: deleting images at cursor");
                 self.buffer.clear_image_placements_at_cursor();

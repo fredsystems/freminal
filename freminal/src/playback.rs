@@ -338,30 +338,28 @@ fn handle_playback_command(
                 }
             }
         }
-        PlaybackCommand::Pause => {
-            if let PlaybackState::RealTimePlaying { play_start, .. } = state {
-                *state = PlaybackState::RealTimePaused {
-                    elapsed_at_pause: play_start.elapsed(),
-                };
-            }
-            // Pause in other states is a no-op.
+        PlaybackCommand::Pause if let PlaybackState::RealTimePlaying { play_start, .. } = state => {
+            *state = PlaybackState::RealTimePaused {
+                elapsed_at_pause: play_start.elapsed(),
+            };
         }
-        PlaybackCommand::NextFrame => {
+        PlaybackCommand::NextFrame
             if matches!(
                 state,
                 PlaybackState::FrameStepWaiting | PlaybackState::WaitingForPlay
             ) && *mode == PlaybackMode::FrameStepping
-                && *current_frame < frames.len()
-            {
-                emulator.handle_incoming_data(&frames[*current_frame].data);
-                *current_frame += 1;
-                *state = if *current_frame >= frames.len() {
-                    PlaybackState::Complete
-                } else {
-                    PlaybackState::FrameStepWaiting
-                };
-            }
+                && *current_frame < frames.len() =>
+        {
+            emulator.handle_incoming_data(&frames[*current_frame].data);
+            *current_frame += 1;
+            *state = if *current_frame >= frames.len() {
+                PlaybackState::Complete
+            } else {
+                PlaybackState::FrameStepWaiting
+            };
         }
+        // Pause in other states is a no-op. NextFrame in non-steppable states is a no-op.
+        PlaybackCommand::Pause | PlaybackCommand::NextFrame => {}
     }
 }
 

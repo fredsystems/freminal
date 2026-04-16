@@ -166,19 +166,17 @@ pub(super) fn dispatch_binding_action(
     deferred_actions: &mut Vec<KeyAction>,
 ) {
     match action {
-        KeyAction::Copy => {
-            if let Some((start, end)) = view_state.selection.normalised() {
-                if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
-                    start_row: start.row,
-                    start_col: start.col,
-                    end_row: end.row,
-                    end_col: end.col,
-                    is_block: view_state.selection.is_block,
-                }) {
-                    error!("Failed to send ExtractSelection to PTY consumer: {e}");
-                } else {
-                    *clipboard_pending = true;
-                }
+        KeyAction::Copy if let Some((start, end)) = view_state.selection.normalised() => {
+            if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
+                start_row: start.row,
+                start_col: start.col,
+                end_row: end.row,
+                end_col: end.col,
+                is_block: view_state.selection.is_block,
+            }) {
+                error!("Failed to send ExtractSelection to PTY consumer: {e}");
+            } else {
+                *clipboard_pending = true;
             }
         }
         KeyAction::ScrollPageUp => {
@@ -211,12 +209,10 @@ pub(super) fn dispatch_binding_action(
                 }
             }
         }
-        KeyAction::ScrollToBottom => {
-            if view_state.scroll_offset != 0 {
-                view_state.scroll_offset = 0;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(0)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+        KeyAction::ScrollToBottom if view_state.scroll_offset != 0 => {
+            view_state.scroll_offset = 0;
+            if let Err(e) = input_tx.send(InputEvent::ScrollOffset(0)) {
+                error!("Failed to send scroll offset to PTY consumer: {e}");
             }
         }
         KeyAction::ScrollLineUp => {
@@ -792,25 +788,24 @@ pub(super) fn write_input_to_terminal(
             // LIMITATION (egui#3653): egui unifies numpad and main-row keys.
             // Application keypad mode cannot distinguish them until egui exposes
             // separate key variants.
-            Event::Text(text) => {
-                if repeat_characters == Decarm::RepeatKey || previous_key.is_none() {
-                    collect_text(text)
-                } else {
-                    continue;
-                }
+            Event::Text(text)
+                if repeat_characters == Decarm::RepeatKey || previous_key.is_none() =>
+            {
+                collect_text(text)
             }
+            Event::Text(_) => continue,
             Event::Key {
                 key: Key::Enter,
                 pressed: true,
                 modifiers,
                 ..
-            } => {
-                if modifiers.is_none() {
-                    [TerminalInput::Enter].as_ref().into()
-                } else {
-                    continue;
-                }
-            }
+            } if modifiers.is_none() => [TerminalInput::Enter].as_ref().into(),
+            #[allow(clippy::match_same_arms)] // Semantically distinct from Event::Text(_) above
+            Event::Key {
+                key: Key::Enter,
+                pressed: true,
+                ..
+            } => continue,
             // https://github.com/emilk/egui/issues/3653
             // egui-winit intercepts Ctrl+C and Ctrl+X at the platform layer and converts them
             // to Event::Copy and Event::Cut respectively, before they can reach us as

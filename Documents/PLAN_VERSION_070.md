@@ -1,577 +1,866 @@
-# PLAN_VERSION_070.md — v0.7.0 "Foundation"
+# PLAN_VERSION_070.md — v0.7.0 "Replay & Layouts"
 
 ## Goal
 
-Replace eframe with a direct winit + glutin + egui integration, giving Freminal full control
-over the event loop, GL context lifecycle, frame pacing, and multi-window management. This
-eliminates five documented eframe workarounds, enables true event-driven rendering (zero CPU
-at idle), and removes the root-viewport coupling that forces the "Close All Windows?"
-confirmation dialog. The new windowing layer lives in a dedicated workspace crate
-(`freminal-windowing`) that encapsulates all platform windowing, GL context management, and
-egui integration — keeping the `freminal` binary crate focused on terminal-specific GUI logic.
+Transform Freminal's recording/playback system from a single-stream byte dump into a full
+session reconstruction engine, and introduce a layout system that lets users define, save,
+and restore complete multi-tab, multi-pane workspace configurations.
 
 ---
 
 ## Task Summary
 
-| #   | Feature                               | Scope  | Status  | Dependencies |
-| --- | ------------------------------------- | ------ | ------- | ------------ |
-| 62  | freminal-windowing crate + event loop | Large  | Pending | None         |
-| 63  | Single-window migration               | Large  | Pending | Task 62      |
-| 64  | Multi-window parity                   | Large  | Pending | Task 63      |
-| 65  | Frame pacing + idle optimization      | Medium | Pending | Task 63      |
-| 66  | Cleanup + eframe removal              | Medium | Pending | Task 64      |
+| #   | Feature                           | Scope | Status  | Dependencies     |
+| --- | --------------------------------- | ----- | ------- | ---------------- |
+| 59  | FREC v2: Multi-Pane Recording     | Large | Pending | Task 32, Task 58 |
+| 60  | Playback v2: Multi-Pane Replay    | Large | Pending | Task 59          |
+| 61  | Saved Layouts (Session Templates) | Large | Pending | Task 36, Task 58 |
 
 ---
 
-## Crate: freminal-windowing
+## Task 59 — FREC v2: Multi-Pane Recording Format
 
-A new workspace member that owns the platform windowing abstraction. Everything below the
-`freminal` crate's terminal GUI logic and above the OS lives here.
+### 59 Overview
 
-### Responsibilities
+The current FREC v1 format is a flat sequence of timestamped PTY read chunks — no metadata,
+no terminal dimensions, no input recording, and no awareness of tabs or panes. It was designed
+for a single-emulator world. With tabs (Task 36) and split panes (Task 58) now in place, the
+format is fundamentally inadequate: it cannot record multi-pane sessions at all, and even for
+single-pane sessions it loses critical information (window size, user input, resize events).
 
-- winit `EventLoop` creation and `ApplicationHandler` implementation
-- GL context creation and management via glutin + glutin-winit
-- egui input translation via egui-winit
-- egui rendering via egui_glow (chrome: menus, modals, dialogs)
-- Window lifecycle: create, destroy, resize, focus, minimize, close
-- Frame pacing: render only on demand, proper Wayland `pre_present_notify()`
-- Multi-window management: peer windows with independent GL contexts
+FREC v2 is a complete redesign. The goals:
 
-### What It Does NOT Own
+1. **Per-stream isolation.** Each pane's PTY output is recorded independently — no byte
+   interleaving. A recording of a 4-pane session contains 4 distinct output streams.
+2. **Bidirectional capture.** Every byte Freminal sends TO the PTY (keyboard input, paste,
+   bracketed paste sequences, report responses) is recorded per-pane. This is not replayed
+   during playback — it exists purely for diagnostics ("what did the user type to produce
+   this state?").
+3. **Topology events.** Tab create/close, pane split/close, focus changes, and zoom
+   toggle are recorded as timestamped events. Combined with the per-pane streams, this
+   allows exact reconstruction of Freminal's state at any point in time.
+4. **Size tracking.** Initial window dimensions and every resize event (both window-level
+   and per-pane) are recorded, so playback can reconstruct the correct terminal geometry.
+5. **Rich metadata.** Recording version, Freminal version, initial tab/pane topology,
+   per-pane dimensions, TERM value, scrollback limit, shell, CWD at recording start.
+6. **Seekability.** A frame index table at the end of the file enables random access and
+   backward seeking without scanning the entire file.
 
-- Terminal emulation (freminal-terminal-emulator)
-- Buffer model (freminal-buffer)
-- Custom terminal renderer (stays in freminal — the GL shaders, glyph atlas, vertex builder)
-- Application-level state (tabs, panes, config, keybindings)
-- PTY I/O
+### 59 Format Design
 
-### Public API Surface (Sketch)
+#### File Structure
 
-```rust
-/// The application trait that `freminal` implements instead of `eframe::App`.
-pub trait App {
-    /// Called once per window per frame, only when a redraw is needed.
-    /// `gl` is the window's GL context; `ctx` is the egui context for this window.
-    fn update(&mut self, window_id: WindowId, ctx: &egui::Context, gl: &glow::Context);
-
-    /// Called when a window is created.  Returns initial egui configuration.
-    fn on_window_created(&mut self, window_id: WindowId, ctx: &egui::Context);
-
-    /// Called when a window close is requested.  Return `false` to cancel.
-    fn on_close_requested(&mut self, window_id: WindowId) -> bool;
-
-    /// GL clear color for the given window (supports transparency).
-    fn clear_color(&self, window_id: WindowId) -> [f32; 4];
-}
-
-/// Opaque window identifier (wraps winit::window::WindowId).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WindowId(winit::window::WindowId);
-
-/// Configuration for creating a new window.
-pub struct WindowConfig {
-    pub title: String,
-    pub inner_size: Option<(u32, u32)>,
-    pub transparent: bool,
-    pub icon: Option<egui::IconData>,
-    pub app_id: Option<String>,
-}
-
-/// Handle passed to the App for requesting window operations.
-pub struct WindowHandle<'a> { /* ... */ }
-
-impl<'a> WindowHandle<'a> {
-    pub fn create_window(&self, config: WindowConfig);
-    pub fn close_window(&self, id: WindowId);
-    pub fn request_repaint(&self, id: WindowId);
-    pub fn request_repaint_after(&self, id: WindowId, delay: Duration);
-    pub fn set_title(&self, id: WindowId, title: &str);
-    pub fn set_visible(&self, id: WindowId, visible: bool);
-    pub fn set_minimized(&self, id: WindowId, minimized: bool);
-}
-
-/// Entry point — replaces `eframe::run_native()`.
-pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error>;
+```text
+┌─────────────────────────────────────────────────────┐
+│ File Header                                          │
+│   Magic: b"FREC"  (4 bytes)                          │
+│   Version: 0x02   (1 byte)                           │
+│   Flags: u32 LE   (4 bytes, reserved — e.g. compression) │
+│   Metadata Length: u32 LE                             │
+│   Metadata: MessagePack / bincode blob                │
+├─────────────────────────────────────────────────────┤
+│ Event Stream (sequential, variable-length records)    │
+│   Record 0: { timestamp_us, event_type, pane_id, ... }│
+│   Record 1: ...                                       │
+│   ...                                                 │
+│   Record N: ...                                       │
+├─────────────────────────────────────────────────────┤
+│ Seek Index (written at finalization)                  │
+│   Index entry count: u64 LE                           │
+│   Per entry: { timestamp_us: u64, file_offset: u64 }  │
+│   Index interval: every ~1 second of recording time   │
+├─────────────────────────────────────────────────────┤
+│ Footer                                               │
+│   Seek index offset: u64 LE (byte offset of index)   │
+│   Total duration: u64 LE (microseconds)               │
+│   Total events: u64 LE                                │
+│   Magic: b"FREC" (4 bytes, for reverse scanning)      │
+└─────────────────────────────────────────────────────┘
 ```
 
-This is a sketch, not a contract. The API will be refined during implementation. The key
-design principle: `freminal-windowing` owns the event loop and GL contexts; the `freminal`
-crate owns everything terminal-specific.
+#### Metadata Block
 
-### Dependencies
+Serialized as a structured binary format (MessagePack or bincode — decided during
+implementation based on dependency weight). Contains:
 
-The implementing agent MUST use the most recent stable versions of all crates at the time of
-implementation. The versions listed below are the latest stable as of 2026-04-15 and serve as
-a **minimum floor**, not a pin:
+```rust
+struct RecordingMetadata {
+    freminal_version: String,       // e.g. "0.6.0"
+    created_at: u64,                // Unix epoch seconds
+    term: String,                   // e.g. "xterm-256color"
+    initial_window_size: (u32, u32), // pixels
+    initial_topology: TopologySnapshot, // full tab/pane tree at recording start
+    scrollback_limit: u32,
+}
 
-| Crate               | Minimum Version | Purpose                                    |
-| ------------------- | --------------- | ------------------------------------------ |
-| `winit`             | 0.30.13         | Window creation, event loop                |
-| `glutin`            | 0.32.3          | OpenGL context creation (EGL/WGL/GLX/CGL)  |
-| `glutin-winit`      | 0.5.0           | glutin-to-winit integration bridge         |
-| `egui`              | 0.34.1          | Immediate-mode UI (menus, modals, dialogs) |
-| `egui-winit`        | 0.34.1          | winit event to egui RawInput translation   |
-| `egui_glow`         | 0.34.1          | egui rendering via glow (chrome only)      |
-| `glow`              | 0.17.0          | OpenGL function loader and bindings        |
-| `raw-window-handle` | 0.6.2           | Window handle interop (glutin / winit)     |
-| `tracing`           | (workspace)     | Structured logging                         |
-| `thiserror`         | (workspace)     | Error types                                |
-| `conv2`             | (workspace)     | Numeric conversions (per agents.md)        |
+struct TopologySnapshot {
+    tabs: Vec<TabSnapshot>,
+    active_tab: TabId,
+}
 
-**IMPORTANT:** At implementation time, the agent MUST run `cargo search <crate>` for each
-dependency to verify the latest stable version and use that version, not the floor listed here.
-If a new major version of `winit` (0.31+) or `egui` (0.35+) has been released stable, the
-agent must evaluate compatibility and use the latest stable if feasible.
+struct TabSnapshot {
+    id: TabId,
+    pane_tree: PaneTreeSnapshot,
+    active_pane: PaneId,
+    zoomed_pane: Option<PaneId>,
+}
 
-**The `eframe` dependency is NOT removed until Task 66.** Tasks 62–65 add the new crate
-alongside eframe so that the migration can be verified incrementally.
+struct PaneTreeSnapshot {
+    // Mirrors PaneTree enum but with serializable IDs and metadata
+    node: PaneNodeSnapshot,
+}
 
----
+enum PaneNodeSnapshot {
+    Leaf {
+        pane_id: PaneId,
+        cols: u32,
+        rows: u32,
+        cwd: Option<String>,
+        shell: Option<String>,
+        title: String,
+    },
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<PaneNodeSnapshot>,
+        second: Box<PaneNodeSnapshot>,
+    },
+}
+```
 
-## Task 62 — freminal-windowing Crate + Event Loop
+#### Event Types
 
-### 62 Overview
+Each event record in the stream has a common header:
 
-Create the `freminal-windowing` workspace crate with a working event loop, GL context, and
-egui integration for a single window. This is the foundation — no terminal rendering, no
-migration of `freminal` code. The deliverable is a crate that can open a window, run an egui
-frame, and paint it via glow, verified by a minimal example binary.
+```text
+[0..8]   u64 LE   timestamp_us (elapsed from recording start)
+[8]      u8       event_type
+[9..13]  u32 LE   payload_length
+[13..]   payload  (event_type-specific)
+```
 
-### 62 Subtasks
+Event types:
 
-1. **62.1 — Scaffold the crate**
-   Create `freminal-windowing/Cargo.toml` with workspace dependencies. Create `src/lib.rs`
-   with the public API types (`App` trait, `WindowId`, `WindowConfig`, `run()`). Add the
-   crate to the workspace `members` list in the root `Cargo.toml`. Ensure `cargo check --all`
-   passes with the new empty crate.
+| Type ID | Name         | Payload                                                                          |
+| ------- | ------------ | -------------------------------------------------------------------------------- |
+| 0x01    | PtyOutput    | pane_id: u32, data: [u8]                                                         |
+| 0x02    | PtyInput     | pane_id: u32, data: [u8]                                                         |
+| 0x03    | PaneResize   | pane_id: u32, cols: u32, rows: u32                                               |
+| 0x04    | WindowResize | width_px: u32, height_px: u32                                                    |
+| 0x05    | TabCreate    | tab_id: u32, pane_id: u32, cols: u32, rows: u32                                  |
+| 0x06    | TabClose     | tab_id: u32                                                                      |
+| 0x07    | PaneSplit    | parent_pane: u32, new_pane: u32, direction: u8, ratio: f32, cols: u32, rows: u32 |
+| 0x08    | PaneClose    | pane_id: u32                                                                     |
+| 0x09    | FocusChange  | tab_id: u32, pane_id: u32                                                        |
+| 0x0A    | ZoomToggle   | tab_id: u32, pane_id: u32, zoomed: u8                                            |
+| 0x0B    | TabSwitch    | tab_id: u32                                                                      |
+| 0x0C    | ThemeChange  | theme_name: String (length-prefixed)                                             |
 
-2. **62.2 — winit event loop**
-   Implement the winit 0.30 `ApplicationHandler` trait. Create an `EventLoop`, open a single
-   window via `ActiveEventLoop::create_window()`. Handle `Resumed`, `Suspended`,
-   `WindowEvent::RedrawRequested`, `WindowEvent::CloseRequested`, `WindowEvent::Resized`,
-   and `AboutToWait`. The `ApplicationHandler` holds application state and dispatches to the
-   `App` trait.
+**PtyOutput (0x01)** is the primary data event — equivalent to v1 frames but tagged with a
+pane ID. **PtyInput (0x02)** records what Freminal sent to the PTY — keyboard input, paste
+content, report responses. This is write-only (diagnostics) and is skipped during normal
+playback.
 
-3. **62.3 — GL context via glutin**
-   On `Resumed`, create a glutin `Display` (EGL on Linux/Wayland, WGL on Windows, CGL on
-   macOS) via `glutin-winit::DisplayBuilder`. Select an OpenGL config with RGBA8 + alpha
-   (for transparency support). Create a `Surface` and `PossiblyCurrentContext`. Create a
-   `glow::Context` from the GL loader function. Handle `Suspended` by destroying the surface
-   (required on Android, good practice elsewhere).
+#### Backward Compatibility
 
-4. **62.4 — egui integration**
-   Create an `egui::Context`. Create an `egui_winit::State` for input translation. Create an
-   `egui_glow::Painter` for rendering. On each `RedrawRequested`:
-   - `state.take_egui_input(&window)` → `RawInput`
-   - `ctx.run(raw_input, |ctx| app.update(...))` → `FullOutput`
-   - `state.handle_platform_output(&window, full_output.platform_output)`
-   - `painter.paint_and_update_textures(...)` with the shapes and textures delta
-   - `window.pre_present_notify()` then `surface.swap_buffers(&context)`
+- Files starting with `b"FREC" 0x01` are v1 and handled by the existing parser.
+- Files starting with `b"FREC" 0x02` are v2 and handled by the new parser.
+- `parse_recording()` dispatches on the version byte.
+- The `--with-playback-file` flag accepts both formats. v1 files play back in single-pane
+  mode exactly as today.
 
-5. **62.5 — Frame pacing**
-   Implement demand-driven rendering: only call `window.request_redraw()` when egui reports
-   `needs_repaint`. Expose `request_repaint()` and `request_repaint_after(delay)` through the
-   `WindowHandle` API. Use a timer (winit `ControlFlow::WaitUntil`) to wake the event loop
-   for delayed repaints. Verify: with no UI interaction, CPU usage is zero.
+### 59 Subtasks
 
-6. **62.6 — Transparency support**
-   When `WindowConfig::transparent` is true, configure the glutin surface with alpha, set
-   `window_attributes.with_transparent(true)`, and clear with `[0, 0, 0, 0]` before each
-   frame. Verify: window background is see-through on a supported compositor.
+1. **59.1 — Define FREC v2 format types**
+   Create the Rust types for the v2 format: `RecordingMetadataV2`, `RecordingEvent`,
+   `EventType` enum, `TopologySnapshot`, `PaneNodeSnapshot`, `SeekIndexEntry`. Place in
+   `freminal-terminal-emulator/src/recording.rs` (or a new `recording/` module directory
+   if the file grows too large). All types must be serializable. Choose and justify the
+   serialization format (MessagePack via `rmp-serde`, bincode, or raw manual encoding).
+   Add unit tests for round-trip serialization of all types.
 
-7. **62.7 — Error handling**
-   Define a `freminal_windowing::Error` enum covering: event loop creation failure, GL context
-   creation failure, surface creation failure, window creation failure. All public APIs return
-   `Result<T, Error>`. No panics in production code.
+2. **59.2 — v2 file writer: header and metadata**
+   Implement `write_header_v2()` that writes the magic, version, flags, and serialized
+   metadata block. The writer takes a `RecordingMetadataV2` (constructed from the current
+   `TabManager` topology at recording start). Unit tests: write + read back, verify
+   metadata fields survive the round trip.
 
-8. **62.8 — Example binary + tests**
-   Create `freminal-windowing/examples/hello.rs` — a minimal app that opens a window, shows
-   an egui label "Hello from freminal-windowing", and exits on close. Unit tests for
-   `WindowId`, `WindowConfig`, error types. The example is not a production artifact — it
-   exists for verification and can be removed later.
+3. **59.3 — v2 file writer: event stream**
+   Implement `write_event()` that appends a single event record to the file. Called from
+   the PTY reader thread (for PtyOutput/PtyInput) and the GUI thread (for topology and
+   resize events). Use a channel to funnel events from multiple threads to a single writer
+   thread (avoids interleaving and file locking). Unit tests: write a sequence of events,
+   read back, verify ordering and content.
 
-### 62 Primary Files
+4. **59.4 — v2 file writer: seek index and footer**
+   On recording stop (or application exit), the writer thread computes the seek index
+   (one entry per ~1 second of recording time, or per N events), writes it, and writes
+   the footer with the index offset, total duration, and event count. Implement graceful
+   finalization on both clean exit and SIGTERM/crash (write what we have). Unit tests:
+   verify index entries point to correct file offsets, verify footer fields.
 
-- `freminal-windowing/Cargo.toml` (new crate manifest)
-- `freminal-windowing/src/lib.rs` (public API, re-exports)
-- `freminal-windowing/src/event_loop.rs` (ApplicationHandler, event dispatch)
-- `freminal-windowing/src/gl_context.rs` (glutin setup, surface management)
-- `freminal-windowing/src/egui_integration.rs` (egui_winit + egui_glow wiring)
-- `freminal-windowing/src/error.rs` (error types)
-- `freminal-windowing/examples/hello.rs` (verification example)
-- `Cargo.toml` (workspace member addition)
+5. **59.5 — v2 file parser**
+   Implement `parse_recording_v2()` that reads the header, metadata, and loads the event
+   stream. Two modes: full load (all events into memory, for small files) and indexed
+   streaming (use the seek index for random access, for large files). The indexed mode
+   reads events on demand by seeking to the nearest index entry. Dispatch from the existing
+   `parse_recording()` based on version byte. Unit tests: parse files written by 59.2–59.4,
+   verify all fields. Test backward compat: v1 files still parse correctly.
 
-### 62 Design Decisions
+6. **59.6 — Hook PTY output recording**
+   In the PTY reader thread (`pty.rs`), replace the v1 `write_frame()` call with
+   `write_event(PtyOutput { pane_id, data })`. Each pane's PTY reader knows its pane ID
+   (threaded through at spawn time). This is the minimal change to start producing v2 files.
 
-1. **Separate crate, not inline in `freminal`.** The windowing layer is a reusable abstraction
-   that encapsulates platform-specific complexity. Keeping it in a separate crate enforces a
-   clean API boundary, makes it testable in isolation, and follows the existing workspace
-   pattern (`freminal-buffer`, `freminal-common`, `freminal-terminal-emulator`).
+7. **59.7 — Hook PTY input recording**
+   Every byte sent TO the PTY (keyboard input via `PtyWrite::Write`, paste via
+   `PtyWrite::Write`, resize via `PtyWrite::Resize`, and report responses) is captured as
+   a `PtyInput` event. The input channel already passes through a known point — tap it
+   there. `PtyWrite::Resize` additionally generates a `PaneResize` event.
 
-2. **winit 0.30 `ApplicationHandler` trait, not the deprecated `EventLoop::run()` closure.**
-   winit 0.30 deprecated the closure-based event loop in favor of the trait-based
-   `ApplicationHandler`. The trait-based approach is cleaner (proper struct methods instead of
-   a giant closure) and is the only supported path forward in winit 0.31+.
+8. **59.8 — Hook topology events**
+   In the GUI thread, emit topology events when:
+   - A tab is created (`TabCreate`) or closed (`TabClose`)
+   - A pane is split (`PaneSplit`) or closed (`PaneClose`)
+   - Focus changes (`FocusChange`)
+   - Zoom toggles (`ZoomToggle`)
+   - The active tab switches (`TabSwitch`)
+   - The window resizes (`WindowResize`)
+     These are sent through the event channel to the writer thread.
 
-3. **One `egui::Context` per window (not shared).** eframe shares one `Context` across all
-   viewports. This causes the root-viewport coupling problem. With independent contexts, each
-   window is a peer with its own egui state. The cost is that egui `Memory` (widget state like
-   scroll offsets, text cursor positions) is per-window, which is correct behavior anyway.
+9. **59.9 — Recording CLI and config updates**
+   Update `--recording-path` to produce v2 files by default. Add `--recording-format v1|v2`
+   flag for backward compatibility. Update `config_example.toml` if any config-level
+   recording options are added. Update the `playback` feature flag gating to cover the
+   new types.
 
-4. **GL context per window.** Each window gets its own glutin `Surface` +
-   `PossiblyCurrentContext`. This avoids the need for context switching (`make_current`) on
-   every frame and enables future per-window vsync.
+10. **59.10 — Tests and integration**
+    End-to-end test: start a headless multi-pane session, feed input, split panes, resize,
+    close panes, stop recording. Parse the resulting file and verify: correct event ordering,
+    per-pane data isolation (no interleaving), topology events at correct timestamps, seek
+    index validity. Test v1 backward compatibility. Test graceful finalization on abrupt stop.
 
----
+### 59 Primary Files
 
-## Task 63 — Single-Window Migration
+- `freminal-terminal-emulator/src/recording.rs` (or `recording/` module — format types, writer, parser)
+- `freminal-terminal-emulator/src/io/pty.rs` (PTY output and input hooks)
+- `freminal/src/gui/mod.rs` (topology event emission)
+- `freminal/src/gui/panes/mod.rs` (pane ID threading)
+- `freminal/src/gui/tabs.rs` (tab lifecycle events)
+- `freminal-common/src/args.rs` (CLI flag updates)
 
-### 63 Overview
+### 59 Design Decisions
 
-Migrate the `freminal` binary from eframe to `freminal-windowing` for the single-window case.
-After this task, Freminal opens and runs using the new event loop with full feature parity
-for a single window. eframe remains as a dependency (not yet removed) but is no longer called.
+1. **Single writer thread via channel.** Events from multiple PTY reader threads and the
+   GUI thread are funneled through a bounded crossbeam channel to a dedicated writer thread.
+   This avoids file-level locking, guarantees chronological ordering (events are timestamped
+   at the source and sorted if needed), and keeps I/O off the hot paths.
 
-### 63 Subtasks
+2. **Seek index at file end.** Writing the index at finalization (rather than maintaining it
+   inline) simplifies the writer — it just appends events sequentially. The footer's index
+   offset allows the parser to jump straight to the index. Crash resilience: if the file is
+   not finalized (crash before footer), the parser falls back to sequential scanning.
 
-1. **63.1 — Implement the `App` trait in `freminal`**
-   Create a new `impl freminal_windowing::App for FreminalApp` (or adapt `FreminalGui`).
-   The `update()` method should contain the same logic as the current `eframe::App::ui()`
-   body. The `on_close_requested()` method replaces the `close_requested` + `CancelClose`
-   intercept.
+3. **PtyInput is write-only.** Input events are never replayed during playback — they exist
+   for diagnostic reconstruction. This means the playback engine can skip them entirely,
+   and the recording overhead of capturing input is negligible (input volume is tiny compared
+   to output).
 
-2. **63.2 — Replace `eframe::run_native()` with `freminal_windowing::run()`**
-   In `main.rs`, replace the eframe launch code with the new entry point. Translate
-   `NativeOptions` to `WindowConfig`. Remove the `raw_input_hook` override (no longer needed).
-   Remove the `clear_color` hook (controlled directly via the `App` trait method).
-
-3. **63.3 — Migrate PaintCallback to direct GL calls**
-   The current custom renderer is wrapped in `egui_glow::CallbackFn` closures. With
-   `freminal-windowing`, the `App::update()` method receives the `glow::Context` directly.
-   Restructure the render pipeline: egui paints chrome first (via `egui_glow::Painter`), then
-   the custom terminal renderer draws directly to the framebuffer. This eliminates the
-   `PaintCallback` indirection and the `painter.intermediate_fbo()` restore requirement.
-
-4. **63.4 — Migrate repaint requests**
-   Replace `ui.ctx().request_repaint()` and `ui.ctx().request_repaint_after(delay)` with
-   `WindowHandle::request_repaint()` and `WindowHandle::request_repaint_after()`. Update the
-   PTY consumer thread to use the new repaint mechanism (it currently holds an
-   `Arc<OnceLock<egui::Context>>` and calls `ctx.request_repaint_after`).
-
-5. **63.5 — Migrate ViewportCommand calls**
-   Replace all `ui.ctx().send_viewport_cmd(ViewportCommand::*)` calls with direct
-   `WindowHandle` method calls (`set_title`, `close_window`, `set_minimized`, etc.). Remove
-   the `last_window_title` caching workaround (no longer needed — direct winit calls don't
-   trigger repaint loops).
-
-6. **63.6 — Migrate `eframe::egui::*` imports**
-   Mechanical find-replace: all `eframe::egui::*` imports become `egui::*`. All
-   `eframe::glow::*` imports become `glow::*`. All `eframe::egui_glow::*` imports become
-   `egui_glow::*`. This is a large but trivial diff.
-
-7. **63.7 — Verification + benchmarks**
-   Run the full verification suite. Run render loop benchmarks before and after. Verify:
-   single window opens, terminal works, tabs work, panes work, settings modal works, menu bar
-   works, search works, background images work, custom shaders work, background opacity works.
-   Verify on Wayland: no hang on hidden workspace (the vsync bug is gone).
-
-### 63 Primary Files
-
-- `freminal/src/main.rs` (launch code replacement)
-- `freminal/src/gui/mod.rs` (App trait impl, removal of eframe hooks)
-- `freminal/src/gui/terminal/widget.rs` (PaintCallback removal)
-- `freminal/src/gui/window.rs` (secondary window code — deferred to Task 64)
-- `freminal/src/gui/rendering.rs` (direct GL rendering)
-- `freminal/src/gui/pty.rs` (repaint mechanism)
-- `freminal/Cargo.toml` (add `freminal-windowing` dep)
-
-### 63 Design Decisions
-
-1. **Render order: egui chrome first, then terminal GL.** Currently the terminal renderer
-   runs inside a `PaintCallback` embedded in egui's paint list. With direct control, we paint
-   egui's chrome (menu bar, settings modal, tab bar) first via `egui_glow::Painter`, then
-   render the terminal content directly via our custom shaders. The terminal occupies a known
-   pixel rect (from egui layout), so the custom renderer clips to that rect. This eliminates
-   the intermediate FBO restore dance.
-
-2. **Keep eframe as a dependency during migration.** Tasks 62–65 are incremental. eframe is
-   not removed until Task 66. This allows bisecting if something breaks.
+4. **Topology snapshots, not diffs.** The metadata block stores the full initial topology.
+   Subsequent topology changes are recorded as discrete events (split, close, etc.). The
+   playback engine reconstructs the topology by applying events sequentially from the initial
+   snapshot. This is simpler and more debuggable than differential encoding.
 
 ---
 
-## Task 64 — Multi-Window Parity
+## Task 60 — Playback v2: Multi-Pane Replay with Size Adaptation
 
-### 64 Overview
+### 60 Overview
 
-Extend `freminal-windowing` to support multiple windows and migrate the multi-window code from
-the current eframe deferred-viewport approach. After this task, `Ctrl+Shift+N` opens a new
-peer window with its own GL context, and closing any window closes only that window.
+The current playback engine (`freminal/src/playback.rs`) drives a single headless
+`TerminalEmulator`, feeding it frames sequentially. It cannot:
 
-### 64 Subtasks
+- Replay multi-pane or multi-tab sessions
+- Handle window size mismatch between recording and playback
+- Seek backward or jump to arbitrary positions
+- Isolate a single pane's stream
 
-1. **64.1 — Multi-window support in freminal-windowing**
-   Extend the `ApplicationHandler` to manage a `HashMap<WindowId, WindowState>` where
-   `WindowState` holds the `Window`, `Surface`, `PossiblyCurrentContext`, `egui::Context`,
-   `egui_winit::State`, and `egui_glow::Painter` for each window. `WindowHandle::create_window()`
-   inserts a new entry. Events are dispatched to the correct window by `winit::window::WindowId`.
+Task 60 rebuilds the playback engine to consume FREC v2 files, reconstruct the full tab/pane
+topology, and introduce size adaptation strategies for tiling WM users who cannot freely
+resize their window.
 
-2. **64.2 — Peer window model**
-   All windows are equal peers. There is no root window. Closing any window closes only that
-   window and its resources. Closing the last window exits the process. The `App` trait's
-   `on_close_requested()` receives the `WindowId` and the app decides whether to allow it
-   (e.g., confirm if the window has running processes). This eliminates the confirmation
-   dialog for root-window close.
+### 60 Design
 
-3. **64.3 — Migrate secondary window code**
-   Replace the `show_viewport_deferred` approach in `gui/window.rs` with
-   `WindowHandle::create_window()`. Remove `SecondaryWindowState`, the per-frame
-   re-registration loop, the pruning loop, and the `closing_all` flag. Each window calls
-   `App::update()` independently with its own `WindowId`.
+#### Multi-Pane Reconstruction
 
-4. **64.4 — Shared resources**
-   Resources that are shared across windows (`Config`, `FontManager`, `PaneIdGenerator`)
-   continue to use `Arc<Mutex<>>`. Per-window resources (`TabManager`, `PaneTree`, channels,
-   `WindowPostRenderer`) move into a per-window state struct owned by the `App`.
+The playback engine creates a headless `TerminalEmulator` per pane (just as live mode does).
+On startup, it reads the `TopologySnapshot` from the FREC v2 metadata and constructs the
+initial tab/pane tree:
 
-5. **64.5 — Tests**
-   Unit tests for the multi-window manager: create window, close window, close last window
-   exits, event dispatch to correct window. Integration: open two windows, verify independent
-   tab/pane management, close one, verify the other continues.
+```text
+1. Read metadata.initial_topology
+2. For each tab:
+   a. For each leaf pane in the tree: create TerminalEmulator::new_headless(cols, rows)
+   b. Construct the PaneTree (mirrors the recorded topology)
+   c. Set active_pane and zoomed_pane from the snapshot
+3. Publish initial snapshots for all panes
+```
 
-### 64 Primary Files
+As topology events arrive during playback (TabCreate, PaneSplit, PaneClose, etc.), the engine
+modifies the tab/pane tree accordingly — creating or destroying emulators as needed.
 
-- `freminal-windowing/src/event_loop.rs` (multi-window dispatch)
-- `freminal-windowing/src/lib.rs` (WindowHandle API extensions)
-- `freminal/src/gui/mod.rs` (per-window state management)
-- `freminal/src/gui/window.rs` (replacement of deferred viewport code)
-- `freminal/src/gui/actions.rs` (close_or_hide_root → close_window)
+PtyOutput events are routed to the correct emulator by `pane_id`. PtyInput events are skipped
+(logged to a diagnostic sidebar if one is ever added, but not fed to emulators).
 
-### 64 Design Decisions
+#### Size Adaptation
 
-1. **No root window.** The fundamental architectural improvement. Every window is a peer.
-   Closing the last window triggers `ControlFlow::Exit`. This eliminates the entire class of
-   bugs around root-viewport coupling.
+The recording captures the exact terminal dimensions at every point. The playback window may
+be a different size — especially on tiling WMs where the user cannot resize freely. Three
+strategies, selectable via a toolbar toggle:
 
-2. **One `egui::Context` per window.** Each window has its own egui state. This means the
-   settings modal is per-window (not shared). If the user opens settings in Window A, Window B
-   is unaffected. This is simpler and more correct than the shared `Arc<AtomicBool>` mutual
-   exclusion approach.
+**1. Letterbox (default):**
+Render each pane at its _recorded_ dimensions. If the playback window is larger, pad with
+background color. If smaller, scroll/clip. This guarantees pixel-perfect fidelity — the
+terminal content is identical to what was recorded. The pane tree layout uses the recorded
+split ratios applied to the recorded window size, then the entire layout is centered in the
+actual window.
+
+**2. Reflow:**
+Create each headless emulator at the _playback_ window dimensions (or the pane's proportional
+share of the playback window). The same byte stream is fed, but the terminal re-wraps content
+to fit the new width. This changes line breaks and may alter visual layout, but is more
+readable when the size mismatch is large. Resize events in the recording are translated
+proportionally.
+
+**3. Scale:**
+Render at the recorded dimensions (like letterbox) but scale the output to fill the playback
+window. Preserves layout fidelity while using available space. May look fuzzy if scaling up
+significantly. Implemented via an intermediate framebuffer rendered at recorded size, then
+scaled to the display rect (leveraging the existing custom GL renderer).
+
+**Default: Letterbox.** It is the only mode that guarantees the playback is visually identical
+to the recording. The user can switch modes during playback via the toolbar.
+
+#### Seek and Rewind
+
+The FREC v2 seek index enables jumping to arbitrary positions:
+
+**Forward seek:** Skip events until the target timestamp. Feed PtyOutput events to emulators
+in fast-forward (no timing delays). Apply topology events normally.
+
+**Backward seek / rewind:** Terminal emulators are not reversible — you cannot "undo" bytes
+fed to them. To seek backward:
+
+1. Find the nearest seek index entry at or before the target timestamp.
+2. Reset all emulators to their initial state (or the state at the index entry — see
+   checkpoint strategy below).
+3. Replay all events from that point to the target timestamp in fast-forward.
+
+**Checkpoint strategy (optimization):** During forward playback, periodically snapshot the
+full emulator state (every ~5 seconds or at each seek index entry). Store these snapshots
+in memory. When seeking backward, find the nearest checkpoint before the target and replay
+from there instead of from the beginning. Memory budget: cap at ~100 checkpoints (each
+snapshot is a few hundred KB), evicting the oldest when the cap is reached.
+
+#### Per-Pane Solo Mode
+
+The playback toolbar offers a pane selector. When a pane is "soloed," only that pane's
+PtyOutput events are fed to its emulator and rendered. Other panes are paused (their events
+are skipped). This is useful for focusing on one pane's output in a busy multi-pane recording.
+Unsoloing resumes all panes from the current timestamp (events that were skipped are not
+replayed — the other panes jump to their state at the current time via fast-forward).
+
+#### Playback Toolbar Updates
+
+The current toolbar has: mode selector (Instant/RealTime/FrameStep), play/pause, frame
+counter. v2 adds:
+
+- **Timeline scrubber:** drag to seek to any timestamp. Shows total duration and current
+  position.
+- **Size mode toggle:** Letterbox / Reflow / Scale.
+- **Pane selector:** dropdown or clickable pane labels for solo mode.
+- **Speed control:** 0.5x, 1x, 2x, 4x, 8x playback speed (multiplier on inter-frame delays).
+- **Diagnostic toggle:** show/hide PtyInput events in a side panel (stretch goal).
+
+### 60 Subtasks
+
+1. **60.1 — Multi-emulator playback engine**
+   Refactor `run_playback_thread` (or replace it) to manage multiple headless
+   `TerminalEmulator` instances, one per pane. Read the `TopologySnapshot` from the v2
+   metadata and construct the initial emulator set. Route `PtyOutput` events by pane ID.
+   Handle topology events (create/destroy emulators as panes split/close). Publish per-pane
+   snapshots via per-pane `ArcSwap`. Fall back to single-emulator mode for v1 files.
+
+2. **60.2 — Playback tab/pane tree reconstruction**
+   On playback start, construct a `TabManager` with the recorded topology. The GUI renders
+   tabs and panes using the same layout code as live mode. Topology events during playback
+   modify the tree (split, close, tab create/close). The GUI must handle dynamic topology
+   changes during playback just as it does in live mode.
+
+3. **60.3 — Letterbox size adaptation**
+   Implement the letterbox strategy: each pane's emulator runs at its recorded dimensions
+   regardless of the playback window size. The layout engine uses recorded dimensions for
+   the pane tree, centers the result in the available window, and pads with background color.
+   If the playback window is smaller than the recorded layout, clip or add scrollbars to the
+   outer frame (not per-pane — the entire layout scrolls as a unit).
+
+4. **60.4 — Reflow size adaptation**
+   Implement the reflow strategy: each pane's emulator is created at the playback window's
+   proportional dimensions. Resize events in the recording are translated proportionally.
+   The pane tree uses the playback window dimensions with recorded split ratios.
+
+5. **60.5 — Scale size adaptation**
+   Implement the scale strategy: render the terminal layout at recorded dimensions into an
+   offscreen framebuffer (FBO), then draw a single textured quad scaled to fill the playback
+   window. This leverages the existing GL renderer. If Task 55 (Custom Shaders) is complete,
+   the scale pass is just another post-processing step. If not, a minimal FBO + blit shader
+   is needed (subset of 55.1).
+
+6. **60.6 — Forward seek**
+   Implement seek-forward: given a target timestamp, skip events and feed them to emulators
+   in fast-forward (no timing delays). Update the timeline scrubber position. Handle topology
+   events during fast-forward.
+
+7. **60.7 — Backward seek with checkpoints**
+   Implement the checkpoint system: during forward playback, snapshot emulator state at
+   regular intervals. On backward seek, find the nearest checkpoint, restore emulator state,
+   and fast-forward to the target. Cap checkpoint memory at a configurable budget. If no
+   checkpoint exists (e.g., seeking to near the beginning), reset to initial state and
+   replay from the start.
+
+8. **60.8 — Per-pane solo mode**
+   Add pane solo/unsolo to the playback toolbar. When soloed, only the selected pane's
+   PtyOutput events are processed. Other panes freeze at their current state. Unsoloing
+   fast-forwards the unsoloed panes to the current timestamp.
+
+9. **60.9 — Speed control**
+   Add speed multiplier to the playback toolbar (0.5x, 1x, 2x, 4x, 8x). The multiplier
+   divides inter-frame delays in RealTime mode. In Instant mode, speed is already infinite.
+   In FrameStep mode, speed is irrelevant.
+
+10. **60.10 — Timeline scrubber UI**
+    Add a horizontal scrubber bar to the playback toolbar showing total duration and current
+    position. Clicking/dragging seeks to the target timestamp (using 60.6/60.7). Show
+    timestamps in human-readable format (MM:SS or HH:MM:SS).
+
+11. **60.11 — v1 backward compatibility**
+    Ensure v1 FREC files continue to play back correctly. The v1 path remains single-pane,
+    forward-only, with the existing playback modes. The new toolbar features (seek, speed,
+    size mode) gracefully degrade: seek is not available (no index), size mode uses letterbox
+    at the default 80x24, speed control works normally.
+
+12. **60.12 — Tests and integration**
+    End-to-end test: record a multi-pane session (using 59.10's test infrastructure), play
+    it back, verify: pane topology matches, per-pane content matches frame-by-frame, seek
+    forward/backward produces correct state, size adaptation modes render without crashes.
+    Test v1 backward compatibility. Benchmark: measure playback throughput for large
+    recordings (e.g., 1M events).
+
+### 60 Primary Files
+
+- `freminal/src/playback.rs` (rebuilt playback engine)
+- `freminal/src/gui/mod.rs` (playback toolbar updates, multi-pane playback rendering)
+- `freminal/src/gui/tabs.rs` (playback tab/pane tree construction)
+- `freminal/src/gui/panes/mod.rs` (playback-mode pane management)
+- `freminal/src/gui/terminal/widget.rs` (size adaptation rendering)
+- `freminal/src/gui/renderer/gpu.rs` (FBO for scale mode, if Task 55 not done)
+- `freminal/src/main.rs` (v2 playback startup path)
+
+### 60 Design Decisions
+
+1. **Letterbox as default.** A tiling WM user cannot resize freely. Reflow changes the
+   content layout. Scale can be fuzzy. Letterbox is the only mode that guarantees the
+   playback is visually identical to the recording, regardless of window size. The user
+   can switch to reflow or scale if they prefer readability over fidelity.
+
+2. **Checkpoints for backward seek.** Terminal emulators are state machines with no reverse
+   operation. The alternative to checkpoints is replaying from the beginning on every
+   backward seek, which is O(N) in recording length. Checkpoints make it O(checkpoint_interval).
+   The memory cost is bounded by the checkpoint cap.
+
+3. **Per-pane solo is skip-based, not filter-based.** Solo mode skips events for non-soloed
+   panes rather than filtering them out of the event stream. This means the timeline stays
+   consistent (the scrubber position reflects real recording time, not just the soloed pane's
+   activity). Unsoloing requires fast-forward to sync the other panes.
+
+4. **Speed control as delay multiplier.** The simplest correct approach. 2x speed = half the
+   inter-frame delay. This preserves relative timing between events (a burst of output still
+   looks like a burst, just faster). The alternative — frame batching — would change the
+   visual cadence.
 
 ---
 
-## Task 65 — Frame Pacing + Idle Optimization
+## Task 61 — Saved Layouts (Session Templates)
 
-### 65 Overview
+### 61 Overview
 
-With the custom event loop in place, implement true event-driven rendering. The goal: zero CPU
-usage when the terminal is idle with a steady cursor, and minimal wakeups when only the cursor
-blink timer is active.
+A layout is a complete description of a Freminal workspace: how many tabs, how each tab's
+panes are arranged, and what runs in each pane. Layouts enable:
 
-### 65 Subtasks
+- **Startup configuration:** launch Freminal with a predefined multi-tab, multi-pane
+  workspace tailored to a project
+- **Save current state:** capture the running session's topology, working directories, and
+  programs into a reusable layout file
+- **Layout library:** a collection of named layouts in `~/.config/freminal/layouts/`,
+  selectable from the menu or Settings Modal
+- **Partial application:** load a layout into a new tab without replacing the entire session
+- **Auto-restore:** optionally save the layout on exit and restore it on next launch
 
-1. **65.1 — Demand-driven rendering**
-   Each window tracks whether it needs a repaint via a dirty flag. The PTY consumer thread
-   sets the flag and calls `request_repaint()`. Keyboard/mouse input sets the flag. The cursor
-   blink timer calls `request_repaint_after(500ms)`. If the flag is not set when
-   `RedrawRequested` fires, skip the frame entirely (just return from the handler without
-   calling `ctx.run()` or `swap_buffers()`).
+This task subsumes and expands Task 56 (Session Restore / Startup Commands), which was limited
+to flat tab lists with no pane tree support.
 
-2. **65.2 — Proper Wayland frame pacing**
-   Call `window.pre_present_notify()` before `surface.swap_buffers()`. This activates winit's
-   Wayland frame-callback pacing, preventing the compositor hang on hidden workspaces. Remove
-   the `vsync = false` workaround. Test: move Freminal to a hidden workspace, verify no hang
-   and no CPU spin.
+### 61 Design
 
-3. **65.3 — Per-window repaint timers**
-   Each window maintains its own next-repaint-at timestamp. The event loop's `ControlFlow` is
-   set to `WaitUntil(earliest_deadline)` across all windows. Only the window whose deadline
-   has passed receives a `request_redraw()`. Other windows sleep.
+#### Layout File Format
 
-4. **65.4 — Idle power measurement**
-   Measure and document idle CPU usage in three scenarios:
-   - Terminal idle, steady cursor (expect ~0%)
-   - Terminal idle, blinking cursor (expect ~0.1%, waking every 500ms)
-   - Active PTY output (expect proportional to output rate, capped at ~120 FPS per window)
-     Compare against the eframe baseline. Include in the completion report.
+Layouts are TOML files. TOML's nesting is limited, but for tree structures we use a
+flattened representation with explicit parent references. The format is human-readable
+and hand-editable — a key design goal.
 
-### 65 Primary Files
+```toml
+# ~/.config/freminal/layouts/dev.toml
 
-- `freminal-windowing/src/event_loop.rs` (frame pacing, dirty tracking, timer management)
-- `freminal/src/gui/pty.rs` (repaint request path)
-- `freminal/src/gui/mod.rs` (dirty flag integration)
+[layout]
+name = "Development"
+description = "Standard dev workspace: editor, server, logs"
 
-### 65 Design Decisions
+# Variables — can be overridden from CLI: freminal --layout dev.toml ~/projects/myapp
+# $1, $2, etc. are positional args. Named vars use ${VAR_NAME}.
+[layout.variables]
+project_dir = "~/projects/default"  # default value, overridden by $1 if provided
 
-1. **Skip-frame on clean.** If nothing has changed, don't call `ctx.run()`. This is the
-   single biggest idle power win. eframe always calls `update()` on `RedrawRequested` even
-   if the frame will be identical.
+# --- Tab definitions ---
 
-2. **`WaitUntil` instead of `Poll`.** winit's `ControlFlow::WaitUntil` suspends the thread
-   until the deadline or an OS event, whichever comes first. This is strictly better than
-   `Poll` (which spins) or `Wait` (which doesn't support timers).
+[[tabs]]
+title = "Editor"
+active = true  # this tab is focused on launch
 
----
+  # Pane tree for this tab. The tree is defined as a flat list of nodes.
+  # Each node has an "id" (local to this tab) and optionally a "parent" + "position".
+  # The root node has no parent.
 
-## Task 66 — Cleanup + eframe Removal
+  [[tabs.panes]]
+  id = "root"
+  split = "vertical"   # "vertical" (left/right) or "horizontal" (top/bottom)
+  ratio = 0.65
 
-### 66 Overview
+  [[tabs.panes]]
+  id = "editor"
+  parent = "root"
+  position = "first"   # "first" (left/top) or "second" (right/bottom)
+  directory = "${project_dir}"
+  command = "nvim ."
+  active = true         # this pane has focus within the tab
 
-Remove the `eframe` dependency entirely. Clean up any remaining eframe artifacts, dead code,
-and transitional scaffolding.
+  [[tabs.panes]]
+  id = "sidebar"
+  parent = "root"
+  position = "second"
+  split = "horizontal"
+  ratio = 0.5
 
-### 66 Subtasks
+  [[tabs.panes]]
+  id = "terminal"
+  parent = "sidebar"
+  position = "first"
+  directory = "${project_dir}"
 
-1. **66.1 — Remove eframe from Cargo.toml**
-   Remove `eframe` from the workspace `[dependencies]` and from `freminal/Cargo.toml`. Add
-   `egui`, `egui-winit`, `egui_glow`, `glow`, `winit`, `glutin`, `glutin-winit` as direct
-   workspace dependencies if not already present (they may already be there from Task 62).
+  [[tabs.panes]]
+  id = "git"
+  parent = "sidebar"
+  position = "second"
+  directory = "${project_dir}"
+  command = "lazygit"
 
-2. **66.2 — Remove eframe re-export paths**
-   Any remaining `eframe::egui::*`, `eframe::glow::*`, or `eframe::egui_glow::*` import
-   paths are replaced with direct crate imports. This should already be done by Task 63.6
-   but verify completeness.
+[[tabs]]
+title = "Server"
 
-3. **66.3 — Remove dead workarounds**
-   Remove the following code that exists solely to work around eframe limitations:
-   - `raw_input_hook` method (no longer exists after Task 63)
-   - `clear_color` hook (no longer exists after Task 63)
-   - `last_window_title` caching (no longer needed after Task 63.5)
-   - `closing_all` flag and confirmation dialog (no longer needed after Task 64.2)
-   - `show_close_confirmation` flag
-   - `vsync = false` workaround and associated comments
-   - `predicted_dt = 0.0` override and associated comments
+  [[tabs.panes]]
+  id = "server"
+  directory = "${project_dir}"
+  command = "cargo watch -x run"
 
-4. **66.4 — Update documentation**
-   Update `agents.md` architecture section to reflect the new windowing layer. Update
-   `DESIGN_DECISIONS.md` with the eframe removal rationale. Update `config_example.toml` if
-   any config keys changed.
+[[tabs]]
+title = "Logs"
 
-5. **66.5 — Final verification**
-   Full verification suite. Render loop benchmarks before and after (expect improvement from
-   eliminated callback indirection). Manual testing on Linux/Wayland, Linux/X11. Verify all
-   features work: tabs, panes, split, multiple windows, search, background images, custom
-   shaders, background opacity, settings modal, theming, clipboard, drag-and-drop, bell,
-   cursor trail, blinking text, Kitty keyboard protocol.
+  [[tabs.panes]]
+  id = "logs"
+  directory = "/var/log"
+  command = "tail -f syslog"
+```
 
-### 66 Primary Files
+#### Pane Node Properties
 
-- `Cargo.toml` (workspace dependency changes)
-- `freminal/Cargo.toml` (eframe removal)
-- `freminal/src/gui/mod.rs` (dead workaround removal)
-- `agents.md` (architecture update)
-- `Documents/DESIGN_DECISIONS.md` (new decision entry)
+Each `[[tabs.panes]]` entry is either a **split node** (has `split` and `ratio`) or a
+**leaf node** (has no `split`). Leaf nodes represent actual terminal panes.
+
+| Field       | Type   | Required | Description                                          |
+| ----------- | ------ | -------- | ---------------------------------------------------- |
+| `id`        | String | Yes      | Unique within the tab (for parent references)        |
+| `parent`    | String | No       | ID of the parent split node (absent for root)        |
+| `position`  | String | No       | "first" or "second" within the parent split          |
+| `split`     | String | No       | "vertical" or "horizontal" — makes this a split node |
+| `ratio`     | Float  | No       | Split ratio (0.0-1.0), default 0.5                   |
+| `directory` | String | No       | Working directory (supports `~` and variables)       |
+| `command`   | String | No       | Command to run after shell starts                    |
+| `shell`     | String | No       | Override the default shell for this pane             |
+| `env`       | Table  | No       | Extra environment variables: `env = { FOO = "bar" }` |
+| `title`     | String | No       | Initial pane title (before shell OSC overrides)      |
+| `active`    | Bool   | No       | If true, this pane/tab has focus on launch           |
+
+A tab with a single pane omits `parent`, `position`, and `split` — just one `[[tabs.panes]]`
+entry with the leaf properties.
+
+#### Variable Substitution
+
+Layouts support variable substitution for reusability across projects:
+
+- **Positional args:** `$1`, `$2`, etc. from `freminal --layout dev.toml ~/projects/myapp`
+  (where `~/projects/myapp` is `$1`)
+- **Named variables:** `${VAR_NAME}` references `[layout.variables]` defaults, overridable
+  via `--var NAME=VALUE`
+- **Environment variables:** `$ENV{HOME}`, `$ENV{USER}` for system env vars
+- **Tilde expansion:** `~` is expanded to `$HOME` in `directory` fields
+
+This means one layout file works across multiple projects:
+
+```sh
+freminal --layout dev.toml ~/projects/frontend
+freminal --layout dev.toml ~/projects/backend
+```
+
+#### Save Current Layout
+
+"Save Layout" captures the running session:
+
+- Tab count and order
+- Per-tab pane tree structure (split directions, ratios)
+- Per-pane working directory (read from `/proc/<pid>/cwd` on Linux)
+- Per-pane foreground process (read from `/proc/<pid>/cmdline` on Linux — best-effort,
+  may be empty or show the shell)
+- Per-pane title (current OSC title)
+
+The output is a valid layout TOML file. Directories are written as absolute paths; the user
+can edit the file to use variables afterward.
+
+**Platform note:** CWD and process detection via `/proc` is Linux-specific. On other
+platforms (if Freminal is ever ported), these fields are omitted and the saved layout
+captures topology only.
+
+#### Layout Application Modes
+
+Layouts can be applied in three ways:
+
+1. **Startup (replace):** `freminal --layout dev.toml` or `startup.layout = "dev"` in
+   config. Creates the workspace from scratch on launch. This is the primary use case.
+
+2. **On-demand replace:** Menu bar > "Layouts" > "Load Layout..." replaces the current
+   session with the selected layout. Prompts for confirmation ("This will close all
+   current tabs.").
+
+3. **On-demand append:** Menu bar > "Layouts" > "Load Layout in New Tab..." creates the
+   layout's tabs as additional tabs in the current session. Useful for "I want my dev
+   layout alongside my existing work."
+
+#### Auto-Save and Restore
+
+```toml
+[startup]
+# Save the current layout on exit and restore it on next launch.
+# The layout is saved to ~/.config/freminal/layouts/_last_session.toml
+restore_last_session = false
+```
+
+When enabled, Freminal saves the current layout to `_last_session.toml` on clean exit.
+On next launch (if no `--layout` flag is given), it restores from this file. This captures
+topology and CWDs but not running programs (since those have exited).
+
+#### Layout Library
+
+Layouts in `~/.config/freminal/layouts/` are discovered automatically. The menu bar shows
+them under "Layouts" with their `layout.name` field. The Settings Modal's "Layouts" tab
+(new tab) lists all discovered layouts with name, description, and a preview of the
+topology.
+
+### 61 Subtasks
+
+1. **61.1 — Layout file format and parser**
+   Define the `Layout`, `LayoutTab`, `LayoutPane`, `LayoutVariables` types. Implement
+   TOML parsing with validation: detect orphan nodes (parent references a non-existent ID),
+   multiple roots, cycles, missing position on non-root nodes. Implement variable
+   substitution (`$1`, `${name}`, `$ENV{...}`, `~`). Unit tests: parse valid layouts,
+   reject malformed ones, verify variable substitution.
+
+2. **61.2 — Layout application engine**
+   Given a parsed `Layout`, create the tab/pane tree using `spawn_pty_tab` for each leaf
+   pane. Pass `directory` to PTY creation (set CWD before exec). Queue `command` for
+   injection after shell ready (reuse the startup command injection mechanism). Set initial
+   titles. Set active tab and active pane per the layout spec.
+
+3. **61.3 — Startup command injection**
+   Implement command injection: after a pane's shell is ready (detect via a short delay or
+   by watching for the first prompt), send the `command` string as PTY input followed by
+   a newline. Handle the "no command" case (just open a shell). This is the core of the
+   original Task 56.3.
+
+4. **61.4 — Shell and environment overrides**
+   Support per-pane `shell` override (use this shell instead of the default). Support
+   per-pane `env` table (set additional environment variables on the PTY child process).
+   Requires extending `spawn_pty_tab` to accept optional shell and env overrides.
+
+5. **61.5 — CLI integration: `--layout` and `--var`**
+   Add `--layout <path_or_name>` flag: if a path, load directly; if a name, search
+   `~/.config/freminal/layouts/<name>.toml`. Add `--var NAME=VALUE` (repeatable) for
+   variable overrides. Positional args after the layout path become `$1`, `$2`, etc.
+   Update arg parsing and config precedence.
+
+6. **61.6 — Save current layout**
+   Implement "Save Layout" that captures the current session topology into a `Layout`
+   struct and serializes it to TOML. Read CWDs via `/proc/<pid>/cwd`. Read foreground
+   processes via `/proc/<pid>/cmdline` (best-effort). Write to a user-chosen path
+   (file dialog or prompt). Unit tests: round-trip save/load produces equivalent topology.
+
+7. **61.7 — Layout library discovery**
+   Scan `~/.config/freminal/layouts/` for `.toml` files on startup and when the directory
+   changes. Parse each file's `[layout]` section (name, description) without fully parsing
+   the tree. Make the list available to the GUI for the menu and Settings Modal.
+
+8. **61.8 — Menu bar integration**
+   Add "Layouts" menu to the menu bar with:
+   - "Load Layout..." (file picker, replace mode)
+   - "Load Layout in New Tab..." (file picker, append mode)
+   - "Save Current Layout..." (save dialog)
+   - Separator
+   - List of discovered layouts from the library (click to load in replace mode)
+     Add `KeyAction::LoadLayout` and `KeyAction::SaveLayout` to keybindings.
+
+9. **61.9 — Auto-save and restore**
+   Implement `startup.restore_last_session`: on exit, save to `_last_session.toml`. On
+   startup (if no `--layout` and `restore_last_session = true`), load from
+   `_last_session.toml`. The saved layout includes topology and CWDs but not commands
+   (since processes have exited — just open shells in the saved directories).
+
+10. **61.10 — Config and settings integration**
+    Add `[startup]` section to config: `layout`, `restore_last_session`. Add a "Layouts"
+    tab to the Settings Modal showing discovered layouts with previews. Update
+    `config_example.toml` and home-manager module.
+
+11. **61.11 — Tests and integration**
+    End-to-end: write a layout file, launch with `--layout`, verify correct tab/pane
+    topology, correct CWDs, correct command injection. Test variable substitution with
+    CLI overrides. Test save/load round-trip. Test auto-restore. Test malformed layouts
+    produce clear error messages. Test partial application (append mode).
+
+### 61 Primary Files
+
+- `freminal-common/src/config.rs` (`StartupConfig`, `LayoutConfig`)
+- `freminal-common/src/layout.rs` (new — layout types, parser, variable substitution)
+- `freminal/src/gui/mod.rs` (layout application, menu integration)
+- `freminal/src/gui/tabs.rs` (layout-driven tab creation)
+- `freminal/src/gui/panes/mod.rs` (layout-driven pane tree construction)
+- `freminal/src/main.rs` (startup layout loading)
+- `freminal-common/src/args.rs` (`--layout`, `--var` flags)
+- `freminal-common/src/keybindings.rs` (layout key actions)
+- `config_example.toml`
+- `nix/home-manager-module.nix`
+
+### 61 Design Decisions
+
+1. **TOML over JSON.** Consistent with the existing config format. TOML's nesting limitations
+   are overcome by the flat node list with parent references — this is more readable than
+   deeply nested inline tables would be, and allows the user to define nodes in any order.
+
+2. **Flat node list with parent references.** A tree can be represented in TOML either as
+   deeply nested inline tables (ugly, hard to edit) or as a flat list with explicit
+   relationships. The flat approach is how many configuration systems handle tree structures
+   (e.g., Terraform resources, Kubernetes manifests). Each node is self-contained and
+   easy to add/remove.
+
+3. **Variables for reusability.** Without variables, layouts are project-specific (hardcoded
+   paths). Variables make a single layout file work across projects. The `$1` positional
+   convention is familiar from shell scripting.
+
+4. **Save captures topology + CWD, not running programs.** We cannot reliably restart an
+   arbitrary program the user was running. Saving CWDs means the user gets shells in the
+   right directories, which covers 90% of the restore value. If `command` was specified
+   in the original layout, the saved layout preserves it — but the "detected" foreground
+   process from `/proc` is stored as a comment, not as an auto-run command, to avoid
+   surprising behavior.
+
+5. **Subsumes Task 56 entirely.** Task 56's `[startup.tabs]` flat list is a strict subset
+   of the layout system. Rather than implementing both, Task 61 provides a superset that
+   handles both simple (`[[tabs]]` with one pane each) and complex (multi-tab, multi-pane,
+   variables) cases. The `[startup]` config section is unified under the layout system.
 
 ---
 
 ## Dependency Graph
 
 ```text
-Task 62 (freminal-windowing crate)
-  │
-  ▼
-Task 63 (Single-window migration)
-  │
-  ├──────────────────┐
-  ▼                  ▼
-Task 64            Task 65
-(Multi-window)     (Frame pacing)
-  │
-  ▼
-Task 66 (Cleanup + eframe removal)
+Task 32 (Playback Feature Flag) ──► Task 59 (FREC v2 Format)
+Task 58 (Built-in Muxing) ──────► Task 59 (FREC v2 Format)
+                                     │
+                                     ▼
+                                  Task 60 (Playback v2)
+
+Task 36 (Tabs) ──► Task 61 (Saved Layouts)
+Task 58 (Built-in Muxing) ──► Task 61 (Saved Layouts)
+
+Task 55 (Custom Shaders) ─ ─ ► Task 60.5 (Scale mode — soft dependency, can use minimal FBO)
+
+Tasks 59 and 61 are independent of each other.
+Task 60 depends on Task 59 (needs v2 format to replay).
+Task 61 can start before, during, or after Task 59/60.
 ```
 
-**Recommended order:** 62 → 63 → 64 ∥ 65 → 66
+**Recommended order:**
 
-Tasks 64 and 65 can run in parallel after Task 63 — they touch different code (multi-window
-lifecycle vs. frame pacing/timers). Task 66 must be last.
+1. Tasks 59 and 61 can start in parallel (independent).
+2. Task 60 starts after Task 59 is complete.
+3. Within Task 60, subtask 60.5 (Scale mode) benefits from Task 55 (Custom Shaders) if
+   complete, but can be implemented with a minimal FBO otherwise.
+
+```text
+v0.7.0 Execution:
+  ┌── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
+  │
+  └── Task 61 (Saved Layouts)      [parallel with 59, independent]
+```
 
 ---
 
 ## Cross-Cutting Concerns
 
-### Crate Dependency Boundaries
+### Recording + Layouts Interaction
 
-`freminal-windowing` must NOT depend on any other freminal crate. It is a general-purpose
-windowing layer. The dependency flows one way:
+Task 59 (recording) captures topology events. Task 61 (layouts) defines topology. When
+recording starts, the initial topology snapshot in the FREC v2 metadata IS effectively a
+layout. This means:
 
-```text
-freminal ──► freminal-windowing
-freminal ──► freminal-terminal-emulator ──► freminal-buffer ──► freminal-common
+- A recording's initial state can be exported as a layout file (diagnostic utility).
+- A layout file can be used to set up the initial state for a recording session.
+
+This interaction is a future enhancement, not a v0.7.0 requirement, but the format designs
+should not preclude it.
+
+### Config Schema Extensions
+
+Task 61 extends the config with `[startup]` fields:
+
+```toml
+[startup]
+layout = "dev"                    # name or path of layout to load on startup
+restore_last_session = false      # auto-save/restore
 ```
 
-`freminal-windowing` depends only on external crates (winit, glutin, egui, glow, etc.) and
-standard library types.
+This must be propagated to `config.rs`, `config_example.toml`, the home-manager module, and
+the Settings Modal.
 
-### Custom Renderer Integration
+### Feature Flag Scope
 
-The terminal renderer (`freminal/src/gui/renderer/`) currently uses `egui_glow::CallbackFn`
-to inject GL calls into egui's paint pipeline. After migration:
-
-- The renderer receives `&glow::Context` directly from the `App::update()` signature
-- No more `PaintCallback` wrapping
-- No more `painter.intermediate_fbo()` restore
-- The render order is explicit: egui chrome → terminal content (or vice versa, with proper
-  depth/stencil management)
-
-The renderer itself (`gpu.rs`, `vertex.rs`, shader code) is unchanged — only the call site
-changes.
-
-### PTY Thread Repaint Path
-
-Currently, PTY consumer threads hold `Arc<OnceLock<egui::Context>>` and call
-`ctx.request_repaint_after(Duration::from_millis(8))`. After migration, they need a
-thread-safe repaint handle from `freminal-windowing`. Options:
-
-1. **Channel-based:** PTY thread sends a "repaint window X" message to the event loop thread
-   via `crossbeam-channel`. The event loop calls `window.request_redraw()`.
-2. **`EventLoopProxy`:** winit provides `EventLoopProxy::send_event()` for cross-thread
-   wakeups. The PTY thread holds a clone of the proxy and sends a custom user event.
-
-Option 2 is preferred — `EventLoopProxy` is the canonical winit mechanism for cross-thread
-wakeups and avoids adding a channel.
-
-### Config Schema
-
-No config schema changes are expected. The windowing layer is transparent to the user.
-`background_opacity`, `vsync` (if exposed), and window-related settings continue to work
-through the same config paths.
-
-### Platform Testing
-
-The migration is platform-sensitive. The following must be tested:
-
-- **Linux/Wayland:** Primary target. Verify no compositor hang, proper frame pacing,
-  transparency, multi-window.
-- **Linux/X11:** Verify GL context creation (GLX or EGL), transparency, multi-window.
-- **macOS:** Verify CGL context, Retina scaling, transparency. (If no macOS CI, document
-  as untested and request manual verification.)
-- **Windows:** Verify WGL context, DPI scaling, transparency. (Same caveat.)
-
-### Benchmark Impact
-
-The migration should improve render loop benchmarks by eliminating:
-
-- `PaintCallback` closure allocation and dispatch
-- egui intermediate FBO management
-- `predicted_dt` scheduling overhead
-
-Agents must capture before/after numbers for all render loop benchmarks:
-
-- `freminal/benches/render_loop_bench.rs` — all benchmarks
-
----
-
-## Risk Assessment
-
-| Risk                                                  | Likelihood | Impact | Mitigation                                                                 |
-| ----------------------------------------------------- | ---------- | ------ | -------------------------------------------------------------------------- |
-| GL context creation fails on exotic drivers           | Medium     | High   | glutin handles driver fallbacks; test on Mesa, NVIDIA proprietary, and AMD |
-| winit 0.31 goes stable mid-task, breaking 0.30 API    | Low        | Medium | Pin to 0.30.x during migration; upgrade to 0.31 as a follow-up             |
-| egui 0.35 releases mid-task with breaking changes     | Low        | Medium | Pin to 0.34.x during migration; upgrade as a follow-up                     |
-| PaintCallback removal breaks custom shader pipeline   | Medium     | Medium | Task 63.3 is dedicated to this; thorough testing of all shader features    |
-| Wayland compositor differences (GNOME vs Sway vs KDE) | Medium     | Low    | Test on at least two compositors                                           |
+Tasks 59 and 60 are gated behind the `playback` feature flag (extending the existing gating
+from Task 32). Task 61 (layouts) is NOT feature-gated — it is always available, as it is a
+core workflow feature independent of recording/playback.
 
 ---
 
@@ -583,5 +872,5 @@ Per `agents.md`, each task is complete when:
 2. `cargo test --all` passes
 3. `cargo clippy --all-targets --all-features -- -D warnings` passes
 4. `cargo-machete` passes
-5. Benchmarks show no unexplained regressions for render changes
-6. Plan document updated with completion status and notes
+5. Benchmarks show no unexplained regressions for render/buffer changes
+6. Config schema additions propagated to config.rs, config_example.toml, home-manager, settings

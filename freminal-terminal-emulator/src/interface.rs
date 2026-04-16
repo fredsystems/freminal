@@ -738,14 +738,15 @@ impl TerminalEmulator {
                     // First snapshot with DontDraw active — start the clock.
                     self.dont_draw_entered_at = Some(Instant::now());
                 }
-                Some(entered_at) => {
-                    if entered_at.elapsed() >= Duration::from_millis(SYNC_UPDATES_TIMEOUT_MS) {
-                        // Timeout expired — reset to Draw so the next snapshot
-                        // carries skip_draw = false, and clear the timer.
-                        self.internal.modes.synchronized_updates = SynchronizedUpdates::Draw;
-                        self.dont_draw_entered_at = None;
-                    }
+                Some(entered_at)
+                    if entered_at.elapsed() >= Duration::from_millis(SYNC_UPDATES_TIMEOUT_MS) =>
+                {
+                    // Timeout expired — reset to Draw so the next snapshot
+                    // carries skip_draw = false, and clear the timer.
+                    self.internal.modes.synchronized_updates = SynchronizedUpdates::Draw;
+                    self.dont_draw_entered_at = None;
                 }
+                Some(_) => {}
             }
         } else {
             // Mode is Draw (or Query) — clear stale timer state.

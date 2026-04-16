@@ -1,6 +1,6 @@
 # Freminal — Copilot Instructions
 
-Freminal is a Rust terminal emulator (Edition 2024, MSRV 1.92.0) using egui/glow
+Freminal is a Rust terminal emulator (Edition 2024, MSRV 1.95.0) using egui/glow
 for rendering. It is a Cargo workspace with five crates.
 
 ## Architecture

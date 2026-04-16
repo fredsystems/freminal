@@ -210,11 +210,10 @@ fn spawn_pty_consumer_thread(
                 Ok(InputEvent::Resize(w, h, pw, ph)) => {
                     emulator.handle_resize_event(w, h, pw, ph);
                 }
-                Ok(InputEvent::Key(bytes)) => {
-                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
-                        error!("Failed to forward key bytes to PTY: {e}");
-                    }
+                Ok(InputEvent::Key(bytes)) if let Err(e) = emulator.write_raw_bytes(&bytes) => {
+                    error!("Failed to forward key bytes to PTY: {e}");
                 }
+                Ok(InputEvent::Key(_)) => {}
                 Ok(InputEvent::FocusChange(focused)) => {
                     emulator.internal.send_focus_event(focused);
                 }
