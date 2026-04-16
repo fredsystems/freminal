@@ -359,6 +359,22 @@ peer window with its own GL context, and closing any window closes only that win
    is unaffected. This is simpler and more correct than the shared `Arc<AtomicBool>` mutual
    exclusion approach.
 
+### 64 Known Bug: Child Window Initial Spawn Truncation
+
+**Must verify fixed / fix during this task.** Under eframe, child windows spawned via
+`show_viewport_deferred` start their PTY at the hardcoded 100×100 default size. The shell
+and any startup programs (e.g. fastfetch) format output for 100 columns using CUP (absolute
+cursor positioning) during the gap before the first deferred-viewport frame fires a resize.
+When the real resize arrives (e.g. 61×34 on a tiling WM), reflow garbles the CUP-positioned
+layout. The root window doesn't have this issue because eframe's synchronous initialization
+fires the first frame/resize before the shell does significant work.
+
+The fix in v0.7.0 is architectural: with peer windows and `on_window_created()`, the window
+size is known before PTY creation. `spawn_pty_tab()` should accept initial dimensions from
+the actual window geometry instead of using hardcoded defaults. **Additionally**, there may
+be a deeper buffer/reflow bug — verify that CUP-positioned content survives resize correctly
+even when the initial size is correct.
+
 ---
 
 ## Task 65 — Frame Pacing + Idle Optimization

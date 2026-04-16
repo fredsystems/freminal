@@ -333,7 +333,9 @@ layout into new tab). Large scope (11 subtasks).
 ## Recommended Execution Order
 
 The following reflects the actual execution state: Tasks 1-17, 20-35, and 53-58 are complete.
-The remaining tasks are ordered as follows.
+The remaining tasks are ordered as follows. Note: v0.7.0 (eframe replacement) is executed
+**before** v0.6.0 (replay & layouts) so that v0.6.0 work targets the final windowing
+architecture.
 
 ### Phase 7 — Update Mechanism
 
@@ -353,22 +355,11 @@ These tasks are defined in `PLAN_VERSION_050.md`. All tasks are complete.
 - **Task 57** — Render Loop Optimization — Complete
 - **Task 58** — Built-in Multiplexer / Split Panes — Complete
 
-### v0.6.0 — Replay & Layouts
-
-These tasks are defined in `PLAN_VERSION_060.md`. Task 56 (Session Restore) has been moved
-here and subsumed by Task 61 (Saved Layouts).
-
-- **Task 59** — FREC v2: Multi-Pane Recording (depends on Tasks 32, 58)
-- **Task 60** — Playback v2: Multi-Pane Replay (depends on Task 59)
-- **Task 61** — Saved Layouts / Session Templates (depends on Tasks 36, 58; subsumes Task 56)
-
-Tasks 59 and 61 can start in parallel (independent of each other). Task 60 starts after
-Task 59 is complete.
-
 ### v0.7.0 — Foundation (eframe Replacement)
 
 These tasks are defined in `PLAN_VERSION_070.md`. Replaces eframe with direct
-winit + glutin + egui integration in a new `freminal-windowing` crate.
+winit + glutin + egui integration in a new `freminal-windowing` crate. **Executed before
+v0.6.0** so that replay/layout work builds on the final windowing architecture.
 
 - **Task 62** — freminal-windowing crate + event loop (independent, new crate)
 - **Task 63** — Single-window migration (depends on Task 62)
@@ -378,17 +369,30 @@ winit + glutin + egui integration in a new `freminal-windowing` crate.
 
 Task 62 can start any time. Tasks 64 and 65 can run in parallel after Task 63.
 
+### v0.6.0 — Replay & Layouts
+
+These tasks are defined in `PLAN_VERSION_060.md`. Task 56 (Session Restore) has been moved
+here and subsumed by Task 61 (Saved Layouts). **Executed after v0.7.0** so that replay and
+layout features target the final windowing architecture (no eframe).
+
+- **Task 59** — FREC v2: Multi-Pane Recording (depends on Tasks 32, 58)
+- **Task 60** — Playback v2: Multi-Pane Replay (depends on Task 59)
+- **Task 61** — Saved Layouts / Session Templates (depends on Tasks 36, 58; subsumes Task 56)
+
+Tasks 59 and 61 can start in parallel (independent of each other). Task 60 starts after
+Task 59 is complete.
+
 ```text
 Complete:     Tasks 1-17, 20-35, 53-55, 57-58
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │
-v0.6.0:       ├── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
-              ├── Task 61 (Saved Layouts)      [parallel with 59]
-              │
 v0.7.0:       ├── Task 62 (windowing crate) ──► Task 63 (single-window) ──┬──► Task 64 (multi-window) ──► Task 66 (cleanup)
               │                                                            └──► Task 65 (frame pacing)
+              │
+v0.6.0:       ├── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
+              ├── Task 61 (Saved Layouts)      [parallel with 59]
 ```
 
 ---
