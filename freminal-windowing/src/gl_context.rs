@@ -123,6 +123,17 @@ impl GlState {
         })
     }
 
+    /// Make this window's GL context current.
+    ///
+    /// Must be called before any GL operations (clear, paint, swap) when
+    /// multiple windows share the same thread — only one context can be
+    /// current at a time.
+    pub(crate) fn make_current(&self) -> Result<(), Error> {
+        self.context
+            .make_current(&self.surface)
+            .map_err(|e| Error::MakeCurrent(format!("{e}")))
+    }
+
     /// Resize the GL surface.
     pub(crate) fn resize(&self, width: NonZeroU32, height: NonZeroU32) {
         self.surface.resize(&self.context, width, height);

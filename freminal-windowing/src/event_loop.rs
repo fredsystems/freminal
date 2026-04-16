@@ -222,7 +222,11 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     && let (Some(w), Some(h)) =
                         (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
                 {
-                    state.gl.resize(w, h);
+                    if let Err(e) = state.gl.make_current() {
+                        error!("make_current failed during resize for {winit_id:?}: {e}");
+                    } else {
+                        state.gl.resize(w, h);
+                    }
                     state.repaint_at = Some(Instant::now());
                     state.window.request_redraw();
                 }
@@ -243,6 +247,12 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 let clear_color = app.clear_color(window_id);
 
                 let handle = WindowHandle { proxy, pending_ops };
+
+                // Ensure this window's GL context is current before rendering.
+                if let Err(e) = state.gl.make_current() {
+                    error!("make_current failed for {winit_id:?}: {e}");
+                    return;
+                }
 
                 // Collect raw input, let app hook modify it, then run the frame.
                 let mut raw_input = state.egui.take_egui_input(&state.window);
