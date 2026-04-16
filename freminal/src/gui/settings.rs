@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
+use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
 use freminal_common::config::{self, Config, CursorShapeConfig, TabBarPosition, ThemeMode};
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;

@@ -1,5 +1,6 @@
 //! winit event loop and `ApplicationHandler` implementation.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -7,13 +8,13 @@ use std::time::Instant;
 use tracing::{debug, error, info};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes};
 
 use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
-use crate::{App, UserEvent, WindowConfig, WindowId};
+use crate::{App, UserEvent, WindowConfig, WindowHandle, WindowId, WindowOp};
 
 /// Per-window state.
 struct WindowState {
@@ -29,6 +30,9 @@ struct Handler<A: App> {
     app: A,
     initial_config: Option<WindowConfig>,
     windows: HashMap<winit::window::WindowId, WindowState>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// Scratch buffer for pending `WindowOp`s queued by `WindowHandle`.
+    pending_ops: RefCell<Vec<WindowOp>>,
 }
 
 impl<A: App> Handler<A> {
@@ -86,8 +90,16 @@ impl<A: App> Handler<A> {
         };
 
         self.windows.insert(winit_id, state);
+
+        let handle = WindowHandle {
+            proxy: &self.proxy,
+            pending_ops: &self.pending_ops,
+        };
         self.app
-            .on_window_created(window_id, &self.windows[&winit_id].egui.ctx);
+            .on_window_created(window_id, &self.windows[&winit_id].egui.ctx, &handle);
+
+        // Process any ops queued during on_window_created.
+        self.process_pending_ops(event_loop);
 
         debug!("Window created: {winit_id:?}");
     }
@@ -108,6 +120,64 @@ impl<A: App> Handler<A> {
             .values()
             .filter_map(|state| state.repaint_at)
             .min()
+    }
+
+    /// Drain and execute all pending `WindowOp`s queued by `WindowHandle`.
+    fn process_pending_ops(&mut self, event_loop: &ActiveEventLoop) {
+        let ops: Vec<WindowOp> = self.pending_ops.borrow_mut().drain(..).collect();
+        for op in ops {
+            match op {
+                WindowOp::CreateWindow(config) => {
+                    self.create_window_from_config(event_loop, config);
+                }
+                WindowOp::CloseWindow(id) => {
+                    self.close_window(id.0);
+                    if self.windows.is_empty() {
+                        event_loop.exit();
+                    }
+                }
+                WindowOp::RequestRepaint(id) => {
+                    if let Some(state) = self.windows.get_mut(&id.0) {
+                        state.repaint_at = Some(Instant::now());
+                        state.window.request_redraw();
+                    }
+                }
+                WindowOp::RequestRepaintAfter(id, delay) => {
+                    if let Some(state) = self.windows.get_mut(&id.0) {
+                        let deadline = Instant::now() + delay;
+                        state.repaint_at = Some(
+                            state
+                                .repaint_at
+                                .map_or(deadline, |existing| existing.min(deadline)),
+                        );
+                    }
+                }
+                WindowOp::SetTitle(id, title) => {
+                    if let Some(state) = self.windows.get(&id.0) {
+                        state.window.set_title(&title);
+                    }
+                }
+                WindowOp::SetVisible(id, visible) => {
+                    if let Some(state) = self.windows.get(&id.0) {
+                        state.window.set_visible(visible);
+                    }
+                }
+                WindowOp::SetMinimized(id, minimized) => {
+                    if let Some(state) = self.windows.get(&id.0) {
+                        state.window.set_minimized(minimized);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update `ControlFlow` based on the nearest repaint deadline.
+    fn update_control_flow(&self, event_loop: &ActiveEventLoop) {
+        if let Some(deadline) = self.earliest_deadline() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 }
 
@@ -158,21 +228,61 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // Split borrows by destructuring self
-                let Handler { app, windows, .. } = self;
+                // Split borrows by destructuring
+                let Handler {
+                    app,
+                    windows,
+                    proxy,
+                    pending_ops,
+                    ..
+                } = self;
                 let Some(state) = windows.get_mut(&winit_id) else {
                     return;
                 };
                 let window_id = WindowId(winit_id);
                 let clear_color = app.clear_color(window_id);
 
-                state
-                    .egui
-                    .run_frame(&state.window, &state.gl, clear_color, |ctx, gl| {
-                        app.update(window_id, ctx, gl);
-                    });
+                let handle = WindowHandle { proxy, pending_ops };
+
+                // Collect raw input, let app hook modify it, then run the frame.
+                let mut raw_input = state.egui.take_egui_input(&state.window);
+                app.raw_input_hook(window_id, &mut raw_input);
+
+                let frame_output = state.egui.run_frame(
+                    &state.window,
+                    &state.gl,
+                    clear_color,
+                    raw_input,
+                    |ctx, gl| {
+                        app.update(window_id, ctx, gl, &handle);
+                    },
+                );
+
+                // Process egui viewport commands.
+                let mut should_close = false;
+                for cmd in frame_output.commands {
+                    process_viewport_command(&state.window, cmd, &mut should_close);
+                }
 
                 state.repaint_at = None;
+
+                // Schedule repaint based on egui's requested delay.
+                if !frame_output.repaint_delay.is_zero()
+                    && frame_output.repaint_delay < std::time::Duration::from_secs(3600)
+                {
+                    let deadline = Instant::now() + frame_output.repaint_delay;
+                    state.repaint_at = Some(deadline);
+                }
+
+                // Process any ops queued during update.
+                self.process_pending_ops(event_loop);
+
+                if should_close {
+                    self.close_window(winit_id);
+                    if self.windows.is_empty() {
+                        event_loop.exit();
+                    }
+                }
             }
             _ => {
                 if !egui_consumed {
@@ -181,12 +291,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             }
         }
 
-        // Update control flow based on deadlines
-        if let Some(deadline) = self.earliest_deadline() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
+        self.update_control_flow(event_loop);
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -223,10 +328,68 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             }
         }
 
-        if let Some(deadline) = self.earliest_deadline() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+        self.update_control_flow(event_loop);
+    }
+}
+
+/// Process a single egui `ViewportCommand` by mapping it to the corresponding
+/// winit `Window` API call.
+///
+/// Commands that require closing the window set `*should_close = true`; the
+/// caller is responsible for actually closing the window after the frame
+/// completes (to avoid mutating the window map during iteration).
+fn process_viewport_command(window: &Window, cmd: egui::ViewportCommand, should_close: &mut bool) {
+    match cmd {
+        egui::ViewportCommand::Close => {
+            *should_close = true;
+        }
+        egui::ViewportCommand::CancelClose => {
+            // In our model, close is synchronous via on_close_requested.
+            // CancelClose is a no-op since we don't queue deferred closes.
+        }
+        egui::ViewportCommand::Title(title) => {
+            window.set_title(&title);
+        }
+        egui::ViewportCommand::Minimized(minimized) => {
+            window.set_minimized(minimized);
+        }
+        egui::ViewportCommand::Maximized(maximized) => {
+            window.set_maximized(maximized);
+        }
+        egui::ViewportCommand::Fullscreen(fullscreen) => {
+            if fullscreen {
+                window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            } else {
+                window.set_fullscreen(None);
+            }
+        }
+        egui::ViewportCommand::InnerSize(size) => {
+            let _ = window.request_inner_size(winit::dpi::LogicalSize::new(size.x, size.y));
+        }
+        egui::ViewportCommand::OuterPosition(pos) => {
+            window.set_outer_position(winit::dpi::LogicalPosition::new(pos.x, pos.y));
+        }
+        egui::ViewportCommand::Visible(visible) => {
+            window.set_visible(visible);
+        }
+        egui::ViewportCommand::RequestUserAttention(kind) => {
+            let winit_kind = match kind {
+                egui::UserAttentionType::Informational => {
+                    Some(winit::window::UserAttentionType::Informational)
+                }
+                egui::UserAttentionType::Critical => {
+                    Some(winit::window::UserAttentionType::Critical)
+                }
+                egui::UserAttentionType::Reset => None,
+            };
+            window.request_user_attention(winit_kind);
+        }
+        egui::ViewportCommand::Focus => {
+            window.focus_window();
+        }
+        // Commands we don't handle yet — log and ignore.
+        _ => {
+            tracing::trace!("Unhandled viewport command: {cmd:?}");
         }
     }
 }
@@ -240,10 +403,14 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
         .build()
         .map_err(|e| Error::EventLoopCreation(format!("{e}")))?;
 
+    let proxy = event_loop.create_proxy();
+
     let mut handler = Handler {
         app,
         initial_config: Some(config),
         windows: HashMap::new(),
+        proxy,
+        pending_ops: RefCell::new(Vec::new()),
     };
 
     event_loop

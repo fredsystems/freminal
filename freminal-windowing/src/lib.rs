@@ -38,16 +38,38 @@ pub struct WindowConfig {
 /// The application trait that `freminal` implements instead of `eframe::App`.
 pub trait App {
     /// Called once per window per frame, only when a redraw is needed.
-    fn update(&mut self, window_id: WindowId, ctx: &egui::Context, gl: &glow::Context);
+    ///
+    /// `handle` allows queuing window operations (title, close, repaint, etc.)
+    /// that are executed after this callback returns.
+    fn update(
+        &mut self,
+        window_id: WindowId,
+        ctx: &egui::Context,
+        gl: &glow::Context,
+        handle: &WindowHandle<'_>,
+    );
 
     /// Called when a window is created.
-    fn on_window_created(&mut self, window_id: WindowId, ctx: &egui::Context);
+    ///
+    /// Use `handle` to obtain a [`RepaintProxy`] for cross-thread repaint
+    /// requests (e.g. PTY consumer threads).
+    fn on_window_created(
+        &mut self,
+        window_id: WindowId,
+        ctx: &egui::Context,
+        handle: &WindowHandle<'_>,
+    );
 
     /// Called when a window close is requested. Return `false` to cancel.
     fn on_close_requested(&mut self, window_id: WindowId) -> bool;
 
     /// GL clear color for the given window (supports transparency via alpha).
     fn clear_color(&self, window_id: WindowId) -> [f32; 4];
+
+    /// Hook to modify raw input before egui processes it.
+    ///
+    /// Default implementation does nothing.
+    fn raw_input_hook(&mut self, _window_id: WindowId, _raw_input: &mut egui::RawInput) {}
 }
 
 /// Handle for requesting window operations from the [`App`].
@@ -146,9 +168,7 @@ pub(crate) enum UserEvent {
 
 /// Internal window operations queued by [`WindowHandle`].
 ///
-/// Variant fields are consumed by the event loop's pending-ops processor
-/// (wired in Task 63).
-#[allow(dead_code)]
+/// Variant fields are consumed by the event loop's pending-ops processor.
 pub(crate) enum WindowOp {
     CreateWindow(WindowConfig),
     CloseWindow(WindowId),

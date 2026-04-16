@@ -38,8 +38,8 @@ arc-swap.workspace = true
 clap.workspace = true
 conv2.workspace = true
 crossbeam-channel.workspace = true
-eframe.workspace = true
 egui.workspace = true
+egui_glow.workspace = true
 fontdb.workspace = true
 freminal-common = { path = "../freminal-common" }
 freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
@@ -55,6 +55,7 @@ tracing-subscriber.workspace = true
 regex.workspace = true
 rustc-hash.workspace = true
 unicode-width.workspace = true
+freminal-windowing = { path = "../freminal-windowing" }
 
 # dev dependencies
 [dev-dependencies]

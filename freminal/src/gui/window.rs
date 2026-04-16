@@ -6,11 +6,12 @@
 use std::sync::{Arc, Mutex, OnceLock, atomic::Ordering};
 
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
-use eframe::egui::{self, CentralPanel, Panel, ViewportBuilder, ViewportCommand, ViewportId};
-use eframe::egui_glow::CallbackFn;
+use egui::{self, CentralPanel, Panel, ViewportBuilder, ViewportCommand, ViewportId};
+use egui_glow::CallbackFn;
 use freminal_common::args::Args;
 use freminal_common::config::{Config, TabBarPosition};
 use freminal_terminal_emulator::io::InputEvent;
+use freminal_windowing::{RepaintProxy, WindowId};
 use glow::HasContext;
 use tracing::{debug, error, trace};
 
@@ -95,9 +96,9 @@ pub(super) struct SecondaryWindowState {
     /// are visible simultaneously.
     pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
 
-    /// Shared egui context handle (same `Arc<OnceLock<>>` as the root).
+    /// Shared repaint handle (same `Arc<OnceLock<>>` as the root).
     /// Used when spawning new PTY tabs so their threads can request repaints.
-    pub(super) egui_ctx: Arc<OnceLock<egui::Context>>,
+    pub(super) repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
 }
 
 impl SecondaryWindowState {
@@ -131,7 +132,7 @@ impl super::FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
-            &self.egui_ctx,
+            &self.repaint_handle,
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -211,7 +212,7 @@ impl super::FreminalGui {
             binding_map: self.binding_map.clone(),
             pane_id_gen: Arc::clone(&self.pane_id_gen),
             window_post: win_post,
-            egui_ctx: Arc::clone(&self.egui_ctx),
+            repaint_handle: Arc::clone(&self.repaint_handle),
         }));
 
         let viewport_id =
@@ -254,7 +255,7 @@ pub(super) fn spawn_split_pane_in_secondary(
         &win.args,
         win.config.scrollback.limit,
         theme,
-        &win.egui_ctx,
+        &win.repaint_handle,
     ) {
         Ok(ch) => ch,
         Err(e) => {
@@ -460,7 +461,7 @@ pub(super) fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mu
                             &win.args,
                             win.config.scrollback.limit,
                             theme,
-                            &win.egui_ctx,
+                            &win.repaint_handle,
                         ) {
                             Ok(channels) => {
                                 let tab_id = win.tabs.next_tab_id();
@@ -630,7 +631,7 @@ pub(super) fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mu
                     &win.args,
                     win.config.scrollback.limit,
                     theme,
-                    &win.egui_ctx,
+                    &win.repaint_handle,
                 ) {
                     Ok(channels) => {
                         let tab_id = win.tabs.next_tab_id();
@@ -1258,7 +1259,7 @@ pub(super) fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mu
                         &win.args,
                         win.config.scrollback.limit,
                         theme,
-                        &win.egui_ctx,
+                        &win.repaint_handle,
                     ) {
                         Ok(channels) => {
                             let tab_id = win.tabs.next_tab_id();

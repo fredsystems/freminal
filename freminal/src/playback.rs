@@ -65,7 +65,12 @@ pub fn run_playback_thread(
     input_rx: crossbeam_channel::Receiver<InputEvent>,
     window_cmd_tx: Sender<WindowCommand>,
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
-    egui_ctx: Arc<OnceLock<eframe::egui::Context>>,
+    egui_ctx: Arc<
+        OnceLock<(
+            freminal_windowing::RepaintProxy,
+            freminal_windowing::WindowId,
+        )>,
+    >,
     clipboard_tx: Sender<String>,
     search_buffer_tx: Sender<(usize, Vec<TChar>)>,
 ) {
@@ -385,7 +390,10 @@ fn publish_snapshot(
     emulator: &mut TerminalEmulator,
     window_cmd_tx: &Sender<WindowCommand>,
     arc_swap: &ArcSwap<TerminalSnapshot>,
-    egui_ctx: &OnceLock<eframe::egui::Context>,
+    egui_ctx: &OnceLock<(
+        freminal_windowing::RepaintProxy,
+        freminal_windowing::WindowId,
+    )>,
     info: PlaybackInfo,
 ) {
     // Drain any window manipulation commands produced by escape sequences.
@@ -412,7 +420,7 @@ fn publish_snapshot(
     snap.playback_info = Some(info);
     arc_swap.store(Arc::new(snap));
 
-    if let Some(ctx) = egui_ctx.get() {
-        ctx.request_repaint_after(Duration::from_millis(8));
+    if let Some((proxy, wid)) = egui_ctx.get() {
+        proxy.request_repaint_after(*wid, Duration::from_millis(8));
     }
 }

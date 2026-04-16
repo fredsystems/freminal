@@ -9,7 +9,7 @@
 //! side effects.
 
 use conv2::ConvUtil;
-use eframe::egui::Pos2;
+use egui::Pos2;
 use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 

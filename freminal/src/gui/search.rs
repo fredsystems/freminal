@@ -25,7 +25,7 @@
 //! 6. The current match scroll offset is updated by `scroll_to_match()`.
 
 use crossbeam_channel::Sender;
-use eframe::egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Ui};
+use egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Ui};
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 use regex::Regex;

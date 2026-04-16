@@ -7,6 +7,14 @@ use winit::window::Window;
 use crate::error::Error;
 use crate::gl_context::GlState;
 
+/// Output from a single egui frame.
+pub(crate) struct FrameOutput {
+    /// Viewport commands emitted by the app during this frame.
+    pub commands: Vec<egui::ViewportCommand>,
+    /// Requested repaint delay (Duration::MAX = no repaint needed).
+    pub repaint_delay: std::time::Duration,
+}
+
 /// Per-window egui state.
 pub(crate) struct EguiState {
     pub(crate) ctx: egui::Context,
@@ -38,18 +46,26 @@ impl EguiState {
         })
     }
 
-    /// Run a single egui frame and paint.
+    /// Collect raw input from winit for the current frame.
+    pub(crate) fn take_egui_input(&mut self, window: &Window) -> egui::RawInput {
+        self.winit_state.take_egui_input(window)
+    }
+
+    /// Run a single egui frame and paint, using pre-collected raw input.
+    ///
+    /// Returns [`FrameOutput`] containing viewport commands and repaint timing.
     pub(crate) fn run_frame<F>(
         &mut self,
         window: &Window,
         gl_state: &GlState,
         clear_color: [f32; 4],
+        raw_input: egui::RawInput,
         ui_fn: F,
-    ) where
+    ) -> FrameOutput
+    where
         F: FnMut(&egui::Context, &glow::Context),
     {
         let mut ui_fn = ui_fn;
-        let raw_input = self.winit_state.take_egui_input(window);
 
         #[expect(
             deprecated,
@@ -82,15 +98,23 @@ impl EguiState {
             tracing::error!("swap_buffers failed: {e}");
         }
 
-        // Schedule repaint if egui needs it
-        let repaint_delay = full_output
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
+        let viewport_output = full_output.viewport_output.get(&egui::ViewportId::ROOT);
+
+        let repaint_delay = viewport_output
             .map(|vo| vo.repaint_delay)
             .unwrap_or(std::time::Duration::MAX);
 
+        let commands = viewport_output
+            .map(|vo| vo.commands.clone())
+            .unwrap_or_default();
+
         if repaint_delay.is_zero() {
             window.request_redraw();
+        }
+
+        FrameOutput {
+            commands,
+            repaint_delay,
         }
     }
 

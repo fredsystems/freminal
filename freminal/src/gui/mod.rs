@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicU64};
 use crate::gui::colors::internal_color_to_egui_with_alpha;
 use anyhow::Result;
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
-use eframe::egui::{self, CentralPanel, Panel, ViewportBuilder, ViewportCommand, ViewportId};
-use eframe::egui_glow::CallbackFn;
+use egui::{self, CentralPanel, Panel, ViewportCommand, ViewportId};
+use egui_glow::CallbackFn;
 use freminal_common::args::Args;
 use freminal_common::config::{Config, TabBarPosition, ThemeMode};
 use freminal_terminal_emulator::io::InputEvent;
 #[cfg(feature = "playback")]
 use freminal_terminal_emulator::io::PlaybackMode;
+use freminal_windowing::{RepaintProxy, WindowId};
 use glow::HasContext;
 use renderer::WindowPostRenderer;
 use settings::{SettingsAction, SettingsModal};
@@ -99,9 +100,12 @@ struct FreminalGui {
     /// CLI arguments needed for spawning new PTY tabs.
     args: Args,
 
-    /// Shared egui context handle used by PTY consumer threads to request
+    /// Shared repaint handle used by PTY consumer threads to request
     /// repaints after publishing new snapshots.
-    egui_ctx: Arc<OnceLock<egui::Context>>,
+    repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
+
+    /// The primary window id, set in `on_window_created()`.
+    window_id: Option<WindowId>,
 
     /// Settings modal state (open/close, draft config, tabs).
     settings_modal: SettingsModal,
@@ -205,34 +209,37 @@ struct FreminalGui {
 impl FreminalGui {
     #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
     fn new(
-        cc: &eframe::CreationContext<'_>,
         initial_tab: Tab,
         config: Config,
         args: Args,
-        egui_ctx: Arc<OnceLock<egui::Context>>,
+        repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
         config_path: Option<std::path::PathBuf>,
         window_post: Arc<Mutex<WindowPostRenderer>>,
         #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
-        // Sample the OS dark/light preference from egui.
-        // `dark_mode` is true when the OS is in dark mode.
-        let os_dark_mode = cc.egui_ctx.global_style().visuals.dark_mode;
+        // OS dark mode is not yet known (no egui context).  Assume light mode
+        // initially; `on_window_created()` will detect the real preference and
+        // correct if needed.
+        let os_dark_mode = false;
 
         let initial_theme =
             freminal_common::themes::by_slug(config.theme.active_slug(os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
-        rendering::set_egui_options(&cc.egui_ctx, initial_theme, config.ui.background_opacity);
+        // Note: `set_egui_options` is deferred to `on_window_created()` where the egui context
+        // is available.
+        let _ = initial_theme; // suppress unused warning; used in on_window_created via config
 
         let gui = Self {
             tabs: TabManager::new(initial_tab),
-            terminal_widget: FreminalTerminalWidget::new(&cc.egui_ctx, &config),
+            terminal_widget: FreminalTerminalWidget::new(&egui::Context::default(), &config),
             binding_map: config.build_binding_map().unwrap_or_else(|e| {
                 error!("Failed to build binding map from config: {e}. Using defaults.");
                 freminal_common::keybindings::BindingMap::default()
             }),
             config,
             args,
-            egui_ctx,
+            repaint_handle,
+            window_id: None,
             settings_modal: SettingsModal::new(config_path),
             last_window_title: String::from("Freminal"),
             os_dark_mode,
@@ -346,7 +353,7 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
-            &self.egui_ctx,
+            &self.repaint_handle,
         ) {
             Ok(channels) => {
                 let id = self.tabs.next_tab_id();
@@ -417,7 +424,7 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
-            &self.egui_ctx,
+            &self.repaint_handle,
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -506,7 +513,76 @@ impl FreminalGui {
     }
 }
 
-impl eframe::App for FreminalGui {
+impl freminal_windowing::App for FreminalGui {
+    /// Called when the primary window is created.
+    ///
+    /// Performs all context-dependent initialization that was previously in the
+    /// eframe `CreationContext` closure: sampling OS dark mode, setting egui
+    /// style, creating the terminal widget, and publishing the `RepaintProxy`.
+    fn on_window_created(
+        &mut self,
+        window_id: WindowId,
+        ctx: &egui::Context,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        self.window_id = Some(window_id);
+
+        // Publish the repaint proxy so PTY threads can request repaints.
+        let proxy = handle.event_loop_proxy();
+        let _ = self.repaint_handle.set((proxy, window_id));
+
+        // Sample OS dark/light preference now that egui context exists.
+        let os_dark_mode = ctx.global_style().visuals.dark_mode;
+        self.os_dark_mode = os_dark_mode;
+
+        // Apply the initial theme.
+        let initial_theme =
+            freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
+                .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+        rendering::set_egui_options(ctx, initial_theme, self.config.ui.background_opacity);
+
+        // Re-create the terminal widget with the real egui context for correct
+        // font registration and DPI scaling.
+        self.terminal_widget = FreminalTerminalWidget::new(ctx, &self.config);
+
+        // Correct the theme for auto mode if the real OS preference differs
+        // from the assumed-light default used during construction.
+        if os_dark_mode {
+            let slug = self.config.theme.active_slug(os_dark_mode);
+            if let Some(theme) = freminal_common::themes::by_slug(slug) {
+                for tab in self.tabs.iter() {
+                    if let Ok(panes) = tab.pane_tree.iter_panes() {
+                        for pane in panes {
+                            if let Err(e) = pane.input_tx.send(InputEvent::ThemeChange(theme)) {
+                                error!("Failed to send corrective ThemeChange: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            // Propagate OS dark mode to all panes.
+            for tab in self.tabs.iter() {
+                if let Ok(panes) = tab.pane_tree.iter_panes() {
+                    for pane in panes {
+                        if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                            self.config.theme.mode,
+                            os_dark_mode,
+                        )) {
+                            error!("Failed to send ThemeModeUpdate: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Called when a window close is requested.
+    ///
+    /// For Task 63 (no secondary windows), always allow the close.
+    fn on_close_requested(&mut self, _window_id: WindowId) -> bool {
+        true
+    }
+
     /// Override the GL framebuffer clear color.
     ///
     /// When `background_opacity < 1.0` the viewport was created with
@@ -517,12 +593,17 @@ impl eframe::App for FreminalGui {
     ///
     /// When opacity is 1.0 the clear color matches `panel_fill` (fully
     /// opaque) — there is no visible difference from the default.
-    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+    fn clear_color(&self, _window_id: WindowId) -> [f32; 4] {
         if self.config.ui.background_opacity < 1.0 {
             [0.0, 0.0, 0.0, 0.0]
         } else {
-            // Fully opaque: use the terminal background color.
-            visuals.panel_fill.to_normalized_gamma_f32()
+            // Fully opaque: use the terminal background color from the theme.
+            let theme =
+                freminal_common::themes::by_slug(self.config.theme.active_slug(self.os_dark_mode))
+                    .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+            let (r, g, b) = theme.background;
+            let color = egui::Color32::from_rgb(r, g, b);
+            color.to_normalized_gamma_f32()
         }
     }
 
@@ -530,100 +611,29 @@ impl eframe::App for FreminalGui {
     // manipulation drain, terminal widget layout, and resize detection — all in one pass over
     // the shared snapshot. Artificial sub-functions would not reduce the coupling.
     #[allow(clippy::too_many_lines)]
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn update(
+        &mut self,
+        _window_id: WindowId,
+        ctx: &egui::Context,
+        _gl: &glow::Context,
+        _handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
 
         // ── Root window close intercept ───────────────────────────────────────
-        // When the user closes the root window while secondary windows exist,
-        // show a confirmation dialog instead of closing immediately — eframe
-        // ties app lifecycle to ViewportId::ROOT so closing it would destroy
-        // all windows.
-        //
-        // Skip the intercept when `closing_all` is true — that means the user
-        // already confirmed "Close All" and the `ViewportCommand::Close` we
-        // sent should be honoured, not re-cancelled.
-        let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
-        if close_requested && !self.closing_all {
-            if self.secondary_windows.is_empty() {
-                // No other windows — let the close proceed normally.
-            } else {
-                // Cancel the OS close and show a confirmation dialog.
-                ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
-                self.show_close_confirmation = true;
-            }
-        }
+        // Task 63: No secondary windows — close proceeds immediately.
+        // The on_close_requested() handler always returns true.
 
-        // ── Secondary window management ───────────────────────────────────────
-        // Re-register all live secondary windows on every frame.  egui's deferred
-        // viewport API requires the closure to be supplied every frame; stopping
-        // means the window is destroyed.  We also prune entries whose windows have
-        // requested close (detected inside run_secondary_window_frame).
-        {
-            let ctx = ui.ctx().clone();
-            let mut live: Vec<(ViewportId, Arc<Mutex<window::SecondaryWindowState>>)> = Vec::new();
-            for (vid, state) in self.secondary_windows.drain(..) {
-                // Check if the window has requested to be closed.  When `closed`
-                // is true we stop calling `show_viewport_deferred` for this entry.
-                // egui destroys the OS window because the closure is no longer
-                // supplied, and the `Arc` is dropped here, cleaning up PTY threads.
-                let is_closed = state.try_lock().is_ok_and(|w| w.closed);
-                if is_closed {
-                    // Do NOT re-register — egui will destroy the viewport.
-                    continue;
-                }
+        // ── Secondary window management (Task 64) ────────────────────────────
+        // Secondary windows are not yet supported with freminal-windowing.
+        // The secondary_windows Vec is always empty.
 
-                let state_clone = Arc::clone(&state);
-                ctx.show_viewport_deferred(
-                    vid,
-                    ViewportBuilder::default()
-                        .with_title("Freminal")
-                        .with_app_id("freminal")
-                        .with_transparent(true),
-                    move |ui, _class| {
-                        let Ok(mut win) = state_clone.try_lock() else {
-                            return;
-                        };
-                        window::run_secondary_window_frame(&mut win, ui);
-                    },
-                );
-                live.push((vid, state));
-            }
-            self.secondary_windows = live;
-
-            // Ensure every secondary (deferred) viewport gets a repaint
-            // whenever the root window repaints.  Without this, compositor-
-            // initiated resizes on tiling Wayland go unnoticed because the
-            // deferred closure only runs as part of the root frame — if no
-            // explicit repaint is requested for the child viewport, eframe
-            // may skip it, leaving the GL framebuffer stretched at the old
-            // size until the user interacts with the child window.
-            for (vid, _) in &self.secondary_windows {
-                ctx.request_repaint_of(*vid);
-            }
-        }
-
-        // Collect `pending_new_window` requests from secondary windows and
-        // consume them into the root's own flag.  We do this with a single
-        // `any()` scan to avoid holding a lock while mutating `self`.
-        let any_secondary_wants_new_window = self.secondary_windows.iter().any(|(_, state)| {
-            state.try_lock().is_ok_and(|mut w| {
-                let v = w.pending_new_window;
-                if v {
-                    w.pending_new_window = false;
-                }
-                v
-            })
-        });
-        if any_secondary_wants_new_window {
-            self.pending_new_window = true;
-        }
-
-        // Consume the pending_new_window flag set by dispatch_deferred_action or
-        // the "Window → New Window" menu.  Must happen here where ctx is available.
+        // Consume the pending_new_window flag — currently a no-op since
+        // spawn_new_window is stubbed (Task 64).
         if self.pending_new_window {
             self.pending_new_window = false;
-            self.spawn_new_window(ui.ctx());
+            self.spawn_new_window(ctx);
         }
 
         // ── Close-all confirmation dialog ─────────────────────────────────────
@@ -636,7 +646,7 @@ impl eframe::App for FreminalGui {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ui.ctx(), |ui| {
+                .show(ctx, |ui| {
                     ui.label("Other windows are still open. Close all windows?");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -661,18 +671,18 @@ impl eframe::App for FreminalGui {
                 // the close intercept at the top of `ui()` won't re-cancel it
                 // on the next frame.
                 self.closing_all = true;
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                ctx.send_viewport_cmd(ViewportCommand::Close);
             }
             if !keep_open {
                 self.show_close_confirmation = false;
             }
             // Request a repaint so the dialog remains interactive.
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
 
         // Detect OS dark/light preference changes and auto-switch theme when
         // `mode = "auto"` is configured.
-        let current_os_dark = ui.ctx().global_style().visuals.dark_mode;
+        let current_os_dark = ctx.global_style().visuals.dark_mode;
         if current_os_dark != self.os_dark_mode {
             self.os_dark_mode = current_os_dark;
 
@@ -707,11 +717,7 @@ impl eframe::App for FreminalGui {
                             }
                         }
                     }
-                    rendering::update_egui_theme(
-                        ui.ctx(),
-                        theme,
-                        self.config.ui.background_opacity,
-                    );
+                    rendering::update_egui_theme(ctx, theme, self.config.ui.background_opacity);
                     // Invalidate theme cache on all panes in all tabs so the
                     // next frame forces a full vertex rebuild with the new palette.
                     for tab in self.tabs.iter_mut() {
@@ -819,7 +825,7 @@ impl eframe::App for FreminalGui {
                 Err(panes::PaneError::CannotCloseLastPane) => {
                     // Last pane in tab — close the entire tab.
                     if self.tabs.tab_count() <= 1 {
-                        self.close_or_hide_root(ui.ctx());
+                        self.close_or_hide_root(ctx);
                         return;
                     }
                     self.close_tab(tab_idx);
@@ -859,11 +865,19 @@ impl eframe::App for FreminalGui {
                 .scroll_offset = snap.scroll_offset;
         }
 
+        // Create a root Ui covering the full available area.  Panels reserve
+        // space from this Ui via `show_inside` (the non-deprecated API).
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("freminal_root"),
+            egui::UiBuilder::default(),
+        );
+
         // Menu bar at the top of the window.
         let mut any_menu_open = false;
         if !self.config.ui.hide_menu_bar {
             let (menu_action, menu_open) = Panel::top("menu_bar")
-                .show_inside(ui, |ui| self.show_menu_bar(ui, &snap))
+                .show_inside(&mut root_ui, |ui| self.show_menu_bar(ui, &snap))
                 .inner;
             any_menu_open = menu_open;
             self.dispatch_tab_bar_action(menu_action);
@@ -878,15 +892,17 @@ impl eframe::App for FreminalGui {
                 TabBarPosition::Top => Panel::top("tab_bar"),
                 TabBarPosition::Bottom => Panel::bottom("tab_bar"),
             };
-            let tab_action = panel.show_inside(ui, |ui| self.show_tab_bar(ui)).inner;
+            let tab_action = panel
+                .show_inside(&mut root_ui, |ui| self.show_tab_bar(ui))
+                .inner;
             self.dispatch_tab_bar_action(tab_action);
         }
 
-        let _panel_response = CentralPanel::default().show_inside(ui, |ui| {
+        let _panel_response = CentralPanel::default().show_inside(&mut root_ui, |ui| {
             // Synchronise font metrics with the current display scale *before*
             // reading `cell_size()`.  Without this, the first frame after a DPI
             // change would use stale pixel metrics for the resize calculation.
-            let ppp = ui.ctx().pixels_per_point();
+            let ppp = ctx.pixels_per_point();
             let ppp_changed = self.terminal_widget.sync_pixels_per_point(ppp);
 
             // Synchronise font zoom for the active tab.  Each tab has its own
@@ -978,7 +994,7 @@ impl eframe::App for FreminalGui {
             };
             if style_changed {
                 if snap.is_normal_display {
-                    ui.ctx().global_style_mut(|style| {
+                    ctx.global_style_mut(|style| {
                         // window_fill: always opaque (menus, settings, chrome).
                         style.visuals.window_fill = internal_color_to_egui_with_alpha(
                             freminal_common::colors::TerminalColor::DefaultBackground,
@@ -995,7 +1011,7 @@ impl eframe::App for FreminalGui {
                         );
                     });
                 } else {
-                    ui.ctx().global_style_mut(|style| {
+                    ctx.global_style_mut(|style| {
                         // window_fill: always opaque (menus, settings, chrome).
                         style.visuals.window_fill =
                             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255);
@@ -1095,7 +1111,7 @@ impl eframe::App for FreminalGui {
                             panes::SplitDirection::Horizontal => egui::CursorIcon::ResizeHorizontal,
                             panes::SplitDirection::Vertical => egui::CursorIcon::ResizeVertical,
                         };
-                        ui.ctx().set_cursor_icon(cursor);
+                        ctx.set_cursor_icon(cursor);
                     }
 
                     // On drag start, record which border we're resizing.
@@ -1538,20 +1554,18 @@ impl eframe::App for FreminalGui {
             };
             if window_title != self.last_window_title {
                 window_title.clone_into(&mut self.last_window_title);
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
-                    self.last_window_title.clone(),
-                ));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.last_window_title.clone()));
             }
 
             // Schedule a repaint at the shortest interval needed by any pane.
             if let Some(delay) = shortest_repaint_delay {
-                ui.ctx().request_repaint_after(delay);
+                ctx.request_repaint_after(delay);
             }
         });
 
         // Show the settings modal (if open) above everything else.
         let modal_was_open = self.settings_modal.is_open;
-        let settings_action = self.settings_modal.show(ui.ctx(), self.os_dark_mode);
+        let settings_action = self.settings_modal.show(ctx, self.os_dark_mode);
 
         // After show() processes the dropdown change, load the new font's
         // bytes and register them with egui so the preview renders in the
@@ -1562,13 +1576,13 @@ impl eframe::App for FreminalGui {
             let bytes = self.terminal_widget.load_font_bytes(&family);
             let base = self.terminal_widget.base_font_defs();
             self.settings_modal
-                .register_preview_font(ui.ctx(), &family, bytes, base);
+                .register_preview_font(ctx, &family, bytes, base);
         }
 
         // If the modal just closed (any reason), restore the original egui
         // font set to remove the preview font registration.
         if modal_was_open && !self.settings_modal.is_open {
-            self.settings_modal.restore_base_fonts(ui.ctx());
+            self.settings_modal.restore_base_fonts(ctx);
         }
 
         match settings_action {
@@ -1593,7 +1607,7 @@ impl eframe::App for FreminalGui {
                     {
                         error!("Failed to send ThemeChange to PTY thread: {e}");
                     }
-                    rendering::update_egui_theme(ui.ctx(), theme, new_cfg.ui.background_opacity);
+                    rendering::update_egui_theme(ctx, theme, new_cfg.ui.background_opacity);
                     // Force a full vertex rebuild on the next frame so
                     // foreground/background colors are re-resolved against
                     // the new palette.  Without this, the preview's rebuild
@@ -1610,7 +1624,7 @@ impl eframe::App for FreminalGui {
 
                 let font_changed =
                     self.terminal_widget
-                        .apply_config_changes(ui.ctx(), &self.config, &new_cfg);
+                        .apply_config_changes(ctx, &self.config, &new_cfg);
                 if font_changed {
                     // Font or ligature config changed — clear each pane's GL
                     // atlas and force full vertex rebuilds.
@@ -1708,7 +1722,7 @@ impl eframe::App for FreminalGui {
                 {
                     error!("Failed to send theme preview to PTY thread: {e}");
                 }
-                rendering::update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
+                rendering::update_egui_theme(ctx, theme, self.config.ui.background_opacity);
             }
             SettingsAction::RevertTheme(ref slug, original_opacity)
                 if let Some(theme) = freminal_common::themes::by_slug(slug) =>
@@ -1725,7 +1739,7 @@ impl eframe::App for FreminalGui {
                 // Restore opacity first so update_egui_theme uses the
                 // correct value for panel_fill.
                 self.config.ui.background_opacity = original_opacity;
-                rendering::update_egui_theme(ui.ctx(), theme, original_opacity);
+                rendering::update_egui_theme(ctx, theme, original_opacity);
             }
             SettingsAction::RevertTheme(_, _)
             | SettingsAction::PreviewTheme(_)
@@ -1745,7 +1759,7 @@ impl eframe::App for FreminalGui {
         trace!("{}", frame_time);
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, _window_id: WindowId, raw_input: &mut egui::RawInput) {
         // Override egui's predicted frame time to zero.
         //
         // egui's `request_repaint_after(delay)` subtracts `predicted_dt`
@@ -1775,81 +1789,41 @@ pub fn run(
     config: Config,
     args: Args,
     config_path: Option<std::path::PathBuf>,
-    egui_ctx_lock: Arc<OnceLock<egui::Context>>,
+    repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     window_post: Arc<Mutex<WindowPostRenderer>>,
     #[cfg(feature = "playback")] is_playback: bool,
 ) -> Result<()> {
-    let icon = match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png")) {
-        Ok(icon) => icon,
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Failed to load window icon from bytes: {e}"
-            ));
-        }
+    let icon_bytes = include_bytes!("../../../assets/icon.png");
+    let image = image::load_from_memory(icon_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to load window icon: {e}"))?;
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let icon = egui::IconData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
     };
 
-    let mut native_options = eframe::NativeOptions::default();
-    native_options.viewport.icon = Some(Arc::new(icon));
+    let window_config = freminal_windowing::WindowConfig {
+        title: "Freminal".to_owned(),
+        inner_size: None,
+        transparent: true,
+        icon: Some(icon),
+        app_id: Some("freminal".into()),
+    };
 
-    // Set the application identifier so that Wayland compositors associate
-    // our xdg_toplevel with the "freminal.desktop" entry (matching
-    // StartupWMClass=freminal).  On X11 winit already derives WM_CLASS
-    // from argv[0], but setting this explicitly ensures consistent behavior
-    // across both display servers.
-    native_options.viewport.app_id = Some("freminal".into());
+    let app = FreminalGui::new(
+        initial_tab,
+        config,
+        args,
+        repaint_handle,
+        config_path,
+        window_post,
+        #[cfg(feature = "playback")]
+        is_playback,
+    );
 
-    // Always request a framebuffer with an alpha channel so that
-    // background_opacity can be changed at runtime without a restart.
-    // When opacity is 1.0 the clear_color() override returns a fully
-    // opaque color, so there is no visual difference.  On Wayland and
-    // macOS this works out of the box; on X11 it requires a running
-    // compositor (e.g. picom).
-    native_options.viewport.transparent = Some(true);
-
-    // Disable client-side vsync so that eglSwapBuffers is non-blocking.
-    //
-    // eframe 0.34 does not call winit's pre_present_notify() before
-    // swap_buffers(), which means winit's Wayland frame-callback pacing
-    // is never activated.  With EGL_SWAP_INTERVAL=1 (the vsync=true
-    // default), eglSwapBuffers blocks until the compositor signals a
-    // frame — but on a hidden workspace the compositor never signals,
-    // so the call blocks indefinitely.  While blocked, the Wayland
-    // event loop cannot dispatch protocol events, so xdg_wm_base pings
-    // go unanswered and the compositor declares the app hung.
-    //
-    // With vsync=false the swap returns immediately.  Wayland compositors
-    // do their own compositing pass at the display refresh rate, so
-    // client-side tearing is not visible.  The `raw_input_hook` override
-    // of `predicted_dt = 0.0` (see above) ensures our repaint-request
-    // delays are honoured exactly, so the effective frame rate is capped
-    // by the repaint intervals (8 ms / 16 ms / 500 ms) rather than
-    // spinning at hundreds of FPS.
-    native_options.vsync = false;
-
-    match eframe::run_native(
-        "Freminal",
-        native_options,
-        Box::new(move |cc| {
-            // Publish the egui::Context so the PTY consumer thread can
-            // request repaints after storing new snapshots.
-            let _already_set = egui_ctx_lock.set(cc.egui_ctx.clone());
-
-            Ok(Box::new(FreminalGui::new(
-                cc,
-                initial_tab,
-                config,
-                args,
-                egui_ctx_lock,
-                config_path,
-                window_post,
-                #[cfg(feature = "playback")]
-                is_playback,
-            )))
-        }),
-    ) {
-        Ok(()) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!(e.to_string())),
-    }
+    freminal_windowing::run(window_config, app).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
+use egui::{self, FontData, FontDefinitions, FontFamily};
 
 // -------------------------------------------------------------------------------------------------
 //  Freminal Terminal – Unified Font Loader

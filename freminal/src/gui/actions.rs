@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui;
+use egui;
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::{error, trace};
 

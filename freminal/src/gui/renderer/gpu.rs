@@ -11,12 +11,12 @@
 //! atlas GL texture, an optional background image texture, and an optional
 //! offscreen FBO for custom post-processing shaders.
 //!
-//! Rendering is triggered via egui's [`eframe::egui_glow::CallbackFn`] mechanism.
+//! Rendering is triggered via egui's [`egui_glow::CallbackFn`] mechanism.
 //! The CPU-side instance/vertex builders live in [`super::vertex`] and are pure
 //! functions that are fully testable without a GL context.
 
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
-use eframe::glow::{self, HasContext};
+use glow::{self, HasContext};
 use tracing::error;
 
 use super::super::atlas::GlyphAtlas;

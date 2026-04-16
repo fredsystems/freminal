@@ -1,22 +1,35 @@
 //! Minimal example: opens a window with an egui label.
 
-use freminal_windowing::{App, WindowConfig, WindowId};
+use freminal_windowing::{App, WindowConfig, WindowHandle, WindowId};
 
 struct HelloApp;
 
 impl App for HelloApp {
-    fn update(&mut self, _window_id: WindowId, ctx: &egui::Context, _gl: &glow::Context) {
-        #[expect(
-            deprecated,
-            reason = "show_inside needs &mut Ui; top-level show takes &Context"
-        )]
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn update(
+        &mut self,
+        _window_id: WindowId,
+        ctx: &egui::Context,
+        _gl: &glow::Context,
+        _handle: &WindowHandle<'_>,
+    ) {
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("hello_root"),
+            egui::UiBuilder::default(),
+        );
+        egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
             ui.heading("Hello from freminal-windowing");
             ui.label("This is a minimal example using winit + glutin + egui.");
         });
     }
 
-    fn on_window_created(&mut self, _window_id: WindowId, _ctx: &egui::Context) {}
+    fn on_window_created(
+        &mut self,
+        _window_id: WindowId,
+        _ctx: &egui::Context,
+        _handle: &WindowHandle<'_>,
+    ) {
+    }
 
     fn on_close_requested(&mut self, _window_id: WindowId) -> bool {
         true

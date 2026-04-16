@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui;
+use egui;
 #[cfg(feature = "playback")]
 use freminal_terminal_emulator::io::{InputEvent, PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;

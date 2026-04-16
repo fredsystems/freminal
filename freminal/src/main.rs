@@ -89,9 +89,14 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
 
     // Shared egui context handle so the PTY consumer thread can request
     // repaints after publishing new snapshots.
-    let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
+    let repaint_handle: Arc<
+        OnceLock<(
+            freminal_windowing::RepaintProxy,
+            freminal_windowing::WindowId,
+        )>,
+    > = Arc::new(OnceLock::new());
 
-    let channels = spawn_pty_tab(&args, cfg.scrollback.limit, theme, &egui_ctx)?;
+    let channels = spawn_pty_tab(&args, cfg.scrollback.limit, theme, &repaint_handle)?;
 
     let config_path = args.config.clone();
 
@@ -121,7 +126,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         cfg,
         args,
         config_path,
-        egui_ctx,
+        repaint_handle,
         window_post,
         #[cfg(feature = "playback")]
         false,
@@ -363,8 +368,13 @@ fn main() {
             Vec<freminal_common::buffer_states::tchar::TChar>,
         )>(1);
 
-        let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
-        let egui_ctx_playback = Arc::clone(&egui_ctx);
+        let repaint_handle: Arc<
+            OnceLock<(
+                freminal_windowing::RepaintProxy,
+                freminal_windowing::WindowId,
+            )>,
+        > = Arc::new(OnceLock::new());
+        let repaint_handle_playback = Arc::clone(&repaint_handle);
 
         std::thread::spawn(move || {
             playback::run_playback_thread(
@@ -373,7 +383,7 @@ fn main() {
                 input_rx,
                 window_cmd_tx,
                 arc_swap,
-                egui_ctx_playback,
+                repaint_handle_playback,
                 clipboard_tx,
                 search_buffer_tx,
             );
@@ -404,7 +414,7 @@ fn main() {
             cfg,
             args,
             config_path,
-            egui_ctx,
+            repaint_handle,
             window_post,
             is_playback,
         )
