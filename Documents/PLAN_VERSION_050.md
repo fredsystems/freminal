@@ -11,7 +11,7 @@ images, and user-provided custom shaders for post-processing effects.
 
 | #   | Feature                  | Scope  | Status   |
 | --- | ------------------------ | ------ | -------- |
-| 53  | Multiple Windows         | Large  | Pending  |
+| 53  | Multiple Windows         | Large  | Complete |
 | 54  | Background Images        | Medium | Complete |
 | 55  | Custom Shaders           | Medium | Complete |
 | 57  | Render Loop Optimization | Medium | Complete |
@@ -75,7 +75,7 @@ Recommend **Option A** for simplicity and resource sharing.
 
 ### 53 Subtasks
 
-1. **53.1 — Fix `.desktop` entry for multi-instance launch**
+1. **53.1 — Fix `.desktop` entry for multi-instance launch** ✅
    Update the desktop entry in `flake.nix` to ensure application launchers always spawn a
    new process. Add `StartupWMClass=freminal` and investigate whether `SingleMainWindow=false`
    or other freedesktop keys are needed. Verify that `freminal yazi --no-menu-bar` launched
@@ -83,37 +83,50 @@ Recommend **Option A** for simplicity and resource sharing.
    another Freminal window is already open. This subtask can be completed independently of
    the multi-viewport work below and provides immediate relief.
 
-2. **53.2 — Research egui multi-viewport API**
+2. **53.2 — Research egui multi-viewport API** ✅
    Investigate eframe/egui's viewport API. Determine how to create additional OS windows,
    share GL contexts (or create separate ones), and manage per-window state. Document findings
    and confirm feasibility of Option A.
 
-3. **53.3 — Application lifecycle refactor**
-   Refactor the application model to support multiple windows. Create a `WindowManager` that
-   owns a collection of windows, each with its own `TabManager`. The main eframe app becomes
-   a coordinator.
+3. **53.3 — Application lifecycle refactor** ✅
+   Refactor the application model to support multiple windows. Root window remains the eframe
+   `App`; secondary windows are managed via `ctx.show_viewport_deferred`. Each secondary window
+   owns its own `TabManager`, `PaneTree`, channels, and `WindowPostRenderer`. Closing the root
+   while secondaries are open shows a "Close All Windows?" confirmation dialog.
 
-4. **53.4 — Per-window state**
-   Each window owns: `TabManager`, `ViewState` per tab, window position/size. Shared across
-   windows: `Config`, `FontManager`, glyph atlas texture.
+4. **53.4 — Per-window state** ✅
+   Each window owns: `TabManager`, `ViewState` per tab, `PaneTree`, PTY channels, snapshot
+   handles, `WindowPostRenderer`. Shared across windows: `Config`, `FontManager` (via
+   `Arc<Mutex<>>`), `PaneIdGenerator` (via `Arc<Mutex<>>`), egui `Context`.
 
-5. **53.5 — Window creation and destruction**
-   Implement "New Window" (creates a new viewport with an initial tab). Implement window close
-   (closes all tabs in that window). Last window close exits the app.
+5. **53.5 — Window creation and destruction** ✅
+   Implemented "New Window" via `spawn_new_window()` which creates a deferred viewport with
+   its own `SecondaryWindowState`. Window close marks `win.closed = true`; pruning loop stops
+   re-registering the viewport. Root close with secondaries open shows confirmation dialog
+   with "Close All" / "Cancel". `closing_all` flag prevents close-intercept from re-cancelling
+   the intentional shutdown.
 
-6. **53.6 — Keyboard shortcut and menu integration**
-   Add `KeyAction::NewWindow` to keybindings. Add "New Window" to the menu bar's "Window" menu.
+6. **53.6 — Keyboard shortcut and menu integration** ✅
+   Added `KeyAction::NewWindow` to keybindings with default `Ctrl+Shift+N`. Added "Window"
+   menu with "New Window" item. Documented in `config_example.toml`.
 
-7. **53.7 — Tests**
-   Unit tests: window manager operations (create, close, last-window-exit). Integration:
-   verify multiple windows can exist concurrently without resource conflicts.
+7. **53.7 — Tests** ✅
+   Unit tests for `KeyAction::NewWindow` (name, display_label, FromStr round-trip, presence
+   in `ALL`, default binding map). `ViewportId` generation tests (monotonic, distinct).
+   `Args` clone test for secondary window spawning.
 
 ### 53 Primary Files
 
-- `freminal/src/gui/mod.rs` (application lifecycle)
-- `freminal/src/gui/windows.rs` (new — window manager)
-- `freminal/src/gui/tabs.rs` (per-window tab ownership)
-- `freminal/src/main.rs` (startup changes)
+- `freminal/src/gui/mod.rs` (application lifecycle, close intercept, confirmation dialog)
+- `freminal/src/gui/window.rs` (secondary window state, spawn, frame rendering)
+- `freminal/src/gui/actions.rs` (close_or_hide_root, spawn_new_window)
+- `freminal/src/gui/menu.rs` (Window menu with New Window)
+- `freminal/src/gui/rendering.rs` (shared rendering helpers)
+- `freminal/src/gui/hot_reload.rs` (shader hot-reload)
+- `freminal-common/src/keybindings.rs` (KeyAction::NewWindow)
+- `freminal-common/src/args.rs` (Args Clone derive)
+- `config_example.toml` (new_window keybinding)
+- `flake.nix` (desktop entry fixes)
 
 ---
 

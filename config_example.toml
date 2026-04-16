@@ -257,6 +257,9 @@ limit = 4000
 #     toggle_menu_bar = (unbound)
 #     open_settings   = "Ctrl+Shift+Comma"
 #
+#   Window management:
+#     new_window      = "Ctrl+Shift+N"  (open a new OS window with an initial tab)
+#
 #   Scrollback:
 #     scroll_page_up   = "Shift+PageUp"
 #     scroll_page_down = "Shift+PageDown"

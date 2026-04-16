@@ -3,7 +3,7 @@
 ## Overview
 
 This document tracks all development work for Freminal: the 35 completed v0.2.0 tasks, 2 pending
-housekeeping tasks, and the versioned roadmap for v0.3.0–v0.6.0. Agents executing any task MUST
+housekeeping tasks, and the versioned roadmap for v0.3.0–v0.7.0. Agents executing any task MUST
 read this document first for context on dependencies and ordering.
 
 All tasks are governed by the rules in `agents.md`, including the mandatory testing, benchmarking,
@@ -16,8 +16,9 @@ and plan document maintenance rules.
 | v0.2.0  | —                       | (Tasks 1–35 below)    | 35    | Done     |
 | v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Active   |
 | v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52 | Complete |
-| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58 | Pending  |
+| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58 | Complete |
 | v0.6.0  | Replay & Layouts        | `PLAN_VERSION_060.md` | 59–61 | Pending  |
+| v0.7.0  | Foundation              | `PLAN_VERSION_070.md` | 62–66 | Pending  |
 
 See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
 B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been
@@ -75,10 +76,16 @@ Task 61 (Saved Layouts).
 | 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`       | Complete | None                 |
 | 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`             | Complete | None                 |
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
+| 53  | Multiple Windows                         | `PLAN_VERSION_050.md` (Task 53)             | Complete | Task 36 (Tabs)       |
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
 | 59  | FREC v2: Multi-Pane Recording            | `PLAN_VERSION_060.md` (Task 59)             | Pending  | Tasks 32, 58         |
 | 60  | Playback v2: Multi-Pane Replay           | `PLAN_VERSION_060.md` (Task 60)             | Pending  | Task 59              |
 | 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_060.md` (Task 61)             | Pending  | Tasks 36, 58         |
+| 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_070.md` (Task 62)             | Pending  | None                 |
+| 63  | Single-window migration                  | `PLAN_VERSION_070.md` (Task 63)             | Pending  | Task 62              |
+| 64  | Multi-window parity                      | `PLAN_VERSION_070.md` (Task 64)             | Pending  | Task 63              |
+| 65  | Frame pacing + idle optimization         | `PLAN_VERSION_070.md` (Task 65)             | Pending  | Task 63              |
+| 66  | Cleanup + eframe removal                 | `PLAN_VERSION_070.md` (Task 66)             | Pending  | Task 64              |
 
 ---
 
@@ -146,6 +153,12 @@ Task 58 (Built-in Multiplexer) ── depends on Task 36 (Tabs); subsumes A.2 (S
 Task 59 (FREC v2 Format) ── depends on Tasks 32 (Playback Feature Flag) + 58 (Muxing)
 Task 60 (Playback v2) ── depends on Task 59 (FREC v2 Format)
 Task 61 (Saved Layouts) ── depends on Tasks 36 (Tabs) + 58 (Muxing); subsumes Task 56
+
+Task 62 (freminal-windowing crate) ── independent (new crate, no existing code touched)
+Task 63 (Single-window migration) ── depends on Task 62
+Task 64 (Multi-window parity) ── depends on Task 63
+Task 65 (Frame pacing + idle opt) ── depends on Task 63 (can run parallel with Task 64)
+Task 66 (Cleanup + eframe removal) ── depends on Task 64
 ```
 
 ### Dependency Details
@@ -319,7 +332,7 @@ layout into new tab). Large scope (11 subtasks).
 
 ## Recommended Execution Order
 
-The following reflects the actual execution state: Tasks 1-17, 20-35 are complete.
+The following reflects the actual execution state: Tasks 1-17, 20-35, and 53-58 are complete.
 The remaining tasks are ordered as follows.
 
 ### Phase 7 — Update Mechanism
@@ -332,15 +345,13 @@ and can be developed in a separate repo in parallel with Task 18.
 
 ### v0.5.0 — Multi-Instance, Visual & Muxing
 
-These tasks are defined in `PLAN_VERSION_050.md`. Task 57 is complete.
+These tasks are defined in `PLAN_VERSION_050.md`. All tasks are complete.
 
-- **Task 53** — Multiple Windows (depends on tabs, Task 36)
-- **Task 54** — Background Images (independent — extends Task 34)
-- **Task 55** — Custom Shaders (independent — extends Task 1 GL renderer)
-- **Task 58** — Built-in Multiplexer / Split Panes (depends on tabs, Task 36; subsumes A.2)
-
-Tasks 54 and 55 can start immediately. Tasks 53 and 58 depend on tabs (Task 36,
-complete). Task 58 is the highest-value remaining feature.
+- **Task 53** — Multiple Windows — Complete
+- **Task 54** — Background Images — Complete
+- **Task 55** — Custom Shaders — Complete
+- **Task 57** — Render Loop Optimization — Complete
+- **Task 58** — Built-in Multiplexer / Split Panes — Complete
 
 ### v0.6.0 — Replay & Layouts
 
@@ -354,20 +365,30 @@ here and subsumed by Task 61 (Saved Layouts).
 Tasks 59 and 61 can start in parallel (independent of each other). Task 60 starts after
 Task 59 is complete.
 
+### v0.7.0 — Foundation (eframe Replacement)
+
+These tasks are defined in `PLAN_VERSION_070.md`. Replaces eframe with direct
+winit + glutin + egui integration in a new `freminal-windowing` crate.
+
+- **Task 62** — freminal-windowing crate + event loop (independent, new crate)
+- **Task 63** — Single-window migration (depends on Task 62)
+- **Task 64** — Multi-window parity (depends on Task 63)
+- **Task 65** — Frame pacing + idle optimization (depends on Task 63, parallel with Task 64)
+- **Task 66** — Cleanup + eframe removal (depends on Task 64)
+
+Task 62 can start any time. Tasks 64 and 65 can run in parallel after Task 63.
+
 ```text
-Complete:     Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
+Complete:     Tasks 1-17, 20-35, 53-55, 57-58
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
-              │                              │
-v0.5.0:       ├── Task 53 (Multiple Windows)
-              ├── Task 54 (Background Images)
-              ├── Task 55 (Custom Shaders)
-              ├── Task 57 (Render Loop Opt) ── Complete
-              ├── Task 58 (Built-in Muxing) ── Complete
               │
 v0.6.0:       ├── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
-              └── Task 61 (Saved Layouts)      [parallel with 59]
+              ├── Task 61 (Saved Layouts)      [parallel with 59]
+              │
+v0.7.0:       ├── Task 62 (windowing crate) ──► Task 63 (single-window) ──┬──► Task 64 (multi-window) ──► Task 66 (cleanup)
+              │                                                            └──► Task 65 (frame pacing)
 ```
 
 ---
@@ -467,6 +488,7 @@ Update this section as tasks complete:
 | 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
 | 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
 | 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |
+| 53   | 2026-04-15 | 2026-04-15 | All 7 subtasks complete on task-53/multiple-windows                   |
 | 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders   |
 | 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders   |
 | 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                   |
@@ -482,6 +504,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_040.md` — v0.4.0 "Search & Protocol" roadmap (Tasks 45–52)
 - `Documents/PLAN_VERSION_050.md` — v0.5.0 "Multi-Instance & Visual" roadmap (Tasks 53–56)
 - `Documents/PLAN_VERSION_060.md` — v0.6.0 "Replay & Layouts" roadmap (Tasks 59–61)
+- `Documents/PLAN_VERSION_070.md` — v0.7.0 "Foundation" roadmap (Tasks 62–66)
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
 - `config_example.toml` — Current config format
