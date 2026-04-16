@@ -64,9 +64,7 @@ impl TChar {
             Self::Utf8(buf, len) => {
                 let bytes = &buf[..*len as usize];
                 // Try to interpret as UTF-8; fallback to width 1 for invalid sequences
-                std::str::from_utf8(bytes)
-                    .map(unicode_width::UnicodeWidthStr::width)
-                    .unwrap_or(1)
+                std::str::from_utf8(bytes).map_or(1, unicode_width::UnicodeWidthStr::width)
             }
         }
     }

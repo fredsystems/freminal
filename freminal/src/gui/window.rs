@@ -1158,13 +1158,13 @@ pub(super) fn run_secondary_window_frame(win: &mut SecondaryWindowState, ui: &mu
                         // Process any pending shader change.
                         if let Some(pending_shader) = wpr.pending_shader.take() {
                             match pending_shader {
-                                Some(src) => {
+                                Some(src)
                                     if let Err(e) =
-                                        wpr.update_shader(gl, &src, vp.width_px, vp.height_px)
-                                    {
-                                        error!("Secondary window: shader compilation failed: {e}");
-                                    }
+                                        wpr.update_shader(gl, &src, vp.width_px, vp.height_px) =>
+                                {
+                                    error!("Secondary window: shader compilation failed: {e}");
                                 }
+                                Some(_) => {}
                                 None => wpr.clear_shader(gl),
                             }
                         }

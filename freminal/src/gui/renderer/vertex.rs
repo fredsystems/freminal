@@ -585,16 +585,8 @@ pub fn build_image_verts(
 
     for (cell_idx, placement) in placements.iter().enumerate() {
         let Some(p) = placement else { continue };
-        let col = if term_width == 0 {
-            0
-        } else {
-            cell_idx % term_width
-        };
-        let row = if term_width == 0 {
-            0
-        } else {
-            cell_idx / term_width
-        };
+        let col = cell_idx.checked_rem(term_width).unwrap_or(0);
+        let row = cell_idx.checked_div(term_width).unwrap_or(0);
 
         let x0 = gl_f32(col) * gl_f32_u32(cell_width);
         let y0 = gl_f32(row) * gl_f32_u32(cell_height);

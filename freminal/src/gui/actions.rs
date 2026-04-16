@@ -161,21 +161,18 @@ impl super::FreminalGui {
         use freminal_common::keybindings::KeyAction;
 
         match action {
-            KeyAction::OpenSettings => {
-                if !self.settings_modal.is_open {
-                    let families = self.terminal_widget.monospace_families();
-                    self.settings_modal
-                        .open(&self.config, families, self.os_dark_mode);
-                    self.settings_modal
-                        .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
-                }
+            KeyAction::OpenSettings if !self.settings_modal.is_open => {
+                let families = self.terminal_widget.monospace_families();
+                self.settings_modal
+                    .open(&self.config, families, self.os_dark_mode);
+                self.settings_modal
+                    .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
             }
             KeyAction::NewTab => self.spawn_new_tab(),
-            KeyAction::CloseTab => {
-                if let Err(e) = self.tabs.close_active_tab() {
-                    trace!("Cannot close tab: {e}");
-                }
+            KeyAction::CloseTab if let Err(e) = self.tabs.close_active_tab() => {
+                trace!("Cannot close tab: {e}");
             }
+            KeyAction::OpenSettings | KeyAction::CloseTab => {}
             KeyAction::NextTab => {
                 self.tabs.next_tab();
                 self.tabs.active_tab_mut().active_pane_mut().bell_active = false;

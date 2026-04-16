@@ -1675,15 +1675,15 @@ impl TerminalHandler {
             }
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate)
-                | Mode::AltScreen47(AltScreen47::Alternate) => {
-                    if self.allow_alt_screen == AllowAltScreen::Allow {
-                        self.handle_enter_alternate();
-                    }
+                | Mode::AltScreen47(AltScreen47::Alternate)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_enter_alternate();
                 }
-                Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary) => {
-                    if self.allow_alt_screen == AllowAltScreen::Allow {
-                        self.handle_leave_alternate();
-                    }
+                Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_leave_alternate();
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
                 Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
@@ -1771,28 +1771,28 @@ impl TerminalHandler {
                     };
                     self.write_to_pty(&Decom::OriginMode.report(Some(mode)));
                 }
-                Mode::Deccolm(Deccolm::Column132) => {
-                    if self.allow_column_mode_switch == AllowColumnModeSwitch::AllowColumnModeSwitch
-                    {
-                        // Save the current width so CSI?3l can restore it
-                        // instead of hardcoding 80.
-                        if self.pre_deccolm_width.is_none() {
-                            self.pre_deccolm_width = Some(self.buffer.terminal_width());
-                        }
-                        self.buffer.set_column_mode(132);
-                        self.send_pty_resize(132);
+                Mode::Deccolm(Deccolm::Column132)
+                    if self.allow_column_mode_switch
+                        == AllowColumnModeSwitch::AllowColumnModeSwitch =>
+                {
+                    // Save the current width so CSI?3l can restore it
+                    // instead of hardcoding 80.
+                    if self.pre_deccolm_width.is_none() {
+                        self.pre_deccolm_width = Some(self.buffer.terminal_width());
                     }
+                    self.buffer.set_column_mode(132);
+                    self.send_pty_resize(132);
                 }
-                Mode::Deccolm(Deccolm::Column80) => {
-                    if self.allow_column_mode_switch == AllowColumnModeSwitch::AllowColumnModeSwitch
-                    {
-                        // Restore the pre-DECCOLM width (falls back to 80 if
-                        // no prior width was saved — e.g. CSI?3l without a
-                        // preceding CSI?3h).
-                        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
-                        self.buffer.set_column_mode(restore_width);
-                        self.send_pty_resize(restore_width);
-                    }
+                Mode::Deccolm(Deccolm::Column80)
+                    if self.allow_column_mode_switch
+                        == AllowColumnModeSwitch::AllowColumnModeSwitch =>
+                {
+                    // Restore the pre-DECCOLM width (falls back to 80 if
+                    // no prior width was saved — e.g. CSI?3l without a
+                    // preceding CSI?3h).
+                    let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
+                    self.buffer.set_column_mode(restore_width);
+                    self.send_pty_resize(restore_width);
                 }
                 Mode::Deccolm(Deccolm::Query) => {
                     // Report current column mode: 132 if width == 132, else 80.
@@ -1951,7 +1951,13 @@ impl TerminalHandler {
                 // noise from the catch-all.
                 // GraphemeClustering Set/Reset are also silently accepted
                 // here — Freminal does grapheme clustering unconditionally.
-                Mode::Decckm(_)
+                // XtExtscrn/AltScreen47 Alternate/Primary without allow_alt_screen
+                // permission, and Deccolm Column132/Column80 without
+                // allow_column_mode_switch permission, are also silently ignored.
+                Mode::XtExtscrn(XtExtscrn::Alternate | XtExtscrn::Primary)
+                | Mode::AltScreen47(AltScreen47::Alternate | AltScreen47::Primary)
+                | Mode::Deccolm(Deccolm::Column132 | Deccolm::Column80)
+                | Mode::Decckm(_)
                 | Mode::BracketedPaste(_)
                 | Mode::MouseMode(_)
                 | Mode::MouseEncodingMode(_)

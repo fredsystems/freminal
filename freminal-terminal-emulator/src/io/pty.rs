@@ -150,11 +150,10 @@ fn process_pty_write(
     msg: &PtyWrite,
 ) {
     match msg {
-        PtyWrite::Write(data) => {
-            if let Err(e) = writer.write_all(data) {
-                error!("Failed to write to pty: {e}");
-            }
+        PtyWrite::Write(data) if let Err(e) = writer.write_all(data) => {
+            error!("Failed to write to pty: {e}");
         }
+        PtyWrite::Write(_) => {}
         PtyWrite::Resize(size) => {
             let size: PtySize = match pty_size_from_terminal_size(size) {
                 Ok(size) => size,

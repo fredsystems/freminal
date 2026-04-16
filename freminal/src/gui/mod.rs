@@ -1382,13 +1382,17 @@ impl eframe::App for FreminalGui {
                             // Process any pending shader change.
                             if let Some(pending_shader) = wpr.pending_shader.take() {
                                 match pending_shader {
-                                    Some(src) => {
-                                        if let Err(e) =
-                                            wpr.update_shader(gl, &src, vp.width_px, vp.height_px)
-                                        {
-                                            error!("Shader compilation failed: {e}");
-                                        }
+                                    Some(src)
+                                        if let Err(e) = wpr.update_shader(
+                                            gl,
+                                            &src,
+                                            vp.width_px,
+                                            vp.height_px,
+                                        ) =>
+                                    {
+                                        error!("Shader compilation failed: {e}");
                                     }
+                                    Some(_) => {}
                                     None => wpr.clear_shader(gl),
                                 }
                             }
@@ -1681,45 +1685,43 @@ impl eframe::App for FreminalGui {
                     }
                 }
             }
-            SettingsAction::PreviewTheme(ref slug) => {
-                if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    if let Err(e) = self
-                        .tabs
-                        .active_tab()
-                        .active_pane()
-                        .input_tx
-                        .send(InputEvent::ThemeChange(theme))
-                    {
-                        error!("Failed to send theme preview to PTY thread: {e}");
-                    }
-                    rendering::update_egui_theme(
-                        ui.ctx(),
-                        theme,
-                        self.config.ui.background_opacity,
-                    );
+            SettingsAction::PreviewTheme(ref slug)
+                if let Some(theme) = freminal_common::themes::by_slug(slug) =>
+            {
+                if let Err(e) = self
+                    .tabs
+                    .active_tab()
+                    .active_pane()
+                    .input_tx
+                    .send(InputEvent::ThemeChange(theme))
+                {
+                    error!("Failed to send theme preview to PTY thread: {e}");
                 }
+                rendering::update_egui_theme(ui.ctx(), theme, self.config.ui.background_opacity);
             }
-            SettingsAction::RevertTheme(ref slug, original_opacity) => {
-                if let Some(theme) = freminal_common::themes::by_slug(slug) {
-                    if let Err(e) = self
-                        .tabs
-                        .active_tab()
-                        .active_pane()
-                        .input_tx
-                        .send(InputEvent::ThemeChange(theme))
-                    {
-                        error!("Failed to send theme revert to PTY thread: {e}");
-                    }
-                    // Restore opacity first so update_egui_theme uses the
-                    // correct value for panel_fill.
-                    self.config.ui.background_opacity = original_opacity;
-                    rendering::update_egui_theme(ui.ctx(), theme, original_opacity);
+            SettingsAction::RevertTheme(ref slug, original_opacity)
+                if let Some(theme) = freminal_common::themes::by_slug(slug) =>
+            {
+                if let Err(e) = self
+                    .tabs
+                    .active_tab()
+                    .active_pane()
+                    .input_tx
+                    .send(InputEvent::ThemeChange(theme))
+                {
+                    error!("Failed to send theme revert to PTY thread: {e}");
                 }
+                // Restore opacity first so update_egui_theme uses the
+                // correct value for panel_fill.
+                self.config.ui.background_opacity = original_opacity;
+                rendering::update_egui_theme(ui.ctx(), theme, original_opacity);
             }
+            SettingsAction::RevertTheme(_, _)
+            | SettingsAction::PreviewTheme(_)
+            | SettingsAction::None => {}
             SettingsAction::PreviewOpacity(opacity) | SettingsAction::RevertOpacity(opacity) => {
                 self.config.ui.background_opacity = opacity;
             }
-            SettingsAction::None => {}
         }
 
         let elapsed = now.elapsed();
