@@ -17,12 +17,12 @@ and plan document maintenance rules.
 | v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Active   |
 | v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52 | Complete |
 | v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58 | Complete |
-| v0.6.0  | Replay & Layouts        | `PLAN_VERSION_060.md` | 59–61 | Pending  |
-| v0.7.0  | Foundation              | `PLAN_VERSION_070.md` | 62–66 | Pending  |
+| v0.6.0  | Foundation              | `PLAN_VERSION_060.md` | 62–66 | Pending  |
+| v0.7.0  | Replay & Layouts        | `PLAN_VERSION_070.md` | 59–61 | Pending  |
 
 See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
 B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been
-subsumed by Task 58. Task 56 (Session Restore) has been moved to v0.6.0 and subsumed by
+subsumed by Task 58. Task 56 (Session Restore) has been moved to v0.7.0 and subsumed by
 Task 61 (Saved Layouts).
 
 ---
@@ -78,14 +78,14 @@ Task 61 (Saved Layouts).
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
 | 53  | Multiple Windows                         | `PLAN_VERSION_050.md` (Task 53)             | Complete | Task 36 (Tabs)       |
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
-| 59  | FREC v2: Multi-Pane Recording            | `PLAN_VERSION_060.md` (Task 59)             | Pending  | Tasks 32, 58         |
-| 60  | Playback v2: Multi-Pane Replay           | `PLAN_VERSION_060.md` (Task 60)             | Pending  | Task 59              |
-| 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_060.md` (Task 61)             | Pending  | Tasks 36, 58         |
-| 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_070.md` (Task 62)             | Pending  | None                 |
-| 63  | Single-window migration                  | `PLAN_VERSION_070.md` (Task 63)             | Pending  | Task 62              |
-| 64  | Multi-window parity                      | `PLAN_VERSION_070.md` (Task 64)             | Pending  | Task 63              |
-| 65  | Frame pacing + idle optimization         | `PLAN_VERSION_070.md` (Task 65)             | Pending  | Task 63              |
-| 66  | Cleanup + eframe removal                 | `PLAN_VERSION_070.md` (Task 66)             | Pending  | Task 64              |
+| 59  | FREC v2: Multi-Pane Recording            | `PLAN_VERSION_070.md` (Task 59)             | Pending  | Tasks 32, 58         |
+| 60  | Playback v2: Multi-Pane Replay           | `PLAN_VERSION_070.md` (Task 60)             | Pending  | Task 59              |
+| 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_070.md` (Task 61)             | Pending  | Tasks 36, 58         |
+| 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_060.md` (Task 62)             | Pending  | None                 |
+| 63  | Single-window migration                  | `PLAN_VERSION_060.md` (Task 63)             | Pending  | Task 62              |
+| 64  | Multi-window parity                      | `PLAN_VERSION_060.md` (Task 64)             | Pending  | Task 63              |
+| 65  | Frame pacing + idle optimization         | `PLAN_VERSION_060.md` (Task 65)             | Pending  | Task 63              |
+| 66  | Cleanup + eframe removal                 | `PLAN_VERSION_060.md` (Task 66)             | Pending  | Task 64              |
 
 ---
 
@@ -333,33 +333,13 @@ layout into new tab). Large scope (11 subtasks).
 ## Recommended Execution Order
 
 The following reflects the actual execution state: Tasks 1-17, 20-35, and 53-58 are complete.
-The remaining tasks are ordered as follows. Note: v0.7.0 (eframe replacement) is executed
-**before** v0.6.0 (replay & layouts) so that v0.6.0 work targets the final windowing
-architecture.
+The remaining tasks are ordered as follows.
 
-### Phase 7 — Update Mechanism
+### v0.6.0 — Foundation (eframe Replacement)
 
-Task 18 depends on Tasks 2, 3, and 16 (all complete). Task 19 is independent
-and can be developed in a separate repo in parallel with Task 18.
-
-- **Task 18** — Client-Side Update Mechanism (unblocked by Tasks 2 + 3 + 16)
-- **Task 19** — Update Service & Website (independent, separate repo; shares API contract with 18)
-
-### v0.5.0 — Multi-Instance, Visual & Muxing
-
-These tasks are defined in `PLAN_VERSION_050.md`. All tasks are complete.
-
-- **Task 53** — Multiple Windows — Complete
-- **Task 54** — Background Images — Complete
-- **Task 55** — Custom Shaders — Complete
-- **Task 57** — Render Loop Optimization — Complete
-- **Task 58** — Built-in Multiplexer / Split Panes — Complete
-
-### v0.7.0 — Foundation (eframe Replacement)
-
-These tasks are defined in `PLAN_VERSION_070.md`. Replaces eframe with direct
-winit + glutin + egui integration in a new `freminal-windowing` crate. **Executed before
-v0.6.0** so that replay/layout work builds on the final windowing architecture.
+These tasks are defined in `PLAN_VERSION_060.md`. Replaces eframe with direct
+winit + glutin + egui integration in a new `freminal-windowing` crate. Executed first
+so that v0.7.0 replay/layout work builds on the final windowing architecture.
 
 - **Task 62** — freminal-windowing crate + event loop (independent, new crate)
 - **Task 63** — Single-window migration (depends on Task 62)
@@ -369,10 +349,10 @@ v0.6.0** so that replay/layout work builds on the final windowing architecture.
 
 Task 62 can start any time. Tasks 64 and 65 can run in parallel after Task 63.
 
-### v0.6.0 — Replay & Layouts
+### v0.7.0 — Replay & Layouts
 
-These tasks are defined in `PLAN_VERSION_060.md`. Task 56 (Session Restore) has been moved
-here and subsumed by Task 61 (Saved Layouts). **Executed after v0.7.0** so that replay and
+These tasks are defined in `PLAN_VERSION_070.md`. Task 56 (Session Restore) has been moved
+here and subsumed by Task 61 (Saved Layouts). Executed after v0.6.0 so that replay and
 layout features target the final windowing architecture (no eframe).
 
 - **Task 59** — FREC v2: Multi-Pane Recording (depends on Tasks 32, 58)
@@ -388,10 +368,10 @@ Complete:     Tasks 1-17, 20-35, 53-55, 57-58
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │
-v0.7.0:       ├── Task 62 (windowing crate) ──► Task 63 (single-window) ──┬──► Task 64 (multi-window) ──► Task 66 (cleanup)
+v0.6.0:       ├── Task 62 (windowing crate) ──► Task 63 (single-window) ──┬──► Task 64 (multi-window) ──► Task 66 (cleanup)
               │                                                            └──► Task 65 (frame pacing)
               │
-v0.6.0:       ├── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
+v0.7.0:       ├── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
               ├── Task 61 (Saved Layouts)      [parallel with 59]
 ```
 
@@ -507,8 +487,8 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_030.md` — v0.3.0 "Daily Driver" roadmap (Tasks 36–44)
 - `Documents/PLAN_VERSION_040.md` — v0.4.0 "Search & Protocol" roadmap (Tasks 45–52)
 - `Documents/PLAN_VERSION_050.md` — v0.5.0 "Multi-Instance & Visual" roadmap (Tasks 53–56)
-- `Documents/PLAN_VERSION_060.md` — v0.6.0 "Replay & Layouts" roadmap (Tasks 59–61)
-- `Documents/PLAN_VERSION_070.md` — v0.7.0 "Foundation" roadmap (Tasks 62–66)
+- `Documents/PLAN_VERSION_060.md` — v0.6.0 "Foundation" roadmap (Tasks 62–66)
+- `Documents/PLAN_VERSION_070.md` — v0.7.0 "Replay & Layouts" roadmap (Tasks 59–61)
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
 - `config_example.toml` — Current config format
