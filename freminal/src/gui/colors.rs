@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use conv2::ConvUtil;
-use eframe::egui::Color32;
+use egui::Color32;
 use freminal_common::colors::TerminalColor;
 use freminal_common::themes::ThemePalette;
 

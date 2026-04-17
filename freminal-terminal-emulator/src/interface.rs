@@ -64,10 +64,7 @@ use freminal_common::buffer_states::modes::{
     mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 
-use freminal_common::{
-    args::Args, buffer_states::tchar::TChar, terminal_size::DEFAULT_HEIGHT,
-    terminal_size::DEFAULT_WIDTH,
-};
+use freminal_common::{args::Args, buffer_states::tchar::TChar};
 
 /// Mode-related fields extracted from the emulator state for a snapshot.
 ///
@@ -240,7 +237,11 @@ impl TerminalEmulator {
     ///
     /// # Errors
     ///
-    pub fn new(args: &Args, scrollback_limit: Option<usize>) -> Result<(Self, Receiver<PtyRead>)> {
+    pub fn new(
+        args: &Args,
+        scrollback_limit: Option<usize>,
+        initial_size: FreminalTerminalSize,
+    ) -> Result<(Self, Receiver<PtyRead>)> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
 
@@ -271,14 +272,10 @@ impl TerminalEmulator {
             None,
             command,
             shell,
+            &initial_size,
         )?;
 
-        if let Err(e) = write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
-            width: DEFAULT_WIDTH as usize,
-            height: DEFAULT_HEIGHT as usize,
-            pixel_width: 0,
-            pixel_height: 0,
-        })) {
+        if let Err(e) = write_tx.send(PtyWrite::Resize(initial_size)) {
             error!("Failed to send resize to pty: {e}");
         }
 

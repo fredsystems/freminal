@@ -19,7 +19,7 @@ use freminal_common::{
 };
 use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
 
-use eframe::egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
+use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
 
 use super::{
     super::{
@@ -40,7 +40,7 @@ use super::{
 };
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
-use eframe::egui_glow::CallbackFn;
+use egui_glow::CallbackFn;
 use glow::HasContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -686,7 +686,7 @@ pub struct FreminalTerminalWidget {
     /// Captured at construction and updated on `apply_config_changes`. Used by
     /// the settings modal to register a temporary preview font without losing
     /// the original font set.
-    base_font_defs: eframe::egui::FontDefinitions,
+    base_font_defs: egui::FontDefinitions,
 }
 
 impl FreminalTerminalWidget {
@@ -740,7 +740,7 @@ impl FreminalTerminalWidget {
     /// preview font). Used by the settings modal to register a temporary
     /// preview font.
     #[must_use]
-    pub const fn base_font_defs(&self) -> &eframe::egui::FontDefinitions {
+    pub const fn base_font_defs(&self) -> &egui::FontDefinitions {
         &self.base_font_defs
     }
 

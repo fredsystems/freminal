@@ -8,7 +8,7 @@ use std::time::Instant;
 use arboard::Clipboard;
 use conv2::ConvUtil;
 use crossbeam_channel::{Receiver, Sender};
-use eframe::egui::{self, Pos2, Vec2, ViewportCommand};
+use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::colors::TerminalColor;

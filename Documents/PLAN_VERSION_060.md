@@ -14,13 +14,14 @@ egui integration — keeping the `freminal` binary crate focused on terminal-spe
 
 ## Task Summary
 
-| #   | Feature                               | Scope  | Status  | Dependencies |
-| --- | ------------------------------------- | ------ | ------- | ------------ |
-| 62  | freminal-windowing crate + event loop | Large  | Pending | None         |
-| 63  | Single-window migration               | Large  | Pending | Task 62      |
-| 64  | Multi-window parity                   | Large  | Pending | Task 63      |
-| 65  | Frame pacing + idle optimization      | Medium | Pending | Task 63      |
-| 66  | Cleanup + eframe removal              | Medium | Pending | Task 64      |
+| #   | Feature                               | Scope  | Status   | Dependencies |
+| --- | ------------------------------------- | ------ | -------- | ------------ |
+| 62  | freminal-windowing crate + event loop | Large  | Complete | None         |
+| 63  | Single-window migration               | Large  | Complete | Task 62      |
+| 64  | Multi-window parity                   | Large  | Complete | Task 63      |
+| 65  | Frame pacing + idle optimization      | Medium | Complete | Task 63      |
+| 66  | Cleanup + eframe removal              | Medium | Complete | Task 64      |
+| 67  | Window spawn truncation diagnostic    | Medium | Pending  | Task 64      |
 
 ---
 
@@ -361,19 +362,21 @@ peer window with its own GL context, and closing any window closes only that win
 
 ### 64 Known Bug: Child Window Initial Spawn Truncation
 
-**Must verify fixed / fix during this task.** Under eframe, child windows spawned via
-`show_viewport_deferred` start their PTY at the hardcoded 100×100 default size. The shell
-and any startup programs (e.g. fastfetch) format output for 100 columns using CUP (absolute
-cursor positioning) during the gap before the first deferred-viewport frame fires a resize.
-When the real resize arrives (e.g. 61×34 on a tiling WM), reflow garbles the CUP-positioned
-layout. The root window doesn't have this issue because eframe's synchronous initialization
-fires the first frame/resize before the shell does significant work.
+**NOT FIXED in Task 64 — deferred to a dedicated diagnostic task.** Under eframe, child
+windows spawned via `show_viewport_deferred` start their PTY at the hardcoded 100×100 default
+size. The shell and any startup programs (e.g. fastfetch) format output for 100 columns using
+CUP (absolute cursor positioning) during the gap before the first deferred-viewport frame
+fires a resize. When the real resize arrives (e.g. 61×34 on a tiling WM), reflow garbles the
+CUP-positioned layout.
 
-The fix in v0.6.0 is architectural: with peer windows and `on_window_created()`, the window
-size is known before PTY creation. `spawn_pty_tab()` should accept initial dimensions from
-the actual window geometry instead of using hardcoded defaults. **Additionally**, there may
-be a deeper buffer/reflow bug — verify that CUP-positioned content survives resize correctly
-even when the initial size is correct.
+The peer-window architecture (Task 64) did not resolve this. The issue likely requires:
+
+1. Passing actual window dimensions from `on_window_created()` into `spawn_pty_tab()` instead
+   of hardcoded defaults.
+2. Diagnosing whether there is a deeper buffer/reflow bug where CUP-positioned content does
+   not survive resize correctly even with correct initial size.
+
+See Task 67 for the dedicated diagnostic and fix.
 
 ---
 
@@ -576,6 +579,46 @@ The migration should improve render loop benchmarks by eliminating:
 Agents must capture before/after numbers for all render loop benchmarks:
 
 - `freminal/benches/render_loop_bench.rs` — all benchmarks
+
+---
+
+## Task 67 — Window Spawn Truncation Diagnostic
+
+### 67 Overview
+
+New windows (and historically, child windows under eframe) start their PTY at a hardcoded
+100×100 default size. Programs that run during shell startup (e.g. fastfetch) format output
+for 100 columns using CUP (absolute cursor positioning). When the real resize arrives
+(e.g. 61×34 on a tiling WM), reflow garbles the CUP-positioned layout.
+
+This task diagnoses and fixes the issue. There are two likely components:
+
+1. **Initial size plumbing**: `spawn_pty_tab()` should accept actual window dimensions from
+   `on_window_created()` instead of hardcoded defaults, so the PTY starts at the correct size.
+2. **Buffer/reflow correctness**: CUP-positioned content may not survive resize correctly even
+   when the initial size is correct. This needs investigation — it may be a deeper bug in the
+   buffer reflow logic.
+
+### 67 Subtasks
+
+1. **67.1 — Diagnose initial size path**: Trace the flow from `on_window_created()` through
+   `spawn_pty_tab()` to identify where the 100×100 default is used and how actual window
+   geometry can be threaded through.
+2. **67.2 — Pass real window dimensions to PTY**: Modify `spawn_pty_tab()` to accept initial
+   dimensions from the window's actual geometry at creation time.
+3. **67.3 — Diagnose CUP + resize reflow**: Determine whether CUP-positioned content survives
+   resize correctly when the initial size matches the final size. If not, identify the reflow
+   bug.
+4. **67.4 — Fix reflow if needed**: If 67.3 reveals a bug, fix it with regression tests.
+5. **67.5 — Tests**: Verify that new windows start at correct dimensions and that
+   CUP-positioned content renders correctly.
+
+### 67 Primary Files
+
+- `freminal/src/gui/mod.rs` (on_window_created, spawn_new_tab)
+- `freminal/src/gui/window.rs` (PerWindowState)
+- `freminal-terminal-emulator/src/interface.rs` (spawn_pty_tab or equivalent)
+- `freminal-buffer/src/buffer.rs` (reflow logic)
 
 ---
 

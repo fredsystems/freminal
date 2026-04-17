@@ -17,7 +17,7 @@ use std::{
 };
 
 use conv2::ConvUtil;
-use eframe::egui;
+use egui;
 use freminal_common::buffer_states::tchar::TChar;
 
 use super::mouse::PreviousMouseState;

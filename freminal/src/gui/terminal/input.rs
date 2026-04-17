@@ -15,7 +15,7 @@ use crate::gui::{
 
 use conv2::ConvUtil;
 use crossbeam_channel::Sender;
-use eframe::egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
+use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
@@ -1358,13 +1358,13 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => {
                 match unit {
-                    eframe::egui::MouseWheelUnit::Point => {
+                    egui::MouseWheelUnit::Point => {
                         scroll_amount += delta.y;
                     }
-                    eframe::egui::MouseWheelUnit::Line => {
+                    egui::MouseWheelUnit::Line => {
                         scroll_amount += delta.y * character_size_y;
                     }
-                    eframe::egui::MouseWheelUnit::Page => {
+                    egui::MouseWheelUnit::Page => {
                         error!("Unhandled MouseWheelUnit: {:?}", unit);
                         continue;
                     }
@@ -1430,7 +1430,7 @@ pub(super) fn write_input_to_terminal(
                         .approx_as::<usize>()
                         .unwrap_or(1);
                     let direction = lines_f.signum(); // +1.0 or -1.0
-                    let unit_delta = eframe::egui::Vec2::new(0.0, direction);
+                    let unit_delta = egui::Vec2::new(0.0, direction);
 
                     // Probe once to see if the active mouse-tracking mode
                     // handles scroll events.

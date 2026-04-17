@@ -5,13 +5,14 @@
 
 //! GUI application library for the Freminal terminal emulator.
 //!
-//! This crate implements the eframe/egui-based graphical front-end. The render
-//! loop in `update()` is a pure read of `TerminalSnapshot` — it performs no
+//! This crate implements the egui-based graphical front-end using the
+//! `freminal-windowing` crate for window management. The render loop in
+//! `update()` is a pure read of `TerminalSnapshot` — it performs no
 //! terminal state mutation. All user input is routed through a
 //! `Sender<InputEvent>` to the PTY processing thread.
 //!
 //! Key modules:
-//! - [`gui`] — top-level GUI types, `FreminalGui`, and the eframe `App` impl
+//! - [`gui`] — top-level GUI types, `FreminalGui`, and the `App` impl
 //! - [`gui::terminal`] — terminal widget, input handling, and rendering
 //! - [`gui::view_state`] — `ViewState` (scroll offset, mouse, focus) owned
 //!   entirely by the GUI and never shared with the PTY thread

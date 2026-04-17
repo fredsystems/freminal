@@ -3,15 +3,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use eframe::egui;
+use egui;
 #[cfg(feature = "playback")]
-use freminal_terminal_emulator::io::{InputEvent, PlaybackCommand, PlaybackMode};
+use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
-#[cfg(feature = "playback")]
-use tracing::error;
 
 use super::TabBarAction;
 use super::tabs::Tab;
+use super::window::PerWindowState;
 
 impl super::FreminalGui {
     /// Show the top menu bar.
@@ -29,24 +28,31 @@ impl super::FreminalGui {
         &mut self,
         ui: &mut egui::Ui,
         snap: &TerminalSnapshot,
+        win: &mut PerWindowState,
+        window_id: super::WindowId,
     ) -> (TabBarAction, bool) {
         let mut menu_action = TabBarAction::None;
         let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
             let freminal_resp = ui.menu_button("Freminal", |ui| {
-                if ui.button("Settings...").clicked() {
-                    let families = self.terminal_widget.monospace_families();
+                let settings_available = !self.settings_modal.is_open;
+                if ui
+                    .add_enabled(settings_available, egui::Button::new("Settings..."))
+                    .clicked()
+                {
+                    let families = win.terminal_widget.monospace_families();
                     self.settings_modal
-                        .open(&self.config, families, self.os_dark_mode);
+                        .open(&self.config, families, win.os_dark_mode);
                     self.settings_modal
-                        .set_base_font_defs(self.terminal_widget.base_font_defs().clone());
+                        .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                    self.settings_owner = Some(window_id);
                     ui.close();
                 }
 
                 ui.separator();
 
                 if ui.button("Quit").clicked() {
-                    self.close_or_hide_root(ui.ctx());
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
             if freminal_resp.inner.is_some() {
@@ -59,8 +65,8 @@ impl super::FreminalGui {
                     ui.close();
                 }
 
-                let active = self.tabs.active_index();
-                let can_close = self.tabs.tab_count() > 1;
+                let active = win.tabs.active_index();
+                let can_close = win.tabs.tab_count() > 1;
                 if ui
                     .add_enabled(can_close, egui::Button::new("Close Tab"))
                     .clicked()
@@ -72,13 +78,13 @@ impl super::FreminalGui {
                 ui.separator();
 
                 if ui.button("Next Tab").clicked() {
-                    let next = (active + 1) % self.tabs.tab_count();
+                    let next = (active + 1) % win.tabs.tab_count();
                     menu_action = TabBarAction::SwitchTo(next);
                     ui.close();
                 }
 
                 if ui.button("Previous Tab").clicked() {
-                    let count = self.tabs.tab_count();
+                    let count = win.tabs.tab_count();
                     let prev = if active == 0 { count - 1 } else { active - 1 };
                     menu_action = TabBarAction::SwitchTo(prev);
                     ui.close();
@@ -89,7 +95,7 @@ impl super::FreminalGui {
             }
 
             let pane_resp = ui.menu_button("Pane", |ui| {
-                self.show_pane_menu(ui);
+                self.show_pane_menu(ui, win);
             });
             if pane_resp.inner.is_some() {
                 any_menu_open = true;
@@ -97,7 +103,7 @@ impl super::FreminalGui {
 
             let window_resp = ui.menu_button("Window", |ui| {
                 if ui.button("New Window").clicked() {
-                    self.pending_new_window = true;
+                    win.pending_new_window = true;
                     ui.close();
                 }
             });
@@ -108,13 +114,13 @@ impl super::FreminalGui {
             // Playback controls: only shown when running in playback mode.
             #[cfg(feature = "playback")]
             if self.is_playback {
-                self.show_playback_controls(ui, snap);
+                self.show_playback_controls(ui, snap, win);
             }
 
             // Password-prompt lock indicator: shown in the menu bar (which is
             // always visible) so it works regardless of tab bar visibility.
             if self.config.security.password_indicator
-                && self
+                && win
                     .tabs
                     .active_tab()
                     .active_pane()
@@ -136,41 +142,41 @@ impl super::FreminalGui {
     ///
     /// Extracted from `show_menu_bar` to keep that function under the
     /// `too_many_lines` clippy limit.
-    pub(super) fn show_pane_menu(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn show_pane_menu(&self, ui: &mut egui::Ui, win: &mut PerWindowState) {
         if ui.button("Split Vertical (Left | Right)").clicked() {
-            self.spawn_split_pane(super::panes::SplitDirection::Horizontal);
+            self.spawn_split_pane(win, super::panes::SplitDirection::Horizontal);
             ui.close();
         }
         if ui.button("Split Horizontal (Top / Bottom)").clicked() {
-            self.spawn_split_pane(super::panes::SplitDirection::Vertical);
+            self.spawn_split_pane(win, super::panes::SplitDirection::Vertical);
             ui.close();
         }
 
         ui.separator();
 
-        let can_close_pane = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+        let can_close_pane = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
         if ui
             .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
             .clicked()
         {
-            self.pending_close_pane = true;
+            win.pending_close_pane = true;
             ui.close();
         }
 
-        let is_zoomed = self.tabs.active_tab().zoomed_pane.is_some();
+        let is_zoomed = win.tabs.active_tab().zoomed_pane.is_some();
         let zoom_label = if is_zoomed {
             "Un-Zoom Pane"
         } else {
             "Zoom Pane"
         };
-        let can_zoom = self.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+        let can_zoom = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
         if ui
             .add_enabled(can_zoom, egui::Button::new(zoom_label))
             .clicked()
         {
-            let tab = self.tabs.active_tab_mut();
+            let tab = win.tabs.active_tab_mut();
             let current = tab.active_pane;
             if tab.zoomed_pane == Some(current) {
                 tab.zoomed_pane = None;
@@ -189,13 +195,13 @@ impl super::FreminalGui {
     /// new tabs. Tabs are separated by thin vertical dividers.
     ///
     /// Returns a `TabBarAction` describing what the user did (if anything).
-    pub(super) fn show_tab_bar(&self, ui: &mut egui::Ui) -> TabBarAction {
+    pub(super) fn show_tab_bar(&self, win: &PerWindowState, ui: &mut egui::Ui) -> TabBarAction {
         ui.horizontal(|ui| {
-            let active = self.tabs.active_index();
-            let count = self.tabs.tab_count();
+            let active = win.tabs.active_index();
+            let count = win.tabs.tab_count();
             let mut action = TabBarAction::None;
 
-            for (i, tab) in self.tabs.iter().enumerate() {
+            for (i, tab) in win.tabs.iter().enumerate() {
                 // Thin vertical separator between tabs (skip before first).
                 if i > 0 {
                     ui.separator();
@@ -236,7 +242,7 @@ impl super::FreminalGui {
     /// Inactive tabs with an unacknowledged bell are drawn with an amber
     /// text color and a warm-tinted background to make them more prominent.
     ///
-    /// A 🔐 lock icon is prepended to the label when `is_echo_off` is `true`,
+    /// A lock icon is prepended to the label when `is_echo_off` is `true`,
     /// indicating that the foreground process has disabled terminal echo (i.e.
     /// a password prompt such as `sudo` or `ssh` is waiting for input).
     pub(super) fn show_single_tab(
@@ -311,7 +317,12 @@ impl super::FreminalGui {
 
     /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
     #[cfg(feature = "playback")]
-    pub(super) fn show_playback_controls(&mut self, ui: &mut egui::Ui, snap: &TerminalSnapshot) {
+    pub(super) fn show_playback_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        snap: &TerminalSnapshot,
+        win: &PerWindowState,
+    ) {
         let info = snap.playback_info.as_ref();
 
         // Mode selector dropdown.
@@ -355,7 +366,7 @@ impl super::FreminalGui {
             }
 
             if changed && let Some(mode) = self.selected_playback_mode {
-                self.send_playback_cmd(PlaybackCommand::SetMode(mode));
+                win.send_playback_cmd(PlaybackCommand::SetMode(mode));
             }
         });
 
@@ -368,12 +379,12 @@ impl super::FreminalGui {
 
         if is_playing {
             if ui.button("Pause").clicked() {
-                self.send_playback_cmd(PlaybackCommand::Pause);
+                win.send_playback_cmd(PlaybackCommand::Pause);
             }
         } else {
             let play_btn = ui.add_enabled(!is_complete && has_mode, egui::Button::new("Play"));
             if play_btn.clicked() {
-                self.send_playback_cmd(PlaybackCommand::Play);
+                win.send_playback_cmd(PlaybackCommand::Play);
             }
         }
 
@@ -381,7 +392,7 @@ impl super::FreminalGui {
         let is_frame_stepping = self.selected_playback_mode == Some(PlaybackMode::FrameStepping);
         let next_btn = ui.add_enabled(is_frame_stepping && !is_complete, egui::Button::new("Next"));
         if next_btn.clicked() {
-            self.send_playback_cmd(PlaybackCommand::NextFrame);
+            win.send_playback_cmd(PlaybackCommand::NextFrame);
         }
 
         ui.separator();
@@ -405,20 +416,6 @@ impl super::FreminalGui {
             Some(PlaybackMode::Instant) => "Instant",
             Some(PlaybackMode::RealTime) => "Real-Time",
             Some(PlaybackMode::FrameStepping) => "Frame Stepping",
-        }
-    }
-
-    /// Send a playback command to the consumer thread via the input channel.
-    #[cfg(feature = "playback")]
-    pub(super) fn send_playback_cmd(&self, cmd: PlaybackCommand) {
-        if let Err(e) = self
-            .tabs
-            .active_tab()
-            .active_pane()
-            .input_tx
-            .send(InputEvent::PlaybackControl(cmd))
-        {
-            error!("Failed to send playback command: {e}");
         }
     }
 }

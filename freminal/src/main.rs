@@ -17,7 +17,7 @@
 //!   ├─ After each batch: publishes Arc<TerminalSnapshot> via ArcSwap
 //!   └─ Sends WindowCommand to GUI for Report*/Viewport handling
 //!
-//! GUI Thread (eframe update() — pure render, no mutation)
+//! GUI Thread (update() — pure render, no mutation)
 //!   ├─ Loads TerminalSnapshot from ArcSwap (atomic, lock-free)
 //!   ├─ Sends InputEvent through crossbeam channel
 //!   ├─ Sends PtyWrite directly for Report* responses
@@ -71,6 +71,8 @@ pub mod gui;
 pub mod playback;
 
 use anyhow::Result;
+use freminal_common::pty_write::FreminalTerminalSize;
+use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_common::{args::Args, config, config::load_config, themes};
 use gui::pty::spawn_pty_tab;
 
@@ -89,9 +91,25 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
 
     // Shared egui context handle so the PTY consumer thread can request
     // repaints after publishing new snapshots.
-    let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
+    let repaint_handle: Arc<
+        OnceLock<(
+            freminal_windowing::RepaintProxy,
+            freminal_windowing::WindowId,
+        )>,
+    > = Arc::new(OnceLock::new());
 
-    let channels = spawn_pty_tab(&args, cfg.scrollback.limit, theme, &egui_ctx)?;
+    let channels = spawn_pty_tab(
+        &args,
+        cfg.scrollback.limit,
+        theme,
+        &repaint_handle,
+        FreminalTerminalSize {
+            width: usize::from(DEFAULT_WIDTH),
+            height: usize::from(DEFAULT_HEIGHT),
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+    )?;
 
     let config_path = args.config.clone();
 
@@ -121,7 +139,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         cfg,
         args,
         config_path,
-        egui_ctx,
+        repaint_handle,
         window_post,
         #[cfg(feature = "playback")]
         false,
@@ -177,7 +195,7 @@ fn main() {
     //   - Stdout layer: INFO by default (or RUST_LOG override)
     //   - File layer:   config-specified level (default DEBUG), always on
     //
-    // Both layers share framework silencers (winit, wgpu, eframe, egui = off)
+    // Both layers share framework silencers (winit, wgpu, egui = off)
     // unless --show-all-debug is set.
 
     // Stdout filter: INFO default, RUST_LOG override, framework silencers.
@@ -189,7 +207,7 @@ fn main() {
         let mut filter = EnvFilter::builder()
             .with_default_directive(Level::INFO.into())
             .from_env_lossy();
-        for spec in &["winit=off", "wgpu=off", "eframe=off", "egui=off"] {
+        for spec in &["winit=off", "wgpu=off", "egui=off"] {
             match spec.parse::<Directive>() {
                 Ok(d) => filter = filter.add_directive(d),
                 Err(e) => {
@@ -218,7 +236,7 @@ fn main() {
         let mut filter = EnvFilter::builder()
             .with_default_directive(file_default_directive)
             .from_env_lossy();
-        for spec in &["winit=off", "wgpu=off", "eframe=off", "egui=off"] {
+        for spec in &["winit=off", "wgpu=off", "egui=off"] {
             match spec.parse::<Directive>() {
                 Ok(d) => filter = filter.add_directive(d),
                 Err(e) => {
@@ -363,8 +381,13 @@ fn main() {
             Vec<freminal_common::buffer_states::tchar::TChar>,
         )>(1);
 
-        let egui_ctx: Arc<OnceLock<eframe::egui::Context>> = Arc::new(OnceLock::new());
-        let egui_ctx_playback = Arc::clone(&egui_ctx);
+        let repaint_handle: Arc<
+            OnceLock<(
+                freminal_windowing::RepaintProxy,
+                freminal_windowing::WindowId,
+            )>,
+        > = Arc::new(OnceLock::new());
+        let repaint_handle_playback = Arc::clone(&repaint_handle);
 
         std::thread::spawn(move || {
             playback::run_playback_thread(
@@ -373,7 +396,7 @@ fn main() {
                 input_rx,
                 window_cmd_tx,
                 arc_swap,
-                egui_ctx_playback,
+                repaint_handle_playback,
                 clipboard_tx,
                 search_buffer_tx,
             );
@@ -404,7 +427,7 @@ fn main() {
             cfg,
             args,
             config_path,
-            egui_ctx,
+            repaint_handle,
             window_post,
             is_playback,
         )

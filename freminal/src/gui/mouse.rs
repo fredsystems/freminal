@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 use conv2::ConvUtil;
-use eframe::egui::{Modifiers, PointerButton, Vec2};
+use egui::{Modifiers, PointerButton, Vec2};
 use freminal_common::buffer_states::modes::mouse::{MouseEncoding, MouseTrack};
 use freminal_terminal_emulator::input::{
     TerminalInput, collect_text, raw_ascii_bytes_to_terminal_input,
@@ -407,7 +407,7 @@ fn encode_x11_mouse_button(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use eframe::egui::Vec2;
+    use egui::Vec2;
 
     // Helper: extract the raw bytes from a Cow<[TerminalInput]> for comparison.
     fn inputs_to_bytes(inputs: &[TerminalInput]) -> Vec<u8> {

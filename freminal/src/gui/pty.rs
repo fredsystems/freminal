@@ -19,10 +19,11 @@ use freminal_common::args::Args;
 use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::pty_write::PtyWrite;
+use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+use freminal_windowing::{RepaintProxy, WindowId};
 
 /// The GUI-side endpoints needed to communicate with a single PTY tab.
 ///
@@ -76,7 +77,7 @@ pub struct TabChannels {
 /// and spawns the PTY consumer thread.  Returns the GUI-side channel
 /// endpoints as a [`TabChannels`].
 ///
-/// The `egui_ctx` handle is shared with the PTY thread so it can request
+/// The `repaint_handle` is shared with the PTY thread so it can request
 /// repaints after publishing new snapshots.
 ///
 /// # Errors
@@ -87,9 +88,11 @@ pub fn spawn_pty_tab(
     args: &Args,
     scrollback_limit: usize,
     theme: &'static freminal_common::themes::ThemePalette,
-    egui_ctx: &Arc<OnceLock<eframe::egui::Context>>,
+    repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
+    initial_size: FreminalTerminalSize,
 ) -> Result<TabChannels> {
-    let (mut terminal, pty_read_rx) = TerminalEmulator::new(args, Some(scrollback_limit))?;
+    let (mut terminal, pty_read_rx) =
+        TerminalEmulator::new(args, Some(scrollback_limit), initial_size)?;
 
     // Apply the configured theme so all snapshots carry the correct palette.
     terminal.internal.handler.set_theme(theme);
@@ -111,7 +114,7 @@ pub fn spawn_pty_tab(
     let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
 
-    let egui_ctx_pty = Arc::clone(egui_ctx);
+    let repaint_handle_pty = Arc::clone(repaint_handle);
 
     spawn_pty_consumer_thread(
         terminal,
@@ -122,7 +125,7 @@ pub fn spawn_pty_tab(
         search_buffer_tx,
         child_exit_rx,
         arc_swap,
-        egui_ctx_pty,
+        repaint_handle_pty,
         pty_dead_tx,
     );
 
@@ -160,7 +163,7 @@ fn spawn_pty_consumer_thread(
     search_buffer_tx: Sender<(usize, Vec<TChar>)>,
     child_exit_rx: Option<Receiver<()>>,
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
-    egui_ctx_pty: Arc<OnceLock<eframe::egui::Context>>,
+    repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     pty_dead_tx: Sender<()>,
 ) {
     std::thread::spawn(move || {
@@ -169,36 +172,37 @@ fn spawn_pty_consumer_thread(
         let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
         // Helper closure: drain window commands, publish snapshot, request repaint.
-        let post_event = |emulator: &mut TerminalEmulator,
-                          window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
-                          arc_swap: &ArcSwap<TerminalSnapshot>,
-                          egui_ctx_pty: &OnceLock<eframe::egui::Context>| {
-            let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
-            for cmd in cmds {
-                let wc = match &cmd {
-                    WindowManipulation::ReportWindowState
-                    | WindowManipulation::ReportWindowPositionWholeWindow
-                    | WindowManipulation::ReportWindowPositionTextArea
-                    | WindowManipulation::ReportWindowSizeInPixels
-                    | WindowManipulation::ReportWindowTextAreaSizeInPixels
-                    | WindowManipulation::ReportRootWindowSizeInPixels
-                    | WindowManipulation::ReportIconLabel
-                    | WindowManipulation::ReportTitle
-                    | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
-                    _ => WindowCommand::Viewport(cmd),
-                };
-                if let Err(e) = window_cmd_tx.send(wc) {
-                    error!("Failed to send window command to GUI: {e}");
+        let post_event =
+            |emulator: &mut TerminalEmulator,
+             window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
+             arc_swap: &ArcSwap<TerminalSnapshot>,
+             repaint_handle: &OnceLock<(RepaintProxy, WindowId)>| {
+                let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
+                for cmd in cmds {
+                    let wc = match &cmd {
+                        WindowManipulation::ReportWindowState
+                        | WindowManipulation::ReportWindowPositionWholeWindow
+                        | WindowManipulation::ReportWindowPositionTextArea
+                        | WindowManipulation::ReportWindowSizeInPixels
+                        | WindowManipulation::ReportWindowTextAreaSizeInPixels
+                        | WindowManipulation::ReportRootWindowSizeInPixels
+                        | WindowManipulation::ReportIconLabel
+                        | WindowManipulation::ReportTitle
+                        | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
+                        _ => WindowCommand::Viewport(cmd),
+                    };
+                    if let Err(e) = window_cmd_tx.send(wc) {
+                        error!("Failed to send window command to GUI: {e}");
+                    }
                 }
-            }
 
-            let snap = emulator.build_snapshot();
-            arc_swap.store(Arc::new(snap));
+                let snap = emulator.build_snapshot();
+                arc_swap.store(Arc::new(snap));
 
-            if let Some(ctx) = egui_ctx_pty.get() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(8));
-            }
-        };
+                if let Some((proxy, wid)) = repaint_handle.get() {
+                    proxy.request_repaint_after(*wid, std::time::Duration::from_millis(8));
+                }
+            };
 
         // Helper closure: process a single InputEvent.
         let handle_input = |emulator: &mut TerminalEmulator,
@@ -274,10 +278,10 @@ fn spawn_pty_consumer_thread(
                         );
                     } else {
                         info!("PTY read channel closed; signaling tab death");
-                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
                         let _ = pty_dead_tx.send(());
-                        if let Some(ctx) = egui_ctx_pty.get() {
-                            ctx.request_repaint();
+                        if let Some((proxy, wid)) = repaint_handle.get() {
+                            proxy.request_repaint(*wid);
                         }
                         return;
                     }
@@ -297,16 +301,16 @@ fn spawn_pty_consumer_thread(
                     }
 
                     info!("PTY drain complete; signaling tab death");
-                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
                     let _ = pty_dead_tx.send(());
-                    if let Some(ctx) = egui_ctx_pty.get() {
-                        ctx.request_repaint();
+                    if let Some((proxy, wid)) = repaint_handle.get() {
+                        proxy.request_repaint(*wid);
                     }
                     return;
                 }
             }
 
-            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &egui_ctx_pty);
+            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
         }
     });
 }
