@@ -25,6 +25,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_instructions(&si)?
         .emit()?;
 
+    // Emit VERGEN_GIT_DESCRIBE via the `git` CLI.  This avoids pulling in a
+    // heavy git-library dependency (vergen v9 requires vergen-gix/vergen-git2
+    // for git info).  The describe output looks like "v0.6.0-42-gabc1234" or
+    // just "v0.6.0" when exactly on a tag.  Falls back to the short SHA if
+    // `git describe` fails (e.g. shallow clone with no tags).
+    let git_describe = Command::new("git")
+        .args(["describe", "--tags", "--always", "--dirty"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=VERGEN_GIT_DESCRIBE={git_describe}");
+
     rebuild_terminfo()?;
 
     Ok(())

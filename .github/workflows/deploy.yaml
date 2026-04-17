@@ -30,11 +30,14 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+      - name: Install cargo-bundle and cargo-generate-rpm
+        run: cargo install cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
+
+      - name: Generate RPM package
+        run: cargo generate-rpm -p freminal
 
       - name: Extract version
         run: |
@@ -50,6 +53,7 @@ jobs:
           cp target/release/freminal "dist/freminal-${VERSION}-linux-amd64"
           cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-amd64.deb"
           cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-amd64.AppImage"
+          cp target/generate-rpm/*.rpm "dist/freminal-${VERSION}-linux-amd64.rpm"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -76,11 +80,14 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+      - name: Install cargo-bundle and cargo-generate-rpm
+        run: cargo install cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
+
+      - name: Generate RPM package
+        run: cargo generate-rpm -p freminal
 
       - name: Extract version
         run: |
@@ -96,6 +103,7 @@ jobs:
           cp target/release/freminal "dist/freminal-${VERSION}-linux-arm64"
           cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-arm64.deb"
           cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-arm64.AppImage"
+          cp target/generate-rpm/*.rpm "dist/freminal-${VERSION}-linux-arm64.rpm"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
