@@ -4,6 +4,10 @@
   inputs = {
     precommit.url = "github:FredSystems/pre-commit-checks";
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -11,6 +15,7 @@
       self,
       precommit,
       nixpkgs,
+      rust-overlay,
       ...
     }:
     let
@@ -31,7 +36,17 @@
       packages = lib.genAttrs systems (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+
+          rustToolchain = pkgs.rust-bin.stable.latest.default;
+
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
 
           runtimeLibs = [
             pkgs.libxkbcommon
@@ -83,7 +98,7 @@
           };
         in
         {
-          freminal = pkgs.rustPlatform.buildRustPackage {
+          freminal = rustPlatform.buildRustPackage {
             pname = "freminal";
             version = "0.6.0";
             src = pkgs.lib.cleanSource ./.;
