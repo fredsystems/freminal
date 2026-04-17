@@ -71,6 +71,8 @@ pub mod gui;
 pub mod playback;
 
 use anyhow::Result;
+use freminal_common::pty_write::FreminalTerminalSize;
+use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_common::{args::Args, config, config::load_config, themes};
 use gui::pty::spawn_pty_tab;
 
@@ -96,7 +98,18 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         )>,
     > = Arc::new(OnceLock::new());
 
-    let channels = spawn_pty_tab(&args, cfg.scrollback.limit, theme, &repaint_handle)?;
+    let channels = spawn_pty_tab(
+        &args,
+        cfg.scrollback.limit,
+        theme,
+        &repaint_handle,
+        FreminalTerminalSize {
+            width: usize::from(DEFAULT_WIDTH),
+            height: usize::from(DEFAULT_HEIGHT),
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+    )?;
 
     let config_path = args.config.clone();
 

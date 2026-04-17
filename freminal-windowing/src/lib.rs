@@ -51,6 +51,10 @@ pub trait App {
 
     /// Called when a window is created.
     ///
+    /// `inner_size` is the window's inner size in physical pixels at creation
+    /// time. On X11 / tiling WMs this is typically the final tiled geometry.
+    /// On Wayland it may be a placeholder until the first configure event.
+    ///
     /// Use `handle` to obtain a [`RepaintProxy`] for cross-thread repaint
     /// requests (e.g. PTY consumer threads).
     fn on_window_created(
@@ -58,6 +62,7 @@ pub trait App {
         window_id: WindowId,
         ctx: &egui::Context,
         handle: &WindowHandle<'_>,
+        inner_size: (u32, u32),
     );
 
     /// Called when a window close is requested. Return `false` to cancel.

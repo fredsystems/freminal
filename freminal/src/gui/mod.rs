@@ -13,6 +13,8 @@ use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
 use freminal_common::args::Args;
 use freminal_common::config::{Config, TabBarPosition, ThemeMode};
+use freminal_common::pty_write::FreminalTerminalSize;
+use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_terminal_emulator::io::InputEvent;
 #[cfg(feature = "playback")]
 use freminal_terminal_emulator::io::PlaybackMode;
@@ -202,6 +204,37 @@ impl FreminalGui {
         }
     }
 
+    /// Compute the initial PTY terminal size from pixel dimensions and cell size.
+    ///
+    /// Falls back to [`DEFAULT_WIDTH`]x[`DEFAULT_HEIGHT`] if the cell size is zero
+    /// (font not yet measured) or the pixel dimensions are zero.
+    fn compute_initial_size(
+        pixel_width: u32,
+        pixel_height: u32,
+        cell_width: u32,
+        cell_height: u32,
+    ) -> FreminalTerminalSize {
+        let pw = pixel_width.value_as::<usize>().unwrap_or(0);
+        let ph = pixel_height.value_as::<usize>().unwrap_or(0);
+        let cw = cell_width.value_as::<usize>().unwrap_or(0);
+        let ch = cell_height.value_as::<usize>().unwrap_or(0);
+
+        if cw == 0 || ch == 0 || pw == 0 || ph == 0 {
+            return FreminalTerminalSize {
+                width: usize::from(DEFAULT_WIDTH),
+                height: usize::from(DEFAULT_HEIGHT),
+                pixel_width: pw,
+                pixel_height: ph,
+            };
+        }
+        FreminalTerminalSize {
+            width: pw / cw,
+            height: ph / ch,
+            pixel_width: pw,
+            pixel_height: ph,
+        }
+    }
+
     /// Spawn a new PTY-backed tab and add it to the tab manager.
     ///
     /// Uses the stored `Args` and `Config` to configure the new terminal.
@@ -218,11 +251,37 @@ impl FreminalGui {
             freminal_common::themes::by_slug(self.config.theme.active_slug(win.os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
 
+        let (cell_w, cell_h) = win.terminal_widget.cell_size();
+        let cw = cell_w.value_as::<usize>().unwrap_or(0);
+        let ch = cell_h.value_as::<usize>().unwrap_or(0);
+        let (last_cols, last_rows) = win
+            .tabs
+            .active_tab()
+            .active_pane()
+            .view_state
+            .last_sent_size;
+        let initial_size = if last_cols > 0 && last_rows > 0 {
+            FreminalTerminalSize {
+                width: last_cols,
+                height: last_rows,
+                pixel_width: cw * last_cols,
+                pixel_height: ch * last_rows,
+            }
+        } else {
+            FreminalTerminalSize {
+                width: usize::from(DEFAULT_WIDTH),
+                height: usize::from(DEFAULT_HEIGHT),
+                pixel_width: 0,
+                pixel_height: 0,
+            }
+        };
+
         match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
             theme,
             &win.repaint_handle,
+            initial_size,
         ) {
             Ok(channels) => {
                 let id = win.tabs.next_tab_id();
@@ -265,6 +324,46 @@ impl FreminalGui {
         }
     }
 
+    /// Compute the initial PTY size for a new split pane, halving along the
+    /// split axis based on the active pane's current dimensions.
+    fn initial_size_for_split(
+        win: &PerWindowState,
+        direction: panes::SplitDirection,
+    ) -> FreminalTerminalSize {
+        let (cell_w, cell_h) = win.terminal_widget.cell_size();
+        let cw = cell_w.value_as::<usize>().unwrap_or(0);
+        let ch = cell_h.value_as::<usize>().unwrap_or(0);
+        let (last_cols, last_rows) = win
+            .tabs
+            .active_tab()
+            .active_pane()
+            .view_state
+            .last_sent_size;
+        if last_cols > 0 && last_rows > 0 {
+            let cols = match direction {
+                panes::SplitDirection::Horizontal => last_cols / 2,
+                panes::SplitDirection::Vertical => last_cols,
+            };
+            let rows = match direction {
+                panes::SplitDirection::Horizontal => last_rows,
+                panes::SplitDirection::Vertical => last_rows / 2,
+            };
+            FreminalTerminalSize {
+                width: cols.max(1),
+                height: rows.max(1),
+                pixel_width: cw * cols.max(1),
+                pixel_height: ch * rows.max(1),
+            }
+        } else {
+            FreminalTerminalSize {
+                width: usize::from(DEFAULT_WIDTH),
+                height: usize::from(DEFAULT_HEIGHT),
+                pixel_width: 0,
+                pixel_height: 0,
+            }
+        }
+    }
+
     /// Spawn a new PTY-backed pane and insert it into the active tab's pane tree,
     /// splitting the currently focused pane.
     ///
@@ -288,12 +387,15 @@ impl FreminalGui {
             freminal_common::themes::by_slug(self.config.theme.active_slug(win.os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
 
+        let initial_size = Self::initial_size_for_split(win, direction);
+
         // Spawn the new PTY before touching `win.tabs` so there is no borrow conflict.
         let channels = match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
             theme,
             &win.repaint_handle,
+            initial_size,
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -407,6 +509,7 @@ impl freminal_windowing::App for FreminalGui {
         window_id: WindowId,
         ctx: &egui::Context,
         handle: &freminal_windowing::WindowHandle<'_>,
+        inner_size: (u32, u32),
     ) {
         let os_dark_mode = ctx.global_style().visuals.dark_mode;
 
@@ -423,6 +526,24 @@ impl freminal_windowing::App for FreminalGui {
             // Re-create terminal widget with real egui context for correct
             // font registration and DPI scaling.
             let terminal_widget = FreminalTerminalWidget::new(ctx, &self.config);
+
+            // Send an immediate resize to the PTY so the shell starts at the
+            // correct dimensions instead of the pre-spawn defaults (100x100).
+            let (cell_w, cell_h) = terminal_widget.cell_size();
+            let computed_size =
+                Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
+            if let Ok(panes) = initial.tab.pane_tree.iter_panes() {
+                for pane in panes {
+                    if let Err(e) = pane.input_tx.send(InputEvent::Resize(
+                        computed_size.width,
+                        computed_size.height,
+                        computed_size.pixel_width,
+                        computed_size.pixel_height,
+                    )) {
+                        error!("Failed to send initial resize to pre-spawned pane: {e}");
+                    }
+                }
+            }
 
             // Correct the theme for auto mode if the real OS preference differs
             // from the assumed-light default used during construction.
@@ -472,11 +593,17 @@ impl freminal_windowing::App for FreminalGui {
 
             let window_post = Arc::new(Mutex::new(WindowPostRenderer::new()));
 
+            let terminal_widget = FreminalTerminalWidget::new(ctx, &self.config);
+            let (cell_w, cell_h) = terminal_widget.cell_size();
+            let initial_size =
+                Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
+
             match pty::spawn_pty_tab(
                 &self.args,
                 self.config.scrollback.limit,
                 theme,
                 &repaint_handle,
+                initial_size,
             ) {
                 Ok(channels) => {
                     let pane_id = self
@@ -538,7 +665,7 @@ impl freminal_windowing::App for FreminalGui {
 
                     let win = PerWindowState {
                         tabs: TabManager::new(tab),
-                        terminal_widget: FreminalTerminalWidget::new(ctx, &self.config),
+                        terminal_widget,
                         last_window_title: String::from("Freminal"),
                         os_dark_mode,
                         style_cache: None,

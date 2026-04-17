@@ -184,16 +184,19 @@ pub fn run_terminal(
     command: Option<(String, Vec<String>)>,
     shell: Option<String>,
     termcaps: Option<&Path>,
+    initial_size: &FreminalTerminalSize,
 ) -> Result<RunTerminalResult> {
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
-        .openpty(PtySize {
-            rows: DEFAULT_HEIGHT,
-            cols: DEFAULT_WIDTH,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
+        .openpty(
+            pty_size_from_terminal_size(initial_size).unwrap_or(PtySize {
+                rows: DEFAULT_HEIGHT,
+                cols: DEFAULT_WIDTH,
+                pixel_width: 0,
+                pixel_height: 0,
+            }),
+        )
         .map_err(|e| {
             error!("Failed to open pty: {e}");
             e
@@ -506,8 +509,8 @@ impl FreminalPtyInputOutput {
         recording: Option<String>,
         command: Option<(String, Vec<String>)>,
         shell: Option<String>,
+        initial_size: &FreminalTerminalSize,
     ) -> Result<Self> {
-        // Terminfo is a Unix concept — Windows programs (cmd.exe, PowerShell)
         // don't use it.  Skip extraction entirely on Windows to avoid issues
         // with symlinks in the tarball requiring elevated privileges.
         let termcaps = if cfg!(target_os = "windows") {
@@ -529,6 +532,7 @@ impl FreminalPtyInputOutput {
             command,
             shell,
             termcaps.as_ref().map(TempDir::path),
+            initial_size,
         )?;
         Ok(Self {
             _termcaps: termcaps,

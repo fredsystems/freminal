@@ -28,6 +28,7 @@ impl App for HelloApp {
         _window_id: WindowId,
         _ctx: &egui::Context,
         _handle: &WindowHandle<'_>,
+        _inner_size: (u32, u32),
     ) {
     }
 

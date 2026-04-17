@@ -81,6 +81,7 @@ impl<A: App> Handler<A> {
 
         let winit_id = window.id();
         let window_id = WindowId(winit_id);
+        let phys = window.inner_size();
 
         let state = WindowState {
             window,
@@ -95,8 +96,12 @@ impl<A: App> Handler<A> {
             proxy: &self.proxy,
             pending_ops: &self.pending_ops,
         };
-        self.app
-            .on_window_created(window_id, &self.windows[&winit_id].egui.ctx, &handle);
+        self.app.on_window_created(
+            window_id,
+            &self.windows[&winit_id].egui.ctx,
+            &handle,
+            (phys.width, phys.height),
+        );
 
         // Process any ops queued during on_window_created.
         self.process_pending_ops(event_loop);

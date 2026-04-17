@@ -19,7 +19,7 @@ use freminal_common::args::Args;
 use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::pty_write::PtyWrite;
+use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
@@ -89,8 +89,10 @@ pub fn spawn_pty_tab(
     scrollback_limit: usize,
     theme: &'static freminal_common::themes::ThemePalette,
     repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
+    initial_size: FreminalTerminalSize,
 ) -> Result<TabChannels> {
-    let (mut terminal, pty_read_rx) = TerminalEmulator::new(args, Some(scrollback_limit))?;
+    let (mut terminal, pty_read_rx) =
+        TerminalEmulator::new(args, Some(scrollback_limit), initial_size)?;
 
     // Apply the configured theme so all snapshots carry the correct palette.
     terminal.internal.handler.set_theme(theme);
