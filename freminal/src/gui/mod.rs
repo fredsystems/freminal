@@ -122,6 +122,9 @@ struct FreminalGui {
     /// `None` after the initial window is created.
     initial_state: Option<InitialWindowState>,
 
+    /// Window icon shared across all windows.
+    icon: Option<egui::IconData>,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -197,6 +200,7 @@ impl FreminalGui {
                 window_post,
                 repaint_handle,
             }),
+            icon: None,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -484,12 +488,12 @@ impl FreminalGui {
     /// menu is clicked.  The actual window creation is deferred to the windowing
     /// crate; `on_window_created()` will set up the `PerWindowState` when the
     /// window is ready.
-    fn spawn_new_window(handle: &freminal_windowing::WindowHandle<'_>) {
+    fn spawn_new_window(&self, handle: &freminal_windowing::WindowHandle<'_>) {
         handle.create_window(freminal_windowing::WindowConfig {
             title: "Freminal".to_owned(),
             inner_size: None,
             transparent: true,
-            icon: None,
+            icon: self.icon.clone(),
             app_id: Some("freminal".into()),
         });
     }
@@ -746,7 +750,7 @@ impl freminal_windowing::App for FreminalGui {
         // ── Spawn new window ─────────────────────────────────────────────────
         if win.pending_new_window {
             win.pending_new_window = false;
-            Self::spawn_new_window(handle);
+            self.spawn_new_window(handle);
         }
 
         // ── Detect OS dark/light preference changes ───────────────────────────
@@ -1915,11 +1919,11 @@ pub fn run(
         title: "Freminal".to_owned(),
         inner_size: None,
         transparent: true,
-        icon: Some(icon),
+        icon: Some(icon.clone()),
         app_id: Some("freminal".into()),
     };
 
-    let app = FreminalGui::new(
+    let mut app = FreminalGui::new(
         initial_tab,
         config,
         args,
@@ -1929,6 +1933,7 @@ pub fn run(
         #[cfg(feature = "playback")]
         is_playback,
     );
+    app.icon = Some(icon);
 
     freminal_windowing::run(window_config, app).map_err(|e| anyhow::anyhow!(e.to_string()))
 }

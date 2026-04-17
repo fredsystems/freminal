@@ -47,6 +47,18 @@ impl<A: App> Handler<A> {
             attrs = attrs.with_transparent(true);
         }
 
+        if let Some(ref icon_data) = config.icon {
+            if let Ok(icon) = winit::window::Icon::from_rgba(
+                icon_data.rgba.clone(),
+                icon_data.width,
+                icon_data.height,
+            ) {
+                attrs = attrs.with_window_icon(Some(icon));
+            } else {
+                error!("Failed to create window icon from RGBA data");
+            }
+        }
+
         #[cfg(target_os = "linux")]
         {
             use winit::platform::wayland::WindowAttributesExtWayland;
