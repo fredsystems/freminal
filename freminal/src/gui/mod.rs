@@ -228,8 +228,8 @@ impl FreminalGui {
             };
         }
         FreminalTerminalSize {
-            width: pw / cw,
-            height: ph / ch,
+            width: (pw / cw).max(1),
+            height: (ph / ch).max(1),
             pixel_width: pw,
             pixel_height: ph,
         }
@@ -532,13 +532,15 @@ impl freminal_windowing::App for FreminalGui {
             let (cell_w, cell_h) = terminal_widget.cell_size();
             let computed_size =
                 Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
+            let cell_pixel_w = cell_w.value_as::<usize>().unwrap_or(0);
+            let cell_pixel_h = cell_h.value_as::<usize>().unwrap_or(0);
             if let Ok(panes) = initial.tab.pane_tree.iter_panes() {
                 for pane in panes {
                     if let Err(e) = pane.input_tx.send(InputEvent::Resize(
                         computed_size.width,
                         computed_size.height,
-                        computed_size.pixel_width,
-                        computed_size.pixel_height,
+                        cell_pixel_w,
+                        cell_pixel_h,
                     )) {
                         error!("Failed to send initial resize to pre-spawned pane: {e}");
                     }
