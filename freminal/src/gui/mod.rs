@@ -125,6 +125,10 @@ struct FreminalGui {
     /// Window icon shared across all windows.
     icon: Option<egui::IconData>,
 
+    /// Which window currently owns the settings modal, if any.
+    /// `None` when the modal is closed.
+    settings_owner: Option<WindowId>,
+
     /// Whether this instance is running in playback mode.
     #[cfg(feature = "playback")]
     is_playback: bool,
@@ -201,6 +205,7 @@ impl FreminalGui {
                 repaint_handle,
             }),
             icon: None,
+            settings_owner: None,
             #[cfg(feature = "playback")]
             is_playback,
             #[cfg(feature = "playback")]
@@ -697,6 +702,11 @@ impl freminal_windowing::App for FreminalGui {
     /// Removes the window's state — its PTY threads will be dropped when
     /// the channels close.  Always returns `true` to allow the close.
     fn on_close_requested(&mut self, window_id: WindowId) -> bool {
+        // If this window owns the settings modal, close it.
+        if self.settings_owner == Some(window_id) {
+            self.settings_modal.is_open = false;
+            self.settings_owner = None;
+        }
         self.windows.remove(&window_id);
         true
     }
@@ -948,7 +958,9 @@ impl freminal_windowing::App for FreminalGui {
         let mut any_menu_open = false;
         if !self.config.ui.hide_menu_bar {
             let (menu_action, menu_open) = Panel::top("menu_bar")
-                .show_inside(&mut root_ui, |ui| self.show_menu_bar(ui, &snap, &mut win))
+                .show_inside(&mut root_ui, |ui| {
+                    self.show_menu_bar(ui, &snap, &mut win, window_id)
+                })
                 .inner;
             any_menu_open = menu_open;
             self.dispatch_tab_bar_action(menu_action, &mut win);
@@ -1596,7 +1608,7 @@ impl freminal_windowing::App for FreminalGui {
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
             for action in all_deferred_actions {
-                self.dispatch_deferred_action(action, &mut win);
+                self.dispatch_deferred_action(action, &mut win, window_id);
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
@@ -1634,99 +1646,90 @@ impl freminal_windowing::App for FreminalGui {
             }
         });
 
-        // Show the settings modal (if open) above everything else.
-        let modal_was_open = self.settings_modal.is_open;
-        let settings_action = self.settings_modal.show(ctx, win.os_dark_mode);
+        // Show the settings modal (if open) only in the window that owns it.
+        let is_settings_owner = self.settings_owner == Some(window_id);
+        if is_settings_owner {
+            let modal_was_open = self.settings_modal.is_open;
+            let settings_action = self.settings_modal.show(ctx, win.os_dark_mode);
 
-        // After show() processes the dropdown change, load the new font's
-        // bytes and register them with egui so the preview renders in the
-        // actual selected font on the next frame.
-        if self.settings_modal.is_open
-            && let Some(family) = self.settings_modal.needed_preview_family()
-        {
-            let bytes = win.terminal_widget.load_font_bytes(&family);
-            let base = win.terminal_widget.base_font_defs();
-            self.settings_modal
-                .register_preview_font(ctx, &family, bytes, base);
-        }
+            // After show() processes the dropdown change, load the new font's
+            // bytes and register them with egui so the preview renders in the
+            // actual selected font on the next frame.
+            if self.settings_modal.is_open
+                && let Some(family) = self.settings_modal.needed_preview_family()
+            {
+                let bytes = win.terminal_widget.load_font_bytes(&family);
+                let base = win.terminal_widget.base_font_defs();
+                self.settings_modal
+                    .register_preview_font(ctx, &family, bytes, base);
+            }
 
-        // If the modal just closed (any reason), restore the original egui
-        // font set to remove the preview font registration.
-        if modal_was_open && !self.settings_modal.is_open {
-            self.settings_modal.restore_base_fonts(ctx);
-        }
+            // If the modal just closed (any reason), restore the original egui
+            // font set to remove the preview font registration.
+            if modal_was_open && !self.settings_modal.is_open {
+                self.settings_modal.restore_base_fonts(ctx);
+                self.settings_owner = None;
+            }
 
-        match settings_action {
-            SettingsAction::Applied => {
-                let new_cfg = self.settings_modal.applied_config().clone();
+            match settings_action {
+                SettingsAction::Applied => {
+                    let new_cfg = self.settings_modal.applied_config().clone();
 
-                // If the active theme slug changed (accounting for mode and OS pref),
-                // look it up and notify the PTY thread so the next snapshot carries
-                // the new palette.
-                if new_cfg.theme.active_slug(win.os_dark_mode)
-                    != self.config.theme.active_slug(win.os_dark_mode)
-                    && let Some(theme) = freminal_common::themes::by_slug(
-                        new_cfg.theme.active_slug(win.os_dark_mode),
-                    )
-                {
-                    if let Err(e) = win
-                        .tabs
-                        .active_tab()
-                        .active_pane()
-                        .input_tx
-                        .send(InputEvent::ThemeChange(theme))
+                    // If the active theme slug changed (accounting for mode and OS pref),
+                    // look it up and notify the PTY thread so the next snapshot carries
+                    // the new palette.
+                    if new_cfg.theme.active_slug(win.os_dark_mode)
+                        != self.config.theme.active_slug(win.os_dark_mode)
+                        && let Some(theme) = freminal_common::themes::by_slug(
+                            new_cfg.theme.active_slug(win.os_dark_mode),
+                        )
                     {
-                        error!("Failed to send ThemeChange to PTY thread: {e}");
-                    }
-                    rendering::update_egui_theme(ctx, theme, new_cfg.ui.background_opacity);
-                    // Force a full vertex rebuild on the next frame so
-                    // foreground/background colors are re-resolved against
-                    // the new palette.  Without this, the preview's rebuild
-                    // may be the last one, and the Apply-frame snapshot
-                    // (with content_changed=false) would skip the rebuild.
-                    for tab in win.tabs.iter_mut() {
-                        if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
-                            for pane in panes {
-                                pane.render_cache.invalidate_theme_cache();
+                        if let Err(e) = win
+                            .tabs
+                            .active_tab()
+                            .active_pane()
+                            .input_tx
+                            .send(InputEvent::ThemeChange(theme))
+                        {
+                            error!("Failed to send ThemeChange to PTY thread: {e}");
+                        }
+                        rendering::update_egui_theme(ctx, theme, new_cfg.ui.background_opacity);
+                        // Force a full vertex rebuild on the next frame so
+                        // foreground/background colors are re-resolved against
+                        // the new palette.  Without this, the preview's rebuild
+                        // may be the last one, and the Apply-frame snapshot
+                        // (with content_changed=false) would skip the rebuild.
+                        for tab in win.tabs.iter_mut() {
+                            if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                                for pane in panes {
+                                    pane.render_cache.invalidate_theme_cache();
+                                }
                             }
                         }
                     }
-                }
 
-                let font_changed =
-                    win.terminal_widget
-                        .apply_config_changes(ctx, &self.config, &new_cfg);
-                if font_changed {
-                    // Font or ligature config changed — clear each pane's GL
-                    // atlas and force full vertex rebuilds.
-                    win.invalidate_all_pane_atlases();
-                }
-                self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
+                    let font_changed =
+                        win.terminal_widget
+                            .apply_config_changes(ctx, &self.config, &new_cfg);
+                    if font_changed {
+                        // Font or ligature config changed — clear each pane's GL
+                        // atlas and force full vertex rebuilds.
+                        win.invalidate_all_pane_atlases();
+                    }
+                    self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
                     error!(
                         "Failed to rebuild binding map after settings apply: {e}. Using defaults."
                     );
                     freminal_common::keybindings::BindingMap::default()
                 });
-                self.config = new_cfg;
+                    self.config = new_cfg;
 
-                // Apply background image and shader changes to all panes.
-                // The actual GL calls happen in each pane's PaintCallback (needs GL context).
-                {
-                    let new_bg_path = self.config.ui.background_image.clone();
-                    // Per-pane: push background image changes to this window.
-                    for tab in win.tabs.iter() {
-                        if let Ok(panes) = tab.pane_tree.iter_panes() {
-                            for pane in panes {
-                                if let Ok(mut rs) = pane.render_state.lock() {
-                                    rs.set_pending_bg_image(new_bg_path.clone());
-                                }
-                            }
-                        }
-                    }
-                    // Per-pane: push background image changes to all other windows
-                    // (win is removed from map, so self.windows is only other windows).
-                    for other_win in self.windows.values() {
-                        for tab in other_win.tabs.iter() {
+                    // Apply background image and shader changes to all panes.
+                    // The actual GL calls happen in each pane's PaintCallback (needs GL context).
+                    {
+                        let new_bg_path = self.config.ui.background_image.clone();
+                        // Per-pane: push background image changes to this window.
+                        for tab in win.tabs.iter() {
                             if let Ok(panes) = tab.pane_tree.iter_panes() {
                                 for pane in panes {
                                     if let Ok(mut rs) = pane.render_state.lock() {
@@ -1735,13 +1738,25 @@ impl freminal_windowing::App for FreminalGui {
                                 }
                             }
                         }
-                    }
+                        // Per-pane: push background image changes to all other windows
+                        // (win is removed from map, so self.windows is only other windows).
+                        for other_win in self.windows.values() {
+                            for tab in other_win.tabs.iter() {
+                                if let Ok(panes) = tab.pane_tree.iter_panes() {
+                                    for pane in panes {
+                                        if let Ok(mut rs) = pane.render_state.lock() {
+                                            rs.set_pending_bg_image(new_bg_path.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
-                    // Window-level: push shader change.
-                    // Only update if the path is None (clear shader) or the read
-                    // succeeds (new shader source).  On read failure, leave the
-                    // current shader in place and log the error.
-                    let shader_pending: Option<String> = self
+                        // Window-level: push shader change.
+                        // Only update if the path is None (clear shader) or the read
+                        // succeeds (new shader source).  On read failure, leave the
+                        // current shader in place and log the error.
+                        let shader_pending: Option<String> = self
                         .config
                         .shader
                         .path
@@ -1757,105 +1772,111 @@ impl freminal_windowing::App for FreminalGui {
                             }
                         })
                         .flatten();
-                    // shader_pending: None means "keep current" (read failed),
-                    // need to distinguish from "clear shader" (path was None).
-                    // Re-derive: if path is None, clear; if path is Some and
-                    // read succeeded, set; if read failed, skip.
-                    let has_shader_path = self.config.shader.path.is_some();
-                    if !has_shader_path {
-                        // Clear shader on this window.
-                        if let Ok(mut wpr) = win.window_post.lock() {
-                            wpr.pending_shader = Some(None);
-                        }
-                        // Clear shader on all other windows.
-                        for other_win in self.windows.values() {
-                            if let Ok(mut wpr) = other_win.window_post.lock() {
+                        // shader_pending: None means "keep current" (read failed),
+                        // need to distinguish from "clear shader" (path was None).
+                        // Re-derive: if path is None, clear; if path is Some and
+                        // read succeeded, set; if read failed, skip.
+                        let has_shader_path = self.config.shader.path.is_some();
+                        if !has_shader_path {
+                            // Clear shader on this window.
+                            if let Ok(mut wpr) = win.window_post.lock() {
                                 wpr.pending_shader = Some(None);
                             }
-                        }
-                    } else if let Some(ref src) = shader_pending {
-                        // Set new shader on this window.
-                        if let Ok(mut wpr) = win.window_post.lock() {
-                            wpr.pending_shader = Some(Some(src.clone()));
-                        }
-                        // Set new shader on all other windows.
-                        for other_win in self.windows.values() {
-                            if let Ok(mut wpr) = other_win.window_post.lock() {
+                            // Clear shader on all other windows.
+                            for other_win in self.windows.values() {
+                                if let Ok(mut wpr) = other_win.window_post.lock() {
+                                    wpr.pending_shader = Some(None);
+                                }
+                            }
+                        } else if let Some(ref src) = shader_pending {
+                            // Set new shader on this window.
+                            if let Ok(mut wpr) = win.window_post.lock() {
                                 wpr.pending_shader = Some(Some(src.clone()));
                             }
-                        }
-                    }
-                    // else: read failed — leave current shader in place.
-                }
-
-                // Notify all panes in all tabs of the new theme mode so DECRPM ?2031
-                // returns the correct locked/dynamic response after the config change.
-                for tab in win.tabs.iter() {
-                    if let Ok(panes) = tab.pane_tree.iter_panes() {
-                        for pane in panes {
-                            if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
-                                self.config.theme.mode,
-                                win.os_dark_mode,
-                            )) {
-                                error!("Failed to send ThemeModeUpdate after settings apply: {e}");
+                            // Set new shader on all other windows.
+                            for other_win in self.windows.values() {
+                                if let Ok(mut wpr) = other_win.window_post.lock() {
+                                    wpr.pending_shader = Some(Some(src.clone()));
+                                }
                             }
                         }
+                        // else: read failed — leave current shader in place.
                     }
-                }
-                // Notify all other windows too.
-                for other_win in self.windows.values() {
-                    for tab in other_win.tabs.iter() {
+
+                    // Notify all panes in all tabs of the new theme mode so DECRPM ?2031
+                    // returns the correct locked/dynamic response after the config change.
+                    for tab in win.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
                                 if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
                                     self.config.theme.mode,
-                                    other_win.os_dark_mode,
+                                    win.os_dark_mode,
                                 )) {
-                                    error!("Failed to send ThemeModeUpdate to other window: {e}");
+                                    error!(
+                                        "Failed to send ThemeModeUpdate after settings apply: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Notify all other windows too.
+                    for other_win in self.windows.values() {
+                        for tab in other_win.tabs.iter() {
+                            if let Ok(panes) = tab.pane_tree.iter_panes() {
+                                for pane in panes {
+                                    if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
+                                        self.config.theme.mode,
+                                        other_win.os_dark_mode,
+                                    )) {
+                                        error!(
+                                            "Failed to send ThemeModeUpdate to other window: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            SettingsAction::PreviewTheme(ref slug)
-                if let Some(theme) = freminal_common::themes::by_slug(slug) =>
-            {
-                if let Err(e) = win
-                    .tabs
-                    .active_tab()
-                    .active_pane()
-                    .input_tx
-                    .send(InputEvent::ThemeChange(theme))
+                SettingsAction::PreviewTheme(ref slug)
+                    if let Some(theme) = freminal_common::themes::by_slug(slug) =>
                 {
-                    error!("Failed to send theme preview to PTY thread: {e}");
+                    if let Err(e) = win
+                        .tabs
+                        .active_tab()
+                        .active_pane()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
+                        error!("Failed to send theme preview to PTY thread: {e}");
+                    }
+                    rendering::update_egui_theme(ctx, theme, self.config.ui.background_opacity);
                 }
-                rendering::update_egui_theme(ctx, theme, self.config.ui.background_opacity);
-            }
-            SettingsAction::RevertTheme(ref slug, original_opacity)
-                if let Some(theme) = freminal_common::themes::by_slug(slug) =>
-            {
-                if let Err(e) = win
-                    .tabs
-                    .active_tab()
-                    .active_pane()
-                    .input_tx
-                    .send(InputEvent::ThemeChange(theme))
+                SettingsAction::RevertTheme(ref slug, original_opacity)
+                    if let Some(theme) = freminal_common::themes::by_slug(slug) =>
                 {
-                    error!("Failed to send theme revert to PTY thread: {e}");
+                    if let Err(e) = win
+                        .tabs
+                        .active_tab()
+                        .active_pane()
+                        .input_tx
+                        .send(InputEvent::ThemeChange(theme))
+                    {
+                        error!("Failed to send theme revert to PTY thread: {e}");
+                    }
+                    // Restore opacity first so update_egui_theme uses the
+                    // correct value for panel_fill.
+                    self.config.ui.background_opacity = original_opacity;
+                    rendering::update_egui_theme(ctx, theme, original_opacity);
                 }
-                // Restore opacity first so update_egui_theme uses the
-                // correct value for panel_fill.
-                self.config.ui.background_opacity = original_opacity;
-                rendering::update_egui_theme(ctx, theme, original_opacity);
+                SettingsAction::RevertTheme(_, _)
+                | SettingsAction::PreviewTheme(_)
+                | SettingsAction::None => {}
+                SettingsAction::PreviewOpacity(opacity)
+                | SettingsAction::RevertOpacity(opacity) => {
+                    self.config.ui.background_opacity = opacity;
+                }
             }
-            SettingsAction::RevertTheme(_, _)
-            | SettingsAction::PreviewTheme(_)
-            | SettingsAction::None => {}
-            SettingsAction::PreviewOpacity(opacity) | SettingsAction::RevertOpacity(opacity) => {
-                self.config.ui.background_opacity = opacity;
-            }
-        }
+        } // end if is_settings_owner
 
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {

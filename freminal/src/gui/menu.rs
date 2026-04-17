@@ -29,17 +29,23 @@ impl super::FreminalGui {
         ui: &mut egui::Ui,
         snap: &TerminalSnapshot,
         win: &mut PerWindowState,
+        window_id: super::WindowId,
     ) -> (TabBarAction, bool) {
         let mut menu_action = TabBarAction::None;
         let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
             let freminal_resp = ui.menu_button("Freminal", |ui| {
-                if ui.button("Settings...").clicked() {
+                let settings_available = !self.settings_modal.is_open;
+                if ui
+                    .add_enabled(settings_available, egui::Button::new("Settings..."))
+                    .clicked()
+                {
                     let families = win.terminal_widget.monospace_families();
                     self.settings_modal
                         .open(&self.config, families, win.os_dark_mode);
                     self.settings_modal
                         .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                    self.settings_owner = Some(window_id);
                     ui.close();
                 }
 

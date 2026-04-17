@@ -188,6 +188,7 @@ impl super::FreminalGui {
         &mut self,
         action: freminal_common::keybindings::KeyAction,
         win: &mut PerWindowState,
+        window_id: super::WindowId,
     ) {
         use freminal_common::keybindings::KeyAction;
 
@@ -198,6 +199,7 @@ impl super::FreminalGui {
                     .open(&self.config, families, win.os_dark_mode);
                 self.settings_modal
                     .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                self.settings_owner = Some(window_id);
             }
             KeyAction::NewTab => self.spawn_new_tab(win),
             KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
