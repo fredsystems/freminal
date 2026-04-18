@@ -108,23 +108,83 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.makeWrapper
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               pkgs.copyDesktopItems
             ];
 
             buildInputs = runtimeLibs;
 
-            desktopItems = [
+            desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [
               desktopItem
             ];
 
-            postInstall = ''
-              wrapProgram $out/bin/freminal \
-                --prefix LD_LIBRARY_PATH : ${runtimeLibPath}
+            postInstall =
+              if pkgs.stdenv.isDarwin then
+                ''
+                                    # Create a macOS .app bundle so Freminal appears in
+                                    # Finder / Spotlight / Launchpad.
+                                    mkdir -p "$out/Applications"
+                                    OUT_APP="$out/Applications/Freminal.app/Contents"
+                                    mkdir -p "$OUT_APP/MacOS" "$OUT_APP/Resources"
 
-              # optional, once you have icons in the repo:
-              install -Dm644 assets/icon.png \
-                $out/share/icons/hicolor/256x256/apps/freminal.png
-            '';
+                                    # macOS only recognises an app bundle if the real binary
+                                    # lives inside it.  Move the binary in, then create a
+                                    # symlink back to $out/bin/ so CLI usage still works.
+                                    mv "$out/bin/freminal" "$OUT_APP/MacOS/freminal"
+                                    ln -s "$OUT_APP/MacOS/freminal" "$out/bin/freminal"
+
+                                    # Write Info.plist
+                                    cat > "$OUT_APP/Info.plist" << 'PLIST'
+                  <?xml version="1.0" encoding="UTF-8"?>
+                  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+                    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+                  <plist version="1.0">
+                  <dict>
+                    <key>CFBundleName</key>
+                    <string>Freminal</string>
+                    <key>CFBundleDisplayName</key>
+                    <string>Freminal</string>
+                    <key>CFBundleIdentifier</key>
+                    <string>io.github.fredclausen.freminal</string>
+                    <key>CFBundleVersion</key>
+                    <string>0.6.0</string>
+                    <key>CFBundleShortVersionString</key>
+                    <string>0.6.0</string>
+                    <key>CFBundleExecutable</key>
+                    <string>freminal</string>
+                    <key>CFBundleIconFile</key>
+                    <string>freminal</string>
+                    <key>CFBundlePackageType</key>
+                    <string>APPL</string>
+                    <key>LSMinimumSystemVersion</key>
+                    <string>13.0</string>
+                    <key>NSHighResolutionCapable</key>
+                    <true/>
+                  </dict>
+                  </plist>
+                  PLIST
+
+                                    # Icon — generate .icns from PNG via iconutil if available,
+                                    # otherwise copy raw PNG (still works, just single-resolution).
+                                    mkdir -p "$OUT_APP/Resources/freminal.iconset"
+                                    cp assets/icon.png "$OUT_APP/Resources/freminal.iconset/icon_256x256.png"
+                                    if command -v iconutil &>/dev/null; then
+                                      iconutil -c icns -o "$OUT_APP/Resources/freminal.icns" \
+                                        "$OUT_APP/Resources/freminal.iconset"
+                                    else
+                                      cp assets/icon.png "$OUT_APP/Resources/freminal.icns"
+                                    fi
+                                    rm -rf "$OUT_APP/Resources/freminal.iconset"
+                ''
+              else
+                ''
+                  wrapProgram $out/bin/freminal \
+                    --prefix LD_LIBRARY_PATH : ${runtimeLibPath}
+
+                  install -Dm644 assets/icon.png \
+                    $out/share/icons/hicolor/256x256/apps/freminal.png
+                '';
           };
         }
       );
@@ -185,11 +245,11 @@
                 pkgs.vttest
                 pkgs.markdownlint-cli2
                 pkgs.cargo-flamegraph
-                pkgs.perf
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.cargo-llvm-cov
                 pkgs.cachix
+                pkgs.perf
               ];
 
               # Extra dev packages provided by mkCheck (includes rustToolchain)

@@ -30,11 +30,14 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+      - name: Install cargo-bundle and cargo-generate-rpm
+        run: cargo install cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
+
+      - name: Generate RPM package
+        run: cargo generate-rpm -p freminal
 
       - name: Extract version
         run: |
@@ -50,6 +53,7 @@ jobs:
           cp target/release/freminal "dist/freminal-${VERSION}-linux-amd64"
           cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-amd64.deb"
           cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-amd64.AppImage"
+          cp target/generate-rpm/*.rpm "dist/freminal-${VERSION}-linux-amd64.rpm"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -76,11 +80,14 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+      - name: Install cargo-bundle and cargo-generate-rpm
+        run: cargo install cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
+
+      - name: Generate RPM package
+        run: cargo generate-rpm -p freminal
 
       - name: Extract version
         run: |
@@ -96,6 +103,7 @@ jobs:
           cp target/release/freminal "dist/freminal-${VERSION}-linux-arm64"
           cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-arm64.deb"
           cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-arm64.AppImage"
+          cp target/generate-rpm/*.rpm "dist/freminal-${VERSION}-linux-arm64.rpm"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -181,29 +189,117 @@ jobs:
       - name: Bundle .app
         run: cargo bundle --release -p freminal
 
-      # temporarily disable code sign. Yes, I know it breaks installability
-      # - name: Code sign
-      #   if: env.MACOS_CERTIFICATE != ''
-      #   env:
-      #     MACOS_CERTIFICATE_PWD: ${{ secrets.MAOS_CERTIFICATE_PWD }}
-      #     MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE }}
-      #   uses: toitlang/action-macos-sign-notarize@v1.2.0
-      #   with:
-      #     certificate: ${{ secrets.MACOS_CERTIFICATE }}
-      #     certificate-password: ${{ secrets.MAOS_CERTIFICATE_PWD }}
-      #     username: ${{ secrets.APPLE_ID_USERNAME }}
-      #     password: ${{ secrets.APPLE_ID_PASSWORD }}
-      #     apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
-      #     app-path: target/release/bundle/osx/Freminal.app
-      # the stupid cert pwd env var is not named properly in github. Nvm, just use the wrong name and it will work.
-      # run: |
-      #   echo "$MACOS_CERTIFICATE" | base64 -d > certificate.p12
-      #   security create-keychain -p build build.keychain
-      #   security default-keychain -s build.keychain
-      #   security unlock-keychain -p build build.keychain
-      #   security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-      #   security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build build.keychain
-      #   /usr/bin/codesign --force -s "$MACOS_CODESIGN_IDENTITY" target/release/bundle/osx/*.app -v
+      # Stage the .app at the repo root for a clean zip path.
+      - name: Stage .app for signing
+        run: |
+          cp -R target/release/bundle/osx/Freminal.app ./Freminal.app
+          echo "::group::Staged .app structure"
+          find Freminal.app -type f | head -50
+          echo "::endgroup::"
+          echo "::group::Info.plist contents"
+          cat Freminal.app/Contents/Info.plist
+          echo "::endgroup::"
+          echo "::group::Binary file info"
+          file Freminal.app/Contents/MacOS/freminal
+          ls -lh Freminal.app/Contents/MacOS/freminal
+          echo "::endgroup::"
+
+      # We handle codesigning and notarization manually instead of using
+      # toitlang/action-macos-sign-notarize because that action's zip step
+      # is not recursive, producing an empty archive that Apple rejects.
+      - name: Import signing certificate
+        if: env.MACOS_CERTIFICATE != ''
+        uses: apple-actions/import-codesign-certs@b610f78488812c1e56b20e6df63ec42d833f2d14 # v6.0.0
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERTIFICATE }}
+          p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+
+      - name: List signing identities
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          echo "::group::Available signing identities"
+          security find-identity -v -p codesigning
+          echo "::endgroup::"
+
+      - name: Codesign .app
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          echo "::group::Entitlements file"
+          cat assets/macos/entitlements.plist
+          echo "::endgroup::"
+
+          echo "Signing with team ID: ${{ secrets.APPLE_TEAM_ID }}"
+          codesign --force --deep --sign "${{ secrets.APPLE_TEAM_ID }}" \
+            --entitlements assets/macos/entitlements.plist \
+            --options=runtime \
+            --verbose=4 \
+            Freminal.app
+
+          echo "::group::Signature details"
+          codesign -dvvv Freminal.app
+          echo "::endgroup::"
+
+          echo "::group::Signature verification"
+          codesign --verify --strict --verbose=4 Freminal.app
+          echo "::endgroup::"
+
+          echo "::group::Embedded entitlements"
+          codesign -d --entitlements - Freminal.app || true
+          echo "::endgroup::"
+
+      - name: Notarize .app
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          # Create a proper recursive zip for notarization
+          ditto -c -k --keepParent Freminal.app Freminal.zip
+          echo "Zip size: $(ls -lh Freminal.zip | awk '{print $5}')"
+          echo "Zip contents:"
+          zipinfo -1 Freminal.zip | head -30
+
+          echo "::group::Submitting to Apple notarization service"
+          xcrun notarytool submit Freminal.zip \
+            --wait \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --verbose
+          echo "::endgroup::"
+
+          echo "::group::Stapling notarization ticket"
+          xcrun stapler staple -v Freminal.app
+          echo "::endgroup::"
+
+          echo "::group::Final verification (spctl)"
+          spctl --assess --type exec --verbose=4 Freminal.app || true
+          echo "::endgroup::"
+
+      - name: Fetch notarization log (debug)
+        if: failure() && env.MACOS_CERTIFICATE != ''
+        run: |
+          echo "::group::Notarization history"
+          xcrun notarytool history \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" || true
+          echo "::endgroup::"
+
+          SUBMISSION_ID=$(xcrun notarytool history \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --output-format json | python3 -c "import sys,json; print(json.load(sys.stdin)['history'][0]['id'])" 2>/dev/null) || true
+
+          if [ -n "$SUBMISSION_ID" ]; then
+            echo "Latest submission: $SUBMISSION_ID"
+            echo "::group::Notarization log"
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+              --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+              --team-id "${{ secrets.APPLE_TEAM_ID }}" || true
+            echo "::endgroup::"
+          else
+            echo "Could not retrieve submission ID from history"
+          fi
 
       - name: Extract version
         run: |
@@ -217,9 +313,7 @@ jobs:
       - name: Rename artifacts
         run: |
           mkdir -p dist
-          cd target/release/bundle/osx
-          zip -r "../../../../dist/freminal-${VERSION}-macos-arm64.app.zip" *.app
-          cd ../../../..
+          zip -r "dist/freminal-${VERSION}-macos-arm64.app.zip" Freminal.app
           cp target/release/freminal "dist/freminal-${VERSION}-macos-arm64"
 
       - name: Upload artifacts
