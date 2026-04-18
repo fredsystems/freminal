@@ -199,6 +199,7 @@ jobs:
           password: ${{ secrets.APPLE_ID_PASSWORD }}
           apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
           app-path: target/release/bundle/osx/Freminal.app
+          entitlements-path: assets/macos/entitlements.plist
 
       - name: Extract version
         run: |
