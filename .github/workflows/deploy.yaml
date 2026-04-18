@@ -201,6 +201,28 @@ jobs:
           app-path: target/release/bundle/osx/Freminal.app
           entitlements-path: assets/macos/entitlements.plist
 
+      - name: Fetch notarization log (debug)
+        if: always() && env.MACOS_CERTIFICATE != ''
+        run: |
+          # Find the most recent notarization submission and print its log.
+          # This is invaluable when notarization returns "Invalid".
+          xcrun notarytool history \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" | head -20
+
+          SUBMISSION_ID=$(xcrun notarytool history \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --output-format json | python3 -c "import sys,json; print(json.load(sys.stdin)['history'][0]['id'])")
+
+          echo "Latest submission: $SUBMISSION_ID"
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}"
+
       - name: Extract version
         run: |
           if [[ "$GITHUB_REF_NAME" == v* ]]; then
