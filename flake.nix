@@ -245,11 +245,11 @@
                 pkgs.vttest
                 pkgs.markdownlint-cli2
                 pkgs.cargo-flamegraph
-                pkgs.perf
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.cargo-llvm-cov
                 pkgs.cachix
+                pkgs.perf
               ];
 
               # Extra dev packages provided by mkCheck (includes rustToolchain)
