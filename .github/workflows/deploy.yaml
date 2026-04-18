@@ -189,6 +189,12 @@ jobs:
       - name: Bundle .app
         run: cargo bundle --release -p freminal
 
+      # The signing action zips the app-path as-is, preserving directory
+      # structure.  Apple requires the .app at the zip root, so we copy
+      # it to a flat location first.
+      - name: Stage .app for signing
+        run: cp -R target/release/bundle/osx/Freminal.app ./Freminal.app
+
       - name: Codesign and notarize .app
         if: env.MACOS_CERTIFICATE != ''
         uses: toitlang/action-macos-sign-notarize@v1.3.0
@@ -198,7 +204,7 @@ jobs:
           username: ${{ secrets.APPLE_ID_USERNAME }}
           password: ${{ secrets.APPLE_ID_PASSWORD }}
           apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
-          app-path: target/release/bundle/osx/Freminal.app
+          app-path: Freminal.app
           entitlements-path: assets/macos/entitlements.plist
 
       - name: Fetch notarization log (debug)
@@ -235,9 +241,7 @@ jobs:
       - name: Rename artifacts
         run: |
           mkdir -p dist
-          cd target/release/bundle/osx
-          zip -r "../../../../dist/freminal-${VERSION}-macos-arm64.app.zip" *.app
-          cd ../../../..
+          zip -r "dist/freminal-${VERSION}-macos-arm64.app.zip" Freminal.app
           cp target/release/freminal "dist/freminal-${VERSION}-macos-arm64"
 
       - name: Upload artifacts
