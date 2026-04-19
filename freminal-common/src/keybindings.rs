@@ -519,11 +519,12 @@ impl fmt::Display for KeyCombo {
 impl KeyCombo {
     /// Format this combo using platform-canonical modifier symbols.
     ///
-    /// On macOS: `⌃` (Control), `⌥` (Option/Alt), `⇧` (Shift), `⌘` (Command).
+    /// On macOS: `⌘` (Ctrl mapped to Command), `⌥` (Option/Alt), `⇧` (Shift).
     /// On Linux/Windows: `Ctrl+`, `Shift+`, `Alt+`.
     ///
     /// Note: On macOS, Ctrl in bindings maps to `⌘` (Command) since that is
-    /// the platform's primary modifier. True Control is `⌃`.
+    /// the platform's primary modifier. True Control (`⌃`) is not currently
+    /// representable in the binding model.
     #[must_use]
     pub fn display_platform(&self) -> String {
         use std::fmt::Write;
@@ -2207,11 +2208,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn display_platform_linux_format() {
         // On Linux (the test host), display_platform should produce "Ctrl+Shift+T" style.
         let combo = KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT);
         let displayed = combo.display_platform();
         assert_eq!(displayed, "Ctrl+Shift+T");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn display_platform_macos_format() {
+        let combo = KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT);
+        let displayed = combo.display_platform();
+        assert_eq!(displayed, "\u{2318}\u{21E7}T");
     }
 
     #[test]

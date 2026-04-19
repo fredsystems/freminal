@@ -193,10 +193,10 @@ impl super::FreminalGui {
         use freminal_common::keybindings::KeyAction;
 
         match action {
-            KeyAction::OpenSettings if !self.settings_modal.is_open => {
+            KeyAction::OpenSettings => {
                 if let Some(_sid) = self.settings_window_id {
                     self.pending_focus_settings = true;
-                } else if !self.pending_settings_window {
+                } else if !self.settings_modal.is_open && !self.pending_settings_window {
                     let families = win.terminal_widget.monospace_families();
                     self.settings_modal
                         .open(&self.config, families, win.os_dark_mode);
@@ -210,7 +210,7 @@ impl super::FreminalGui {
             KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
                 trace!("Cannot close tab: {e}");
             }
-            KeyAction::OpenSettings | KeyAction::CloseTab => {}
+            KeyAction::CloseTab => {}
             KeyAction::NextTab => {
                 win.tabs.next_tab();
                 win.tabs.active_tab_mut().active_pane_mut().bell_active = false;

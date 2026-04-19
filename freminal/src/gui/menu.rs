@@ -46,18 +46,14 @@ impl super::FreminalGui {
         let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
             let freminal_resp = ui.menu_button("Freminal", |ui| {
-                let settings_available = !self.settings_modal.is_open;
                 if ui
-                    .add_enabled(
-                        settings_available,
-                        self.menu_button_for("Settings...", KeyAction::OpenSettings),
-                    )
+                    .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
                     .clicked()
                 {
                     if self.settings_window_id.is_some() {
                         // Settings window already exists — focus it.
                         self.pending_focus_settings = true;
-                    } else if !self.pending_settings_window {
+                    } else if !self.settings_modal.is_open && !self.pending_settings_window {
                         let families = win.terminal_widget.monospace_families();
                         self.settings_modal
                             .open(&self.config, families, win.os_dark_mode);

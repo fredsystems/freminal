@@ -1746,7 +1746,7 @@ impl FreminalTerminalWidget {
     /// window's egui context is separate from terminal windows, so we cannot
     /// register chrome fonts here.  The font manager rebuild uses the
     /// last-known `pixels_per_point`.  Each terminal window will pick up the
-    /// egui chrome font update on its next frame via `mark_egui_fonts_dirty`.
+    /// egui chrome font update on its next frame via `flush_egui_fonts_if_dirty`.
     pub fn apply_config_changes_no_ctx(
         &mut self,
         old_config: &Config,

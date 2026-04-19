@@ -540,14 +540,16 @@ impl FreminalGui {
                             new_cfg.theme.active_slug(win.os_dark_mode),
                         )
                     {
-                        if let Err(e) = win
-                            .tabs
-                            .active_tab()
-                            .active_pane()
-                            .input_tx
-                            .send(InputEvent::ThemeChange(theme))
-                        {
-                            error!("Failed to send ThemeChange to PTY thread: {e}");
+                        for tab in win.tabs.iter() {
+                            if let Ok(panes) = tab.pane_tree.iter_panes() {
+                                for pane in panes {
+                                    if let Err(e) =
+                                        pane.input_tx.send(InputEvent::ThemeChange(theme))
+                                    {
+                                        error!("Failed to send ThemeChange to PTY thread: {e}");
+                                    }
+                                }
+                            }
                         }
                         for tab in win.tabs.iter_mut() {
                             if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
@@ -649,16 +651,16 @@ impl FreminalGui {
             SettingsAction::PreviewTheme(slug)
                 if let Some(theme) = freminal_common::themes::by_slug(slug) =>
             {
-                // Send theme preview to all windows.
+                // Send theme preview to all panes in all windows.
                 for win in self.windows.values() {
-                    if let Err(e) = win
-                        .tabs
-                        .active_tab()
-                        .active_pane()
-                        .input_tx
-                        .send(InputEvent::ThemeChange(theme))
-                    {
-                        error!("Failed to send theme preview to PTY thread: {e}");
+                    for tab in win.tabs.iter() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes() {
+                            for pane in panes {
+                                if let Err(e) = pane.input_tx.send(InputEvent::ThemeChange(theme)) {
+                                    error!("Failed to send theme preview to PTY thread: {e}");
+                                }
+                            }
+                        }
                     }
                 }
                 for &wid in self.windows.keys() {
@@ -669,14 +671,14 @@ impl FreminalGui {
                 if let Some(theme) = freminal_common::themes::by_slug(slug) =>
             {
                 for win in self.windows.values() {
-                    if let Err(e) = win
-                        .tabs
-                        .active_tab()
-                        .active_pane()
-                        .input_tx
-                        .send(InputEvent::ThemeChange(theme))
-                    {
-                        error!("Failed to send theme revert to PTY thread: {e}");
+                    for tab in win.tabs.iter() {
+                        if let Ok(panes) = tab.pane_tree.iter_panes() {
+                            for pane in panes {
+                                if let Err(e) = pane.input_tx.send(InputEvent::ThemeChange(theme)) {
+                                    error!("Failed to send theme revert to PTY thread: {e}");
+                                }
+                            }
+                        }
                     }
                 }
                 self.config.ui.background_opacity = *original_opacity;
