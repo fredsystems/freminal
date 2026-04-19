@@ -516,6 +516,37 @@ impl fmt::Display for KeyCombo {
     }
 }
 
+impl KeyCombo {
+    /// Format this combo using platform-canonical modifier symbols.
+    ///
+    /// On macOS: `⌃` (Control), `⌥` (Option/Alt), `⇧` (Shift), `⌘` (Command).
+    /// On Linux/Windows: `Ctrl+`, `Shift+`, `Alt+`.
+    ///
+    /// Note: On macOS, Ctrl in bindings maps to `⌘` (Command) since that is
+    /// the platform's primary modifier. True Control is `⌃`.
+    #[must_use]
+    pub fn display_platform(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::new();
+        if cfg!(target_os = "macos") {
+            // macOS: use symbols, Ctrl→⌘, Alt→⌥, Shift→⇧
+            if self.modifiers.ctrl {
+                s.push('\u{2318}'); // ⌘
+            }
+            if self.modifiers.alt {
+                s.push('\u{2325}'); // ⌥
+            }
+            if self.modifiers.shift {
+                s.push('\u{21E7}'); // ⇧
+            }
+            let _ = write!(s, "{}", self.key);
+        } else {
+            let _ = write!(s, "{}{}", self.modifiers, self.key);
+        }
+        s
+    }
+}
+
 impl FromStr for KeyCombo {
     type Err = KeyBindingError;
 
@@ -2173,5 +2204,40 @@ mod tests {
             });
             assert_eq!(key, parsed, "name→parse roundtrip failed for {key:?}");
         }
+    }
+
+    #[test]
+    fn display_platform_linux_format() {
+        // On Linux (the test host), display_platform should produce "Ctrl+Shift+T" style.
+        let combo = KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT);
+        let displayed = combo.display_platform();
+        assert_eq!(displayed, "Ctrl+Shift+T");
+    }
+
+    #[test]
+    fn display_platform_bare_key() {
+        let combo = KeyCombo::bare(BindingKey::Escape);
+        let displayed = combo.display_platform();
+        assert_eq!(displayed, "Escape");
+    }
+
+    #[test]
+    fn combo_for_returns_bound_action() {
+        let map = BindingMap::default();
+        // NewTab has a default binding of Ctrl+Shift+T.
+        let combo = map.combo_for(KeyAction::NewTab);
+        assert!(combo.is_some(), "NewTab should have a default binding");
+        let combo = combo.unwrap();
+        assert_eq!(combo.key, BindingKey::T);
+        assert!(combo.modifiers.ctrl);
+        assert!(combo.modifiers.shift);
+    }
+
+    #[test]
+    fn combo_for_returns_none_for_unbound() {
+        let map = BindingMap::default();
+        // CloseTab has no default binding.
+        let combo = map.combo_for(KeyAction::CloseTab);
+        assert!(combo.is_none(), "CloseTab should have no default binding");
     }
 }

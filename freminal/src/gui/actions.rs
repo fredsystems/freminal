@@ -194,12 +194,17 @@ impl super::FreminalGui {
 
         match action {
             KeyAction::OpenSettings if !self.settings_modal.is_open => {
-                let families = win.terminal_widget.monospace_families();
-                self.settings_modal
-                    .open(&self.config, families, win.os_dark_mode);
-                self.settings_modal
-                    .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
-                self.settings_owner = Some(window_id);
+                if let Some(_sid) = self.settings_window_id {
+                    self.pending_focus_settings = true;
+                } else if !self.pending_settings_window {
+                    let families = win.terminal_widget.monospace_families();
+                    self.settings_modal
+                        .open(&self.config, families, win.os_dark_mode);
+                    self.settings_modal
+                        .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                    self.settings_owner = Some(window_id);
+                    self.pending_settings_window = true;
+                }
             }
             KeyAction::NewTab => self.spawn_new_tab(win),
             KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {

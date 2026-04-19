@@ -136,6 +136,13 @@ impl<'a> WindowHandle<'a> {
             .push(WindowOp::SetMinimized(id, minimized));
     }
 
+    /// Request that a window be focused (brought to front).
+    pub fn focus_window(&self, id: WindowId) {
+        self.pending_ops
+            .borrow_mut()
+            .push(WindowOp::FocusWindow(id));
+    }
+
     /// Get a clone of the event loop proxy for cross-thread repaint requests.
     pub fn event_loop_proxy(&self) -> RepaintProxy {
         RepaintProxy {
@@ -182,6 +189,7 @@ pub(crate) enum WindowOp {
     SetTitle(WindowId, String),
     SetVisible(WindowId, bool),
     SetMinimized(WindowId, bool),
+    FocusWindow(WindowId),
 }
 
 #[cfg(test)]
