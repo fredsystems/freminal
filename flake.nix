@@ -165,17 +165,8 @@
                   </plist>
                   PLIST
 
-                                    # Icon — generate .icns from PNG via iconutil if available,
-                                    # otherwise copy raw PNG (still works, just single-resolution).
-                                    mkdir -p "$OUT_APP/Resources/freminal.iconset"
-                                    cp assets/icon.png "$OUT_APP/Resources/freminal.iconset/icon_256x256.png"
-                                    if command -v iconutil &>/dev/null; then
-                                      iconutil -c icns -o "$OUT_APP/Resources/freminal.icns" \
-                                        "$OUT_APP/Resources/freminal.iconset"
-                                    else
-                                      cp assets/icon.png "$OUT_APP/Resources/freminal.icns"
-                                    fi
-                                    rm -rf "$OUT_APP/Resources/freminal.iconset"
+                                    # Icon — use pre-generated .icns (multi-resolution, Retina-ready).
+                                    cp assets/macos/freminal.icns "$OUT_APP/Resources/freminal.icns"
                 ''
               else
                 ''

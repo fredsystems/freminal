@@ -536,17 +536,8 @@ in
       source = tomlFormat.generate "freminal-config" configAttrset;
     };
 
-    # On macOS, symlink the .app bundle into ~/Applications so that
-    # Finder, Spotlight, and Launchpad can discover Freminal.
-    home.activation.linkFreminalApp = lib.mkIf pkgs.stdenv.isDarwin (
-      lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        app_src="${cfg.package}/Applications/Freminal.app"
-        app_dst="$HOME/Applications/Freminal.app"
-        if [ -e "$app_src" ]; then
-          $DRY_RUN_CMD rm -rf "$app_dst"
-          $DRY_RUN_CMD cp -RL "$app_src" "$app_dst"
-        fi
-      ''
-    );
+    # On macOS, Home Manager automatically copies .app bundles from
+    # home.packages into ~/Applications/Home Manager Apps/. No custom
+    # activation script is needed.
   };
 }
