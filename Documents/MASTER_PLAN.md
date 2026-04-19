@@ -11,14 +11,14 @@ and plan document maintenance rules.
 
 ### Version Roadmap
 
-| Version | Codename                | Plan Document         | Tasks | Status   |
-| ------- | ----------------------- | --------------------- | ----- | -------- |
-| v0.2.0  | —                       | (Tasks 1–35 below)    | 35    | Done     |
-| v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44 | Active   |
-| v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52 | Complete |
-| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58 | Complete |
-| v0.6.0  | Foundation              | `PLAN_VERSION_060.md` | 62–66 | Pending  |
-| v0.7.0  | Replay & Layouts        | `PLAN_VERSION_070.md` | 59–61 | Pending  |
+| Version | Codename                | Plan Document         | Tasks       | Status   |
+| ------- | ----------------------- | --------------------- | ----------- | -------- |
+| v0.2.0  | —                       | (Tasks 1–35 below)    | 35          | Done     |
+| v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44       | Active   |
+| v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52       | Complete |
+| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58       | Complete |
+| v0.6.0  | Foundation              | `PLAN_VERSION_060.md` | 62–67       | Complete |
+| v0.7.0  | Recording & Layouts     | `PLAN_VERSION_070.md` | 59,61,68,69 | Pending  |
 
 See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
 B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been
@@ -78,9 +78,10 @@ Task 61 (Saved Layouts).
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
 | 53  | Multiple Windows                         | `PLAN_VERSION_050.md` (Task 53)             | Complete | Task 36 (Tabs)       |
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
-| 59  | FREC v2: Multi-Pane Recording            | `PLAN_VERSION_070.md` (Task 59)             | Pending  | Tasks 32, 58         |
-| 60  | Playback v2: Multi-Pane Replay           | `PLAN_VERSION_070.md` (Task 60)             | Pending  | Task 59              |
+| 59  | FREC v2: Recording Overhaul              | `PLAN_VERSION_070.md` (Task 59)             | Pending  | Task 58              |
 | 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_070.md` (Task 61)             | Pending  | Tasks 36, 58         |
+| 68  | Platform Performance Triage              | `PLAN_VERSION_070.md` (Task 68)             | Pending  | None                 |
+| 69  | UI Polish & Settings Completeness        | `PLAN_VERSION_070.md` (Task 69)             | Pending  | None                 |
 | 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_060.md` (Task 62)             | Complete | None                 |
 | 63  | Single-window migration                  | `PLAN_VERSION_060.md` (Task 63)             | Complete | Task 62              |
 | 64  | Multi-window parity                      | `PLAN_VERSION_060.md` (Task 64)             | Complete | Task 63              |
@@ -151,9 +152,10 @@ Task 35 (Kitty Keyboard Protocol) ── independent, can run any time
 
 Task 58 (Built-in Multiplexer) ── depends on Task 36 (Tabs); subsumes A.2 (Split Panes)
 
-Task 59 (FREC v2 Format) ── depends on Tasks 32 (Playback Feature Flag) + 58 (Muxing)
-Task 60 (Playback v2) ── depends on Task 59 (FREC v2 Format)
+Task 59 (FREC v2 Recording) ── depends on Task 58 (Muxing); removes playback + v1 format
 Task 61 (Saved Layouts) ── depends on Tasks 36 (Tabs) + 58 (Muxing); subsumes Task 56
+Task 68 (Platform Performance) ── independent; Windows launch spike + macOS idle CPU
+Task 69 (UI Polish) ── independent; glyphs, settings gaps, search positioning, settings window
 
 Task 62 (freminal-windowing crate) ── independent (new crate, no existing code touched)
 Task 63 (Single-window migration) ── depends on Task 62
@@ -308,18 +310,12 @@ detach/reattach, no status bar. Each pane owns a `TerminalEmulator` via the exis
 function and channel architecture. The pane tree lives on the GUI thread; PTY threads are unaware
 of the tree structure. Large scope (14 subtasks).
 
-**Task 59:** Depends on Tasks 32 (Playback Feature Flag) and 58 (Built-in Muxing). Redesigns the
-FREC recording format from a flat single-stream byte dump to a multi-stream, multi-pane format
-with per-pane PTY output isolation, bidirectional capture (recording bytes sent TO the PTY for
-diagnostics), topology change events (split, close, tab create/close, resize, focus), initial
-metadata (window size, tab/pane topology, Freminal version), and a seek index for random access.
-The goal is exact state reconstruction at any frame. Large scope (10 subtasks).
-
-**Task 60:** Depends on Task 59 (FREC v2 Format). Rebuilds the playback engine to consume v2 files:
-multi-emulator reconstruction from topology snapshots, size adaptation for tiling WM users
-(letterbox default, reflow, scale), forward/backward seek with checkpoint-based rewind, per-pane
-solo mode, speed control, and a timeline scrubber. v1 backward compatibility preserved. Large
-scope (12 subtasks).
+**Task 59:** Depends on Task 58 (Built-in Muxing). Removes all playback code and the
+`playback` feature flag, deletes FREC v1 format, and implements FREC v2 — a rich multi-window,
+multi-pane recording format with per-pane PTY stream isolation, bidirectional capture, keyboard
+and mouse input event logging, topology/window lifecycle events, and a seek index. Updates
+`sequence_decoder.py` to parse v2 format. Recording is always compiled (no feature gate),
+activated at runtime via `--recording-path`. Large scope (12 subtasks).
 
 **Task 61:** Depends on Tasks 36 (Tabs) and 58 (Built-in Muxing). Subsumes Task 56 (Session
 Restore / Startup Commands). TOML-based layout files defining complete multi-tab, multi-pane
@@ -327,7 +323,7 @@ workspace configurations with per-pane working directory, startup command, shell
 environment variables. Variable substitution (`$1`, `${name}`, `$ENV{...}`) for cross-project
 reusability. Save current layout from running session (CWD via `/proc`), layout library in
 `~/.config/freminal/layouts/`, auto-save/restore on exit/launch, and partial application (load
-layout into new tab). Large scope (11 subtasks).
+layout into new tab). Large scope (12 subtasks).
 
 ---
 
@@ -350,30 +346,30 @@ so that v0.7.0 replay/layout work builds on the final windowing architecture.
 
 Task 62 can start any time. Tasks 64 and 65 can run in parallel after Task 63.
 
-### v0.7.0 — Replay & Layouts
+### v0.7.0 — Recording & Layouts
 
 These tasks are defined in `PLAN_VERSION_070.md`. Task 56 (Session Restore) has been moved
-here and subsumed by Task 61 (Saved Layouts). Executed after v0.6.0 so that replay and
-layout features target the final windowing architecture (no eframe).
+here and subsumed by Task 61 (Saved Layouts). Task 60 (Playback v2) has been removed —
+playback is not worth the complexity for multi-window/multi-pane. Executed after v0.6.0
+so that recording and layout features target the final windowing architecture (no eframe).
 
-- **Task 59** — FREC v2: Multi-Pane Recording (depends on Tasks 32, 58)
-- **Task 60** — Playback v2: Multi-Pane Replay (depends on Task 59)
+- **Task 59** — FREC v2: Recording Overhaul (depends on Task 58; removes playback + v1)
 - **Task 61** — Saved Layouts / Session Templates (depends on Tasks 36, 58; subsumes Task 56)
+- **Task 68** — Platform Performance Triage (independent; Windows launch spike + macOS idle CPU)
+- **Task 69** — UI Polish & Settings Completeness (independent; glyphs, settings gaps, search positioning, settings window)
 
-Tasks 59 and 61 can start in parallel (independent of each other). Task 60 starts after
-Task 59 is complete.
+Tasks 59, 61, 68, and 69 can all start in parallel (independent of each other).
 
 ```text
-Complete:     Tasks 1-17, 20-35, 53-55, 57-58
+Complete:     Tasks 1-17, 20-35, 53-55, 57-58, 62-66
               │
 Phase 7:      ├── Task 18 (Update Client) ──┤
               ├── Task 19 (Update Service)   ┤ (parallel, separate repo)
               │
-v0.6.0:       ├── Task 62 (windowing crate) ──► Task 63 (single-window) ──┬──► Task 64 (multi-window) ──► Task 66 (cleanup)
-              │                                                            └──► Task 65 (frame pacing)
-              │
-v0.7.0:       ├── Task 59 (FREC v2 Format) ──► Task 60 (Playback v2)
+v0.7.0:       ├── Task 59 (FREC v2 Recording)
               ├── Task 61 (Saved Layouts)      [parallel with 59]
+              ├── Task 68 (Platform Perf)      [parallel with 59 and 61]
+              └── Task 69 (UI Polish)          [parallel with all]
 ```
 
 ---
@@ -494,7 +490,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_040.md` — v0.4.0 "Search & Protocol" roadmap (Tasks 45–52)
 - `Documents/PLAN_VERSION_050.md` — v0.5.0 "Multi-Instance & Visual" roadmap (Tasks 53–56)
 - `Documents/PLAN_VERSION_060.md` — v0.6.0 "Foundation" roadmap (Tasks 62–66)
-- `Documents/PLAN_VERSION_070.md` — v0.7.0 "Replay & Layouts" roadmap (Tasks 59–61)
+- `Documents/PLAN_VERSION_070.md` — v0.7.0 "Recording & Layouts" roadmap (Tasks 59, 61)
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
 - `config_example.toml` — Current config format

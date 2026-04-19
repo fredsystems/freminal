@@ -1063,11 +1063,7 @@ impl SettingsModal {
         }
 
         // Clear button to unbind this action.
-        if ui
-            .small_button("\u{2715}")
-            .on_hover_text("Unbind")
-            .clicked()
-        {
+        if ui.small_button("X").on_hover_text("Unbind").clicked() {
             self.draft
                 .keybindings
                 .overrides

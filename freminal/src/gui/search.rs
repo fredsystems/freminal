@@ -392,15 +392,15 @@ pub fn show_search_bar(
                         });
 
                         // ← Prev button.
-                        if ui.button("◀").clicked() {
+                        if ui.button("<").clicked() {
                             action = SearchBarAction::Prev;
                         }
                         // → Next button.
-                        if ui.button("▶").clicked() {
+                        if ui.button(">").clicked() {
                             action = SearchBarAction::Next;
                         }
-                        // ✕ Close button.
-                        if ui.button("✕").clicked() {
+                        // Close button.
+                        if ui.button("X").clicked() {
                             action = SearchBarAction::Close;
                         }
                     });

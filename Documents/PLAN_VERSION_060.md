@@ -140,9 +140,9 @@ egui integration for a single window. This is the foundation — no terminal ren
 migration of `freminal` code. The deliverable is a crate that can open a window, run an egui
 frame, and paint it via glow, verified by a minimal example binary.
 
-### 62 Subtasks
+### 62 Subtasks (all complete)
 
-1. **62.1 — Scaffold the crate**
+1. **62.1 — Scaffold the crate** ✓
    Create `freminal-windowing/Cargo.toml` with workspace dependencies. Create `src/lib.rs`
    with the public API types (`App` trait, `WindowId`, `WindowConfig`, `run()`). Add the
    crate to the workspace `members` list in the root `Cargo.toml`. Ensure `cargo check --all`
@@ -235,7 +235,7 @@ Migrate the `freminal` binary from eframe to `freminal-windowing` for the single
 After this task, Freminal opens and runs using the new event loop with full feature parity
 for a single window. eframe remains as a dependency (not yet removed) but is no longer called.
 
-### 63 Subtasks
+### 63 Subtasks (all complete)
 
 1. **63.1 — Implement the `App` trait in `freminal`**
    Create a new `impl freminal_windowing::App for FreminalApp` (or adapt `FreminalGui`).
@@ -310,7 +310,7 @@ Extend `freminal-windowing` to support multiple windows and migrate the multi-wi
 the current eframe deferred-viewport approach. After this task, `Ctrl+Shift+N` opens a new
 peer window with its own GL context, and closing any window closes only that window.
 
-### 64 Subtasks
+### 64 Subtasks (all complete)
 
 1. **64.1 — Multi-window support in freminal-windowing**
    Extend the `ApplicationHandler` to manage a `HashMap<WindowId, WindowState>` where
@@ -388,7 +388,7 @@ With the custom event loop in place, implement true event-driven rendering. The 
 usage when the terminal is idle with a steady cursor, and minimal wakeups when only the cursor
 blink timer is active.
 
-### 65 Subtasks
+### 65 Subtasks (all complete)
 
 1. **65.1 — Demand-driven rendering**
    Each window tracks whether it needs a repaint via a dirty flag. The PTY consumer thread
@@ -440,7 +440,7 @@ blink timer is active.
 Remove the `eframe` dependency entirely. Clean up any remaining eframe artifacts, dead code,
 and transitional scaffolding.
 
-### 66 Subtasks
+### 66 Subtasks (all complete)
 
 1. **66.1 — Remove eframe from Cargo.toml**
    Remove `eframe` from the workspace `[dependencies]` and from `freminal/Cargo.toml`. Add
@@ -644,3 +644,16 @@ Per `agents.md`, each task is complete when:
 4. `cargo-machete` passes
 5. Benchmarks show no unexplained regressions for render changes
 6. Plan document updated with completion status and notes
+
+---
+
+## Completion Tracking
+
+| Task | Started    | Completed  | Notes                                                      |
+| ---- | ---------- | ---------- | ---------------------------------------------------------- |
+| 62   | 2026-04-16 | 2026-04-16 | All 8 subtasks complete on task-62/freminal-windowing      |
+| 63   | 2026-04-16 | 2026-04-16 | All 7 subtasks complete on task-63/single-window-migration |
+| 64   | 2026-04-16 | 2026-04-16 | All 5 subtasks complete on task-64/multi-window-parity     |
+| 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete  |
+| 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references     |
+| 67   |            |            | Pending — deferred window spawn truncation diagnostic      |
