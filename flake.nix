@@ -201,6 +201,7 @@
                 "^res/"
                 "typos.toml"
                 "\\.bin$"
+                "assets/"
               ];
             };
           };
