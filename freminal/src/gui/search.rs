@@ -336,14 +336,17 @@ pub fn show_search_bar(
         0
     };
 
-    // Anchor the search bar to the top-right corner of the terminal area.
+    // Anchor the search bar to the top-right corner of the pane's terminal area.
+    // Use pivot(RIGHT_TOP) so that fixed_pos refers to the Area's right-top corner,
+    // not its top-left.  Do NOT use .anchor() — it overrides fixed_pos and positions
+    // relative to the full window rect, ignoring pane boundaries.
     let anchor_pos = Pos2::new(terminal_rect.right() - 4.0, terminal_rect.top() + 4.0);
 
     let mut action = SearchBarAction::None;
 
     Area::new(egui::Id::new("search_overlay").with(pane_id))
         .order(Order::Foreground)
-        .anchor(Align2::RIGHT_TOP, egui::Vec2::ZERO)
+        .pivot(Align2::RIGHT_TOP)
         .fixed_pos(anchor_pos)
         .interactable(true)
         .show(ui.ctx(), |ui| {
