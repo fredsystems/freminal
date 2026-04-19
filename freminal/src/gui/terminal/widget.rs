@@ -160,8 +160,9 @@ fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
     let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
     ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
 
-    // Request a repaint so the fade-out animation continues next frame.
-    ui.ctx().request_repaint();
+    // Request a repaint so the fade-out animation continues next frame (~60 fps cap).
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
 }
 
 /// Context menu action produced by the right-click popup.
@@ -1378,7 +1379,8 @@ impl FreminalTerminalWidget {
             // Drive the cursor trail animation: request a repaint on the next
             // frame so the interpolation continues smoothly until it completes.
             if cursor_animating {
-                ui.ctx().request_repaint();
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(16));
             }
         }
 

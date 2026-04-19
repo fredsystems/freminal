@@ -108,9 +108,11 @@ impl EguiState {
             .map(|vo| vo.commands.clone())
             .unwrap_or_default();
 
-        if repaint_delay.is_zero() {
-            window.request_redraw();
-        }
+        // Do NOT call `window.request_redraw()` here — let the event loop
+        // manage scheduling via `repaint_at` / `about_to_wait`.  Calling
+        // `request_redraw()` directly bypasses `ControlFlow::WaitUntil` and
+        // causes an unbounded render loop on platforms where `swap_buffers`
+        // returns immediately (macOS with vsync disabled).
 
         FrameOutput {
             commands,
