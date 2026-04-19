@@ -4,7 +4,9 @@
 // https://opensource.org/licenses/MIT.
 
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
-use freminal_common::config::{self, Config, CursorShapeConfig, TabBarPosition, ThemeMode};
+use freminal_common::config::{
+    self, BackgroundImageMode, Config, CursorShapeConfig, TabBarPosition, ThemeMode,
+};
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
 use std::path::PathBuf;
@@ -686,6 +688,122 @@ impl SettingsModal {
         ui.colored_label(
             egui::Color32::GRAY,
             "On X11, requires a running compositor (e.g. picom).",
+        );
+
+        self.show_ui_background_image(ui);
+        self.show_ui_shader(ui);
+    }
+
+    /// Background image controls for the UI tab.
+    fn show_ui_background_image(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Background Image:");
+        let mut bg_image_text = self
+            .draft
+            .ui
+            .background_image
+            .as_ref()
+            .map_or_else(String::new, |p| p.display().to_string());
+        let bg_response = ui.text_edit_singleline(&mut bg_image_text);
+        if bg_response.changed() {
+            self.draft.ui.background_image = if bg_image_text.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(bg_image_text))
+            };
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Path to a background image (PNG, JPEG, WebP). Leave empty to disable.",
+        );
+
+        ui.add_space(8.0);
+
+        ui.label("Background Image Mode:");
+        let current_mode = self.draft.ui.background_image_mode;
+        ComboBox::from_id_salt("bg_image_mode")
+            .selected_text(match current_mode {
+                BackgroundImageMode::Fill => "Fill",
+                BackgroundImageMode::Fit => "Fit",
+                BackgroundImageMode::Cover => "Cover",
+                BackgroundImageMode::Tile => "Tile",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Fill,
+                    "Fill (stretch, ignore aspect ratio)",
+                );
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Fit,
+                    "Fit (letterbox, preserve aspect ratio)",
+                );
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Cover,
+                    "Cover (crop, preserve aspect ratio)",
+                );
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Tile,
+                    "Tile (repeat in both dimensions)",
+                );
+            });
+
+        ui.add_space(8.0);
+
+        ui.label("Background Image Opacity:");
+        ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Controls the opacity of the background image overlay.",
+        );
+    }
+
+    /// Custom shader controls for the UI tab.
+    fn show_ui_shader(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Custom Shader:");
+        let mut shader_text = self
+            .draft
+            .shader
+            .path
+            .as_ref()
+            .map_or_else(String::new, |p| p.display().to_string());
+        let shader_response = ui.text_edit_singleline(&mut shader_text);
+        if shader_response.changed() {
+            self.draft.shader.path = if shader_text.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(shader_text))
+            };
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Path to a GLSL fragment shader for post-processing. Leave empty to disable.",
+        );
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Uniforms: sampler2D u_terminal, vec2 u_resolution, float u_time.",
+        );
+
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Automatically recompile the shader when the file changes on disk.",
         );
     }
 
