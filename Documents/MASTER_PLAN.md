@@ -80,8 +80,8 @@ Task 61 (Saved Layouts).
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
 | 59  | FREC v2: Recording Overhaul              | `PLAN_VERSION_070.md` (Task 59)             | Pending  | Task 58              |
 | 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_070.md` (Task 61)             | Pending  | Tasks 36, 58         |
-| 68  | Platform Performance Triage              | `PLAN_VERSION_070.md` (Task 68)             | Pending  | None                 |
-| 69  | UI Polish & Settings Completeness        | `PLAN_VERSION_070.md` (Task 69)             | Pending  | None                 |
+| 68  | Platform Performance Triage              | `PLAN_VERSION_070.md` (Task 68)             | Complete | None                 |
+| 69  | UI Polish & Settings Completeness        | `PLAN_VERSION_070.md` (Task 69)             | Complete | None                 |
 | 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_060.md` (Task 62)             | Complete | None                 |
 | 63  | Single-window migration                  | `PLAN_VERSION_060.md` (Task 63)             | Complete | Task 62              |
 | 64  | Multi-window parity                      | `PLAN_VERSION_060.md` (Task 64)             | Complete | Task 63              |
@@ -478,6 +478,8 @@ Update this section as tasks complete:
 | 64   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-64/multi-window-parity                  |
 | 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete             |
 | 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                |
+| 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                    |
+| 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window            |
 
 ---
 
