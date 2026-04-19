@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use egui;
+use freminal_common::keybindings::KeyAction;
 #[cfg(feature = "playback")]
 use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
@@ -13,6 +14,16 @@ use super::tabs::Tab;
 use super::window::PerWindowState;
 
 impl super::FreminalGui {
+    /// Create a `Button` with the shortcut label for `action` from the active
+    /// binding map, using platform-canonical modifier symbols.
+    fn menu_button_for(&self, label: &str, action: KeyAction) -> egui::Button<'_> {
+        let btn = egui::Button::new(label);
+        if let Some(combo) = self.binding_map.combo_for(action) {
+            btn.shortcut_text(combo.display_platform())
+        } else {
+            btn
+        }
+    }
     /// Show the top menu bar.
     ///
     /// Contains a "Freminal" menu with Settings and Quit entries, a "Tab"
@@ -35,17 +46,22 @@ impl super::FreminalGui {
         let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
             let freminal_resp = ui.menu_button("Freminal", |ui| {
-                let settings_available = !self.settings_modal.is_open;
                 if ui
-                    .add_enabled(settings_available, egui::Button::new("Settings..."))
+                    .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
                     .clicked()
                 {
-                    let families = win.terminal_widget.monospace_families();
-                    self.settings_modal
-                        .open(&self.config, families, win.os_dark_mode);
-                    self.settings_modal
-                        .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
-                    self.settings_owner = Some(window_id);
+                    if self.settings_window_id.is_some() {
+                        // Settings window already exists — focus it.
+                        self.pending_focus_settings = true;
+                    } else if !self.settings_modal.is_open && !self.pending_settings_window {
+                        let families = win.terminal_widget.monospace_families();
+                        self.settings_modal
+                            .open(&self.config, families, win.os_dark_mode);
+                        self.settings_modal
+                            .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                        self.settings_owner = Some(window_id);
+                        self.pending_settings_window = true;
+                    }
                     ui.close();
                 }
 
@@ -60,35 +76,7 @@ impl super::FreminalGui {
             }
 
             let tab_resp = ui.menu_button("Tab", |ui| {
-                if ui.button("New Tab").clicked() {
-                    menu_action = TabBarAction::NewTab;
-                    ui.close();
-                }
-
-                let active = win.tabs.active_index();
-                let can_close = win.tabs.tab_count() > 1;
-                if ui
-                    .add_enabled(can_close, egui::Button::new("Close Tab"))
-                    .clicked()
-                {
-                    menu_action = TabBarAction::Close(active);
-                    ui.close();
-                }
-
-                ui.separator();
-
-                if ui.button("Next Tab").clicked() {
-                    let next = (active + 1) % win.tabs.tab_count();
-                    menu_action = TabBarAction::SwitchTo(next);
-                    ui.close();
-                }
-
-                if ui.button("Previous Tab").clicked() {
-                    let count = win.tabs.tab_count();
-                    let prev = if active == 0 { count - 1 } else { active - 1 };
-                    menu_action = TabBarAction::SwitchTo(prev);
-                    ui.close();
-                }
+                menu_action = self.show_tab_menu(ui, win);
             });
             if tab_resp.inner.is_some() {
                 any_menu_open = true;
@@ -102,7 +90,10 @@ impl super::FreminalGui {
             }
 
             let window_resp = ui.menu_button("Window", |ui| {
-                if ui.button("New Window").clicked() {
+                if ui
+                    .add(self.menu_button_for("New Window", KeyAction::NewWindow))
+                    .clicked()
+                {
                     win.pending_new_window = true;
                     ui.close();
                 }
@@ -138,16 +129,74 @@ impl super::FreminalGui {
         (menu_action, any_menu_open)
     }
 
+    /// Render the "Tab" dropdown menu contents.
+    ///
+    /// Returns a `TabBarAction` if the user clicked a tab management item.
+    fn show_tab_menu(&self, ui: &mut egui::Ui, win: &PerWindowState) -> TabBarAction {
+        if ui
+            .add(self.menu_button_for("New Tab", KeyAction::NewTab))
+            .clicked()
+        {
+            ui.close();
+            return TabBarAction::NewTab;
+        }
+
+        let active = win.tabs.active_index();
+        let can_close = win.tabs.tab_count() > 1;
+        if ui
+            .add_enabled(
+                can_close,
+                self.menu_button_for("Close Tab", KeyAction::CloseTab),
+            )
+            .clicked()
+        {
+            ui.close();
+            return TabBarAction::Close(active);
+        }
+
+        ui.separator();
+
+        if ui
+            .add(self.menu_button_for("Next Tab", KeyAction::NextTab))
+            .clicked()
+        {
+            let next = (active + 1) % win.tabs.tab_count();
+            ui.close();
+            return TabBarAction::SwitchTo(next);
+        }
+
+        if ui
+            .add(self.menu_button_for("Previous Tab", KeyAction::PrevTab))
+            .clicked()
+        {
+            let count = win.tabs.tab_count();
+            let prev = if active == 0 { count - 1 } else { active - 1 };
+            ui.close();
+            return TabBarAction::SwitchTo(prev);
+        }
+
+        TabBarAction::None
+    }
+
     /// Render the "Pane" dropdown menu contents.
     ///
     /// Extracted from `show_menu_bar` to keep that function under the
     /// `too_many_lines` clippy limit.
     pub(super) fn show_pane_menu(&self, ui: &mut egui::Ui, win: &mut PerWindowState) {
-        if ui.button("Split Vertical (Left | Right)").clicked() {
+        if ui
+            .add(self.menu_button_for("Split Vertical (Left | Right)", KeyAction::SplitVertical))
+            .clicked()
+        {
             self.spawn_split_pane(win, super::panes::SplitDirection::Horizontal);
             ui.close();
         }
-        if ui.button("Split Horizontal (Top / Bottom)").clicked() {
+        if ui
+            .add(self.menu_button_for(
+                "Split Horizontal (Top / Bottom)",
+                KeyAction::SplitHorizontal,
+            ))
+            .clicked()
+        {
             self.spawn_split_pane(win, super::panes::SplitDirection::Vertical);
             ui.close();
         }
@@ -157,7 +206,10 @@ impl super::FreminalGui {
         let can_close_pane = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
         if ui
-            .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
+            .add_enabled(
+                can_close_pane,
+                self.menu_button_for("Close Pane", KeyAction::ClosePane),
+            )
             .clicked()
         {
             win.pending_close_pane = true;
@@ -173,7 +225,10 @@ impl super::FreminalGui {
         let can_zoom = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
         if ui
-            .add_enabled(can_zoom, egui::Button::new(zoom_label))
+            .add_enabled(
+                can_zoom,
+                self.menu_button_for(zoom_label, KeyAction::ZoomPane),
+            )
             .clicked()
         {
             let tab = win.tabs.active_tab_mut();

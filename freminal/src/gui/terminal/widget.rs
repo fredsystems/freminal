@@ -687,6 +687,11 @@ pub struct FreminalTerminalWidget {
     /// the settings modal to register a temporary preview font without losing
     /// the original font set.
     base_font_defs: egui::FontDefinitions,
+    /// Set by `apply_config_changes_no_ctx` when the font family or size
+    /// changed but no egui context was available to register the new fonts.
+    /// Cleared on the next frame when the terminal window calls
+    /// `flush_egui_fonts_if_dirty`.
+    egui_fonts_dirty: bool,
 }
 
 impl FreminalTerminalWidget {
@@ -711,6 +716,7 @@ impl FreminalTerminalWidget {
                 config.cursor.trail_duration_ms,
             )),
             base_font_defs,
+            egui_fonts_dirty: false,
         }
     }
 
@@ -734,6 +740,20 @@ impl FreminalTerminalWidget {
     #[must_use]
     pub fn load_font_bytes(&self, family: &str) -> Option<Vec<u8>> {
         self.font_manager.load_font_bytes_for_family(family)
+    }
+
+    /// If the egui chrome fonts were marked dirty by a no-ctx config change,
+    /// re-register them now with the provided context and clear the flag.
+    pub fn flush_egui_fonts_if_dirty(&mut self, ctx: &egui::Context, config: &Config) {
+        if self.egui_fonts_dirty {
+            self.egui_fonts_dirty = false;
+            let new_font_config = FontConfig {
+                size: config.font.size,
+                user_font: config.font.family.clone(),
+                ..FontConfig::default()
+            };
+            self.base_font_defs = setup_font_files(ctx, &new_font_config);
+        }
     }
 
     /// Return a reference to the base egui `FontDefinitions` (without any
@@ -798,6 +818,7 @@ impl FreminalTerminalWidget {
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
+        pane_id: crate::gui::panes::PaneId,
     ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1546,8 +1567,13 @@ impl FreminalTerminalWidget {
         // Run search refresh when query changed (outside the !snap.skip_draw block
         // to ensure it fires even on identical content frames).
         if view_state.search_state.is_open {
-            let bar_action =
-                show_search_bar(ui, view_state, terminal_rect, search_error.as_deref());
+            let bar_action = show_search_bar(
+                ui,
+                view_state,
+                terminal_rect,
+                search_error.as_deref(),
+                pane_id,
+            );
             match bar_action {
                 SearchBarAction::Next => {
                     view_state.search_state.next_match();
@@ -1710,6 +1736,37 @@ impl FreminalTerminalWidget {
                 ..FontConfig::default()
             };
             self.base_font_defs = setup_font_files(ctx, &new_font_config);
+        }
+        needs_pane_atlas_clear
+    }
+
+    /// Apply config changes without an egui context.
+    ///
+    /// Used when the standalone settings window applies changes — the settings
+    /// window's egui context is separate from terminal windows, so we cannot
+    /// register chrome fonts here.  The font manager rebuild uses the
+    /// last-known `pixels_per_point`.  Each terminal window will pick up the
+    /// egui chrome font update on its next frame via `flush_egui_fonts_if_dirty`.
+    pub fn apply_config_changes_no_ctx(
+        &mut self,
+        old_config: &Config,
+        new_config: &Config,
+    ) -> bool {
+        let pixels_per_point = self.font_manager.pixels_per_point();
+        let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
+        let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
+        let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
+        self.ligatures = new_config.font.ligatures;
+        self.cursor_trail = new_config.cursor.trail;
+        self.cursor_trail_duration =
+            Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
+
+        // Mark egui chrome fonts as needing update — will be applied on the
+        // next frame when this window's update() runs with a real ctx.
+        let font_changed = old_config.font.family != new_config.font.family
+            || (old_config.font.size - new_config.font.size).abs() > f32::EPSILON;
+        if font_changed {
+            self.egui_fonts_dirty = true;
         }
         needs_pane_atlas_clear
     }

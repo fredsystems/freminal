@@ -545,6 +545,35 @@ Coverage target: 100% across crates.
 - Do NOT create new markdown files unless explicitly requested
 - If intent is unclear, stop and ask
 
+### FREC Recording Analysis
+
+When analyzing FREC recording files (`.frec`, `.bin`, or any file produced by `--recording-path`),
+agents MUST use `sequence_decoder.py` in the repository root. Do NOT write ad-hoc parsers,
+one-off Python scripts, or inline binary parsing code to read FREC files. The decoder supports
+filtering by pane, window, and event type, escape sequence decoding, and timing analysis.
+
+Usage:
+
+```sh
+# Basic decode
+python3 sequence_decoder.py --recording-path=path/to/file
+
+# With escape sequence conversion and timing
+python3 sequence_decoder.py --recording-path=path/to/file --convert-escape --show-timing
+
+# Filter to a specific pane (v2 only)
+python3 sequence_decoder.py --recording-path=path/to/file --pane 0
+
+# Show only topology/lifecycle events (v2 only)
+python3 sequence_decoder.py --recording-path=path/to/file --events-only
+
+# Show recording summary (v2 only)
+python3 sequence_decoder.py --recording-path=path/to/file --summary
+```
+
+If the decoder lacks a feature needed for the current task, extend the decoder rather than
+working around it.
+
 ---
 
 ## Documentation Rules

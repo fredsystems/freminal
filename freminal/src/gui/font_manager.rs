@@ -635,6 +635,12 @@ impl FontManager {
     /// This is a lightweight per-frame check intended to handle monitor DPI
     /// changes (e.g. dragging the window to a `HiDPI` display) without requiring
     /// a full config reload.
+    /// Returns the currently-stored display scale factor.
+    #[must_use]
+    pub const fn pixels_per_point(&self) -> f32 {
+        self.pixels_per_point
+    }
+
     pub fn update_pixels_per_point(&mut self, pixels_per_point: f32) -> bool {
         if (pixels_per_point - self.pixels_per_point).abs() <= f32::EPSILON {
             return false;

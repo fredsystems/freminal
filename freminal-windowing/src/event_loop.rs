@@ -184,6 +184,11 @@ impl<A: App> Handler<A> {
                         state.window.set_minimized(minimized);
                     }
                 }
+                WindowOp::FocusWindow(id) => {
+                    if let Some(state) = self.windows.get(&id.0) {
+                        state.window.focus_window();
+                    }
+                }
             }
         }
     }

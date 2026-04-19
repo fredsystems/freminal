@@ -3,8 +3,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Slider, Ui};
-use freminal_common::config::{self, Config, CursorShapeConfig, TabBarPosition, ThemeMode};
+use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
+use freminal_common::config::{
+    self, BackgroundImageMode, Config, CursorShapeConfig, TabBarPosition, ThemeMode,
+};
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
 use std::path::PathBuf;
@@ -246,6 +248,118 @@ impl SettingsModal {
     ///   2. Hot-reload any settings that can change at runtime.
     ///
     /// `os_dark_mode` is used to resolve `ThemeMode::Auto` for preview/revert.
+    /// Render the settings UI as a standalone window (fills the entire egui context).
+    ///
+    /// Unlike [`show()`], which creates a floating `egui::Window` inside a parent
+    /// terminal window, this method renders directly into a `CentralPanel`.
+    /// Used when the settings dialog is its own OS window.
+    pub fn show_standalone(&mut self, ctx: &egui::Context, os_dark_mode: bool) -> SettingsAction {
+        self.os_dark_mode = os_dark_mode;
+        if !self.is_open {
+            return SettingsAction::None;
+        }
+
+        let mut action = SettingsAction::None;
+
+        let theme_before = self.draft.theme.active_slug(self.os_dark_mode).to_string();
+        let opacity_before = self.draft.ui.background_opacity;
+
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("settings_root"),
+            egui::UiBuilder::default(),
+        );
+
+        // Bottom bar must be laid out first (Panel reserves space from the root).
+        let is_read_only = self.read_only_reason.is_some();
+        Panel::bottom("settings_bottom_bar").show_inside(&mut root_ui, |ui| {
+            ui.add_space(4.0);
+            if let Some(msg) = &self.status_message {
+                ui.colored_label(egui::Color32::YELLOW, msg);
+            }
+            ui.horizontal(|ui| {
+                let reset_btn = egui::Button::new("Reset to Defaults");
+                if ui.add_enabled(!is_read_only, reset_btn).clicked() {
+                    self.draft = Config::default();
+                    self.status_message = Some("Reset to defaults (not saved yet)".to_string());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let apply_btn = egui::Button::new("Apply");
+                    if ui.add_enabled(!is_read_only, apply_btn).clicked() {
+                        action = self.try_apply();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.is_open = false;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        });
+
+        egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
+            ui.heading("Settings");
+            ui.add_space(4.0);
+
+            // --- Read-only banner ---
+            if let Some(reason) = &self.read_only_reason {
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(80, 60, 20))
+                    .corner_radius(4.0)
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.colored_label(egui::Color32::from_rgb(255, 220, 100), reason);
+                    });
+                ui.add_space(4.0);
+            }
+
+            // --- Tab bar ---
+            ui.horizontal(|ui| {
+                for tab in SettingsTab::ALL {
+                    ui.selectable_value(&mut self.active_tab, tab, tab.label());
+                }
+            });
+            ui.separator();
+
+            // --- Tab content ---
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    if is_read_only {
+                        ui.disable();
+                    }
+                    self.draw_active_tab(ui);
+                });
+        });
+
+        // Revert / preview logic (same as show())
+        if !self.is_open && action != SettingsAction::Applied {
+            let theme_changed = self.original_theme_slug != theme_before;
+            let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
+            if theme_changed {
+                return SettingsAction::RevertTheme(
+                    self.original_theme_slug.clone(),
+                    self.original_opacity,
+                );
+            } else if opacity_changed {
+                return SettingsAction::RevertOpacity(self.original_opacity);
+            }
+            return action;
+        }
+
+        if (self.draft.ui.background_opacity - opacity_before).abs() > f32::EPSILON
+            && action != SettingsAction::Applied
+        {
+            return SettingsAction::PreviewOpacity(self.draft.ui.background_opacity);
+        }
+
+        let theme_after = self.draft.theme.active_slug(self.os_dark_mode).to_string();
+        if theme_after != theme_before && action != SettingsAction::Applied {
+            return SettingsAction::PreviewTheme(theme_after);
+        }
+
+        action
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, os_dark_mode: bool) -> SettingsAction {
         self.os_dark_mode = os_dark_mode;
         if !self.is_open {
@@ -687,6 +801,122 @@ impl SettingsModal {
             egui::Color32::GRAY,
             "On X11, requires a running compositor (e.g. picom).",
         );
+
+        self.show_ui_background_image(ui);
+        self.show_ui_shader(ui);
+    }
+
+    /// Background image controls for the UI tab.
+    fn show_ui_background_image(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Background Image:");
+        let mut bg_image_text = self
+            .draft
+            .ui
+            .background_image
+            .as_ref()
+            .map_or_else(String::new, |p| p.display().to_string());
+        let bg_response = ui.text_edit_singleline(&mut bg_image_text);
+        if bg_response.changed() {
+            self.draft.ui.background_image = if bg_image_text.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(bg_image_text))
+            };
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Path to a background image (PNG, JPEG, WebP). Leave empty to disable.",
+        );
+
+        ui.add_space(8.0);
+
+        ui.label("Background Image Mode:");
+        let current_mode = self.draft.ui.background_image_mode;
+        ComboBox::from_id_salt("bg_image_mode")
+            .selected_text(match current_mode {
+                BackgroundImageMode::Fill => "Fill",
+                BackgroundImageMode::Fit => "Fit",
+                BackgroundImageMode::Cover => "Cover",
+                BackgroundImageMode::Tile => "Tile",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Fill,
+                    "Fill (stretch, ignore aspect ratio)",
+                );
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Fit,
+                    "Fit (letterbox, preserve aspect ratio)",
+                );
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Cover,
+                    "Cover (crop, preserve aspect ratio)",
+                );
+                ui.selectable_value(
+                    &mut self.draft.ui.background_image_mode,
+                    BackgroundImageMode::Tile,
+                    "Tile (repeat in both dimensions)",
+                );
+            });
+
+        ui.add_space(8.0);
+
+        ui.label("Background Image Opacity:");
+        ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Controls the opacity of the background image overlay.",
+        );
+    }
+
+    /// Custom shader controls for the UI tab.
+    fn show_ui_shader(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Custom Shader:");
+        let mut shader_text = self
+            .draft
+            .shader
+            .path
+            .as_ref()
+            .map_or_else(String::new, |p| p.display().to_string());
+        let shader_response = ui.text_edit_singleline(&mut shader_text);
+        if shader_response.changed() {
+            self.draft.shader.path = if shader_text.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(shader_text))
+            };
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Path to a GLSL fragment shader for post-processing. Leave empty to disable.",
+        );
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Uniforms: sampler2D u_terminal, vec2 u_resolution, float u_time.",
+        );
+
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Automatically recompile the shader when the file changes on disk.",
+        );
     }
 
     fn show_tabs_tab(&mut self, ui: &mut Ui) {
@@ -1063,11 +1293,7 @@ impl SettingsModal {
         }
 
         // Clear button to unbind this action.
-        if ui
-            .small_button("\u{2715}")
-            .on_hover_text("Unbind")
-            .clicked()
-        {
+        if ui.small_button("X").on_hover_text("Unbind").clicked() {
             self.draft
                 .keybindings
                 .overrides
