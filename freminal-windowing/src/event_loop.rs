@@ -224,10 +224,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         event: WindowEvent,
     ) {
         // Mouse-motion events arrive at 100+ Hz on macOS.  We pass them to
-        // egui (for pointer position tracking needed by clicks and hover) but
-        // return immediately — no repaint scheduling, no control-flow update.
-        // The CPU overhead from winit's Objective-C event dispatch is
-        // unavoidable platform cost (observed equally in Ghostty and WezTerm).
+        // egui for pointer position tracking but only schedule a repaint if
+        // egui actually wants one (e.g. menu hover highlight).  We skip the
+        // full window_event path to avoid unnecessary work.
         if matches!(
             event,
             WindowEvent::CursorMoved { .. }
@@ -235,8 +234,17 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 | WindowEvent::CursorLeft { .. }
         ) {
             if let Some(state) = self.windows.get_mut(&winit_id) {
-                let _ = state.egui.on_window_event(&state.window, &event);
+                let response = state.egui.on_window_event(&state.window, &event);
+                if response.repaint {
+                    let deadline = Instant::now() + std::time::Duration::from_millis(16);
+                    state.repaint_at = Some(
+                        state
+                            .repaint_at
+                            .map_or(deadline, |existing| existing.min(deadline)),
+                    );
+                }
             }
+            self.update_control_flow(event_loop);
             return;
         }
 
