@@ -104,6 +104,20 @@ pub(super) fn read_clipboard_base64() -> String {
     }
 }
 
+/// Flags for [`handle_window_manipulation`] that control which commands are
+/// honoured for a given pane.
+#[allow(clippy::struct_excessive_bools)]
+pub(super) struct WindowManipFlags {
+    /// Whether clipboard read requests are allowed by policy.
+    pub allow_clipboard_read: bool,
+    /// Whether this pane is the fully-active pane (active tab + active pane).
+    pub is_active: bool,
+    /// Whether the window currently has OS focus.
+    pub window_focused: bool,
+    /// Whether this pane is the only pane in its tab (no splits).
+    pub is_only_pane: bool,
+}
+
 /// Drain and dispatch all pending [`WindowCommand`]s for this frame.
 ///
 /// ## Flow
@@ -151,7 +165,7 @@ pub(super) fn read_clipboard_base64() -> String {
 // responses, title stack, clipboard. Each variant requires distinct context (ui, pty_write_tx,
 // title_stack). Splitting further would scatter a cohesive protocol handler.
 // All arguments are required context that cannot be easily grouped without obscuring intent.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn handle_window_manipulation(
     ui: &egui::Ui,
     window_cmd_rx: &Receiver<WindowCommand>,
@@ -164,9 +178,7 @@ pub(super) fn handle_window_manipulation(
     bell_active: &mut bool,
     bell_since: &mut Option<Instant>,
     bell_mode: BellMode,
-    allow_clipboard_read: bool,
-    is_active: bool,
-    window_focused: bool,
+    flags: &WindowManipFlags,
 ) {
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
@@ -188,18 +200,26 @@ pub(super) fn handle_window_manipulation(
             | WindowManipulation::NotFullScreen
             | WindowManipulation::FullScreen
             | WindowManipulation::ToggleFullScreen
-                if !is_active => {}
+                if !flags.is_active => {}
+
+            // ── Resize commands from split panes: suppress ───────────
+            // A pane sharing space in a split must not resize the OS
+            // window to its own dimensions — that would shrink the
+            // window to a fraction of its intended size.
+            WindowManipulation::ResizeWindow(_, _)
+            | WindowManipulation::ResizeWindowToLinesAndColumns(_, _)
+                if !flags.is_only_pane => {}
 
             // ── Title: inactive tabs update their own title only ─────
-            WindowManipulation::SetTitleBarText(title) if !is_active => {
+            WindowManipulation::SetTitleBarText(title) if !flags.is_active => {
                 tab_title.clone_from(&title);
             }
 
             // ── Title stack: inactive tabs save their own tab title ──
-            WindowManipulation::SaveWindowTitleToStack if !is_active => {
+            WindowManipulation::SaveWindowTitleToStack if !flags.is_active => {
                 title_stack.push(tab_title.clone());
             }
-            WindowManipulation::RestoreWindowTitleFromStack if !is_active => {
+            WindowManipulation::RestoreWindowTitleFromStack if !flags.is_active => {
                 if let Some(title) = title_stack.pop() {
                     tab_title.clone_from(&title);
                 } else {
@@ -441,7 +461,7 @@ pub(super) fn handle_window_manipulation(
             // user has opted in via [security] allow_clipboard_read = true.
             // Otherwise respond with an empty payload (safe default).
             WindowManipulation::QueryClipboard(sel) => {
-                let payload = if allow_clipboard_read {
+                let payload = if flags.allow_clipboard_read {
                     read_clipboard_base64()
                 } else {
                     tracing::debug!(
@@ -461,7 +481,7 @@ pub(super) fn handle_window_manipulation(
                     *bell_active = true;
                     *bell_since = Some(Instant::now());
 
-                    if !window_focused {
+                    if !flags.window_focused {
                         ui.ctx()
                             .send_viewport_cmd(ViewportCommand::RequestUserAttention(
                                 egui::UserAttentionType::Informational,

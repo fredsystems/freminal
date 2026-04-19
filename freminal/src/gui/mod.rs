@@ -1286,6 +1286,7 @@ impl freminal_windowing::App for FreminalGui {
                 .window_focused;
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
+                let is_only_pane = tab.pane_tree.pane_count().unwrap_or(1) == 1;
                 if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
                     for pane in panes {
                         let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
@@ -1301,9 +1302,12 @@ impl freminal_windowing::App for FreminalGui {
                             &mut pane.bell_active,
                             &mut pane.view_state.bell_since,
                             self.config.bell.mode,
-                            self.config.security.allow_clipboard_read,
-                            is_fully_active,
-                            window_focused,
+                            &rendering::WindowManipFlags {
+                                allow_clipboard_read: self.config.security.allow_clipboard_read,
+                                is_active: is_fully_active,
+                                window_focused,
+                                is_only_pane,
+                            },
                         );
                     }
                 }
