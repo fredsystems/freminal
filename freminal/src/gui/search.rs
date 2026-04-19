@@ -31,6 +31,7 @@ use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 use regex::Regex;
 
 use super::{
+    panes::PaneId,
     renderer::MatchHighlight,
     view_state::{MatchSpan, SearchState, ViewState},
 };
@@ -326,6 +327,7 @@ pub fn show_search_bar(
     view_state: &mut ViewState,
     terminal_rect: Rect,
     error_msg: Option<&str>,
+    pane_id: PaneId,
 ) -> SearchBarAction {
     let match_count = view_state.search_state.matches.len();
     let current = if match_count > 0 {
@@ -339,7 +341,7 @@ pub fn show_search_bar(
 
     let mut action = SearchBarAction::None;
 
-    Area::new(egui::Id::new("search_overlay"))
+    Area::new(egui::Id::new("search_overlay").with(pane_id))
         .order(Order::Foreground)
         .anchor(Align2::RIGHT_TOP, egui::Vec2::ZERO)
         .fixed_pos(anchor_pos)

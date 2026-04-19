@@ -1397,6 +1397,7 @@ impl freminal_windowing::App for FreminalGui {
                             &self.binding_map,
                             is_echo_off,
                             is_active,
+                            pane_id,
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;

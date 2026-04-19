@@ -798,6 +798,7 @@ impl FreminalTerminalWidget {
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
+        pane_id: crate::gui::panes::PaneId,
     ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1546,8 +1547,13 @@ impl FreminalTerminalWidget {
         // Run search refresh when query changed (outside the !snap.skip_draw block
         // to ensure it fires even on identical content frames).
         if view_state.search_state.is_open {
-            let bar_action =
-                show_search_bar(ui, view_state, terminal_rect, search_error.as_deref());
+            let bar_action = show_search_bar(
+                ui,
+                view_state,
+                terminal_rect,
+                search_error.as_deref(),
+                pane_id,
+            );
             match bar_action {
                 SearchBarAction::Next => {
                     view_state.search_state.next_match();
