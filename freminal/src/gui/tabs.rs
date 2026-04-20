@@ -388,6 +388,7 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
             ))),

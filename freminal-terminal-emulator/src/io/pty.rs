@@ -59,6 +59,11 @@ pub struct FreminalPtyInputOutput {
     /// at its default `false`.  Read by the GUI via a cheap `Relaxed` load
     /// without any locking overhead.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// OS process ID of the PTY child shell.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    pub child_pid: Option<u32>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -136,6 +141,11 @@ pub struct RunTerminalResult {
     /// reads it atomically when building snapshots.
     /// `Arc` lets both threads share ownership without a lock.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// OS process ID of the PTY child (shell or direct command).
+    ///
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    pub child_pid: Option<u32>,
 }
 
 /// Process a single `PtyWrite` message: either write data or resize the PTY.
@@ -319,6 +329,7 @@ pub fn run_terminal(
     }
 
     let mut child = pair.slave.spawn_command(cmd)?;
+    let child_pid = child.process_id();
 
     // Release any handles owned by the slave: we don't need it now
     // that we've spawned the child.
@@ -481,6 +492,7 @@ pub fn run_terminal(
     Ok(RunTerminalResult {
         child_exit_rx,
         echo_off,
+        child_pid,
     })
 }
 
@@ -517,6 +529,7 @@ impl FreminalPtyInputOutput {
             _termcaps: termcaps,
             child_exit_rx: result.child_exit_rx,
             echo_off: result.echo_off,
+            child_pid: result.child_pid,
         })
     }
 

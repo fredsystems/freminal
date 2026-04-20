@@ -175,6 +175,12 @@ pub struct Pane {
     /// their own GL state (VAOs, VBOs, atlas texture) without conflicts.
     pub(crate) render_state: Arc<Mutex<RenderState>>,
 
+    /// OS process ID of the PTY child shell for this pane.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    pub child_pid: Option<u32>,
+
     /// Per-pane dirty-tracking cache for incremental rendering.
     ///
     /// Tracks the previous frame's cursor, theme, selection, and content pointers
@@ -1029,6 +1035,116 @@ impl PaneTree {
             })
         }
     }
+
+    /// Serialise the pane tree as a flat `Vec<LayoutPane>` suitable for
+    /// writing to a layout TOML file.
+    ///
+    /// `cwd_fn` is called for each leaf pane id and should return the current
+    /// working directory of that pane as a string (e.g. read from
+    /// `/proc/<pid>/cwd`).  Returning `None` omits the `directory` field.
+    #[must_use]
+    pub fn to_layout_panes<F>(&self, cwd_fn: F) -> Vec<freminal_common::layout::LayoutPane>
+    where
+        F: Fn(PaneId) -> Option<String>,
+    {
+        let mut out = Vec::new();
+        if let Some(root) = &self.root {
+            collect_layout_panes(root, None, None, &cwd_fn, &mut out);
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Layout serialisation helpers (private)
+// ---------------------------------------------------------------------------
+
+/// Recursively walk a `PaneNode` tree and append `LayoutPane` entries to `out`.
+///
+/// Each split node is assigned a stable string id of the form `split_<first>_<second>`
+/// built from the leaf-pane ids of its two subtrees' first leaves.
+fn collect_layout_panes<F>(
+    node: &PaneNode,
+    parent_id: Option<&str>,
+    position: Option<freminal_common::layout::LayoutPanePosition>,
+    cwd_fn: &F,
+    out: &mut Vec<freminal_common::layout::LayoutPane>,
+) where
+    F: Fn(PaneId) -> Option<String>,
+{
+    match node {
+        PaneNode::Leaf(pane) => {
+            let cwd = cwd_fn(pane.id);
+            out.push(freminal_common::layout::LayoutPane {
+                id: pane.id.to_string(),
+                parent: parent_id.map(str::to_owned),
+                position,
+                split: None,
+                ratio: 0.5,
+                directory: cwd,
+                command: None,
+                shell: None,
+                env: std::collections::HashMap::new(),
+                title: if pane.title.is_empty() || pane.title == "Terminal" {
+                    None
+                } else {
+                    Some(pane.title.clone())
+                },
+                active: false,
+            });
+        }
+        PaneNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            // Derive a stable id from the first-leaf ids of each child.
+            let first_leaf = first
+                .first_leaf_id()
+                .map_or_else(|| "?".to_owned(), |id| id.to_string());
+            let second_leaf = second
+                .first_leaf_id()
+                .map_or_else(|| "?".to_owned(), |id| id.to_string());
+            let split_id = format!("split_{first_leaf}_{second_leaf}");
+
+            let layout_dir = match direction {
+                SplitDirection::Horizontal => {
+                    freminal_common::layout::LayoutSplitDirection::Horizontal
+                }
+                SplitDirection::Vertical => freminal_common::layout::LayoutSplitDirection::Vertical,
+            };
+
+            out.push(freminal_common::layout::LayoutPane {
+                id: split_id.clone(),
+                parent: parent_id.map(str::to_owned),
+                position,
+                split: Some(layout_dir),
+                ratio: *ratio,
+                directory: None,
+                command: None,
+                shell: None,
+                env: std::collections::HashMap::new(),
+                title: None,
+                active: false,
+            });
+
+            collect_layout_panes(
+                first,
+                Some(&split_id),
+                Some(freminal_common::layout::LayoutPanePosition::First),
+                cwd_fn,
+                out,
+            );
+            collect_layout_panes(
+                second,
+                Some(&split_id),
+                Some(freminal_common::layout::LayoutPanePosition::Second),
+                cwd_fn,
+                out,
+            );
+        }
+    }
 }
 
 // ── Layout helpers ───────────────────────────────────────────────────
@@ -1143,6 +1259,7 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
             ))),

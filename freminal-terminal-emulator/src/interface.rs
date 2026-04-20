@@ -496,6 +496,15 @@ impl TerminalEmulator {
             .map(|io| std::sync::Arc::clone(&io.echo_off))
     }
 
+    /// Return the OS process ID of the PTY child shell.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Returns `None` on headless terminals or platforms where the PID is unavailable.
+    #[must_use]
+    pub fn child_pid(&self) -> Option<u32> {
+        self.pty_io.as_ref().and_then(|io| io.child_pid)
+    }
+
     /// Build a point-in-time snapshot of the terminal state.
     ///
     /// This is cheap to call: the visible content is flattened here on the

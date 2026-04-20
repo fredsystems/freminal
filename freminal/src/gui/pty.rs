@@ -71,6 +71,12 @@ pub struct TabChannels {
     /// only published on PTY output — if the shell is idle waiting for a
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
+
+    /// OS process ID of the PTY child shell.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    pub child_pid: Option<u32>,
 }
 
 /// Per-pane configuration forwarded to the PTY child process.
@@ -134,6 +140,7 @@ pub fn spawn_pty_tab(
     let echo_off = terminal
         .echo_off_atomic()
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let child_pid = terminal.child_pid();
 
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
@@ -167,6 +174,7 @@ pub fn spawn_pty_tab(
         search_buffer_rx,
         pty_dead_rx,
         echo_off,
+        child_pid,
     })
 }
 

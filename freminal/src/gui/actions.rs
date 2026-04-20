@@ -379,11 +379,36 @@ impl super::FreminalGui {
             | KeyAction::ScrollToBottom
             | KeyAction::ScrollLineUp
             | KeyAction::ScrollLineDown
-            | KeyAction::LoadLayout
-            | KeyAction::SaveLayout => {
+            | KeyAction::LoadLayout => {
                 trace!(
                     "Unexpected deferred key action (should be handled at input layer): {action:?}"
                 );
+            }
+            KeyAction::SaveLayout => {
+                // Determine where to write the layout file.
+                let Some(layout_dir) = freminal_common::config::layout_library_dir() else {
+                    error!("SaveLayout: cannot determine layout library directory");
+                    return;
+                };
+                // Build a timestamp-based filename: layout-<unix_secs>.toml
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let filename = format!("layout-{now}.toml");
+                let path = layout_dir.join(filename);
+                // Ensure the directory exists.
+                if let Err(e) = std::fs::create_dir_all(&layout_dir) {
+                    error!("SaveLayout: cannot create layout library dir: {e}");
+                    return;
+                }
+                match self.save_layout(&path) {
+                    Ok(()) => {
+                        tracing::info!("Layout saved to {}", path.display());
+                    }
+                    Err(e) => {
+                        error!("SaveLayout: failed to write {}: {e}", path.display());
+                    }
+                }
             }
         }
     }

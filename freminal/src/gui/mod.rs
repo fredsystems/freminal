@@ -389,6 +389,7 @@ impl FreminalGui {
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
+                    child_pid: channels.child_pid,
                     render_state: new_render_state(Arc::clone(&win.window_post)),
                     render_cache: terminal::PaneRenderCache::new(),
                 };
@@ -528,6 +529,7 @@ impl FreminalGui {
                 title_stack: Vec::new(),
                 view_state: view_state::ViewState::new(),
                 echo_off: channels.echo_off,
+                child_pid: channels.child_pid,
                 render_state: new_render_state(Arc::clone(&win.window_post)),
                 render_cache: terminal::PaneRenderCache::new(),
             };
@@ -657,6 +659,7 @@ impl FreminalGui {
             title_stack: Vec::new(),
             view_state: view_state::ViewState::new(),
             echo_off: channels.echo_off,
+            child_pid: channels.child_pid,
             render_state: terminal::new_render_state(Arc::clone(window_post)),
             render_cache: terminal::PaneRenderCache::new(),
         })
@@ -863,6 +866,86 @@ impl FreminalGui {
                 debug!("layout: pane {:?} not found for command injection", pane_id);
             }
         }
+    }
+
+    /// Read the current working directory of the shell in the given pane.
+    ///
+    /// On Linux this resolves `/proc/<pid>/cwd`.  Returns `None` on non-Linux
+    /// platforms or when the child PID is unknown.
+    fn read_cwd_for_pane(&self, pane_id: panes::PaneId) -> Option<String> {
+        // Find the pane across all windows and tabs.
+        let child_pid = self.windows.values().find_map(|win| {
+            win.tabs.iter().find_map(|tab| {
+                tab.pane_tree.iter_panes().ok().and_then(|ps| {
+                    ps.into_iter()
+                        .find(|p| p.id == pane_id)
+                        .and_then(|p| p.child_pid)
+                })
+            })
+        })?;
+
+        #[cfg(target_os = "linux")]
+        {
+            let link = format!("/proc/{child_pid}/cwd");
+            std::fs::read_link(&link)
+                .ok()
+                .and_then(|p| p.into_os_string().into_string().ok())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = child_pid;
+            None
+        }
+    }
+
+    /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]
+    /// and write it to `path` in TOML format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the layout cannot be serialised or the file cannot be written.
+    pub fn save_layout(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use freminal_common::layout::{Layout, LayoutMeta, LayoutTab, LayoutWindow};
+
+        let mut windows: Vec<LayoutWindow> = Vec::new();
+
+        for win in self.windows.values() {
+            let mut tabs: Vec<LayoutTab> = Vec::new();
+
+            for (tab_idx, tab) in win.tabs.iter().enumerate() {
+                let panes = tab
+                    .pane_tree
+                    .to_layout_panes(|pane_id| self.read_cwd_for_pane(pane_id));
+                tabs.push(LayoutTab {
+                    title: None,
+                    active: tab_idx == 0,
+                    panes,
+                });
+            }
+
+            windows.push(LayoutWindow {
+                size: None,
+                position: None,
+                monitor: None,
+                tabs,
+            });
+        }
+
+        let name = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+
+        let layout = Layout {
+            layout: LayoutMeta {
+                name,
+                description: None,
+                variables: std::collections::HashMap::new(),
+            },
+            windows,
+            tabs: Vec::new(),
+        };
+
+        let toml_str = layout.to_toml_string()?;
+        std::fs::write(path, toml_str)?;
+        Ok(())
     }
 
     /// Apply a resolved layout to the current frontmost window and spawn any
@@ -1431,6 +1514,7 @@ impl freminal_windowing::App for FreminalGui {
                         title_stack: Vec::new(),
                         view_state: view_state::ViewState::new(),
                         echo_off: channels.echo_off,
+                        child_pid: channels.child_pid,
                         render_state: new_render_state(Arc::clone(&window_post)),
                         render_cache: terminal::PaneRenderCache::new(),
                     };

@@ -151,6 +151,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         title_stack: Vec::new(),
         view_state: gui::view_state::ViewState::new(),
         echo_off: channels.echo_off,
+        child_pid: channels.child_pid,
         render_state: gui::terminal::new_render_state(Arc::clone(&window_post)),
         render_cache: gui::terminal::PaneRenderCache::new(),
     };
