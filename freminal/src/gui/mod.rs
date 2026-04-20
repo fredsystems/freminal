@@ -604,6 +604,7 @@ impl FreminalGui {
         handle.create_window(freminal_windowing::WindowConfig {
             title: "Freminal".to_owned(),
             inner_size: None,
+            position: None,
             transparent: true,
             icon: self.icon.clone(),
             app_id: Some("freminal".into()),
@@ -1012,6 +1013,11 @@ impl FreminalGui {
                 && let Some(win) = self.windows.get_mut(&window_id)
             {
                 win.tabs = new_tabs;
+                // Schedule geometry restoration for this window — applied on the
+                // next frame via ctx.send_viewport_cmd in update().
+                if first_window.size.is_some() || first_window.position.is_some() {
+                    win.pending_geometry = first_window.size.map(|s| (s, first_window.position));
+                }
             }
         }
 
@@ -1021,6 +1027,7 @@ impl FreminalGui {
             handle.create_window(freminal_windowing::WindowConfig {
                 title: "Freminal".to_owned(),
                 inner_size: extra_window.size.map(<[u32; 2]>::into),
+                position: extra_window.position.map(<[i32; 2]>::into),
                 transparent: true,
                 icon: self.icon.clone(),
                 app_id: Some("freminal".into()),
@@ -1136,6 +1143,7 @@ impl FreminalGui {
             window_post,
             repaint_handle,
             pending_new_window: false,
+            pending_geometry: None,
         };
         self.windows.insert(window_id, win);
 
@@ -1492,6 +1500,7 @@ impl freminal_windowing::App for FreminalGui {
                 window_post: initial.window_post,
                 repaint_handle: initial.repaint_handle,
                 pending_new_window: false,
+                pending_geometry: None,
             };
             self.windows.insert(window_id, win);
 
@@ -1650,6 +1659,7 @@ impl freminal_windowing::App for FreminalGui {
                         window_post,
                         repaint_handle,
                         pending_new_window: false,
+                        pending_geometry: None,
                     };
                     self.windows.insert(window_id, win);
 
@@ -1791,6 +1801,7 @@ impl freminal_windowing::App for FreminalGui {
             handle.create_window(freminal_windowing::WindowConfig {
                 title: "Freminal Settings".to_owned(),
                 inner_size: Some((600, 500)),
+                position: None,
                 transparent: false,
                 icon: self.icon.clone(),
                 app_id: Some("freminal-settings".into()),
@@ -1808,6 +1819,19 @@ impl freminal_windowing::App for FreminalGui {
         if win.pending_new_window {
             win.pending_new_window = false;
             self.spawn_new_window(handle);
+        }
+
+        // ── Apply pending window geometry from layout engine ─────────────────
+        if let Some(([w, h], pos_opt)) = win.pending_geometry.take() {
+            use conv2::ConvUtil as _;
+            let w_f: f32 = w.approx_as().unwrap_or(f32::MAX);
+            let h_f: f32 = h.approx_as().unwrap_or(f32::MAX);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w_f, h_f)));
+            if let Some([x, y]) = pos_opt {
+                let x_f: f32 = x.approx_as().unwrap_or(0.0_f32);
+                let y_f: f32 = y.approx_as().unwrap_or(0.0_f32);
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x_f, y_f)));
+            }
         }
 
         // ── Deferred egui font update from standalone settings window ────────
@@ -2797,6 +2821,7 @@ pub fn run(
     let window_config = freminal_windowing::WindowConfig {
         title: "Freminal".to_owned(),
         inner_size: None,
+        position: None,
         transparent: true,
         icon: Some(icon.clone()),
         app_id: Some("freminal".into()),

@@ -64,4 +64,11 @@ pub(super) struct PerWindowState {
     /// Set to `true` by the `NewWindow` key action or menu; consumed in
     /// `update()` where `WindowHandle` is available.
     pub(super) pending_new_window: bool,
+
+    /// If set, send resize + reposition viewport commands on the next frame.
+    ///
+    /// Populated by the layout engine when applying a layout to an existing
+    /// window.  Consumed in `update()` via `ctx.send_viewport_cmd`.
+    /// `(size_px, position_px)` — position is `None` on Wayland.
+    pub(super) pending_geometry: Option<([u32; 2], Option<[i32; 2]>)>,
 }

@@ -43,6 +43,10 @@ impl<A: App> Handler<A> {
             attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));
         }
 
+        if let Some((x, y)) = config.position {
+            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
+        }
+
         if config.transparent {
             attrs = attrs.with_transparent(true);
         }

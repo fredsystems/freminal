@@ -27,6 +27,10 @@ pub struct WindowConfig {
     pub title: String,
     /// Initial inner size in logical pixels `(width, height)`.
     pub inner_size: Option<(u32, u32)>,
+    /// Initial outer position in logical pixels `(x, y)`.
+    ///
+    /// Silently ignored on Wayland (compositor controls placement).
+    pub position: Option<(i32, i32)>,
     /// Whether the window background should be transparent.
     pub transparent: bool,
     /// Window icon.
@@ -201,6 +205,7 @@ mod tests {
         let config = WindowConfig {
             title: "test".to_owned(),
             inner_size: None,
+            position: None,
             transparent: false,
             icon: None,
             app_id: None,
@@ -217,6 +222,7 @@ mod tests {
         let config = WindowConfig {
             title: "sized".to_owned(),
             inner_size: Some((800, 600)),
+            position: None,
             transparent: true,
             icon: None,
             app_id: Some("test.app".to_owned()),
