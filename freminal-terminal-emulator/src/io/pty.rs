@@ -178,6 +178,7 @@ pub fn run_terminal(
     shell: Option<String>,
     termcaps: Option<&Path>,
     initial_size: &FreminalTerminalSize,
+    cwd: Option<&Path>,
 ) -> Result<RunTerminalResult> {
     let pty_system = NativePtySystem::default();
 
@@ -288,6 +289,10 @@ pub fn run_terminal(
     }
     cmd.env_remove("NIX_BUILD_TOP");
     cmd.env_remove("IN_NIX_SHELL");
+
+    if let Some(dir) = cwd {
+        cmd.cwd(dir);
+    }
 
     let mut child = pair.slave.spawn_command(cmd)?;
 
@@ -466,6 +471,7 @@ impl FreminalPtyInputOutput {
         command: Option<(String, Vec<String>)>,
         shell: Option<String>,
         initial_size: &FreminalTerminalSize,
+        cwd: Option<&Path>,
     ) -> Result<Self> {
         // don't use it.  Skip extraction entirely on Windows to avoid issues
         // with symlinks in the tarball requiring elevated privileges.
@@ -485,6 +491,7 @@ impl FreminalPtyInputOutput {
             shell,
             termcaps.as_ref().map(TempDir::path),
             initial_size,
+            cwd,
         )?;
         Ok(Self {
             _termcaps: termcaps,

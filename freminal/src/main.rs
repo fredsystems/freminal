@@ -126,6 +126,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         },
         recording_handle.clone(),
         0, // recording pane ID for initial pane
+        None,
     )?;
 
     let config_path = args.config.clone();

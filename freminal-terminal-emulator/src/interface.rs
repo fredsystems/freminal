@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -241,6 +242,7 @@ impl TerminalEmulator {
         args: &Args,
         scrollback_limit: Option<usize>,
         initial_size: FreminalTerminalSize,
+        cwd: Option<&Path>,
     ) -> Result<(Self, Receiver<PtyRead>)> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
@@ -263,7 +265,7 @@ impl TerminalEmulator {
             args.shell.clone()
         };
 
-        let io = FreminalPtyInputOutput::new(read_rx, pty_tx, command, shell, &initial_size)?;
+        let io = FreminalPtyInputOutput::new(read_rx, pty_tx, command, shell, &initial_size, cwd)?;
 
         if let Err(e) = write_tx.send(PtyWrite::Resize(initial_size)) {
             error!("Failed to send resize to pty: {e}");
