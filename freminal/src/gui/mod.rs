@@ -1330,6 +1330,71 @@ impl FreminalGui {
             | SettingsAction::None => {}
         }
     }
+
+    /// Return the path used for auto-save/restore of the last session.
+    fn last_session_path() -> Option<std::path::PathBuf> {
+        freminal_common::config::layout_library_dir().map(|d| d.join("last_session.toml"))
+    }
+
+    /// Save the current session to `last_session.toml` in the layout library.
+    ///
+    /// Called automatically when the last terminal window closes and
+    /// `restore_last_session` is enabled.  Failures are logged but not fatal.
+    fn auto_save_session(&self) {
+        let Some(path) = Self::last_session_path() else {
+            error!("auto_save_session: cannot determine layout library path");
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            error!("auto_save_session: cannot create layout library dir: {e}");
+            return;
+        }
+        match self.save_layout(&path) {
+            Ok(()) => {
+                tracing::info!("Session auto-saved to {}", path.display());
+            }
+            Err(e) => {
+                error!("auto_save_session: failed: {e}");
+            }
+        }
+    }
+
+    /// Apply the last-session layout if `restore_last_session` is enabled and
+    /// the file exists.  Called once after the first window is ready.
+    ///
+    /// Only called when no `--layout` CLI flag was provided.
+    fn maybe_restore_last_session(
+        &mut self,
+        window_id: WindowId,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        if !self.config.startup.restore_last_session {
+            return;
+        }
+        let Some(path) = Self::last_session_path() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        match freminal_common::layout::Layout::from_file(&path).and_then(|l| {
+            l.validate()?;
+            l.resolve()
+        }) {
+            Ok(resolved) => {
+                let commands = self.apply_layout(&resolved, window_id, handle);
+                self.inject_layout_commands(&commands);
+            }
+            Err(e) => {
+                error!(
+                    "restore_last_session: failed to apply {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 impl freminal_windowing::App for FreminalGui {
@@ -1447,6 +1512,9 @@ impl freminal_windowing::App for FreminalGui {
                         error!("Failed to load layout '{layout_path}': {e}");
                     }
                 }
+            } else {
+                // No --layout CLI flag — try to restore the last session if configured.
+                self.maybe_restore_last_session(window_id, handle);
             }
 
             // Emit WindowCreate recording event.
@@ -1623,6 +1691,18 @@ impl freminal_windowing::App for FreminalGui {
             self.settings_modal.is_open = false;
             self.settings_owner = None;
         }
+
+        // Auto-save session before the last terminal window is removed.
+        // We check *before* remove so we still have access to the window's tabs.
+        let remaining_terminal_windows = self
+            .windows
+            .keys()
+            .filter(|&&wid| Some(wid) != self.settings_window_id)
+            .count();
+        if remaining_terminal_windows == 1 && self.config.startup.restore_last_session {
+            self.auto_save_session();
+        }
+
         self.windows.remove(&window_id);
 
         // Emit WindowClose recording event (only for known windows), and clean up the mapping.
