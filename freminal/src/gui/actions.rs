@@ -378,7 +378,9 @@ impl super::FreminalGui {
             | KeyAction::ScrollToTop
             | KeyAction::ScrollToBottom
             | KeyAction::ScrollLineUp
-            | KeyAction::ScrollLineDown => {
+            | KeyAction::ScrollLineDown
+            | KeyAction::LoadLayout
+            | KeyAction::SaveLayout => {
                 trace!(
                     "Unexpected deferred key action (should be handled at input layer): {action:?}"
                 );

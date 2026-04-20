@@ -758,6 +758,12 @@ pub enum KeyAction {
     ResizePaneRight,
     /// Toggle zoom on the focused pane (full-tab or restore).
     ZoomPane,
+
+    // -- Layout actions ---------------------------------------------------
+    /// Open the Load Layout dialog.
+    LoadLayout,
+    /// Save the current session topology as a layout file.
+    SaveLayout,
 }
 
 impl KeyAction {
@@ -815,6 +821,8 @@ impl KeyAction {
             Self::ResizePaneUp => "resize_pane_up",
             Self::ResizePaneRight => "resize_pane_right",
             Self::ZoomPane => "zoom_pane",
+            Self::LoadLayout => "load_layout",
+            Self::SaveLayout => "save_layout",
         }
     }
 
@@ -874,6 +882,8 @@ impl KeyAction {
             Self::ResizePaneUp => "Resize Pane Up",
             Self::ResizePaneRight => "Resize Pane Right",
             Self::ZoomPane => "Zoom Pane",
+            Self::LoadLayout => "Load Layout",
+            Self::SaveLayout => "Save Layout",
         }
     }
 
@@ -930,6 +940,8 @@ impl KeyAction {
         Self::ResizePaneUp,
         Self::ResizePaneRight,
         Self::ZoomPane,
+        Self::LoadLayout,
+        Self::SaveLayout,
     ];
 }
 
@@ -998,6 +1010,8 @@ impl FromStr for KeyAction {
             "resize_pane_up" => Ok(Self::ResizePaneUp),
             "resize_pane_right" => Ok(Self::ResizePaneRight),
             "zoom_pane" => Ok(Self::ZoomPane),
+            "load_layout" => Ok(Self::LoadLayout),
+            "save_layout" => Ok(Self::SaveLayout),
             other => Err(KeyBindingError::UnknownAction(other.to_string())),
         }
     }
@@ -1329,6 +1343,12 @@ fn register_window_bindings(map: &mut BindingMap) {
     );
 }
 
+/// Register layout management bindings.
+const fn register_layout_bindings(_map: &BindingMap) {
+    // No default bindings for layout actions — they are available via the
+    // menu bar only by default.  Users can bind them in `[keybindings]`.
+}
+
 impl Default for BindingMap {
     /// Produce the standard set of key bindings matching common terminal
     /// emulator conventions.
@@ -1338,6 +1358,7 @@ impl Default for BindingMap {
         register_misc_bindings(&mut map);
         register_pane_bindings(&mut map);
         register_window_bindings(&mut map);
+        register_layout_bindings(&map);
         map
     }
 }
@@ -1647,7 +1668,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            48,
+            50,
             "KeyAction::ALL should contain all variants"
         );
     }

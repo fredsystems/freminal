@@ -50,6 +50,8 @@ pub mod config;
 pub mod cursor;
 /// Configurable key bindings: actions, key combos, and the binding map.
 pub mod keybindings;
+/// Layout file format types, parser, and resolver.
+pub mod layout;
 /// PTY write command types shared between the emulator and the OS PTY writer.
 pub mod pty_write;
 /// SGR (Select Graphic Rendition) parameter types.

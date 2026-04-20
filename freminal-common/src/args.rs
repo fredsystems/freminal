@@ -49,6 +49,29 @@ pub struct Args {
     #[arg(long = "recording-path")]
     pub recording_path: Option<PathBuf>,
 
+    /// Layout to load on startup.
+    ///
+    /// Can be a bare name (e.g. `dev`) to load
+    /// `~/.config/freminal/layouts/dev.toml`, or a full path to a `.toml`
+    /// file.  Overrides `startup.layout` in the config file.
+    ///
+    /// Positional arguments after `--layout` (before `--`) are passed to the
+    /// layout as `$1`, `$2`, etc.  Use `--var` to pass named variables.
+    ///
+    /// Example:
+    ///   freminal --layout dev ~/projects/myapp
+    #[arg(long = "layout")]
+    pub layout: Option<String>,
+
+    /// Override a named variable in the layout.
+    ///
+    /// Format: `NAME=VALUE`.  Can be repeated for multiple variables.
+    ///
+    /// Example:
+    ///   `freminal --layout dev --var project_dir=~/myapp --var branch=main`
+    #[arg(long = "var", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
+    pub layout_vars: Vec<String>,
+
     /// Program to run instead of the default shell.
     ///
     /// Everything after `--` (or the first non-option argument) is treated as
@@ -61,4 +84,22 @@ pub struct Args {
     ///   freminal htop
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
+}
+
+impl Args {
+    /// Parse the `--var NAME=VALUE` overrides into a `HashMap`.
+    ///
+    /// Values that do not contain `=` are silently ignored.
+    #[must_use]
+    pub fn layout_var_map(&self) -> std::collections::HashMap<String, String> {
+        self.layout_vars
+            .iter()
+            .filter_map(|s| {
+                let mut parts = s.splitn(2, '=');
+                let key = parts.next()?.to_string();
+                let val = parts.next()?.to_string();
+                Some((key, val))
+            })
+            .collect()
+    }
 }
