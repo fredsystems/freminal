@@ -28,12 +28,8 @@ pub type HPCON = HANDLE;
 /// Flag to inherit the cursor position from the parent console.
 pub const PSEUDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
 
-/// Deprecated alias — the upstream WezTerm constant name had a typo.
-pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = PSEUDOCONSOLE_INHERIT_CURSOR;
-
 pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
-pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
 
 shared_library!(ConPtyFuncs,
     pub fn CreatePseudoConsole(
