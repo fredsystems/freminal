@@ -536,11 +536,207 @@ pub struct SeekIndexEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Writer
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during recording.
+#[derive(Debug, thiserror::Error)]
+pub enum RecordingError {
+    /// I/O error during file write.
+    #[error("recording I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// Serialization error.
+    #[error("recording serialization error: {0}")]
+    Serialize(#[from] rmp_serde::encode::Error),
+}
+
+/// Handle for sending recording events from any thread.
+///
+/// Cheaply cloneable. Dropping all clones signals the writer thread to finalize
+/// and flush.
+#[derive(Clone)]
+pub struct RecordingHandle {
+    tx: crossbeam_channel::Sender<RecordingEvent>,
+}
+
+impl RecordingHandle {
+    /// Send an event to the recording writer thread.
+    ///
+    /// Returns `Ok(())` if the event was queued, or `Err` if the writer thread
+    /// has shut down. Events are silently dropped on a full channel to avoid
+    /// blocking the PTY/GUI threads (uses `try_send`).
+    pub fn send(&self, event: RecordingEvent) {
+        // Best-effort: never block production threads.
+        let _: Result<(), _> = self.tx.try_send(event);
+    }
+}
+
+/// Dedicated writer thread state. Not public — created via [`start_recording`].
+struct WriterThread {
+    writer: std::io::BufWriter<std::fs::File>,
+    rx: crossbeam_channel::Receiver<RecordingEvent>,
+    seek_entries: Vec<SeekIndexEntry>,
+    last_seek_timestamp_us: u64,
+    events_written: u64,
+    last_timestamp_us: u64,
+}
+
+/// Seek index interval: one entry per second of recording time.
+const SEEK_INDEX_INTERVAL_US: u64 = 1_000_000;
+
+impl WriterThread {
+    /// Write the fixed file header and serialized metadata.
+    fn write_header(&mut self, metadata: &RecordingMetadata) -> Result<(), RecordingError> {
+        use std::io::Write;
+
+        // Magic
+        self.writer.write_all(FREC_MAGIC)?;
+        // Version
+        self.writer.write_all(&[FREC_VERSION])?;
+        // Flags (reserved, all zero)
+        self.writer.write_all(&0u32.to_le_bytes())?;
+        // Serialize metadata
+        let metadata_bytes = rmp_serde::to_vec(metadata)?;
+        let metadata_len = u32::try_from(metadata_bytes.len()).unwrap_or(u32::MAX);
+        self.writer.write_all(&metadata_len.to_le_bytes())?;
+        self.writer.write_all(&metadata_bytes)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    /// Write a single event record and update seek index.
+    fn write_event(&mut self, event: &RecordingEvent) -> Result<(), RecordingError> {
+        use std::io::{Seek, Write};
+
+        // Record file offset for seek index (before writing this event).
+        let file_offset = self.writer.stream_position()?;
+
+        // Check if we need a seek index entry (~1 second intervals).
+        if event.timestamp_us >= self.last_seek_timestamp_us + SEEK_INDEX_INTERVAL_US
+            || self.seek_entries.is_empty()
+        {
+            self.seek_entries.push(SeekIndexEntry {
+                timestamp_us: event.timestamp_us,
+                file_offset,
+            });
+            self.last_seek_timestamp_us = event.timestamp_us;
+        }
+
+        // Serialize payload via MessagePack.
+        let payload_bytes = rmp_serde::to_vec(&event.payload)?;
+        let payload_len = u32::try_from(payload_bytes.len()).unwrap_or(u32::MAX);
+
+        // Event header: timestamp_us (8) + event_type (1) + payload_length (4)
+        self.writer.write_all(&event.timestamp_us.to_le_bytes())?;
+        self.writer
+            .write_all(&[event.payload.event_type().to_u8()])?;
+        self.writer.write_all(&payload_len.to_le_bytes())?;
+        // Payload
+        self.writer.write_all(&payload_bytes)?;
+
+        self.events_written += 1;
+        self.last_timestamp_us = event.timestamp_us;
+
+        Ok(())
+    }
+
+    /// Write the seek index and footer, finalizing the file.
+    fn finalize(&mut self) -> Result<(), RecordingError> {
+        use std::io::{Seek, Write};
+
+        // Record offset of seek index.
+        let seek_index_offset = self.writer.stream_position()?;
+
+        // Seek index: entry count + entries.
+        let entry_count = u64::try_from(self.seek_entries.len()).unwrap_or(u64::MAX);
+        self.writer.write_all(&entry_count.to_le_bytes())?;
+        for entry in &self.seek_entries {
+            self.writer.write_all(&entry.timestamp_us.to_le_bytes())?;
+            self.writer.write_all(&entry.file_offset.to_le_bytes())?;
+        }
+
+        // Footer: seek_index_offset + total_duration + total_events + magic.
+        self.writer.write_all(&seek_index_offset.to_le_bytes())?;
+        self.writer
+            .write_all(&self.last_timestamp_us.to_le_bytes())?;
+        self.writer.write_all(&self.events_written.to_le_bytes())?;
+        self.writer.write_all(FREC_MAGIC)?;
+
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    /// Run the writer loop: drain events from channel, write, finalize on close.
+    fn run(mut self, metadata: &RecordingMetadata) {
+        if let Err(e) = self.write_header(metadata) {
+            error!("FREC recording: failed to write header: {e}");
+            return;
+        }
+
+        // Take rx out so we don't hold an immutable borrow on self while writing.
+        let rx = self.rx.clone();
+
+        // Drain events until all senders are dropped.
+        for event in &rx {
+            if let Err(e) = self.write_event(&event) {
+                error!("FREC recording: failed to write event: {e}");
+            }
+        }
+
+        if let Err(e) = self.finalize() {
+            error!("FREC recording: failed to finalize: {e}");
+        }
+    }
+}
+
+/// Start a recording session.
+///
+/// Creates the output file, spawns a dedicated writer thread, and returns a
+/// [`RecordingHandle`] that can be cloned and sent to any thread. Dropping all
+/// handles causes the writer to finalize the file and exit.
+///
+/// The channel is bounded to `channel_capacity` events. If the channel is full,
+/// events are silently dropped (the writer is I/O-bound, not the PTY thread).
+///
+/// # Errors
+///
+/// Returns an error if the output file cannot be created.
+pub fn start_recording(
+    path: &std::path::Path,
+    metadata: RecordingMetadata,
+    channel_capacity: usize,
+) -> Result<RecordingHandle, RecordingError> {
+    let file = std::fs::File::create(path)?;
+    let writer = std::io::BufWriter::new(file);
+    let (tx, rx) = crossbeam_channel::bounded(channel_capacity);
+
+    let thread = WriterThread {
+        writer,
+        rx,
+        seek_entries: Vec::new(),
+        last_seek_timestamp_us: 0,
+        events_written: 0,
+        last_timestamp_us: 0,
+    };
+
+    std::thread::Builder::new()
+        .name("frec-writer".to_string())
+        .spawn(move || thread.run(&metadata))
+        .map_err(|e| RecordingError::Io(std::io::Error::other(e)))?;
+
+    Ok(RecordingHandle { tx })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::used_underscore_binding
+)]
 mod tests {
     use super::*;
 
@@ -1060,5 +1256,239 @@ mod tests {
     fn empty_topology() {
         let topo = TopologySnapshot { windows: vec![] };
         round_trip(&topo);
+    }
+
+    /// Create a minimal test metadata value.
+    fn test_metadata() -> RecordingMetadata {
+        RecordingMetadata {
+            freminal_version: "0.7.0".to_string(),
+            created_at: 1_700_000_000,
+            term: "xterm-256color".to_string(),
+            initial_topology: TopologySnapshot { windows: vec![] },
+            scrollback_limit: 10_000,
+        }
+    }
+
+    /// Read back a FREC file and verify header, events, seek index, and footer.
+    /// Returns (metadata, events, `seek_entries`, `total_duration_us`, `total_events`).
+    fn read_frec_file(
+        path: &std::path::Path,
+    ) -> (
+        RecordingMetadata,
+        Vec<RecordingEvent>,
+        Vec<SeekIndexEntry>,
+        u64,
+        u64,
+    ) {
+        let data = std::fs::read(path).unwrap();
+        let mut pos = 0;
+
+        // Header: magic
+        assert_eq!(&data[pos..pos + 4], FREC_MAGIC);
+        pos += 4;
+        // Version
+        assert_eq!(data[pos], FREC_VERSION);
+        pos += 1;
+        // Flags
+        let _flags = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        // Metadata length
+        let meta_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        // Metadata
+        let metadata: RecordingMetadata =
+            rmp_serde::from_slice(&data[pos..pos + meta_len]).unwrap();
+        pos += meta_len;
+
+        // Footer is at the end — read it to find seek index offset.
+        let footer_start = data.len() - FOOTER_SIZE;
+        let seek_index_offset =
+            u64::from_le_bytes(data[footer_start..footer_start + 8].try_into().unwrap()) as usize;
+        let total_duration = u64::from_le_bytes(
+            data[footer_start + 8..footer_start + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let total_events = u64::from_le_bytes(
+            data[footer_start + 16..footer_start + 24]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(&data[footer_start + 24..footer_start + 28], FREC_MAGIC);
+
+        // Read events (from after metadata to seek index).
+        let mut events = Vec::new();
+        let mut event_pos = pos;
+        while event_pos < seek_index_offset {
+            let ts = u64::from_le_bytes(data[event_pos..event_pos + 8].try_into().unwrap());
+            let payload_len =
+                u32::from_le_bytes(data[event_pos + 9..event_pos + 13].try_into().unwrap())
+                    as usize;
+            event_pos += EVENT_HEADER_SIZE;
+            let payload: EventPayload =
+                rmp_serde::from_slice(&data[event_pos..event_pos + payload_len]).unwrap();
+            events.push(RecordingEvent {
+                timestamp_us: ts,
+                payload,
+            });
+            event_pos += payload_len;
+        }
+
+        // Read seek index.
+        let mut idx_pos = seek_index_offset;
+        let entry_count =
+            u64::from_le_bytes(data[idx_pos..idx_pos + 8].try_into().unwrap()) as usize;
+        idx_pos += 8;
+        let mut seek_entries = Vec::new();
+        for _ in 0..entry_count {
+            let ts = u64::from_le_bytes(data[idx_pos..idx_pos + 8].try_into().unwrap());
+            let offset = u64::from_le_bytes(data[idx_pos + 8..idx_pos + 16].try_into().unwrap());
+            seek_entries.push(SeekIndexEntry {
+                timestamp_us: ts,
+                file_offset: offset,
+            });
+            idx_pos += SEEK_INDEX_ENTRY_SIZE;
+        }
+
+        (metadata, events, seek_entries, total_duration, total_events)
+    }
+
+    #[test]
+    fn writer_empty_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.frec");
+        let metadata = test_metadata();
+
+        let handle = start_recording(&path, metadata.clone(), 64).unwrap();
+        drop(handle); // Signal writer to finalize.
+
+        // Give writer thread time to finish.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (read_meta, events, seek_entries, duration, total) = read_frec_file(&path);
+
+        assert_eq!(read_meta, metadata);
+        assert!(events.is_empty());
+        assert!(seek_entries.is_empty());
+        assert_eq!(duration, 0);
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn writer_round_trip_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.frec");
+        let metadata = test_metadata();
+
+        let handle = start_recording(&path, metadata.clone(), 64).unwrap();
+
+        handle.send(RecordingEvent {
+            timestamp_us: 1000,
+            payload: EventPayload::PtyOutput {
+                pane_id: 0,
+                data: b"hello".to_vec(),
+            },
+        });
+        handle.send(RecordingEvent {
+            timestamp_us: 2000,
+            payload: EventPayload::PaneResize {
+                pane_id: 0,
+                cols: 120,
+                rows: 40,
+            },
+        });
+        handle.send(RecordingEvent {
+            timestamp_us: 3000,
+            payload: EventPayload::WindowClose { window_id: 0 },
+        });
+
+        drop(handle);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (read_meta, events, seek_entries, duration, total) = read_frec_file(&path);
+
+        assert_eq!(read_meta, metadata);
+        assert_eq!(events.len(), 3);
+        assert_eq!(total, 3);
+        assert_eq!(duration, 3000);
+
+        // Verify event contents.
+        assert_eq!(events[0].timestamp_us, 1000);
+        assert_eq!(
+            events[0].payload,
+            EventPayload::PtyOutput {
+                pane_id: 0,
+                data: b"hello".to_vec()
+            }
+        );
+        assert_eq!(events[1].timestamp_us, 2000);
+        assert_eq!(events[2].timestamp_us, 3000);
+
+        // First event should create a seek entry.
+        assert!(!seek_entries.is_empty());
+        assert_eq!(seek_entries[0].timestamp_us, 1000);
+    }
+
+    #[test]
+    fn writer_seek_index_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.frec");
+        let metadata = test_metadata();
+
+        let handle = start_recording(&path, metadata, 256).unwrap();
+
+        // Write events spanning 3.5 seconds — should produce ~4 seek entries.
+        for i in 0..35 {
+            handle.send(RecordingEvent {
+                timestamp_us: i * 100_000, // 0, 100ms, 200ms, ..., 3400ms
+                payload: EventPayload::PtyOutput {
+                    pane_id: 0,
+                    data: vec![b'A' + (i % 26) as u8],
+                },
+            });
+        }
+
+        drop(handle);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (_, events, seek_entries, _, _) = read_frec_file(&path);
+
+        assert_eq!(events.len(), 35);
+        // First entry at t=0, then at t>=1s, t>=2s, t>=3s → 4 entries.
+        assert_eq!(seek_entries.len(), 4);
+        assert_eq!(seek_entries[0].timestamp_us, 0);
+        assert!(seek_entries[1].timestamp_us >= 1_000_000);
+        assert!(seek_entries[2].timestamp_us >= 2_000_000);
+        assert!(seek_entries[3].timestamp_us >= 3_000_000);
+    }
+
+    #[test]
+    fn writer_event_ordering_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.frec");
+        let metadata = test_metadata();
+
+        let handle = start_recording(&path, metadata, 256).unwrap();
+
+        for i in 0..100u64 {
+            handle.send(RecordingEvent {
+                timestamp_us: i * 10,
+                payload: EventPayload::PtyInput {
+                    pane_id: 0,
+                    data: vec![i as u8],
+                },
+            });
+        }
+
+        drop(handle);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (_, events, _, _, total) = read_frec_file(&path);
+
+        assert_eq!(events.len(), 100);
+        assert_eq!(total, 100);
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(event.timestamp_us, (i as u64) * 10);
+        }
     }
 }
