@@ -21,6 +21,7 @@
 //! (field names preserved) and easy consumption from Python (the `msgpack` package) in
 //! the `sequence_decoder` script.
 
+use conv2::ValueFrom;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -728,6 +729,193 @@ pub fn start_recording(
 }
 
 // ---------------------------------------------------------------------------
+// Reader / Parser
+// ---------------------------------------------------------------------------
+
+/// Parsed contents of a FREC v2 file.
+#[derive(Debug, Clone)]
+pub struct ParsedRecording {
+    /// Metadata from the file header.
+    pub metadata: RecordingMetadata,
+    /// All events in order.
+    pub events: Vec<RecordingEvent>,
+    /// Seek index entries.
+    pub seek_index: Vec<SeekIndexEntry>,
+    /// Total recording duration in microseconds (from footer).
+    pub total_duration_us: u64,
+    /// Total event count (from footer).
+    pub total_events: u64,
+}
+
+/// Errors that can occur while parsing a FREC file.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    /// I/O error.
+    #[error("parse I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// Deserialization error.
+    #[error("parse deserialization error: {0}")]
+    Deserialize(#[from] rmp_serde::decode::Error),
+    /// Invalid file format.
+    #[error("invalid FREC file: {0}")]
+    InvalidFormat(String),
+}
+
+/// Parse a FREC v2 file into memory (full load mode).
+///
+/// Reads the entire file and returns all metadata, events, and the seek index.
+/// Suitable for small-to-medium files and integration tests.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] if the file is not a valid FREC v2 file.
+pub fn parse_recording(path: &std::path::Path) -> Result<ParsedRecording, ParseError> {
+    let data = std::fs::read(path)?;
+    parse_recording_from_bytes(&data)
+}
+
+/// Parse FREC v2 from an in-memory byte slice.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] if the data is not a valid FREC v2 file.
+pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseError> {
+    if data.len() < HEADER_FIXED_SIZE + FOOTER_SIZE {
+        return Err(ParseError::InvalidFormat(
+            "file too small for header + footer".to_string(),
+        ));
+    }
+
+    let mut pos = 0;
+
+    // --- Header ---
+    if &data[pos..pos + 4] != FREC_MAGIC {
+        return Err(ParseError::InvalidFormat("bad magic".to_string()));
+    }
+    pos += 4;
+
+    if data[pos] != FREC_VERSION {
+        return Err(ParseError::InvalidFormat(format!(
+            "unsupported version: {:#04x}",
+            data[pos]
+        )));
+    }
+    pos += 1;
+
+    // Flags (reserved).
+    pos += 4;
+
+    let meta_len = read_u32_le(data, pos) as usize;
+    pos += 4;
+
+    if pos + meta_len > data.len() {
+        return Err(ParseError::InvalidFormat(
+            "metadata length exceeds file size".to_string(),
+        ));
+    }
+    let metadata: RecordingMetadata = rmp_serde::from_slice(&data[pos..pos + meta_len])?;
+    pos += meta_len;
+
+    // --- Footer ---
+    let footer_start = data.len() - FOOTER_SIZE;
+    if &data[footer_start + 24..footer_start + 28] != FREC_MAGIC {
+        return Err(ParseError::InvalidFormat("bad footer magic".to_string()));
+    }
+    let seek_index_offset = usize::value_from(read_u64_le(data, footer_start))
+        .map_err(|_| ParseError::InvalidFormat("seek_index_offset overflows usize".to_string()))?;
+    let total_duration_us = read_u64_le(data, footer_start + 8);
+    let total_events = read_u64_le(data, footer_start + 16);
+
+    // --- Events ---
+    let mut events = Vec::new();
+    let mut event_pos = pos;
+    while event_pos < seek_index_offset {
+        if event_pos + EVENT_HEADER_SIZE > data.len() {
+            return Err(ParseError::InvalidFormat(
+                "truncated event header".to_string(),
+            ));
+        }
+        let timestamp_us = read_u64_le(data, event_pos);
+        // Skip event_type byte (we deserialize payload which includes the variant).
+        let payload_len = read_u32_le(data, event_pos + 9) as usize;
+        event_pos += EVENT_HEADER_SIZE;
+
+        if event_pos + payload_len > data.len() {
+            return Err(ParseError::InvalidFormat(
+                "truncated event payload".to_string(),
+            ));
+        }
+        let payload: EventPayload =
+            rmp_serde::from_slice(&data[event_pos..event_pos + payload_len])?;
+        events.push(RecordingEvent {
+            timestamp_us,
+            payload,
+        });
+        event_pos += payload_len;
+    }
+
+    // --- Seek index ---
+    let mut idx_pos = seek_index_offset;
+    if idx_pos + 8 > footer_start {
+        return Err(ParseError::InvalidFormat(
+            "seek index overlaps footer".to_string(),
+        ));
+    }
+    let entry_count = usize::value_from(read_u64_le(data, idx_pos)).map_err(|_| {
+        ParseError::InvalidFormat("seek index entry_count overflows usize".to_string())
+    })?;
+    idx_pos += 8;
+
+    let mut seek_index = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        if idx_pos + SEEK_INDEX_ENTRY_SIZE > footer_start {
+            return Err(ParseError::InvalidFormat(
+                "truncated seek index".to_string(),
+            ));
+        }
+        seek_index.push(SeekIndexEntry {
+            timestamp_us: read_u64_le(data, idx_pos),
+            file_offset: read_u64_le(data, idx_pos + 8),
+        });
+        idx_pos += SEEK_INDEX_ENTRY_SIZE;
+    }
+
+    Ok(ParsedRecording {
+        metadata,
+        events,
+        seek_index,
+        total_duration_us,
+        total_events,
+    })
+}
+
+/// Read a little-endian `u32` from a byte slice at the given offset.
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    let bytes: [u8; 4] = [
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ];
+    u32::from_le_bytes(bytes)
+}
+
+/// Read a little-endian `u64` from a byte slice at the given offset.
+fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+    let bytes: [u8; 8] = [
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
+    ];
+    u64::from_le_bytes(bytes)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1269,88 +1457,9 @@ mod tests {
         }
     }
 
-    /// Read back a FREC file and verify header, events, seek index, and footer.
-    /// Returns (metadata, events, `seek_entries`, `total_duration_us`, `total_events`).
-    fn read_frec_file(
-        path: &std::path::Path,
-    ) -> (
-        RecordingMetadata,
-        Vec<RecordingEvent>,
-        Vec<SeekIndexEntry>,
-        u64,
-        u64,
-    ) {
-        let data = std::fs::read(path).unwrap();
-        let mut pos = 0;
-
-        // Header: magic
-        assert_eq!(&data[pos..pos + 4], FREC_MAGIC);
-        pos += 4;
-        // Version
-        assert_eq!(data[pos], FREC_VERSION);
-        pos += 1;
-        // Flags
-        let _flags = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-        // Metadata length
-        let meta_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        // Metadata
-        let metadata: RecordingMetadata =
-            rmp_serde::from_slice(&data[pos..pos + meta_len]).unwrap();
-        pos += meta_len;
-
-        // Footer is at the end — read it to find seek index offset.
-        let footer_start = data.len() - FOOTER_SIZE;
-        let seek_index_offset =
-            u64::from_le_bytes(data[footer_start..footer_start + 8].try_into().unwrap()) as usize;
-        let total_duration = u64::from_le_bytes(
-            data[footer_start + 8..footer_start + 16]
-                .try_into()
-                .unwrap(),
-        );
-        let total_events = u64::from_le_bytes(
-            data[footer_start + 16..footer_start + 24]
-                .try_into()
-                .unwrap(),
-        );
-        assert_eq!(&data[footer_start + 24..footer_start + 28], FREC_MAGIC);
-
-        // Read events (from after metadata to seek index).
-        let mut events = Vec::new();
-        let mut event_pos = pos;
-        while event_pos < seek_index_offset {
-            let ts = u64::from_le_bytes(data[event_pos..event_pos + 8].try_into().unwrap());
-            let payload_len =
-                u32::from_le_bytes(data[event_pos + 9..event_pos + 13].try_into().unwrap())
-                    as usize;
-            event_pos += EVENT_HEADER_SIZE;
-            let payload: EventPayload =
-                rmp_serde::from_slice(&data[event_pos..event_pos + payload_len]).unwrap();
-            events.push(RecordingEvent {
-                timestamp_us: ts,
-                payload,
-            });
-            event_pos += payload_len;
-        }
-
-        // Read seek index.
-        let mut idx_pos = seek_index_offset;
-        let entry_count =
-            u64::from_le_bytes(data[idx_pos..idx_pos + 8].try_into().unwrap()) as usize;
-        idx_pos += 8;
-        let mut seek_entries = Vec::new();
-        for _ in 0..entry_count {
-            let ts = u64::from_le_bytes(data[idx_pos..idx_pos + 8].try_into().unwrap());
-            let offset = u64::from_le_bytes(data[idx_pos + 8..idx_pos + 16].try_into().unwrap());
-            seek_entries.push(SeekIndexEntry {
-                timestamp_us: ts,
-                file_offset: offset,
-            });
-            idx_pos += SEEK_INDEX_ENTRY_SIZE;
-        }
-
-        (metadata, events, seek_entries, total_duration, total_events)
+    /// Read back a FREC file using the production parser.
+    fn read_frec_file(path: &std::path::Path) -> ParsedRecording {
+        parse_recording(path).unwrap()
     }
 
     #[test]
@@ -1365,13 +1474,13 @@ mod tests {
         // Give writer thread time to finish.
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let (read_meta, events, seek_entries, duration, total) = read_frec_file(&path);
+        let parsed = read_frec_file(&path);
 
-        assert_eq!(read_meta, metadata);
-        assert!(events.is_empty());
-        assert!(seek_entries.is_empty());
-        assert_eq!(duration, 0);
-        assert_eq!(total, 0);
+        assert_eq!(parsed.metadata, metadata);
+        assert!(parsed.events.is_empty());
+        assert!(parsed.seek_index.is_empty());
+        assert_eq!(parsed.total_duration_us, 0);
+        assert_eq!(parsed.total_events, 0);
     }
 
     #[test]
@@ -1405,28 +1514,28 @@ mod tests {
         drop(handle);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let (read_meta, events, seek_entries, duration, total) = read_frec_file(&path);
+        let parsed = read_frec_file(&path);
 
-        assert_eq!(read_meta, metadata);
-        assert_eq!(events.len(), 3);
-        assert_eq!(total, 3);
-        assert_eq!(duration, 3000);
+        assert_eq!(parsed.metadata, metadata);
+        assert_eq!(parsed.events.len(), 3);
+        assert_eq!(parsed.total_events, 3);
+        assert_eq!(parsed.total_duration_us, 3000);
 
         // Verify event contents.
-        assert_eq!(events[0].timestamp_us, 1000);
+        assert_eq!(parsed.events[0].timestamp_us, 1000);
         assert_eq!(
-            events[0].payload,
+            parsed.events[0].payload,
             EventPayload::PtyOutput {
                 pane_id: 0,
                 data: b"hello".to_vec()
             }
         );
-        assert_eq!(events[1].timestamp_us, 2000);
-        assert_eq!(events[2].timestamp_us, 3000);
+        assert_eq!(parsed.events[1].timestamp_us, 2000);
+        assert_eq!(parsed.events[2].timestamp_us, 3000);
 
         // First event should create a seek entry.
-        assert!(!seek_entries.is_empty());
-        assert_eq!(seek_entries[0].timestamp_us, 1000);
+        assert!(!parsed.seek_index.is_empty());
+        assert_eq!(parsed.seek_index[0].timestamp_us, 1000);
     }
 
     #[test]
@@ -1451,15 +1560,15 @@ mod tests {
         drop(handle);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let (_, events, seek_entries, _, _) = read_frec_file(&path);
+        let parsed = read_frec_file(&path);
 
-        assert_eq!(events.len(), 35);
+        assert_eq!(parsed.events.len(), 35);
         // First entry at t=0, then at t>=1s, t>=2s, t>=3s → 4 entries.
-        assert_eq!(seek_entries.len(), 4);
-        assert_eq!(seek_entries[0].timestamp_us, 0);
-        assert!(seek_entries[1].timestamp_us >= 1_000_000);
-        assert!(seek_entries[2].timestamp_us >= 2_000_000);
-        assert!(seek_entries[3].timestamp_us >= 3_000_000);
+        assert_eq!(parsed.seek_index.len(), 4);
+        assert_eq!(parsed.seek_index[0].timestamp_us, 0);
+        assert!(parsed.seek_index[1].timestamp_us >= 1_000_000);
+        assert!(parsed.seek_index[2].timestamp_us >= 2_000_000);
+        assert!(parsed.seek_index[3].timestamp_us >= 3_000_000);
     }
 
     #[test]
@@ -1483,11 +1592,11 @@ mod tests {
         drop(handle);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let (_, events, _, _, total) = read_frec_file(&path);
+        let parsed = read_frec_file(&path);
 
-        assert_eq!(events.len(), 100);
-        assert_eq!(total, 100);
-        for (i, event) in events.iter().enumerate() {
+        assert_eq!(parsed.events.len(), 100);
+        assert_eq!(parsed.total_events, 100);
+        for (i, event) in parsed.events.iter().enumerate() {
             assert_eq!(event.timestamp_us, (i as u64) * 10);
         }
     }
