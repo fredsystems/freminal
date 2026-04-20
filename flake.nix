@@ -122,20 +122,20 @@
             postInstall =
               if pkgs.stdenv.isDarwin then
                 ''
-                                    # Create a macOS .app bundle so Freminal appears in
-                                    # Finder / Spotlight / Launchpad.
-                                    mkdir -p "$out/Applications"
-                                    OUT_APP="$out/Applications/Freminal.app/Contents"
-                                    mkdir -p "$OUT_APP/MacOS" "$OUT_APP/Resources"
+                  # Create a macOS .app bundle so Freminal appears in
+                  # Finder / Spotlight / Launchpad.
+                  mkdir -p "$out/Applications"
+                  OUT_APP="$out/Applications/Freminal.app/Contents"
+                  mkdir -p "$OUT_APP/MacOS" "$OUT_APP/Resources"
 
-                                    # macOS only recognises an app bundle if the real binary
-                                    # lives inside it.  Move the binary in, then create a
-                                    # symlink back to $out/bin/ so CLI usage still works.
-                                    mv "$out/bin/freminal" "$OUT_APP/MacOS/freminal"
-                                    ln -s "$OUT_APP/MacOS/freminal" "$out/bin/freminal"
+                  # macOS only recognises an app bundle if the real binary
+                  # lives inside it.  Move the binary in, then create a
+                  # symlink back to $out/bin/ so CLI usage still works.
+                  mv "$out/bin/freminal" "$OUT_APP/MacOS/freminal"
+                  ln -s "$OUT_APP/MacOS/freminal" "$out/bin/freminal"
 
-                                    # Write Info.plist
-                                    cat > "$OUT_APP/Info.plist" << 'PLIST'
+                  # Write Info.plist
+                  cat > "$OUT_APP/Info.plist" << 'PLIST'
                   <?xml version="1.0" encoding="UTF-8"?>
                   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
                     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -148,9 +148,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.6.0</string>
+                    <string>0.7.0</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.6.0</string>
+                    <string>0.7.0</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
@@ -165,8 +165,8 @@
                   </plist>
                   PLIST
 
-                                    # Icon — use pre-generated .icns (multi-resolution, Retina-ready).
-                                    cp assets/macos/freminal.icns "$OUT_APP/Resources/freminal.icns"
+                  # Icon — use pre-generated .icns (multi-resolution, Retina-ready).
+                  cp assets/macos/freminal.icns "$OUT_APP/Resources/freminal.icns"
                 ''
               else
                 ''

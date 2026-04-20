@@ -20,7 +20,7 @@
     clippy::all
 )]
 
-use std::{fmt::Debug, io, process::Output, vec};
+use std::{fmt::Debug, fs, io, process::Output, vec};
 
 use cargo_metadata::MetadataCommand;
 use clap::{Parser, Subcommand};
@@ -163,6 +163,16 @@ enum Command {
     /// Use this instead of `ci` in the pre-commit hook for faster commits.
     #[command(visible_alias = "pc")]
     Precommit,
+
+    /// Bump the version string in all locations (Cargo.toml, flake.nix)
+    ///
+    /// Updates the workspace version in `Cargo.toml` and all version strings
+    /// in `flake.nix` (package version + macOS Info.plist bundle versions).
+    #[command(visible_alias = "bv")]
+    BumpVersion {
+        /// The new version string (e.g. "0.8.0")
+        version: String,
+    },
 }
 
 impl Command {
@@ -189,6 +199,7 @@ impl Command {
             Self::TestLibs => test_libs(),
             Self::BenchCompile => bench_compile(),
             Self::Precommit => precommit(),
+            Self::BumpVersion { version } => bump_version(&version),
         }
     }
 }
@@ -440,6 +451,79 @@ fn test_default_features() -> Result<()> {
 fn precommit() -> Result<()> {
     test()?;
     machete()?;
+    Ok(())
+}
+
+/// Bump the version string in all locations across the workspace.
+///
+/// Updates:
+/// 1. `Cargo.toml` — `[workspace.package] version = "…"`
+/// 2. `flake.nix` — `version = "…"` (nix package version)
+/// 3. `flake.nix` — `CFBundleVersion` and `CFBundleShortVersionString` in the
+///    macOS Info.plist heredoc
+///
+/// The function reads the current version from `Cargo.toml` and replaces all
+/// occurrences with the new version. If any file doesn't contain the expected
+/// old version string, it reports an error rather than silently doing nothing.
+fn bump_version(new_version: &str) -> Result<()> {
+    // Validate that the new version is valid semver.
+    semver::Version::parse(new_version)
+        .wrap_err_with(|| format!("invalid semver version: {new_version}"))?;
+
+    // Read current version from Cargo.toml.
+    let cargo_toml_path = "Cargo.toml";
+    let cargo_content = fs::read_to_string(cargo_toml_path)
+        .wrap_err_with(|| format!("failed to read {cargo_toml_path}"))?;
+
+    // Extract current version from the workspace.package section.
+    let old_version = cargo_content
+        .lines()
+        .find(|line| line.starts_with("version = \""))
+        .and_then(|line| line.strip_prefix("version = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!("could not find 'version = \"…\"' in {cargo_toml_path}")
+        })?
+        .to_owned();
+
+    if old_version == new_version {
+        tracing::info!("version is already {new_version}, nothing to do");
+        return Ok(());
+    }
+
+    tracing::info!("bumping version: {old_version} -> {new_version}");
+
+    // 1. Update Cargo.toml
+    let old_cargo_line = format!("version = \"{old_version}\"");
+    let new_cargo_line = format!("version = \"{new_version}\"");
+
+    let updated_cargo = cargo_content.replacen(&old_cargo_line, &new_cargo_line, 1);
+    color_eyre::eyre::ensure!(
+        updated_cargo != cargo_content,
+        "failed to replace version in {cargo_toml_path}"
+    );
+    fs::write(cargo_toml_path, &updated_cargo)
+        .wrap_err_with(|| format!("failed to write {cargo_toml_path}"))?;
+    tracing::info!("  updated {cargo_toml_path}");
+
+    // 2. Update flake.nix — all occurrences of the old version.
+    let flake_path = "flake.nix";
+    let flake_content =
+        fs::read_to_string(flake_path).wrap_err_with(|| format!("failed to read {flake_path}"))?;
+
+    let updated_flake = flake_content.replace(&old_version, new_version);
+    let replacements = flake_content.matches(&old_version).count();
+    if replacements == 0 {
+        tracing::warn!("no version strings found in {flake_path} — is it already updated?");
+    } else {
+        fs::write(flake_path, &updated_flake)
+            .wrap_err_with(|| format!("failed to write {flake_path}"))?;
+        tracing::info!("  updated {flake_path} ({replacements} occurrences)");
+    }
+
+    tracing::info!("version bump complete: {old_version} -> {new_version}");
+    tracing::info!("remember to run `cargo check` to update Cargo.lock");
+
     Ok(())
 }
 
