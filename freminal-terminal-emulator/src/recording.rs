@@ -629,7 +629,7 @@ impl WriterThread {
         // Flags (reserved, all zero)
         self.writer.write_all(&0u32.to_le_bytes())?;
         // Serialize metadata
-        let metadata_bytes = rmp_serde::to_vec(metadata)?;
+        let metadata_bytes = rmp_serde::to_vec_named(metadata)?;
         let metadata_len = u32::try_from(metadata_bytes.len()).unwrap_or(u32::MAX);
         self.writer.write_all(&metadata_len.to_le_bytes())?;
         self.writer.write_all(&metadata_bytes)?;
@@ -656,7 +656,7 @@ impl WriterThread {
         }
 
         // Serialize payload via MessagePack.
-        let payload_bytes = rmp_serde::to_vec(&event.payload)?;
+        let payload_bytes = rmp_serde::to_vec_named(&event.payload)?;
         let payload_len = u32::try_from(payload_bytes.len()).unwrap_or(u32::MAX);
 
         // Event header: timestamp_us (8) + event_type (1) + payload_length (4)
@@ -967,7 +967,7 @@ mod tests {
     fn round_trip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(
         value: &T,
     ) {
-        let bytes = rmp_serde::to_vec(value).unwrap();
+        let bytes = rmp_serde::to_vec_named(value).unwrap();
         let decoded: T = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(value, &decoded);
     }

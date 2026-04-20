@@ -115,6 +115,8 @@ def format_payload(event_type_name, payload_dict, convert_esc=False):
     """Format a decoded msgpack payload for display."""
     if event_type_name in ("PtyOutput", "PtyInput"):
         raw = payload_dict.get("data", b"")
+        if isinstance(raw, list):
+            raw = bytes(raw)
         if isinstance(raw, bytes):
             text = raw.decode("utf-8", errors="replace")
         else:
@@ -126,7 +128,9 @@ def format_payload(event_type_name, payload_dict, convert_esc=False):
     # For other event types, show the payload as key=value pairs.
     parts = []
     for k, v in payload_dict.items():
-        if isinstance(v, bytes):
+        if isinstance(v, list) and all(isinstance(x, int) for x in v):
+            v = bytes(v).decode("utf-8", errors="replace")
+        elif isinstance(v, bytes):
             v = v.decode("utf-8", errors="replace")
         parts.append(f"{k}={v!r}")
     return " ".join(parts)
@@ -321,6 +325,12 @@ while pos + 13 <= end:
     # Decode msgpack payload
     try:
         payload_dict = msgpack.unpackb(payload_raw, raw=False)
+        # rmp_serde serializes Rust enum variants as {variant_name: {fields...}}.
+        # Unwrap the single-key wrapper to get the inner field map.
+        if isinstance(payload_dict, dict) and len(payload_dict) == 1:
+            inner = next(iter(payload_dict.values()))
+            if isinstance(inner, dict):
+                payload_dict = inner
     except Exception:
         payload_dict = {"_raw": payload_raw.hex()}
 
