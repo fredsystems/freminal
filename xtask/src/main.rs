@@ -462,9 +462,10 @@ fn precommit() -> Result<()> {
 /// 3. `flake.nix` — `CFBundleVersion` and `CFBundleShortVersionString` in the
 ///    macOS Info.plist heredoc
 ///
-/// The function reads the current version from `Cargo.toml` and replaces all
-/// occurrences with the new version. If any file doesn't contain the expected
-/// old version string, it reports an error rather than silently doing nothing.
+/// The function reads the current version from `Cargo.toml` and replaces
+/// matching occurrences with the new version. Missing expected occurrences
+/// are not ignored silently: the command emits warnings for files that do
+/// not contain the old version string and then continues successfully.
 fn bump_version(new_version: &str) -> Result<()> {
     // Validate that the new version is valid semver.
     semver::Version::parse(new_version)

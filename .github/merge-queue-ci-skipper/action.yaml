@@ -156,11 +156,15 @@ runs:
           });
 
           console.log(`checks.check_runs = ${checks.check_runs.map(check => `${check.status},${check.conclusion},${check.name};`)}`);
-          const nonSuccessfulChecks = checks.check_runs.filter(check => check.status !== "completed" || check.conclusion !== "success");
-          const nonSuccessfulCheckNames = nonSuccessfulChecks.map(check => check.name);
-          console.log(`nonSuccessfulCheckNames = ${nonSuccessfulCheckNames}`);
 
-          const missingChecks = requiredCheckNames.filter(checkName => nonSuccessfulCheckNames.includes(checkName));
+          const missingChecks = requiredCheckNames.filter(checkName =>
+            !checks.check_runs.some(check =>
+              check.name === checkName &&
+              check.status === "completed" &&
+              check.conclusion === "success"
+            )
+          );
+          console.log(`missingChecks = ${missingChecks}`);
 
           if (missingChecks.length > 0) {
             console.log(`Required checks not passed, cannot skip merge queue checks. Setting CAN_SKIP_CHECKS to false. Missing checks: ${missingChecks.join(', ')}`);

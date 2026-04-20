@@ -14,8 +14,6 @@ default-members = [
   "freminal-buffer",
   "freminal-common",
   "freminal-terminal-emulator",
-  "freminal-windowing",
-  "portable-pty",
 ]
 
 [workspace.package]

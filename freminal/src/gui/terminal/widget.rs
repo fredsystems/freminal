@@ -969,7 +969,7 @@ impl FreminalTerminalWidget {
         {
             let scrollbar_hit = ui.input(|i| {
                 let ptr = &i.pointer;
-                if !ptr.primary_down() {
+                if !ptr.primary_pressed() {
                     return false;
                 }
                 ptr.interact_pos().is_some_and(|pos| {
