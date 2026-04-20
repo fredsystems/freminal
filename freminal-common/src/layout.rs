@@ -1190,6 +1190,132 @@ project_dir = "~/default"
     }
 
     #[test]
+    fn multi_window_layout_parses() {
+        let content = r#"
+[layout]
+name = "Multi"
+
+[[windows]]
+size = [1920, 1080]
+position = [0, 0]
+
+  [[windows.tabs]]
+  title = "Window 1"
+
+    [[windows.tabs.panes]]
+    id = "w1p1"
+    active = true
+
+[[windows]]
+size = [800, 600]
+position = [100, 50]
+
+  [[windows.tabs]]
+  title = "Window 2"
+
+    [[windows.tabs.panes]]
+    id = "w2p1"
+    active = true
+"#;
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), content).expect("parse failed");
+        assert_eq!(layout.windows.len(), 2);
+        assert_eq!(layout.windows[0].size, Some([1920, 1080]));
+        assert_eq!(layout.windows[0].position, Some([0, 0]));
+        assert_eq!(layout.windows[1].size, Some([800, 600]));
+        assert_eq!(layout.windows[1].position, Some([100, 50]));
+    }
+
+    #[test]
+    fn multi_window_layout_round_trip() {
+        let content = r#"
+[layout]
+name = "MultiRT"
+
+[[windows]]
+size = [1280, 720]
+position = [10, 20]
+
+  [[windows.tabs]]
+  title = "Tab A"
+
+    [[windows.tabs.panes]]
+    id = "pane1"
+    active = true
+
+[[windows]]
+size = [640, 480]
+
+  [[windows.tabs]]
+  title = "Tab B"
+
+    [[windows.tabs.panes]]
+    id = "pane2"
+    active = true
+"#;
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), content).expect("parse failed");
+        let toml_str = layout.to_toml_string().expect("serialize failed");
+        let reparsed =
+            Layout::from_str_content(Path::new("test.toml"), &toml_str).expect("reparse failed");
+        assert_eq!(reparsed.windows.len(), 2);
+        assert_eq!(reparsed.windows[0].size, Some([1280, 720]));
+        assert_eq!(reparsed.windows[0].position, Some([10, 20]));
+        assert_eq!(reparsed.windows[1].size, Some([640, 480]));
+        assert_eq!(reparsed.windows[1].position, None);
+    }
+
+    #[test]
+    fn save_to_file_and_from_file_round_trip() {
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), SPLIT_LAYOUT).expect("parse failed");
+        let tmp = std::env::temp_dir().join("freminal_layout_rt_test.toml");
+        layout.save_to_file(&tmp).expect("save failed");
+        let reloaded = Layout::from_file(&tmp).expect("load failed");
+        assert_eq!(reloaded.display_name(), layout.display_name());
+        assert_eq!(reloaded.windows.len(), layout.windows.len());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn from_file_rejects_malformed_toml() {
+        let tmp = std::env::temp_dir().join("freminal_layout_bad_test.toml");
+        std::fs::write(&tmp, "this is not [ valid toml !!!").expect("write failed");
+        let err = Layout::from_file(&tmp).expect_err("expected parse error");
+        // Should be a parse/toml error, not a panic.
+        let msg = err.to_string();
+        assert!(!msg.is_empty(), "error message should be non-empty");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn discover_layouts_finds_valid_files() {
+        let tmp_dir = std::env::temp_dir().join("freminal_discover_test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+
+        // Write one valid layout.
+        let valid_path = tmp_dir.join("my_layout.toml");
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), SIMPLE_LAYOUT).expect("parse failed");
+        layout.save_to_file(&valid_path).expect("save failed");
+
+        // Write one invalid .toml file (should be skipped silently).
+        let bad_path = tmp_dir.join("corrupt.toml");
+        std::fs::write(&bad_path, "not toml !!!").expect("write failed");
+
+        // Write a non-toml file (should be ignored).
+        let txt_path = tmp_dir.join("readme.txt");
+        std::fs::write(&txt_path, "ignore me").expect("write failed");
+
+        let summaries = discover_layouts(&tmp_dir);
+        assert_eq!(summaries.len(), 1, "expected exactly 1 valid layout");
+        assert_eq!(summaries[0].name, "Simple");
+        assert_eq!(summaries[0].path, valid_path);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
     fn validation_rejects_cycle() {
         let bad = r#"
 [[tabs]]
