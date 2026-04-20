@@ -255,11 +255,6 @@ fn spawn_pty_consumer_thread(
                     let total_rows = emulator.internal.handler.buffer().get_rows().len();
                     let _ = search_buffer_tx.send((total_rows, combined));
                 }
-                #[cfg(feature = "playback")]
-                Ok(InputEvent::PlaybackControl(_)) => {
-                    // Playback commands are handled by the dedicated playback
-                    // consumer thread, not the normal PTY consumer.  Ignore.
-                }
                 Err(_) => {
                     info!("Input channel closed; consumer thread exiting");
                     return false;

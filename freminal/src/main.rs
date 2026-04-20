@@ -46,16 +46,6 @@ extern crate tracing;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-#[cfg(feature = "playback")]
-use arc_swap::ArcSwap;
-#[cfg(feature = "playback")]
-use crossbeam_channel::unbounded;
-#[cfg(feature = "playback")]
-use freminal_terminal_emulator::interface::TerminalEmulator;
-#[cfg(feature = "playback")]
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
-#[cfg(feature = "playback")]
-use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
@@ -67,9 +57,6 @@ use tracing_subscriber::{
 };
 
 pub mod gui;
-#[cfg(feature = "playback")]
-pub mod playback;
-
 use anyhow::Result;
 use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
@@ -78,7 +65,7 @@ use gui::pty::spawn_pty_tab;
 
 use clap::Parser;
 
-/// Run the normal (non-playback) PTY terminal path.
+/// Run the PTY-backed terminal path.
 ///
 /// Spawns a PTY-backed terminal tab via [`spawn_pty_tab`] and starts the
 /// GUI event loop.
@@ -141,8 +128,6 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         config_path,
         repaint_handle,
         window_post,
-        #[cfg(feature = "playback")]
-        false,
     )
 }
 
@@ -312,131 +297,8 @@ fn main() {
         args.shell = cfg.shell_path().map(String::from);
     }
 
-    // ── 3. Create the emulator and data source ───────────────────────
-    //
-    // Normal mode: spawn a PTY, feed its output through a channel.
-    // Playback mode: parse a FREC recording file into frames, hand them
-    //                to a dedicated playback consumer thread.
+    // ── 3. Spawn PTY and start GUI ──────────────────────────────────
 
-    #[cfg(feature = "playback")]
-    let is_playback = args.playback.is_some();
-
-    #[cfg(feature = "playback")]
-    let res = if let Some(playback_path) = args.playback.clone() {
-        // ── Playback mode ───────────────────────────────────────────
-        let file_data = match std::fs::read(&playback_path) {
-            Ok(d) => d,
-            Err(e) => {
-                error!(
-                    "Failed to read playback file {}: {e}",
-                    playback_path.display()
-                );
-                return;
-            }
-        };
-
-        let frames = match freminal_terminal_emulator::recording::parse_recording(&file_data) {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to parse recording file: {e}");
-                return;
-            }
-        };
-
-        info!(
-            "Loaded {} playback frames from {}",
-            frames.len(),
-            playback_path.display()
-        );
-
-        let (mut terminal, _pty_write_rx) =
-            TerminalEmulator::new_headless(Some(cfg.scrollback.limit));
-
-        // Apply the configured theme.
-        //
-        // In playback mode there is no egui context yet, so we cannot detect
-        // the OS dark/light preference.  `active_slug(false)` assumes light
-        // mode for `ThemeMode::Auto`.  The GUI constructor will correct this
-        // by sending a `ThemeChange` once the real OS preference is known.
-        let theme =
-            themes::by_slug(cfg.theme.active_slug(false)).unwrap_or(&themes::CATPPUCCIN_MOCHA);
-        terminal.internal.handler.set_theme(theme);
-
-        // Shared snapshot published by the playback thread.
-        let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
-            Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
-        let arc_swap_gui = Arc::clone(&arc_swap);
-
-        // The playback emulator has no real PTY, but the GUI still needs a
-        // pty_write_tx for Report* responses from handle_window_manipulation.
-        // Create a throwaway channel — responses are silently dropped.
-        let (pty_write_tx, _pty_write_sink) =
-            crossbeam_channel::unbounded::<freminal_common::pty_write::PtyWrite>();
-
-        let (input_tx, input_rx) = unbounded::<InputEvent>();
-        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
-        let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
-        let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(
-            usize,
-            Vec<freminal_common::buffer_states::tchar::TChar>,
-        )>(1);
-
-        let repaint_handle: Arc<
-            OnceLock<(
-                freminal_windowing::RepaintProxy,
-                freminal_windowing::WindowId,
-            )>,
-        > = Arc::new(OnceLock::new());
-        let repaint_handle_playback = Arc::clone(&repaint_handle);
-
-        std::thread::spawn(move || {
-            playback::run_playback_thread(
-                terminal,
-                frames,
-                input_rx,
-                window_cmd_tx,
-                arc_swap,
-                repaint_handle_playback,
-                clipboard_tx,
-                search_buffer_tx,
-            );
-        });
-
-        let config_path = args.config.clone();
-        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
-        let window_post = Arc::new(Mutex::new(gui::renderer::WindowPostRenderer::new()));
-        let playback_pane = gui::panes::Pane {
-            id: gui::panes::PaneId::first(),
-            arc_swap: arc_swap_gui,
-            input_tx,
-            pty_write_tx,
-            window_cmd_rx,
-            clipboard_rx,
-            search_buffer_rx,
-            pty_dead_rx,
-            title: "Playback".to_owned(),
-            bell_active: false,
-            title_stack: Vec::new(),
-            view_state: gui::view_state::ViewState::new(),
-            echo_off: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            render_state: gui::terminal::new_render_state(Arc::clone(&window_post)),
-            render_cache: gui::terminal::PaneRenderCache::new(),
-        };
-        gui::run(
-            gui::tabs::Tab::new(gui::tabs::TabId::first(), playback_pane),
-            cfg,
-            args,
-            config_path,
-            repaint_handle,
-            window_post,
-            is_playback,
-        )
-    } else {
-        // ── Normal mode (playback feature enabled, but no playback path) ──
-        normal_run(args, cfg)
-    };
-
-    #[cfg(not(feature = "playback"))]
     let res = normal_run(args, cfg);
 
     if let Err(e) = res {

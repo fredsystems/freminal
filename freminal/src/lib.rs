@@ -37,5 +37,3 @@
 extern crate tracing;
 
 pub mod gui;
-#[cfg(feature = "playback")]
-pub mod playback;

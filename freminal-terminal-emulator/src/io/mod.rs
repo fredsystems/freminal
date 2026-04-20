@@ -77,39 +77,6 @@ pub enum InputEvent {
         /// `end_col` (the same column range on each row).
         is_block: bool,
     },
-    /// A playback control command (mode selection, play/pause, next frame).
-    ///
-    /// Only sent when the application is running in playback mode.
-    #[cfg(feature = "playback")]
-    PlaybackControl(PlaybackCommand),
-}
-
-/// Playback mode selection.
-///
-/// Controls how a recorded terminal session is replayed.
-#[cfg(feature = "playback")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaybackMode {
-    /// Process the entire recording at once (no timing).
-    Instant,
-    /// Replay frames with their original inter-frame timing.
-    RealTime,
-    /// Advance one frame at a time on user command.
-    FrameStepping,
-}
-
-/// Commands the GUI sends to control playback state.
-#[cfg(feature = "playback")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaybackCommand {
-    /// Select a playback mode (always pauses playback; user must press Play).
-    SetMode(PlaybackMode),
-    /// Begin or resume playback in the current mode.
-    Play,
-    /// Pause playback (only meaningful in `RealTime` mode).
-    Pause,
-    /// Advance one frame (only meaningful in `FrameStepping` mode).
-    NextFrame,
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

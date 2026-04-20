@@ -5,12 +5,7 @@
 
 use std::{io::Write, path::Path, path::PathBuf};
 
-#[cfg(feature = "playback")]
-use std::time::Instant;
-
 use super::{PtyRead, PtyWrite};
-#[cfg(feature = "playback")]
-use crate::recording;
 use anyhow::Result;
 use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender};
@@ -176,11 +171,9 @@ fn process_pty_write(
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
 #[allow(clippy::too_many_lines)]
-#[cfg_attr(not(feature = "playback"), allow(clippy::needless_pass_by_value))]
 pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,
     send_tx: Sender<PtyRead>,
-    recording_path: Option<String>,
     command: Option<(String, Vec<String>)>,
     shell: Option<String>,
     termcaps: Option<&Path>,
@@ -329,30 +322,6 @@ pub fn run_terminal(
 
     std::thread::spawn(move || {
         let buf = &mut [0u8; 4096];
-        #[cfg(feature = "playback")]
-        let mut recording = None;
-        #[cfg(feature = "playback")]
-        let mut recording_start = None;
-        #[cfg(not(feature = "playback"))]
-        let _ = recording_path;
-
-        // if recording path is some, open a file for writing
-        #[cfg(feature = "playback")]
-        if let Some(path) = &recording_path {
-            match std::fs::File::create(path) {
-                Ok(mut file) => {
-                    if let Err(e) = recording::write_header(&mut file) {
-                        error!("Failed to write recording header: {e}");
-                    } else {
-                        recording_start = Some(Instant::now());
-                        recording = Some(file);
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to create recording file: {e}");
-                }
-            }
-        }
 
         // Consume the output from the child.
         //
@@ -370,18 +339,6 @@ pub fn run_terminal(
                 return;
             }
             let data = buf[..amount_read].to_vec();
-
-            // Write framed data to recording file
-            #[cfg(feature = "playback")]
-            if let Some(file) = &mut recording {
-                let elapsed = recording_start.map_or(0, |start| {
-                    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
-                });
-                if let Err(e) = recording::write_frame(file, elapsed, &data) {
-                    error!("Failed to write to recording file: {e}");
-                    return;
-                }
-            }
 
             if let Err(e) = send_tx.send(PtyRead {
                 buf: data,
@@ -506,7 +463,6 @@ impl FreminalPtyInputOutput {
     pub fn new(
         write_rx: Receiver<PtyWrite>,
         send_tx: Sender<PtyRead>,
-        recording: Option<String>,
         command: Option<(String, Vec<String>)>,
         shell: Option<String>,
         initial_size: &FreminalTerminalSize,
@@ -522,13 +478,9 @@ impl FreminalPtyInputOutput {
             })?)
         };
 
-        #[cfg(not(feature = "playback"))]
-        let _ = recording;
-
         let result = run_terminal(
             write_rx,
             send_tx,
-            recording,
             command,
             shell,
             termcaps.as_ref().map(TempDir::path),

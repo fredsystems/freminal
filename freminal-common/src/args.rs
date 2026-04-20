@@ -11,11 +11,6 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "freminal", version, about)]
 pub struct Args {
-    /// Path to write session recordings to
-    #[cfg(feature = "playback")]
-    #[arg(long = "recording-path")]
-    pub recording: Option<String>,
-
     /// Shell to run (overrides config file and default shell)
     #[arg(long)]
     pub shell: Option<String>,
@@ -42,15 +37,6 @@ pub struct Args {
     /// Path to a TOML configuration file (overrides default config locations)
     #[arg(long = "config")]
     pub config: Option<PathBuf>,
-
-    /// Replay a recorded session file instead of launching a PTY.
-    ///
-    /// The file must contain raw bytes as produced by `--recording-path`.
-    /// No shell is spawned; the recording is fed directly into the terminal
-    /// emulator.
-    #[cfg(feature = "playback")]
-    #[arg(long = "with-playback-file")]
-    pub playback: Option<PathBuf>,
 
     /// Hide the menu bar at the top of the window (overrides config file)
     #[arg(long = "hide-menu-bar")]

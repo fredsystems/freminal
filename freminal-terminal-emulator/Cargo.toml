@@ -52,4 +52,3 @@ vergen.workspace = true
 
 [features]
 default = []
-playback = ["freminal-common/playback"]

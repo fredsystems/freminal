@@ -16,8 +16,6 @@ use freminal_common::config::{Config, TabBarPosition, ThemeMode};
 use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_terminal_emulator::io::InputEvent;
-#[cfg(feature = "playback")]
-use freminal_terminal_emulator::io::PlaybackMode;
 use freminal_windowing::{RepaintProxy, WindowId};
 use glow::HasContext;
 use renderer::WindowPostRenderer;
@@ -139,15 +137,6 @@ struct FreminalGui {
 
     /// Set to `true` when the existing settings window should be focused.
     pending_focus_settings: bool,
-
-    /// Whether this instance is running in playback mode.
-    #[cfg(feature = "playback")]
-    is_playback: bool,
-
-    /// The playback mode currently selected in the GUI dropdown.
-    /// Only meaningful when `is_playback` is true.
-    #[cfg(feature = "playback")]
-    selected_playback_mode: Option<PlaybackMode>,
 }
 
 impl FreminalGui {
@@ -159,7 +148,6 @@ impl FreminalGui {
         repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
         config_path: Option<std::path::PathBuf>,
         window_post: Arc<Mutex<WindowPostRenderer>>,
-        #[cfg(feature = "playback")] is_playback: bool,
     ) -> Self {
         // Inform the initial tab about the configured theme mode and current OS
         // dark/light preference so DECRPM ?2031 responses are correct from the start.
@@ -220,10 +208,6 @@ impl FreminalGui {
             settings_window_id: None,
             pending_settings_window: false,
             pending_focus_settings: false,
-            #[cfg(feature = "playback")]
-            is_playback,
-            #[cfg(feature = "playback")]
-            selected_playback_mode: None,
         }
     }
 
@@ -263,13 +247,6 @@ impl FreminalGui {
     /// Uses the stored `Args` and `Config` to configure the new terminal.
     /// Logs an error and does nothing if the PTY fails to start.
     fn spawn_new_tab(&self, win: &mut PerWindowState) {
-        // Tabs are not supported in playback mode — there is exactly one
-        // recording session to replay and no PTY to spawn.
-        #[cfg(feature = "playback")]
-        if self.is_playback {
-            return;
-        }
-
         let theme =
             freminal_common::themes::by_slug(self.config.theme.active_slug(win.os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
@@ -400,12 +377,6 @@ impl FreminalGui {
     // suggests an impossible inline form; suppressed here with justification.
     #[allow(clippy::significant_drop_tightening)]
     fn spawn_split_pane(&self, win: &mut PerWindowState, direction: panes::SplitDirection) {
-        // Split panes are not supported in playback mode.
-        #[cfg(feature = "playback")]
-        if self.is_playback {
-            return;
-        }
-
         let theme =
             freminal_common::themes::by_slug(self.config.theme.active_slug(win.os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
@@ -1208,7 +1179,7 @@ impl freminal_windowing::App for FreminalGui {
         if !self.config.ui.hide_menu_bar {
             let (menu_action, menu_open) = Panel::top("menu_bar")
                 .show_inside(&mut root_ui, |ui| {
-                    self.show_menu_bar(ui, &snap, &mut win, window_id)
+                    self.show_menu_bar(ui, &mut win, window_id)
                 })
                 .inner;
             any_menu_open = menu_open;
@@ -1951,7 +1922,6 @@ pub fn run(
     config_path: Option<std::path::PathBuf>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     window_post: Arc<Mutex<WindowPostRenderer>>,
-    #[cfg(feature = "playback")] is_playback: bool,
 ) -> Result<()> {
     let icon_bytes = include_bytes!("../../../assets/icon.png");
     let image = image::load_from_memory(icon_bytes)
@@ -1979,8 +1949,6 @@ pub fn run(
         repaint_handle,
         config_path,
         window_post,
-        #[cfg(feature = "playback")]
-        is_playback,
     );
     app.icon = Some(icon);
 

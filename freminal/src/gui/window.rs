@@ -65,15 +65,3 @@ pub(super) struct PerWindowState {
     /// `update()` where `WindowHandle` is available.
     pub(super) pending_new_window: bool,
 }
-
-impl PerWindowState {
-    /// Send a playback command to the consumer thread via the input channel.
-    #[cfg(feature = "playback")]
-    pub(super) fn send_playback_cmd(&self, cmd: freminal_terminal_emulator::io::PlaybackCommand) {
-        if let Err(e) = self.tabs.active_tab().active_pane().input_tx.send(
-            freminal_terminal_emulator::io::InputEvent::PlaybackControl(cmd),
-        ) {
-            tracing::error!("Failed to send playback command: {e}");
-        }
-    }
-}
