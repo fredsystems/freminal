@@ -190,6 +190,18 @@ struct FreminalGui {
     /// non-settings, non-initial window) pops one entry from this queue and
     /// uses it instead of spawning a default single-pane window.
     pending_layout_windows: std::collections::VecDeque<freminal_common::layout::ResolvedWindow>,
+
+    /// Cached list of layouts discovered in the layout library directory.
+    ///
+    /// Populated at startup from `layout_library_dir()` and refreshed after
+    /// `SaveLayout` writes a new file.  Used to populate the Layouts menu.
+    discovered_layouts: Vec<freminal_common::layout::LayoutSummary>,
+
+    /// A layout that has been selected from the menu and is waiting to be
+    /// applied once `update()` has access to `WindowHandle`.
+    ///
+    /// `None` when no layout application is pending.
+    pending_load_layout: Option<freminal_common::layout::ResolvedLayout>,
 }
 
 impl FreminalGui {
@@ -266,6 +278,10 @@ impl FreminalGui {
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
             pending_layout_windows: std::collections::VecDeque::new(),
+            discovered_layouts: freminal_common::config::layout_library_dir()
+                .map(|dir| freminal_common::layout::discover_layouts(&dir))
+                .unwrap_or_default(),
+            pending_load_layout: None,
         }
     }
 
@@ -2645,6 +2661,12 @@ impl freminal_windowing::App for FreminalGui {
 
         // Reinsert per-window state before returning.
         self.windows.insert(window_id, win);
+
+        // Apply a pending layout (set from the Layouts menu).
+        if let Some(resolved) = self.pending_load_layout.take() {
+            let commands = self.apply_layout(&resolved, window_id, handle);
+            self.inject_layout_commands(&commands);
+        }
     }
 
     fn raw_input_hook(&mut self, _window_id: WindowId, raw_input: &mut egui::RawInput) {

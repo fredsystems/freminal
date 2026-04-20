@@ -404,6 +404,9 @@ impl super::FreminalGui {
                 match self.save_layout(&path) {
                     Ok(()) => {
                         tracing::info!("Layout saved to {}", path.display());
+                        // Refresh the layout library so the new file appears in the menu.
+                        self.discovered_layouts =
+                            freminal_common::layout::discover_layouts(&layout_dir);
                     }
                     Err(e) => {
                         error!("SaveLayout: failed to write {}: {e}", path.display());

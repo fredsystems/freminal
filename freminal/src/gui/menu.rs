@@ -96,6 +96,13 @@ impl super::FreminalGui {
                 any_menu_open = true;
             }
 
+            let layout_resp = ui.menu_button("Layouts", |ui| {
+                self.show_layouts_menu(ui, win, window_id);
+            });
+            if layout_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
             // Password-prompt lock indicator: shown in the menu bar (which is
             // always visible) so it works regardless of tab bar visibility.
             if self.config.security.password_indicator
@@ -115,6 +122,45 @@ impl super::FreminalGui {
             }
         });
         (menu_action, any_menu_open)
+    }
+
+    /// Render the "Layouts" dropdown menu contents.
+    fn show_layouts_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        win: &mut PerWindowState,
+        window_id: super::WindowId,
+    ) {
+        if ui
+            .add(self.menu_button_for("Save Layout", KeyAction::SaveLayout))
+            .clicked()
+        {
+            self.dispatch_deferred_action(KeyAction::SaveLayout, win, window_id);
+            ui.close();
+        }
+
+        if !self.discovered_layouts.is_empty() {
+            ui.separator();
+            // Clone to avoid holding an immutable borrow of `self` while
+            // the loop body needs `&mut self`.
+            let layouts = self.discovered_layouts.clone();
+            for summary in &layouts {
+                if ui.button(&summary.name).clicked() {
+                    match freminal_common::layout::Layout::from_file(&summary.path).and_then(|l| {
+                        l.validate()?;
+                        l.resolve()
+                    }) {
+                        Ok(resolved) => {
+                            self.pending_load_layout = Some(resolved);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to load layout '{}': {e}", summary.name);
+                        }
+                    }
+                    ui.close();
+                }
+            }
+        }
     }
 
     /// Render the "Tab" dropdown menu contents.
