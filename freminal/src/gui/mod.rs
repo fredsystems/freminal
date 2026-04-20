@@ -811,6 +811,42 @@ impl FreminalGui {
         Some((tab, active_pane))
     }
 
+    /// Inject startup commands into panes after layout application.
+    ///
+    /// Each `(pane_id, command)` pair was collected during layout application;
+    /// the command is sent to the pane's PTY immediately followed by a newline.
+    /// The shell receives the text as if the user typed it.
+    fn inject_layout_commands(&self, commands: &[(panes::PaneId, String)]) {
+        if commands.is_empty() {
+            return;
+        }
+        // Build a flat map of pane_id → pty_write_tx across all windows.
+        for (pane_id, command) in commands {
+            let found = self.windows.values().find_map(|win| {
+                win.tabs.iter().find_map(|tab| {
+                    tab.pane_tree.iter_panes().ok().and_then(|panes| {
+                        panes
+                            .into_iter()
+                            .find(|p| p.id == *pane_id)
+                            .map(|p| p.pty_write_tx.clone())
+                    })
+                })
+            });
+            if let Some(tx) = found {
+                let mut payload = command.as_bytes().to_owned();
+                payload.push(b'\n');
+                if let Err(e) = tx.send(freminal_common::pty_write::PtyWrite::Write(payload)) {
+                    error!(
+                        "layout: failed to inject command into pane {:?}: {e}",
+                        pane_id
+                    );
+                }
+            } else {
+                debug!("layout: pane {:?} not found for command injection", pane_id);
+            }
+        }
+    }
+
     /// Apply a resolved layout to the current frontmost window and spawn any
     /// additional windows.
     ///
@@ -1283,7 +1319,8 @@ impl freminal_windowing::App for FreminalGui {
                 {
                     Ok(layout) => match layout.resolve() {
                         Ok(resolved) => {
-                            self.apply_layout(&resolved, window_id, handle);
+                            let cmds = self.apply_layout(&resolved, window_id, handle);
+                            self.inject_layout_commands(&cmds);
                         }
                         Err(e) => {
                             error!("Failed to resolve layout '{layout_path}': {e}");
@@ -1312,13 +1349,15 @@ impl freminal_windowing::App for FreminalGui {
             // Subsequent window — check if a layout window is waiting, otherwise
             // spawn a default single-pane PTY tab.
             if !self.pending_layout_windows.is_empty() {
-                self.build_window_from_pending_layout(
+                if let Some(cmds) = self.build_window_from_pending_layout(
                     window_id,
                     ctx,
                     handle,
                     inner_size,
                     os_dark_mode,
-                );
+                ) {
+                    self.inject_layout_commands(&cmds);
+                }
                 return;
             }
 
