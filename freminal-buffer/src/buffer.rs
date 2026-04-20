@@ -372,11 +372,14 @@ impl Buffer {
     fn debug_assert_invariants(&self) {}
 
     fn push_row(&mut self, origin: RowOrigin, join: RowJoin) {
-        let mut row = Row::new_with_origin(self.width, origin, join);
-        // BCE: if the current SGR has a non-default background, fill the new
-        // row with blank cells carrying that background color.  For the common
-        // case (default tag) this is a no-op.
-        row.fill_with_tag(&self.current_tag);
+        let row = Row::new_with_origin(self.width, origin, join);
+        // New rows created by scrolling (LF at bottom, auto-wrap at bottom-right)
+        // use default background — NOT the current SGR background.  BCE
+        // (back_color_erase) only applies to explicit erase operations (ED, EL).
+        // Filling with current_tag here causes visible artifacts when programs
+        // output long lines with colored backgrounds that wrap at the right margin:
+        // the trailing blank cells on the wrapped continuation row retain the
+        // non-default background instead of being transparent.
         self.rows.push(row);
         self.row_cache.push(None);
     }
@@ -1580,11 +1583,12 @@ impl Buffer {
                         } else if sy == self.height.saturating_sub(1) {
                             // Cursor was at the bottom of the visible window and the
                             // next slot already has content from old scrollback — this
-                            // is the newly-scrolled-in line, so wipe it (BCE).
+                            // is the newly-scrolled-in line, so wipe it.  Use default
+                            // background (no BCE) — same rationale as `push_row`.
                             self.image_cell_count -= row.count_image_cells();
                             row.origin = RowOrigin::HardBreak;
                             row.join = RowJoin::NewLogicalLine;
-                            row.clear_with_tag(&self.current_tag);
+                            row.clear();
                         }
                         // Otherwise (cursor was above the bottom, row has real
                         // content): leave the row completely untouched.
@@ -2329,8 +2333,9 @@ impl Buffer {
         // rows[row_idx+1] into rows[row_idx] for row_idx in first..last).
         // It is now replaced with a blank row; deduct any image cells it held.
         self.image_cell_count -= self.rows[last].count_image_cells();
-        let mut new_row = Row::new(self.width);
-        new_row.fill_with_tag(&self.current_tag);
+        let new_row = Row::new(self.width);
+        // Scroll-created blank rows use default background (no BCE).
+        // See `push_row` comment for rationale.
         self.rows[last] = new_row;
         // New blank row at `last` — no cached representation yet.
         self.row_cache[last] = None;
@@ -2357,8 +2362,9 @@ impl Buffer {
         // rows[row_idx-1] into rows[row_idx] for row_idx in first+1..=last).
         // It is now replaced with a blank row; deduct any image cells it held.
         self.image_cell_count -= self.rows[first].count_image_cells();
-        let mut new_row = Row::new(self.width);
-        new_row.fill_with_tag(&self.current_tag);
+        let new_row = Row::new(self.width);
+        // Scroll-created blank rows use default background (no BCE).
+        // See `push_row` comment for rationale.
         self.rows[first] = new_row;
         // New blank row at `first` — no cached representation yet.
         self.row_cache[first] = None;
