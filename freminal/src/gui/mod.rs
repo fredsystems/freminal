@@ -1286,7 +1286,13 @@ impl freminal_windowing::App for FreminalGui {
                 .window_focused;
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
-                let is_only_pane = tab.pane_tree.pane_count().unwrap_or(1) == 1;
+                let is_only_pane = match tab.pane_tree.pane_count() {
+                    Ok(count) => count == 1,
+                    Err(e) => {
+                        trace!("pane_count error (treating as split): {e}");
+                        false
+                    }
+                };
                 if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
                     for pane in panes {
                         let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;

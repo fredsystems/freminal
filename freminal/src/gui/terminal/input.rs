@@ -166,6 +166,27 @@ pub(super) fn dispatch_binding_action(
     deferred_actions: &mut Vec<KeyAction>,
 ) {
     match action {
+        KeyAction::Paste => {
+            // Read clipboard directly via arboard, bypassing egui-winit's
+            // per-window clipboard (which fails on Wayland child windows).
+            match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                Ok(text) if !text.is_empty() => {
+                    let text = text.replace("\r\n", "\n");
+                    let payload = if snap.bracketed_paste == RlBracket::Enabled {
+                        format!("\x1b[200~{text}\x1b[201~")
+                    } else {
+                        text
+                    };
+                    if let Err(e) = input_tx.send(InputEvent::Key(payload.into_bytes())) {
+                        error!("Failed to send paste to PTY consumer: {e}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Clipboard read failed: {e}");
+                }
+            }
+        }
         KeyAction::Copy if let Some((start, end)) = view_state.selection.normalised() => {
             if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
                 start_row: start.row,
