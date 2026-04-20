@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::{io::Write, path::Path, path::PathBuf};
+use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::{PtyRead, PtyWrite};
 use anyhow::Result;
@@ -167,6 +167,18 @@ fn process_pty_write(
     }
 }
 
+/// Configuration for spawning a PTY child process.
+pub struct PtySpawnConfig<'a> {
+    /// Optional explicit command to run instead of the shell.
+    pub command: Option<(String, Vec<String>)>,
+    /// Shell executable override. Used when `command` is `None`.
+    pub shell: Option<String>,
+    /// Working directory for the child process.
+    pub cwd: Option<&'a Path>,
+    /// Extra environment variables to set on the child process.
+    pub extra_env: Option<&'a HashMap<String, String>>,
+}
+
 // Inherently large: the PTY thread event loop integrating the PTY reader, input channel, and
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
@@ -174,12 +186,16 @@ fn process_pty_write(
 pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,
     send_tx: Sender<PtyRead>,
-    command: Option<(String, Vec<String>)>,
-    shell: Option<String>,
+    spawn_cfg: PtySpawnConfig<'_>,
     termcaps: Option<&Path>,
     initial_size: &FreminalTerminalSize,
-    cwd: Option<&Path>,
 ) -> Result<RunTerminalResult> {
+    let PtySpawnConfig {
+        command,
+        shell,
+        cwd,
+        extra_env,
+    } = spawn_cfg;
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
@@ -292,6 +308,14 @@ pub fn run_terminal(
 
     if let Some(dir) = cwd {
         cmd.cwd(dir);
+    }
+
+    // Apply per-pane extra environment variables from the layout.
+    // These are applied last so they can override any default env vars set above.
+    if let Some(env) = extra_env {
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
     }
 
     let mut child = pair.slave.spawn_command(cmd)?;
@@ -468,10 +492,8 @@ impl FreminalPtyInputOutput {
     pub fn new(
         write_rx: Receiver<PtyWrite>,
         send_tx: Sender<PtyRead>,
-        command: Option<(String, Vec<String>)>,
-        shell: Option<String>,
+        spawn_cfg: PtySpawnConfig<'_>,
         initial_size: &FreminalTerminalSize,
-        cwd: Option<&Path>,
     ) -> Result<Self> {
         // don't use it.  Skip extraction entirely on Windows to avoid issues
         // with symlinks in the tarball requiring elevated privileges.
@@ -487,11 +509,9 @@ impl FreminalPtyInputOutput {
         let result = run_terminal(
             write_rx,
             send_tx,
-            command,
-            shell,
+            spawn_cfg,
             termcaps.as_ref().map(TempDir::path),
             initial_size,
-            cwd,
         )?;
         Ok(Self {
             _termcaps: termcaps,

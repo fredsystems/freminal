@@ -365,9 +365,13 @@ impl FreminalGui {
             theme,
             &win.repaint_handle,
             initial_size,
-            self.recording_handle.clone(),
-            pane_id.raw().try_into().unwrap_or(u32::MAX),
-            cwd_path,
+            pty::PtyTabConfig {
+                cwd: cwd_path,
+                shell_override: None,
+                extra_env: None,
+                recording_handle: self.recording_handle.clone(),
+                recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
         ) {
             Ok(channels) => {
                 let id = win.tabs.next_tab_id();
@@ -489,9 +493,13 @@ impl FreminalGui {
             theme,
             &win.repaint_handle,
             initial_size,
-            self.recording_handle.clone(),
-            new_pane_id.raw().try_into().unwrap_or(u32::MAX),
-            cwd_path,
+            pty::PtyTabConfig {
+                cwd: cwd_path,
+                shell_override: None,
+                extra_env: None,
+                recording_handle: self.recording_handle.clone(),
+                recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -607,6 +615,12 @@ impl FreminalGui {
             .next_id();
 
         let cwd = leaf.directory.as_deref().map(std::path::Path::new);
+        let shell_override = leaf.shell.as_deref();
+        let extra_env = if leaf.env.is_empty() {
+            None
+        } else {
+            Some(&leaf.env)
+        };
 
         let channels = match pty::spawn_pty_tab(
             &self.args,
@@ -614,9 +628,13 @@ impl FreminalGui {
             theme,
             repaint_handle,
             initial_size,
-            self.recording_handle.clone(),
-            pane_id.raw().try_into().unwrap_or(u32::MAX),
-            cwd,
+            pty::PtyTabConfig {
+                cwd,
+                shell_override,
+                extra_env,
+                recording_handle: self.recording_handle.clone(),
+                recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -1390,9 +1408,13 @@ impl freminal_windowing::App for FreminalGui {
                 theme,
                 &repaint_handle,
                 initial_size,
-                self.recording_handle.clone(),
-                pane_id.raw().try_into().unwrap_or(u32::MAX),
-                None,
+                pty::PtyTabConfig {
+                    cwd: None,
+                    shell_override: None,
+                    extra_env: None,
+                    recording_handle: self.recording_handle.clone(),
+                    recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                },
             ) {
                 Ok(channels) => {
                     let pane = panes::Pane {
