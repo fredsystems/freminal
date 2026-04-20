@@ -21,29 +21,14 @@ fn parse_from<I: IntoIterator<Item = S>, S: Into<std::ffi::OsString> + Clone>(
 #[test]
 fn parses_empty_args_defaults() {
     let args = parse_from(["freminal"]).unwrap();
-    #[cfg(feature = "playback")]
-    assert!(args.recording.is_none());
     assert!(args.shell.is_none());
     assert!(!args.show_all_debug);
     // When the flag is absent, write_logs_to_file is None (unset).
     // The merge logic in main.rs will fall back to the config/default value.
     assert!(args.write_logs_to_file.is_none());
     assert!(args.config.is_none());
+    assert!(args.recording_path.is_none());
     assert!(args.command.is_empty());
-}
-
-#[cfg(feature = "playback")]
-#[test]
-fn parses_recording_path() {
-    let args = parse_from(["freminal", "--recording-path", "rec.log"]).unwrap();
-    assert_eq!(args.recording.as_deref(), Some("rec.log"));
-}
-
-#[cfg(feature = "playback")]
-#[test]
-fn missing_recording_path_argument() {
-    let result = parse_from(["freminal", "--recording-path"]);
-    assert!(result.is_err());
 }
 
 #[test]
@@ -97,6 +82,21 @@ fn invalid_argument_is_error() {
 }
 
 #[test]
+fn parses_recording_path() {
+    let args = parse_from(["freminal", "--recording-path", "/tmp/session.frec"]).unwrap();
+    assert_eq!(
+        args.recording_path.as_deref(),
+        Some(std::path::Path::new("/tmp/session.frec"))
+    );
+}
+
+#[test]
+fn missing_recording_path_argument() {
+    let result = parse_from(["freminal", "--recording-path"]);
+    assert!(result.is_err());
+}
+
+#[test]
 fn parses_config_path() {
     let args = parse_from(["freminal", "--config", "/path/to/config.toml"]).unwrap();
     assert_eq!(
@@ -130,32 +130,6 @@ fn version_flag_produces_version_error() {
     }
 }
 
-#[cfg(feature = "playback")]
-#[test]
-fn all_flags_combined() {
-    let args = parse_from([
-        "freminal",
-        "--recording-path",
-        "rec.log",
-        "--shell",
-        "/bin/zsh",
-        "--show-all-debug",
-        "--write-logs-to-file=true",
-        "--config",
-        "/tmp/config.toml",
-    ])
-    .unwrap();
-    assert_eq!(args.recording.as_deref(), Some("rec.log"));
-    assert_eq!(args.shell.as_deref(), Some("/bin/zsh"));
-    assert!(args.show_all_debug);
-    assert_eq!(args.write_logs_to_file, Some(true));
-    assert_eq!(
-        args.config.as_deref(),
-        Some(std::path::Path::new("/tmp/config.toml"))
-    );
-    assert!(args.command.is_empty());
-}
-
 // ---- Command (trailing positional) tests ----
 
 #[test]
@@ -187,26 +161,6 @@ fn command_with_flags_uses_double_dash() {
     let args = parse_from(["freminal", "--shell", "/bin/zsh", "--", "htop", "-d", "10"]).unwrap();
     assert_eq!(args.shell.as_deref(), Some("/bin/zsh"));
     assert_eq!(args.command, vec!["htop", "-d", "10"]);
-}
-
-#[cfg(feature = "playback")]
-#[test]
-fn all_flags_combined_with_command() {
-    let args = parse_from([
-        "freminal",
-        "--recording-path",
-        "rec.log",
-        "--shell",
-        "/bin/zsh",
-        "--",
-        "vim",
-        "-R",
-        "readme.md",
-    ])
-    .unwrap();
-    assert_eq!(args.recording.as_deref(), Some("rec.log"));
-    assert_eq!(args.shell.as_deref(), Some("/bin/zsh"));
-    assert_eq!(args.command, vec!["vim", "-R", "readme.md"]);
 }
 
 // ------------------------
@@ -246,18 +200,6 @@ proptest! {
         let _ = result;
     }
 
-    /// Ensure `--recording-path` and `--shell` always propagate correctly
-    /// for random filenames and shell names.
-    #[cfg(feature = "playback")]
-    #[test]
-    fn recording_and_shell_preserved(
-        path in "[a-zA-Z0-9_/\\.]{1,20}",
-        shell in "/bin/[a-z]{2,8}"
-    ) {
-        let args = parse_from(["freminal", "--recording-path", &path, "--shell", &shell]).unwrap();
-        prop_assert_eq!(args.recording.as_deref(), Some(path.as_str()));
-        prop_assert_eq!(args.shell.as_deref(), Some(shell.as_str()));
-    }
 
     /// The parser should never panic or crash for arbitrary ASCII input.
     #[test]

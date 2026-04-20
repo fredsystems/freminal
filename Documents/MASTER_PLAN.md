@@ -78,7 +78,7 @@ Task 61 (Saved Layouts).
 | 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`        | Complete | None                 |
 | 53  | Multiple Windows                         | `PLAN_VERSION_050.md` (Task 53)             | Complete | Task 36 (Tabs)       |
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
-| 59  | FREC v2: Recording Overhaul              | `PLAN_VERSION_070.md` (Task 59)             | Pending  | Task 58              |
+| 59  | FREC v2: Recording Overhaul              | `PLAN_VERSION_070.md` (Task 59)             | Complete | Task 58              |
 | 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_070.md` (Task 61)             | Pending  | Tasks 36, 58         |
 | 68  | Platform Performance Triage              | `PLAN_VERSION_070.md` (Task 68)             | Complete | None                 |
 | 69  | UI Polish & Settings Completeness        | `PLAN_VERSION_070.md` (Task 69)             | Complete | None                 |
@@ -480,6 +480,7 @@ Update this section as tasks complete:
 | 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                |
 | 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                    |
 | 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window            |
+| 59   | 2026-04-19 | 2026-04-20 | All 12 subtasks complete on task-59/frec-v2-recording                 |
 
 ---
 

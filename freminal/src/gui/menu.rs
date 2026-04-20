@@ -5,9 +5,6 @@
 
 use egui;
 use freminal_common::keybindings::KeyAction;
-#[cfg(feature = "playback")]
-use freminal_terminal_emulator::io::{PlaybackCommand, PlaybackMode};
-use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
 use super::TabBarAction;
 use super::tabs::Tab;
@@ -27,18 +24,15 @@ impl super::FreminalGui {
     /// Show the top menu bar.
     ///
     /// Contains a "Freminal" menu with Settings and Quit entries, a "Tab"
-    /// menu with tab management actions, and playback controls when
-    /// running in playback mode.
+    /// menu with tab management actions.
     ///
     /// Returns `(action, any_menu_open)` — the second element is `true`
     /// when any dropdown menu is currently expanded, so the caller can
     /// suppress terminal input and prevent the dismiss-click from leaking
     /// through to the PTY.
-    #[cfg_attr(not(feature = "playback"), allow(unused_variables))]
     pub(super) fn show_menu_bar(
         &mut self,
         ui: &mut egui::Ui,
-        snap: &TerminalSnapshot,
         win: &mut PerWindowState,
         window_id: super::WindowId,
     ) -> (TabBarAction, bool) {
@@ -100,12 +94,6 @@ impl super::FreminalGui {
             });
             if window_resp.inner.is_some() {
                 any_menu_open = true;
-            }
-
-            // Playback controls: only shown when running in playback mode.
-            #[cfg(feature = "playback")]
-            if self.is_playback {
-                self.show_playback_controls(ui, snap, win);
             }
 
             // Password-prompt lock indicator: shown in the menu bar (which is
@@ -368,109 +356,5 @@ impl super::FreminalGui {
         });
 
         action
-    }
-
-    /// Render the playback toolbar controls (mode selector, play/pause, next, progress).
-    #[cfg(feature = "playback")]
-    pub(super) fn show_playback_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        snap: &TerminalSnapshot,
-        win: &PerWindowState,
-    ) {
-        let info = snap.playback_info.as_ref();
-
-        // Mode selector dropdown.
-        ui.menu_button(self.playback_mode_label(), |ui| {
-            let mut changed = false;
-
-            if ui
-                .selectable_label(
-                    self.selected_playback_mode == Some(PlaybackMode::Instant),
-                    "Instant",
-                )
-                .clicked()
-            {
-                self.selected_playback_mode = Some(PlaybackMode::Instant);
-                changed = true;
-                ui.close();
-            }
-
-            if ui
-                .selectable_label(
-                    self.selected_playback_mode == Some(PlaybackMode::RealTime),
-                    "Real-Time",
-                )
-                .clicked()
-            {
-                self.selected_playback_mode = Some(PlaybackMode::RealTime);
-                changed = true;
-                ui.close();
-            }
-
-            if ui
-                .selectable_label(
-                    self.selected_playback_mode == Some(PlaybackMode::FrameStepping),
-                    "Frame Stepping",
-                )
-                .clicked()
-            {
-                self.selected_playback_mode = Some(PlaybackMode::FrameStepping);
-                changed = true;
-                ui.close();
-            }
-
-            if changed && let Some(mode) = self.selected_playback_mode {
-                win.send_playback_cmd(PlaybackCommand::SetMode(mode));
-            }
-        });
-
-        ui.separator();
-
-        // Play / Pause toggle button.
-        let is_playing = info.is_some_and(|i| i.playing);
-        let is_complete = info.is_some_and(|i| i.current_frame >= i.total_frames);
-        let has_mode = self.selected_playback_mode.is_some();
-
-        if is_playing {
-            if ui.button("Pause").clicked() {
-                win.send_playback_cmd(PlaybackCommand::Pause);
-            }
-        } else {
-            let play_btn = ui.add_enabled(!is_complete && has_mode, egui::Button::new("Play"));
-            if play_btn.clicked() {
-                win.send_playback_cmd(PlaybackCommand::Play);
-            }
-        }
-
-        // Next button: only active in frame-stepping mode.
-        let is_frame_stepping = self.selected_playback_mode == Some(PlaybackMode::FrameStepping);
-        let next_btn = ui.add_enabled(is_frame_stepping && !is_complete, egui::Button::new("Next"));
-        if next_btn.clicked() {
-            win.send_playback_cmd(PlaybackCommand::NextFrame);
-        }
-
-        ui.separator();
-
-        // Frame counter label.
-        if let Some(info) = info {
-            ui.label(format!(
-                "Frame {}/{}",
-                info.current_frame, info.total_frames
-            ));
-        } else {
-            ui.label("Frame 0/0");
-        }
-    }
-
-    /// Human-readable label for the current playback mode selector button.
-    #[cfg(feature = "playback")]
-    pub(super) const fn playback_mode_label(&self) -> &'static str {
-        match self.selected_playback_mode {
-            None => "Mode",
-            Some(PlaybackMode::Instant) => "Instant",
-            Some(PlaybackMode::RealTime) => "Real-Time",
-            Some(PlaybackMode::FrameStepping) => "Frame Stepping",
-        }
     }
 }

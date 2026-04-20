@@ -237,6 +237,7 @@
                 pkgs.vttest
                 pkgs.markdownlint-cli2
                 pkgs.cargo-flamegraph
+                pkgs.python313Packages.msgpack # For sequence decoder
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.cargo-llvm-cov

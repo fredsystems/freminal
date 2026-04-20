@@ -38,4 +38,3 @@ toml.workspace = true
 
 [features]
 default = []
-playback = []

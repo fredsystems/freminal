@@ -37,27 +37,6 @@ use freminal_common::{
     themes::ThemePalette,
 };
 
-#[cfg(feature = "playback")]
-use crate::io::PlaybackMode;
-
-/// Playback status information carried in each snapshot.
-///
-/// When the terminal is running in playback mode, the consumer thread
-/// populates this struct after building the emulator snapshot so the GUI
-/// can display progress and controls.
-#[cfg(feature = "playback")]
-#[derive(Debug, Clone)]
-pub struct PlaybackInfo {
-    /// Index of the last processed frame (0-indexed).
-    pub current_frame: usize,
-    /// Total number of frames in the recording.
-    pub total_frames: usize,
-    /// Currently selected playback mode.
-    pub mode: PlaybackMode,
-    /// `true` when real-time playback is actively running (not paused).
-    pub playing: bool,
-}
-
 /// A point-in-time snapshot of the terminal state, ready for the GUI to render.
 ///
 /// All expensive work (flattening rows → `Vec<TChar>` / `Vec<FormatTag>`) is
@@ -325,13 +304,6 @@ pub struct TerminalSnapshot {
     /// this to apply 2× horizontal scaling for DECDWL rows and 2× scaling in
     /// both dimensions (with top/bottom clipping) for DECDHL rows.
     pub visible_line_widths: Arc<Vec<freminal_buffer::row::LineWidth>>,
-
-    /// Playback status, present only when the application is in playback mode.
-    ///
-    /// The GUI uses this to render playback controls and frame progress.
-    /// `None` in normal (live PTY) mode.
-    #[cfg(feature = "playback")]
-    pub playback_info: Option<PlaybackInfo>,
 }
 
 impl TerminalSnapshot {
@@ -380,8 +352,6 @@ impl TerminalSnapshot {
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
             visible_line_widths: Arc::new(Vec::new()),
-            #[cfg(feature = "playback")]
-            playback_info: None,
             cursor_color_override: None,
             pointer_shape: PointerShape::Default,
         }

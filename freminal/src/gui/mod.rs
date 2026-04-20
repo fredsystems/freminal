@@ -16,8 +16,6 @@ use freminal_common::config::{Config, TabBarPosition, ThemeMode};
 use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_terminal_emulator::io::InputEvent;
-#[cfg(feature = "playback")]
-use freminal_terminal_emulator::io::PlaybackMode;
 use freminal_windowing::{RepaintProxy, WindowId};
 use glow::HasContext;
 use renderer::WindowPostRenderer;
@@ -140,14 +138,15 @@ struct FreminalGui {
     /// Set to `true` when the existing settings window should be focused.
     pending_focus_settings: bool,
 
-    /// Whether this instance is running in playback mode.
-    #[cfg(feature = "playback")]
-    is_playback: bool,
+    /// Optional recording handle for FREC v2 session recording.
+    /// When `Some`, topology and window events are emitted.
+    recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
 
-    /// The playback mode currently selected in the GUI dropdown.
-    /// Only meaningful when `is_playback` is true.
-    #[cfg(feature = "playback")]
-    selected_playback_mode: Option<PlaybackMode>,
+    /// Maps OS `WindowId` to recording-local u32 identifiers.
+    recording_window_ids: HashMap<WindowId, u32>,
+
+    /// Counter for assigning monotonic recording window IDs.
+    next_recording_window_id: u32,
 }
 
 impl FreminalGui {
@@ -159,7 +158,7 @@ impl FreminalGui {
         repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
         config_path: Option<std::path::PathBuf>,
         window_post: Arc<Mutex<WindowPostRenderer>>,
-        #[cfg(feature = "playback")] is_playback: bool,
+        recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
     ) -> Self {
         // Inform the initial tab about the configured theme mode and current OS
         // dark/light preference so DECRPM ?2031 responses are correct from the start.
@@ -220,11 +219,19 @@ impl FreminalGui {
             settings_window_id: None,
             pending_settings_window: false,
             pending_focus_settings: false,
-            #[cfg(feature = "playback")]
-            is_playback,
-            #[cfg(feature = "playback")]
-            selected_playback_mode: None,
+            recording_handle,
+            recording_window_ids: HashMap::new(),
+            next_recording_window_id: 0,
         }
+    }
+
+    /// Get or assign a recording-local u32 ID for the given OS `WindowId`.
+    fn recording_window_id(&mut self, wid: WindowId) -> u32 {
+        *self.recording_window_ids.entry(wid).or_insert_with(|| {
+            let id = self.next_recording_window_id;
+            self.next_recording_window_id += 1;
+            id
+        })
     }
 
     /// Compute the initial PTY terminal size from pixel dimensions and cell size.
@@ -263,13 +270,6 @@ impl FreminalGui {
     /// Uses the stored `Args` and `Config` to configure the new terminal.
     /// Logs an error and does nothing if the PTY fails to start.
     fn spawn_new_tab(&self, win: &mut PerWindowState) {
-        // Tabs are not supported in playback mode — there is exactly one
-        // recording session to replay and no PTY to spawn.
-        #[cfg(feature = "playback")]
-        if self.is_playback {
-            return;
-        }
-
         let theme =
             freminal_common::themes::by_slug(self.config.theme.active_slug(win.os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
@@ -299,20 +299,23 @@ impl FreminalGui {
             }
         };
 
+        let pane_id = self
+            .pane_id_gen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_id();
+
         match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
             theme,
             &win.repaint_handle,
             initial_size,
+            self.recording_handle.clone(),
+            pane_id.raw().try_into().unwrap_or(u32::MAX),
         ) {
             Ok(channels) => {
                 let id = win.tabs.next_tab_id();
-                let pane_id = self
-                    .pane_id_gen
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .next_id();
                 let pane = panes::Pane {
                     id: pane_id,
                     arc_swap: channels.arc_swap,
@@ -400,17 +403,18 @@ impl FreminalGui {
     // suggests an impossible inline form; suppressed here with justification.
     #[allow(clippy::significant_drop_tightening)]
     fn spawn_split_pane(&self, win: &mut PerWindowState, direction: panes::SplitDirection) {
-        // Split panes are not supported in playback mode.
-        #[cfg(feature = "playback")]
-        if self.is_playback {
-            return;
-        }
-
         let theme =
             freminal_common::themes::by_slug(self.config.theme.active_slug(win.os_dark_mode))
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
 
         let initial_size = Self::initial_size_for_split(win, direction);
+
+        // Pre-allocate pane id so it can be threaded into recording.
+        let new_pane_id = self
+            .pane_id_gen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_id();
 
         // Spawn the new PTY before touching `win.tabs` so there is no borrow conflict.
         let channels = match pty::spawn_pty_tab(
@@ -419,6 +423,8 @@ impl FreminalGui {
             theme,
             &win.repaint_handle,
             initial_size,
+            self.recording_handle.clone(),
+            new_pane_id.raw().try_into().unwrap_or(u32::MAX),
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -432,31 +438,25 @@ impl FreminalGui {
 
         // Insert the new pane into the tree.
         let new_pane_id = {
-            let mut guard = self
-                .pane_id_gen
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let id_gen = &mut *guard;
             let tab = win.tabs.active_tab_mut();
-            match tab
-                .pane_tree
-                .split(target_id, direction, id_gen, |new_id| panes::Pane {
-                    id: new_id,
-                    arc_swap: channels.arc_swap,
-                    input_tx: channels.input_tx,
-                    pty_write_tx: channels.pty_write_tx,
-                    window_cmd_rx: channels.window_cmd_rx,
-                    clipboard_rx: channels.clipboard_rx,
-                    search_buffer_rx: channels.search_buffer_rx,
-                    pty_dead_rx: channels.pty_dead_rx,
-                    title: "Terminal".to_owned(),
-                    bell_active: false,
-                    title_stack: Vec::new(),
-                    view_state: view_state::ViewState::new(),
-                    echo_off: channels.echo_off,
-                    render_state: new_render_state(Arc::clone(&win.window_post)),
-                    render_cache: terminal::PaneRenderCache::new(),
-                }) {
+            let new_pane = panes::Pane {
+                id: new_pane_id,
+                arc_swap: channels.arc_swap,
+                input_tx: channels.input_tx,
+                pty_write_tx: channels.pty_write_tx,
+                window_cmd_rx: channels.window_cmd_rx,
+                clipboard_rx: channels.clipboard_rx,
+                search_buffer_rx: channels.search_buffer_rx,
+                pty_dead_rx: channels.pty_dead_rx,
+                title: "Terminal".to_owned(),
+                bell_active: false,
+                title_stack: Vec::new(),
+                view_state: view_state::ViewState::new(),
+                echo_off: channels.echo_off,
+                render_state: new_render_state(Arc::clone(&win.window_post)),
+                render_cache: terminal::PaneRenderCache::new(),
+            };
+            match tab.pane_tree.split_with_id(target_id, direction, new_pane) {
                 Ok(id) => id,
                 Err(e) => {
                     error!("Failed to insert split pane into tree: {e}");
@@ -790,6 +790,20 @@ impl freminal_windowing::App for FreminalGui {
                 pending_new_window: false,
             };
             self.windows.insert(window_id, win);
+
+            // Emit WindowCreate recording event.
+            let rec_wid = self.recording_window_id(window_id);
+            if let Some(ref h) = self.recording_handle {
+                h.emit(
+                    freminal_terminal_emulator::recording::EventPayload::WindowCreate {
+                        window_id: rec_wid,
+                        width_px: inner_size.0,
+                        height_px: inner_size.1,
+                        x: 0,
+                        y: 0,
+                    },
+                );
+            }
         } else {
             // Subsequent window — spawn a new PTY tab.
             let theme =
@@ -808,19 +822,22 @@ impl freminal_windowing::App for FreminalGui {
             let initial_size =
                 Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
 
+            let pane_id = self
+                .pane_id_gen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .next_id();
+
             match pty::spawn_pty_tab(
                 &self.args,
                 self.config.scrollback.limit,
                 theme,
                 &repaint_handle,
                 initial_size,
+                self.recording_handle.clone(),
+                pane_id.raw().try_into().unwrap_or(u32::MAX),
             ) {
                 Ok(channels) => {
-                    let pane_id = self
-                        .pane_id_gen
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .next_id();
                     let pane = panes::Pane {
                         id: pane_id,
                         arc_swap: channels.arc_swap,
@@ -888,6 +905,20 @@ impl freminal_windowing::App for FreminalGui {
                         pending_new_window: false,
                     };
                     self.windows.insert(window_id, win);
+
+                    // Emit WindowCreate recording event.
+                    let rec_wid = self.recording_window_id(window_id);
+                    if let Some(ref h) = self.recording_handle {
+                        h.emit(
+                            freminal_terminal_emulator::recording::EventPayload::WindowCreate {
+                                window_id: rec_wid,
+                                width_px: inner_size.0,
+                                height_px: inner_size.1,
+                                x: 0,
+                                y: 0,
+                            },
+                        );
+                    }
                 }
                 Err(e) => {
                     error!("Failed to spawn PTY for new window: {e}");
@@ -914,6 +945,18 @@ impl freminal_windowing::App for FreminalGui {
             self.settings_owner = None;
         }
         self.windows.remove(&window_id);
+
+        // Emit WindowClose recording event (only for known windows), and clean up the mapping.
+        if let Some(rec_wid) = self.recording_window_ids.remove(&window_id)
+            && let Some(ref h) = self.recording_handle
+        {
+            h.emit(
+                freminal_terminal_emulator::recording::EventPayload::WindowClose {
+                    window_id: rec_wid,
+                },
+            );
+        }
+
         true
     }
 
@@ -1135,6 +1178,16 @@ impl freminal_windowing::App for FreminalGui {
 
             match tab.pane_tree.close(pane_id) {
                 Ok(_closed) => {
+                    // Emit PaneClose recording event.
+                    if let Some(ref h) = self.recording_handle {
+                        #[allow(clippy::cast_possible_truncation)]
+                        h.emit(
+                            freminal_terminal_emulator::recording::EventPayload::PaneClose {
+                                pane_id: pane_id.raw() as u32,
+                            },
+                        );
+                    }
+
                     // Reset last_sent_size on all surviving panes so the
                     // next frame's resize check fires with the new layout.
                     let tab = win.tabs.active_tab_mut();
@@ -1208,7 +1261,7 @@ impl freminal_windowing::App for FreminalGui {
         if !self.config.ui.hide_menu_bar {
             let (menu_action, menu_open) = Panel::top("menu_bar")
                 .show_inside(&mut root_ui, |ui| {
-                    self.show_menu_bar(ui, &snap, &mut win, window_id)
+                    self.show_menu_bar(ui, &mut win, window_id)
                 })
                 .inner;
             any_menu_open = menu_open;
@@ -1634,6 +1687,17 @@ impl freminal_windowing::App for FreminalGui {
                     && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
                 let is_active = pane_id == active_pane_id;
 
+                // Build a RecordingContext for this pane if recording is active.
+                let rec_window_id = self.recording_window_id(window_id);
+                let rec_ctx = self.recording_handle.as_ref().map(|h| {
+                    freminal_terminal_emulator::recording::RecordingContext {
+                        handle: h,
+                        window_id: rec_window_id,
+                        #[allow(clippy::cast_possible_truncation)]
+                        pane_id: pane_id.raw() as u32,
+                    }
+                });
+
                 // Render this pane into a child UI scoped to its content rect.
                 // show() returns (left_clicked, deferred_key_actions).
                 // left_clicked is true when a primary left-click was pressed inside
@@ -1657,6 +1721,7 @@ impl freminal_windowing::App for FreminalGui {
                             is_echo_off,
                             is_active,
                             pane_id,
+                            rec_ctx.as_ref(),
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;
@@ -1951,7 +2016,7 @@ pub fn run(
     config_path: Option<std::path::PathBuf>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     window_post: Arc<Mutex<WindowPostRenderer>>,
-    #[cfg(feature = "playback")] is_playback: bool,
+    recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
 ) -> Result<()> {
     let icon_bytes = include_bytes!("../../../assets/icon.png");
     let image = image::load_from_memory(icon_bytes)
@@ -1979,8 +2044,7 @@ pub fn run(
         repaint_handle,
         config_path,
         window_post,
-        #[cfg(feature = "playback")]
-        is_playback,
+        recording_handle,
     );
     app.icon = Some(icon);
 

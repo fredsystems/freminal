@@ -25,6 +25,8 @@ arc-swap.workspace = true
 conv2.workspace = true
 crossbeam-channel.workspace = true
 freminal-buffer = { path = "../freminal-buffer" }
+rmp-serde.workspace = true
+serde.workspace = true
 freminal-common = { path = "../freminal-common" }
 portable-pty = { path = "../portable-pty" }
 sys-locale.workspace = true
@@ -52,4 +54,3 @@ vergen.workspace = true
 
 [features]
 default = []
-playback = ["freminal-common/playback"]

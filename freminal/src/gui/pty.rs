@@ -22,6 +22,7 @@ use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::recording::{EventPayload, RecordingHandle};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_windowing::{RepaintProxy, WindowId};
 
@@ -90,6 +91,8 @@ pub fn spawn_pty_tab(
     theme: &'static freminal_common::themes::ThemePalette,
     repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
     initial_size: FreminalTerminalSize,
+    recording_handle: Option<RecordingHandle>,
+    recording_pane_id: u32,
 ) -> Result<TabChannels> {
     let (mut terminal, pty_read_rx) =
         TerminalEmulator::new(args, Some(scrollback_limit), initial_size)?;
@@ -127,6 +130,8 @@ pub fn spawn_pty_tab(
         arc_swap,
         repaint_handle_pty,
         pty_dead_tx,
+        recording_handle,
+        recording_pane_id,
     );
 
     Ok(TabChannels {
@@ -165,6 +170,8 @@ fn spawn_pty_consumer_thread(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     pty_dead_tx: Sender<()>,
+    recording_handle: Option<RecordingHandle>,
+    recording_pane_id: u32,
 ) {
     std::thread::spawn(move || {
         let mut emulator = terminal;
@@ -212,12 +219,26 @@ fn spawn_pty_consumer_thread(
          -> bool {
             match msg {
                 Ok(InputEvent::Resize(w, h, pw, ph)) => {
+                    if let Some(ref rec) = recording_handle {
+                        rec.emit(EventPayload::PaneResize {
+                            pane_id: recording_pane_id,
+                            cols: w.try_into().unwrap_or(u32::MAX),
+                            rows: h.try_into().unwrap_or(u32::MAX),
+                        });
+                    }
                     emulator.handle_resize_event(w, h, pw, ph);
                 }
-                Ok(InputEvent::Key(bytes)) if let Err(e) = emulator.write_raw_bytes(&bytes) => {
-                    error!("Failed to forward key bytes to PTY: {e}");
+                Ok(InputEvent::Key(bytes)) => {
+                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
+                        error!("Failed to forward key bytes to PTY: {e}");
+                    }
+                    if let Some(ref rec) = recording_handle {
+                        rec.emit(EventPayload::PtyInput {
+                            pane_id: recording_pane_id,
+                            data: bytes,
+                        });
+                    }
                 }
-                Ok(InputEvent::Key(_)) => {}
                 Ok(InputEvent::FocusChange(focused)) => {
                     emulator.internal.send_focus_event(focused);
                 }
@@ -255,11 +276,6 @@ fn spawn_pty_consumer_thread(
                     let total_rows = emulator.internal.handler.buffer().get_rows().len();
                     let _ = search_buffer_tx.send((total_rows, combined));
                 }
-                #[cfg(feature = "playback")]
-                Ok(InputEvent::PlaybackControl(_)) => {
-                    // Playback commands are handled by the dedicated playback
-                    // consumer thread, not the normal PTY consumer.  Ignore.
-                }
                 Err(_) => {
                     info!("Input channel closed; consumer thread exiting");
                     return false;
@@ -273,9 +289,14 @@ fn spawn_pty_consumer_thread(
             crossbeam_channel::select! {
                 recv(pty_read_rx) -> msg => {
                     if let Ok(read) = msg {
-                        emulator.handle_incoming_data(
-                            &read.buf[0..read.read_amount],
-                        );
+                        let data = &read.buf[0..read.read_amount];
+                        if let Some(ref rec) = recording_handle {
+                            rec.emit(EventPayload::PtyOutput {
+                                pane_id: recording_pane_id,
+                                data: data.to_vec(),
+                            });
+                        }
+                        emulator.handle_incoming_data(data);
                     } else {
                         info!("PTY read channel closed; signaling tab death");
                         post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);

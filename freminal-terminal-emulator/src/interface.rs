@@ -263,17 +263,7 @@ impl TerminalEmulator {
             args.shell.clone()
         };
 
-        let io = FreminalPtyInputOutput::new(
-            read_rx,
-            pty_tx,
-            #[cfg(feature = "playback")]
-            args.recording.clone(),
-            #[cfg(not(feature = "playback"))]
-            None,
-            command,
-            shell,
-            &initial_size,
-        )?;
+        let io = FreminalPtyInputOutput::new(read_rx, pty_tx, command, shell, &initial_size)?;
 
         if let Err(e) = write_tx.send(PtyWrite::Resize(initial_size)) {
             error!("Failed to send resize to pty: {e}");
@@ -640,8 +630,6 @@ impl TerminalEmulator {
             images,
             visible_image_placements,
             visible_line_widths,
-            #[cfg(feature = "playback")]
-            playback_info: None,
             cursor_color_override: self.internal.handler.cursor_color_override(),
             pointer_shape: self.internal.handler.pointer_shape(),
         }

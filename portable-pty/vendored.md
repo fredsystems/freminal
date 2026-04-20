@@ -3,8 +3,7 @@
 - **Source:** <https://github.com/wezterm/wezterm> (crate `pty/`)
 - **Version:** 0.9.1 (as declared in the upstream `Cargo.toml`)
 - **Vendored on:** 2026-04-05
-- **Why:** Upstream `portable-pty` had outdated transitive dependencies and did not compile
-  under Rust 2024 / Cargo 1.94 without patches.
+- **Why:** Upstream `portable-pty` had outdated transitive dependencies and we wanted to bring them up to newer versions.
 
 ## Changes from upstream
 

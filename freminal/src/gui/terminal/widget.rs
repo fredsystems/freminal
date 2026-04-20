@@ -820,6 +820,7 @@ impl FreminalTerminalWidget {
         is_echo_off: bool,
         is_active_pane: bool,
         pane_id: crate::gui::panes::PaneId,
+        recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
     ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -930,6 +931,7 @@ impl FreminalTerminalWidget {
                     cache.previous_scroll_amount,
                     binding_map,
                     is_active_pane,
+                    recording_ctx,
                 )
             });
             left_mouse_button_pressed = left_mouse_button_pressed_inner;

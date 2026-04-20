@@ -625,8 +625,20 @@ impl TerminalInput {
                         let code = u32::from(*c);
                         Self::build_csi_u(code, None, flags, meta)
                     }
+                } else if meta.event_type != KeyEventType::Press {
+                    // Flag 2 without flag 8: plain ASCII normally uses legacy
+                    // encoding, but release/repeat events MUST use CSI u so
+                    // the event-type suffix can be included.  Sending a raw
+                    // byte for a release would duplicate the key press.
+                    if c.is_ascii_uppercase() {
+                        let lower = u32::from(c.to_ascii_lowercase());
+                        Self::build_csi_u(lower, Some(2), flags, meta)
+                    } else {
+                        let code = u32::from(*c);
+                        Self::build_csi_u(code, None, flags, meta)
+                    }
                 } else {
-                    // Flags 1/2/4/16 alone don't affect plain ASCII.
+                    // Flags 1/2/4/16 alone don't affect plain ASCII presses.
                     TerminalInputPayload::Single(*c)
                 }
             }
@@ -645,10 +657,12 @@ impl TerminalInput {
 
             // ── Enter ───────────────────────────────────────────────────
             Self::Enter => {
-                if report_all {
+                if report_all || meta.event_type != KeyEventType::Press {
+                    // Flag 8, or release/repeat: use CSI u so event type is
+                    // included and legacy bytes aren't duplicated on release.
                     Self::build_csi_u(13, None, flags, meta)
                 } else {
-                    // Flag 1 exception: Enter still sends legacy bytes.
+                    // Flag 1 exception: Enter press still sends legacy bytes.
                     if line_feed_mode == Lnm::NewLine {
                         TerminalInputPayload::Many(b"\x0d\x0a")
                     } else {
@@ -662,10 +676,12 @@ impl TerminalInput {
 
             // ── Backspace ───────────────────────────────────────────────
             Self::Backspace => {
-                if report_all {
+                if report_all || meta.event_type != KeyEventType::Press {
+                    // Flag 8, or release/repeat: use CSI u so event type is
+                    // included and legacy bytes aren't duplicated on release.
                     Self::build_csi_u(127, None, flags, meta)
                 } else {
-                    // Flag 1 exception: Backspace still sends legacy bytes.
+                    // Flag 1 exception: Backspace press still sends legacy bytes.
                     if backarrow_sends_bs == Decbkm::BackarrowSendsBs {
                         TerminalInputPayload::Single(char_to_ctrl_code(b'H'))
                     } else {
@@ -676,10 +692,12 @@ impl TerminalInput {
 
             // ── Tab ─────────────────────────────────────────────────────
             Self::Tab => {
-                if report_all {
+                if report_all || meta.event_type != KeyEventType::Press {
+                    // Flag 8, or release/repeat: use CSI u so event type is
+                    // included and legacy bytes aren't duplicated on release.
                     Self::build_csi_u(9, None, flags, meta)
                 } else {
-                    // Flag 1 exception: Tab still sends legacy byte.
+                    // Flag 1 exception: Tab press still sends legacy byte.
                     TerminalInputPayload::Single(char_to_ctrl_code(b'i'))
                 }
             }

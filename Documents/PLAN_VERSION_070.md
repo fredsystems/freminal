@@ -13,7 +13,7 @@ and triage platform-specific performance issues on Windows and macOS.
 
 | #   | Feature                           | Scope  | Status   | Dependencies     |
 | --- | --------------------------------- | ------ | -------- | ---------------- |
-| 59  | FREC v2: Recording Overhaul       | Large  | Pending  | Task 58          |
+| 59  | FREC v2: Recording Overhaul       | Large  | Complete | Task 58          |
 | 61  | Saved Layouts (Session Templates) | Large  | Pending  | Task 36, Task 58 |
 | 68  | Platform Performance Triage       | Medium | Complete | None             |
 | 69  | UI Polish & Settings Completeness | Medium | Complete | None             |
