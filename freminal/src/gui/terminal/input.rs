@@ -26,6 +26,7 @@ use freminal_terminal_emulator::{
         KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
     },
     io::InputEvent,
+    recording::{EventPayload, RecordingContext},
     snapshot::TerminalSnapshot,
 };
 use std::borrow::Cow;
@@ -43,6 +44,38 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers) -> KeyModifiers {
         shift: m.shift,
         ctrl: m.ctrl || m.command,
         alt: m.alt,
+    }
+}
+
+/// Encode egui [`Modifiers`] as a packed `u8` for FREC v2 recording.
+///
+/// Bit layout: 0=shift, 1=ctrl, 2=alt, 3=super/command.
+const fn modifiers_to_recording_u8(m: Modifiers) -> u8 {
+    let mut bits = 0u8;
+    if m.shift {
+        bits |= 1;
+    }
+    if m.ctrl {
+        bits |= 2;
+    }
+    if m.alt {
+        bits |= 4;
+    }
+    if m.command {
+        bits |= 8;
+    }
+    bits
+}
+
+/// Convert egui [`PointerButton`] to a recording button number
+/// (0=left, 1=middle, 2=right, 3+=extra).
+const fn pointer_button_to_u8(b: PointerButton) -> u8 {
+    match b {
+        PointerButton::Primary => 0,
+        PointerButton::Secondary => 2,
+        PointerButton::Middle => 1,
+        PointerButton::Extra1 => 3,
+        PointerButton::Extra2 => 4,
     }
 }
 
@@ -620,6 +653,7 @@ pub(super) fn write_input_to_terminal(
     scroll_amount: f32,
     binding_map: &BindingMap,
     is_active_pane: bool,
+    recording_ctx: Option<&RecordingContext<'_>>,
 ) -> (
     bool,
     Option<PreviousMouseState>,
@@ -1173,6 +1207,18 @@ pub(super) fn write_input_to_terminal(
 
                 last_reported_mouse_pos = Some(current);
 
+                // Record mouse move event (every move — debouncing is a future optimization).
+                if let Some(ctx) = recording_ctx {
+                    #[allow(clippy::cast_possible_truncation)]
+                    ctx.handle.emit(EventPayload::MouseMove {
+                        window_id: ctx.window_id,
+                        pane_id: ctx.pane_id,
+                        x: x as u32,
+                        y: y as u32,
+                        coalesced_count: 1,
+                    });
+                }
+
                 if let Some(res) = res {
                     res
                 } else {
@@ -1267,6 +1313,19 @@ pub(super) fn write_input_to_terminal(
 
                 last_reported_mouse_pos = Some(new_mouse_position.clone());
 
+                // Record mouse button event.
+                if let Some(ctx) = recording_ctx {
+                    #[allow(clippy::cast_possible_truncation)]
+                    ctx.handle.emit(EventPayload::MouseButton {
+                        window_id: ctx.window_id,
+                        pane_id: ctx.pane_id,
+                        button: pointer_button_to_u8(*button),
+                        pressed: *pressed,
+                        x: x as u32,
+                        y: y as u32,
+                    });
+                }
+
                 if *button == PointerButton::Primary && *pressed {
                     left_mouse_button_pressed = true;
                 }
@@ -1359,6 +1418,22 @@ pub(super) fn write_input_to_terminal(
                             view_state.selection.end = Some(end_coord);
                             view_state.selection.is_selecting = false;
 
+                            // Record selection event if a real selection exists.
+                            if let Some(ctx) = recording_ctx
+                                && let Some(anchor) = view_state.selection.anchor
+                                && anchor != end_coord
+                            {
+                                #[allow(clippy::cast_possible_truncation)]
+                                ctx.handle.emit(EventPayload::SelectionEvent {
+                                    pane_id: ctx.pane_id,
+                                    start_row: anchor.row as u32,
+                                    start_col: anchor.col as u32,
+                                    end_row: end_coord.row as u32,
+                                    end_col: end_coord.col as u32,
+                                    is_block: view_state.selection.is_block,
+                                });
+                            }
+
                             // If anchor == end the user clicked without
                             // dragging — there is no real selection.
                             // Clear it so the next click starts fresh
@@ -1409,6 +1484,16 @@ pub(super) fn write_input_to_terminal(
                 scroll_amount -= scroll_amount_to_do;
 
                 state_changed = true;
+
+                // Record scroll event.
+                if let Some(ctx) = recording_ctx {
+                    ctx.handle.emit(EventPayload::MouseScroll {
+                        window_id: ctx.window_id,
+                        pane_id: ctx.pane_id,
+                        delta_x: delta.x,
+                        delta_y: delta.y,
+                    });
+                }
 
                 // Resolve the mouse position for scroll reporting.  Prefer
                 // `last_reported_mouse_pos` (set by PointerMoved), but fall
@@ -1502,12 +1587,63 @@ pub(super) fn write_input_to_terminal(
 
         if !inputs.is_empty() {
             state_changed = true;
-            send_terminal_inputs(
-                inputs.as_ref(),
-                input_tx,
-                &InputModes::from_snapshot(snap),
-                &event_meta,
-            );
+
+            // Capture encoded bytes for recording before sending.
+            let modes = InputModes::from_snapshot(snap);
+            let encoded: Vec<u8> = inputs
+                .iter()
+                .flat_map(|input| {
+                    match input.to_payload(
+                        modes.cursor_key_app_mode,
+                        modes.keypad_app_mode,
+                        modes.modify_other_keys,
+                        modes.application_escape_key,
+                        modes.backarrow_sends_bs,
+                        modes.line_feed_mode,
+                        modes.kitty_keyboard_flags,
+                        &event_meta,
+                    ) {
+                        TerminalInputPayload::Single(b) => vec![b],
+                        TerminalInputPayload::Many(bs) => bs.to_vec(),
+                        TerminalInputPayload::Owned(bs) => bs,
+                    }
+                })
+                .collect();
+
+            if !encoded.is_empty()
+                && let Err(e) = input_tx.send(InputEvent::Key(encoded.clone()))
+            {
+                error!("Failed to send key input to PTY consumer: {e}");
+            }
+
+            // Emit recording event for keyboard input.
+            if let Some(ctx) = recording_ctx {
+                // For paste events, emit ClipboardPaste instead of KeyboardInput.
+                if let Event::Paste(text) = event {
+                    ctx.handle.emit(EventPayload::ClipboardPaste {
+                        pane_id: ctx.pane_id,
+                        data: text.as_bytes().to_vec(),
+                    });
+                } else {
+                    let (key_name, modifier_bits) = match event {
+                        Event::Text(text) => (text.clone(), 0u8),
+                        Event::Key { key, modifiers, .. } => (
+                            key.name().to_string(),
+                            modifiers_to_recording_u8(*modifiers),
+                        ),
+                        Event::Copy => ("Ctrl+C".to_string(), 2u8),
+                        Event::Cut => ("Ctrl+X".to_string(), 2u8),
+                        _ => (String::new(), 0u8),
+                    };
+                    ctx.handle.emit(EventPayload::KeyboardInput {
+                        window_id: ctx.window_id,
+                        pane_id: ctx.pane_id,
+                        key_name,
+                        modifiers: modifier_bits,
+                        encoded,
+                    });
+                }
+            }
         }
     }
 

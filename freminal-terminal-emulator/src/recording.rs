@@ -551,6 +551,20 @@ pub enum RecordingError {
     Serialize(#[from] rmp_serde::encode::Error),
 }
 
+/// Per-pane recording context passed into input handlers.
+///
+/// Bundles the recording handle with the window and pane IDs needed to
+/// emit events. Avoids threading three extra parameters through deep call
+/// chains.
+pub struct RecordingContext<'a> {
+    /// The recording handle.
+    pub handle: &'a RecordingHandle,
+    /// Recording-local window identifier.
+    pub window_id: u32,
+    /// Recording-local pane identifier.
+    pub pane_id: u32,
+}
+
 /// Handle for sending recording events from any thread.
 ///
 /// Cheaply cloneable. Dropping all clones signals the writer thread to finalize
@@ -558,17 +572,35 @@ pub enum RecordingError {
 #[derive(Clone)]
 pub struct RecordingHandle {
     tx: crossbeam_channel::Sender<RecordingEvent>,
+    start: std::time::Instant,
 }
 
 impl RecordingHandle {
     /// Send an event to the recording writer thread.
     ///
-    /// Returns `Ok(())` if the event was queued, or `Err` if the writer thread
-    /// has shut down. Events are silently dropped on a full channel to avoid
+    /// Events are silently dropped on a full channel to avoid
     /// blocking the PTY/GUI threads (uses `try_send`).
     pub fn send(&self, event: RecordingEvent) {
         // Best-effort: never block production threads.
         let _: Result<(), _> = self.tx.try_send(event);
+    }
+
+    /// Compute the current timestamp in microseconds since recording start.
+    #[must_use]
+    pub fn timestamp_us(&self) -> u64 {
+        let elapsed = self.start.elapsed();
+        // Truncation is acceptable: u64 microseconds covers ~584,942 years.
+        #[allow(clippy::cast_possible_truncation)]
+        let us = elapsed.as_micros() as u64;
+        us
+    }
+
+    /// Build and send an event with the current timestamp.
+    pub fn emit(&self, payload: EventPayload) {
+        self.send(RecordingEvent {
+            timestamp_us: self.timestamp_us(),
+            payload,
+        });
     }
 }
 
@@ -725,7 +757,10 @@ pub fn start_recording(
         .spawn(move || thread.run(&metadata))
         .map_err(|e| RecordingError::Io(std::io::Error::other(e)))?;
 
-    Ok(RecordingHandle { tx })
+    Ok(RecordingHandle {
+        tx,
+        start: std::time::Instant::now(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1599,5 +1634,114 @@ mod tests {
         for (i, event) in parsed.events.iter().enumerate() {
             assert_eq!(event.timestamp_us, (i as u64) * 10);
         }
+    }
+
+    /// Integration test: exercises the `RecordingHandle::emit()` convenience
+    /// method with a realistic mix of event types, then verifies the full
+    /// round-trip through the writer thread and parser.
+    #[test]
+    fn integration_mixed_event_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.frec");
+        let metadata = test_metadata();
+
+        let handle = start_recording(&path, metadata, 256).unwrap();
+
+        // Simulate a realistic session: window create, PTY output, keyboard input,
+        // mouse events, clipboard paste, selection, pane close, window close.
+        handle.emit(EventPayload::WindowCreate {
+            window_id: 0,
+            width_px: 1920,
+            height_px: 1080,
+            x: 0,
+            y: 0,
+        });
+        handle.emit(EventPayload::PtyOutput {
+            pane_id: 0,
+            data: b"$ ls\r\n".to_vec(),
+        });
+        handle.emit(EventPayload::KeyboardInput {
+            window_id: 0,
+            pane_id: 0,
+            key_name: "l".to_string(),
+            modifiers: 0,
+            encoded: b"l".to_vec(),
+        });
+        handle.emit(EventPayload::MouseMove {
+            window_id: 0,
+            pane_id: 0,
+            x: 10,
+            y: 5,
+            coalesced_count: 1,
+        });
+        handle.emit(EventPayload::MouseButton {
+            window_id: 0,
+            pane_id: 0,
+            button: 0,
+            pressed: true,
+            x: 10,
+            y: 5,
+        });
+        handle.emit(EventPayload::MouseScroll {
+            window_id: 0,
+            pane_id: 0,
+            delta_x: 0.0,
+            delta_y: -3.0,
+        });
+        handle.emit(EventPayload::ClipboardPaste {
+            pane_id: 0,
+            data: b"pasted text".to_vec(),
+        });
+        handle.emit(EventPayload::SelectionEvent {
+            pane_id: 0,
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 10,
+            is_block: false,
+        });
+        handle.emit(EventPayload::PaneClose { pane_id: 0 });
+        handle.emit(EventPayload::WindowClose { window_id: 0 });
+
+        // Drop handle to trigger finalization.
+        drop(handle);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let parsed = read_frec_file(&path);
+
+        assert_eq!(parsed.events.len(), 10);
+        assert_eq!(parsed.total_events, 10);
+
+        // Verify event types in order.
+        let expected_types = [
+            EventType::WindowCreate,
+            EventType::PtyOutput,
+            EventType::KeyboardInput,
+            EventType::MouseMove,
+            EventType::MouseButton,
+            EventType::MouseScroll,
+            EventType::ClipboardPaste,
+            EventType::SelectionEvent,
+            EventType::PaneClose,
+            EventType::WindowClose,
+        ];
+        for (i, expected) in expected_types.iter().enumerate() {
+            assert_eq!(
+                parsed.events[i].payload.event_type(),
+                *expected,
+                "Event {i} type mismatch"
+            );
+        }
+
+        // Verify timestamps are monotonically non-decreasing.
+        for window in parsed.events.windows(2) {
+            assert!(
+                window[1].timestamp_us >= window[0].timestamp_us,
+                "Timestamps not monotonic"
+            );
+        }
+
+        // Verify footer duration covers the event span.
+        assert!(parsed.total_duration_us >= parsed.events.last().unwrap().timestamp_us);
     }
 }

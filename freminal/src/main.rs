@@ -61,6 +61,9 @@ use anyhow::Result;
 use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_common::{args::Args, config, config::load_config, themes};
+use freminal_terminal_emulator::recording::{
+    RecordingHandle, RecordingMetadata, TopologySnapshot, start_recording,
+};
 use gui::pty::spawn_pty_tab;
 
 use clap::Parser;
@@ -70,6 +73,31 @@ use clap::Parser;
 /// Spawns a PTY-backed terminal tab via [`spawn_pty_tab`] and starts the
 /// GUI event loop.
 fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
+    // Start recording if --recording-path was specified.
+    let recording_handle: Option<RecordingHandle> = if let Some(ref path) = args.recording_path {
+        let metadata = RecordingMetadata {
+            freminal_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            term: "xterm-256color".to_string(),
+            initial_topology: TopologySnapshot { windows: vec![] },
+            scrollback_limit: cfg.scrollback.limit.try_into().unwrap_or(u32::MAX),
+        };
+        match start_recording(path, metadata, 4096) {
+            Ok(handle) => {
+                info!("Recording to {}", path.display());
+                Some(handle)
+            }
+            Err(e) => {
+                error!("Failed to start recording: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Select the initial theme.  The OS dark/light preference is not yet
     // available (no egui context), so `active_slug(false)` assumes light mode
     // for `ThemeMode::Auto`.  The GUI constructor will detect the real OS
@@ -96,6 +124,8 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
             pixel_width: 0,
             pixel_height: 0,
         },
+        recording_handle.clone(),
+        0, // recording pane ID for initial pane
     )?;
 
     let config_path = args.config.clone();
@@ -128,6 +158,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         config_path,
         repaint_handle,
         window_post,
+        recording_handle,
     )
 }
 

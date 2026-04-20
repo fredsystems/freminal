@@ -42,6 +42,13 @@ pub struct Args {
     #[arg(long = "hide-menu-bar")]
     pub hide_menu_bar: bool,
 
+    /// Path to write a FREC v2 recording file.
+    ///
+    /// When specified, all PTY I/O, keyboard/mouse input, and topology events
+    /// are recorded to the given file. The file is finalized on clean exit.
+    #[arg(long = "recording-path")]
+    pub recording_path: Option<PathBuf>,
+
     /// Program to run instead of the default shell.
     ///
     /// Everything after `--` (or the first non-option argument) is treated as

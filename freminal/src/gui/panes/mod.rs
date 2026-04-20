@@ -49,6 +49,12 @@ impl PaneId {
     pub const fn first() -> Self {
         Self(0)
     }
+
+    /// Return the raw inner value.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 impl std::fmt::Display for PaneId {
