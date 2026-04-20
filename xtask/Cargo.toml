@@ -11,6 +11,7 @@ clap-cargo.workspace = true
 clap-verbosity-flag.workspace = true
 color-eyre.workspace = true
 duct.workspace = true
+semver.workspace = true
 tracing.workspace = true
 tracing-log.workspace = true
 tracing-subscriber.workspace = true

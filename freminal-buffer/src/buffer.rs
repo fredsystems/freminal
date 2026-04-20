@@ -125,6 +125,12 @@ pub struct Buffer {
     /// can short-circuit in O(1) when no images are present (the overwhelmingly
     /// common case).
     image_cell_count: usize,
+
+    /// Buffer-relative row indices where OSC 133 `PromptStart` markers fired.
+    ///
+    /// Maintained atomically with row drains: when rows are removed from the
+    /// front, all indices are shifted down and entries that fell off are dropped.
+    prompt_rows: Vec<usize>,
 }
 
 /// Snapshot of the primary buffer state saved when entering the alternate screen.
@@ -217,6 +223,7 @@ impl Buffer {
             decom_enabled: Decom::NormalCursor,
             image_store: ImageStore::new(),
             image_cell_count: 0,
+            prompt_rows: Vec::new(),
         }
     }
 
@@ -261,12 +268,37 @@ impl Buffer {
         self.decom_enabled = Decom::NormalCursor;
         self.image_store.clear();
         self.image_cell_count = 0;
+        self.prompt_rows.clear();
     }
 
     /// The maximum number of off-screen rows retained above the visible area.
     #[must_use]
     pub const fn scrollback_limit(&self) -> usize {
         self.scrollback_limit
+    }
+
+    /// Record the current cursor row as a prompt-start marker.
+    ///
+    /// Called by `TerminalHandler` when an OSC 133 `PromptStart` fires.
+    pub fn mark_prompt_row(&mut self) {
+        self.prompt_rows.push(self.cursor.pos.y);
+    }
+
+    /// Buffer-relative row indices of all recorded prompt-start markers.
+    #[must_use]
+    pub fn prompt_rows(&self) -> &[usize] {
+        &self.prompt_rows
+    }
+
+    /// Shift all prompt-row markers down by `removed` and drop any that
+    /// fell below zero.  Called after draining rows from the front.
+    fn adjust_prompt_rows(&mut self, removed: usize) {
+        self.prompt_rows.retain_mut(|r| {
+            r.checked_sub(removed).is_some_and(|adjusted| {
+                *r = adjusted;
+                true
+            })
+        });
     }
 
     /// Internal consistency checks for debug builds.
@@ -372,11 +404,14 @@ impl Buffer {
     fn debug_assert_invariants(&self) {}
 
     fn push_row(&mut self, origin: RowOrigin, join: RowJoin) {
-        let mut row = Row::new_with_origin(self.width, origin, join);
-        // BCE: if the current SGR has a non-default background, fill the new
-        // row with blank cells carrying that background color.  For the common
-        // case (default tag) this is a no-op.
-        row.fill_with_tag(&self.current_tag);
+        let row = Row::new_with_origin(self.width, origin, join);
+        // New rows created by scrolling (LF at bottom, auto-wrap at bottom-right)
+        // use default background — NOT the current SGR background.  BCE
+        // (back_color_erase) only applies to explicit erase operations (ED, EL).
+        // Filling with current_tag here causes visible artifacts when programs
+        // output long lines with colored backgrounds that wrap at the right margin:
+        // the trailing blank cells on the wrapped continuation row retain the
+        // non-default background instead of being transparent.
         self.rows.push(row);
         self.row_cache.push(None);
     }
@@ -907,6 +942,7 @@ impl Buffer {
             decom_enabled: Decom::NormalCursor,
             image_store: saved.image_store,
             image_cell_count: saved.image_cell_count,
+            prompt_rows: Vec::new(),
         };
 
         let new_offset = tmp.set_size(new_width, new_height, saved.scroll_offset);
@@ -1216,6 +1252,7 @@ impl Buffer {
                     }
                     self.rows.drain(0..excess);
                     self.row_cache.drain(0..excess);
+                    self.adjust_prompt_rows(excess);
                     // Adjust cursor Y for the removed rows.
                     self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
                 }
@@ -1305,6 +1342,7 @@ impl Buffer {
         }
         self.rows.drain(0..overflow);
         self.row_cache.drain(0..overflow);
+        self.adjust_prompt_rows(overflow);
 
         // --- Garbage-collect images no longer referenced by any row ---
         if !self.image_store.is_empty() {
@@ -1580,11 +1618,12 @@ impl Buffer {
                         } else if sy == self.height.saturating_sub(1) {
                             // Cursor was at the bottom of the visible window and the
                             // next slot already has content from old scrollback — this
-                            // is the newly-scrolled-in line, so wipe it (BCE).
+                            // is the newly-scrolled-in line, so wipe it.  Use default
+                            // background (no BCE) — same rationale as `push_row`.
                             self.image_cell_count -= row.count_image_cells();
                             row.origin = RowOrigin::HardBreak;
                             row.join = RowJoin::NewLogicalLine;
-                            row.clear_with_tag(&self.current_tag);
+                            row.clear();
                         }
                         // Otherwise (cursor was above the bottom, row has real
                         // content): leave the row completely untouched.
@@ -2329,8 +2368,9 @@ impl Buffer {
         // rows[row_idx+1] into rows[row_idx] for row_idx in first..last).
         // It is now replaced with a blank row; deduct any image cells it held.
         self.image_cell_count -= self.rows[last].count_image_cells();
-        let mut new_row = Row::new(self.width);
-        new_row.fill_with_tag(&self.current_tag);
+        let new_row = Row::new(self.width);
+        // Scroll-created blank rows use default background (no BCE).
+        // See `push_row` comment for rationale.
         self.rows[last] = new_row;
         // New blank row at `last` — no cached representation yet.
         self.row_cache[last] = None;
@@ -2357,8 +2397,9 @@ impl Buffer {
         // rows[row_idx-1] into rows[row_idx] for row_idx in first+1..=last).
         // It is now replaced with a blank row; deduct any image cells it held.
         self.image_cell_count -= self.rows[first].count_image_cells();
-        let mut new_row = Row::new(self.width);
-        new_row.fill_with_tag(&self.current_tag);
+        let new_row = Row::new(self.width);
+        // Scroll-created blank rows use default background (no BCE).
+        // See `push_row` comment for rationale.
         self.rows[first] = new_row;
         // New blank row at `first` — no cached representation yet.
         self.row_cache[first] = None;
@@ -2817,6 +2858,7 @@ impl Buffer {
             }
             self.rows.drain(0..visible_start);
             self.row_cache.drain(0..visible_start);
+            self.adjust_prompt_rows(visible_start);
 
             // Adjust cursor
             if self.cursor.pos.y >= visible_start {

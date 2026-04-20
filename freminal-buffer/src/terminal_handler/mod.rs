@@ -1343,6 +1343,7 @@ impl TerminalHandler {
         match marker {
             FtcsMarker::PromptStart => {
                 self.ftcs_state = FtcsState::InPrompt;
+                self.buffer.mark_prompt_row();
             }
             FtcsMarker::CommandStart => {
                 self.ftcs_state = FtcsState::InCommand;

@@ -284,28 +284,69 @@ pub fn scroll_to_match_and_send(
 
 /// Jump to the previous command boundary (OSC 133 prompt start).
 ///
-/// # Not yet implemented
+/// Searches `snap.prompt_rows` for the highest prompt row that is above the
+/// current visible window top, then scrolls to place that row near the top
+/// of the viewport.
 ///
-/// Command-boundary jumping requires per-row FTCS prompt markers to be
-/// stored in `TerminalSnapshot`.  The current snapshot architecture only
-/// carries a single `ftcs_state: FtcsState` (the *current* FTCS state at
-/// snapshot time) — it does not record the buffer row at which each
-/// `PromptStart` marker was received.  Until the snapshot is extended with
-/// a `prompt_rows: Vec<usize>` field (or equivalent), this function is a
-/// no-op.
-#[allow(clippy::missing_const_for_fn)] // Not implementable until TerminalSnapshot carries per-row FTCS data
-pub fn jump_to_prev_command(_view_state: &mut ViewState, _snap: &TerminalSnapshot) {
-    // TODO: implement once TerminalSnapshot carries per-row FTCS prompt rows.
+/// Returns `Some(new_scroll_offset)` if the scroll offset changed, `None`
+/// otherwise.
+pub fn jump_to_prev_command(view_state: &mut ViewState, snap: &TerminalSnapshot) -> Option<usize> {
+    if snap.prompt_rows.is_empty() || snap.total_rows <= snap.term_height {
+        return None;
+    }
+
+    let max_start = snap.total_rows.saturating_sub(snap.term_height);
+    // Use snap.scroll_offset (source of truth matching snap.total_rows).
+    let window_start = max_start.saturating_sub(snap.scroll_offset);
+
+    // Find the last prompt row strictly above the current window start.
+    let target = snap.prompt_rows.iter().rev().find(|&&r| r < window_start)?;
+
+    let new_start = (*target).min(max_start);
+    let new_scroll_offset = max_start
+        .saturating_sub(new_start)
+        .min(snap.max_scroll_offset);
+
+    let old = snap.scroll_offset;
+    view_state.scroll_offset = new_scroll_offset;
+    if new_scroll_offset == old {
+        None
+    } else {
+        Some(new_scroll_offset)
+    }
 }
 
 /// Jump to the next command boundary (OSC 133 prompt start).
 ///
-/// # Not yet implemented
+/// Searches `snap.prompt_rows` for the lowest prompt row that is below the
+/// current visible window top, then scrolls to place that row near the top
+/// of the viewport.
 ///
-/// See [`jump_to_prev_command`] for the architectural prerequisite.
-#[allow(clippy::missing_const_for_fn)] // Not implementable until TerminalSnapshot carries per-row FTCS data
-pub fn jump_to_next_command(_view_state: &mut ViewState, _snap: &TerminalSnapshot) {
-    // TODO: implement once TerminalSnapshot carries per-row FTCS prompt rows.
+/// Returns `Some(new_scroll_offset)` if the scroll offset changed, `None`
+/// otherwise.
+pub fn jump_to_next_command(view_state: &mut ViewState, snap: &TerminalSnapshot) -> Option<usize> {
+    if snap.prompt_rows.is_empty() || snap.total_rows <= snap.term_height {
+        return None;
+    }
+
+    let max_start = snap.total_rows.saturating_sub(snap.term_height);
+    let window_start = max_start.saturating_sub(snap.scroll_offset);
+
+    // Find the first prompt row strictly after the current window start.
+    let target = snap.prompt_rows.iter().find(|&&r| r > window_start)?;
+
+    let new_start = (*target).min(max_start);
+    let new_scroll_offset = max_start
+        .saturating_sub(new_start)
+        .min(snap.max_scroll_offset);
+
+    let old = snap.scroll_offset;
+    view_state.scroll_offset = new_scroll_offset;
+    if new_scroll_offset == old {
+        None
+    } else {
+        Some(new_scroll_offset)
+    }
 }
 
 // ---------------------------------------------------------------------------

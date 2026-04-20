@@ -261,6 +261,13 @@ pub struct TerminalSnapshot {
     /// The GUI can use this to display command success/failure indicators.
     pub last_exit_code: Option<i32>,
 
+    /// Absolute buffer row indices where OSC 133 prompt-start markers fired.
+    ///
+    /// Used by the GUI for command-boundary jumping (Ctrl+Shift+Up/Down).
+    /// Ordering is not guaranteed; consumers must not assume this list is
+    /// sorted by row index.
+    pub prompt_rows: Arc<[usize]>,
+
     /// The active color theme palette.
     ///
     /// Carried in the snapshot so the GUI can render with the user's chosen
@@ -348,6 +355,7 @@ impl TerminalSnapshot {
             cwd: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
+            prompt_rows: Arc::from([]),
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),

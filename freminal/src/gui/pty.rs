@@ -9,6 +9,7 @@
 //! wires all channels, spawns the PTY consumer thread, and returns the
 //! GUI-side channel endpoints as a [`TabChannels`].
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
@@ -85,6 +86,8 @@ pub struct TabChannels {
 ///
 /// Returns an error if `TerminalEmulator::new` fails (e.g. the shell
 /// cannot be started).
+// Constructor-like function: all parameters are required to set up the PTY session.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty_tab(
     args: &Args,
     scrollback_limit: usize,
@@ -93,9 +96,10 @@ pub fn spawn_pty_tab(
     initial_size: FreminalTerminalSize,
     recording_handle: Option<RecordingHandle>,
     recording_pane_id: u32,
+    cwd: Option<&Path>,
 ) -> Result<TabChannels> {
     let (mut terminal, pty_read_rx) =
-        TerminalEmulator::new(args, Some(scrollback_limit), initial_size)?;
+        TerminalEmulator::new(args, Some(scrollback_limit), initial_size, cwd)?;
 
     // Apply the configured theme so all snapshots carry the correct palette.
     terminal.internal.handler.set_theme(theme);

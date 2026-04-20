@@ -11,10 +11,49 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
+
 jobs:
+  # =====================================================================
+  # Fast-path: skip redundant merge-queue re-checks when the synthetic
+  # commit is directly against main (no other PRs queued ahead).
+  # =====================================================================
+  skip-if-clean:
+    name: Skip if merge_queue produces no diff
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    if: ${{ always() }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Merge Queue CI Check Skipper
+        id: merge-queue-ci-skipper
+        uses: ./.github/merge-queue-ci-skipper
+        with:
+          secret: ${{ secrets.GH_ACCESS_TOKEN }}
+
+      - name: Check merge_group synthetic commit
+        id: check
+        run: |
+          # PR mode: never skip
+          if [ "${{ github.event_name }}" != "merge_group" ]; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ "${{ steps.merge-queue-ci-skipper.outputs.skip-check }}" = "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
   build-and-check:
     runs-on: ubuntu-latest
-
+    needs: skip-if-clean
+    if: ${{ needs.skip-if-clean.outputs.skip != 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -43,6 +82,8 @@ jobs:
   coverage:
     name: Coverage Report
     runs-on: ubuntu-latest
+    needs: skip-if-clean
+    if: ${{ needs.skip-if-clean.outputs.skip != 'true' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
@@ -60,6 +101,8 @@ jobs:
   # Run cargo check. This is a fast way to catch any obvious errors in the code.
   check:
     name: Check ${{ matrix.os }} ${{ matrix.toolchain }}
+    needs: skip-if-clean
+    if: ${{ needs.skip-if-clean.outputs.skip != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +123,7 @@ jobs:
     name: CI Success
     runs-on: ubuntu-latest
     needs:
+      - skip-if-clean
       - build-and-check
       - coverage
       - check
@@ -87,9 +131,17 @@ jobs:
     steps:
       - name: Verify all jobs succeeded
         run: |
+          echo "skip-if-clean:   ${{ needs.skip-if-clean.outputs.skip }}"
           echo "build-and-check: ${{ needs.build-and-check.result }}"
           echo "coverage:        ${{ needs.coverage.result }}"
           echo "check:           ${{ needs.check.result }}"
+
+          # Fast-path: if the merge queue skipper determined no re-check
+          # is needed, all downstream jobs were skipped — that is success.
+          if [[ "${{ needs.skip-if-clean.outputs.skip }}" == "true" ]]; then
+            echo "✅ Merge queue fast-path: checks skipped (already validated on PR)"
+            exit 0
+          fi
 
           if [[ "${{ needs.build-and-check.result }}" != "success" ]]; then
             echo "❌ build-and-check failed"

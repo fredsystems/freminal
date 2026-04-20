@@ -305,6 +305,16 @@ impl FreminalGui {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_id();
 
+        let pane_cwd = win
+            .tabs
+            .active_tab()
+            .active_pane()
+            .arc_swap
+            .load()
+            .cwd
+            .clone();
+        let cwd_path = pane_cwd.as_deref().map(std::path::Path::new);
+
         match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
@@ -313,6 +323,7 @@ impl FreminalGui {
             initial_size,
             self.recording_handle.clone(),
             pane_id.raw().try_into().unwrap_or(u32::MAX),
+            cwd_path,
         ) {
             Ok(channels) => {
                 let id = win.tabs.next_tab_id();
@@ -416,6 +427,17 @@ impl FreminalGui {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_id();
 
+        // Read CWD from the focused pane so the new split inherits it.
+        let pane_cwd = win
+            .tabs
+            .active_tab()
+            .active_pane()
+            .arc_swap
+            .load()
+            .cwd
+            .clone();
+        let cwd_path = pane_cwd.as_deref().map(std::path::Path::new);
+
         // Spawn the new PTY before touching `win.tabs` so there is no borrow conflict.
         let channels = match pty::spawn_pty_tab(
             &self.args,
@@ -425,6 +447,7 @@ impl FreminalGui {
             initial_size,
             self.recording_handle.clone(),
             new_pane_id.raw().try_into().unwrap_or(u32::MAX),
+            cwd_path,
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -836,6 +859,7 @@ impl freminal_windowing::App for FreminalGui {
                 initial_size,
                 self.recording_handle.clone(),
                 pane_id.raw().try_into().unwrap_or(u32::MAX),
+                None,
             ) {
                 Ok(channels) => {
                     let pane = panes::Pane {

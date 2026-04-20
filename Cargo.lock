@@ -5230,6 +5230,7 @@ dependencies = [
  "clap-verbosity-flag",
  "color-eyre",
  "duct",
+ "semver",
  "tracing",
  "tracing-log",
  "tracing-subscriber",

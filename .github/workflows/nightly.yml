@@ -1,0 +1,335 @@
+name: Nightly
+
+on:
+  schedule:
+    # Run at 06:00 UTC every day (midnight US Central)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Only one nightly run at a time.
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  # ── Gate: skip if no new commits since the last nightly tag ──────────
+  check-changes:
+    name: Check for new commits
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+      tag: ${{ steps.check.outputs.tag }}
+      nightly_version: ${{ steps.check.outputs.nightly_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check for commits since last nightly
+        id: check
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          TAG="nightly-${DATE}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Compute nightly version: read base from Cargo.toml, append
+          # nightly suffix.  If the version already has a pre-release
+          # (e.g. 0.7.0-beta.1), append ".nightly.YYYYMMDD" to it;
+          # otherwise set it to "X.Y.Z-nightly.YYYYMMDD".
+          BASE_VERSION=$(grep -m1 '^version = "' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if echo "$BASE_VERSION" | grep -q '-'; then
+            NIGHTLY_VERSION="${BASE_VERSION}.nightly.${DATE}"
+          else
+            NIGHTLY_VERSION="${BASE_VERSION}-nightly.${DATE}"
+          fi
+          echo "nightly_version=${NIGHTLY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${NIGHTLY_VERSION}"
+
+          # Find the most recent nightly tag.
+          LAST_NIGHTLY=$(git tag -l 'nightly-*' --sort=-creatordate | head -1)
+
+          if [ -z "$LAST_NIGHTLY" ]; then
+            echo "No previous nightly tag found — first nightly build"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            COMMITS=$(git rev-list "${LAST_NIGHTLY}..HEAD" --count)
+            echo "Commits since ${LAST_NIGHTLY}: ${COMMITS}"
+            if [ "$COMMITS" -gt 0 ]; then
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  # ── CI gate: lint + test must pass before building artifacts ────────
+  ci:
+    name: CI Checks
+    needs: check-changes
+    if: needs.check-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@32cb6a5ae30bb0dfc996fa7baf8bf1ed28442fa4 # v3
+
+      - name: Use Determinate Cache
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+        with:
+          use-flakehub: false
+          use-gha-cache: false
+
+      - name: Run checks in devShell
+        run: |
+          nix develop --impure --command bash -e -c '
+            set -euxo pipefail
+            cargo clippy --all-targets --all-features -- -D warnings
+            cargo test --all
+            cargo-machete
+          '
+
+  # ── Build matrix (same as deploy.yaml) ──────────────────────────────
+  build-linux-amd64:
+    name: Build Linux AMD64
+    needs: [ci, check-changes]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Bump version to nightly
+        run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
+
+      - name: Install cargo-bundle and cargo-generate-rpm
+        run: cargo install cargo-bundle cargo-generate-rpm
+
+      - name: Bundle .deb package and build release binary
+        run: cargo bundle --release -p freminal
+
+      - name: Generate RPM package
+        run: cargo generate-rpm -p freminal
+
+      - name: Rename artifacts
+        run: |
+          VERSION="${{ needs.check-changes.outputs.tag }}"
+          mkdir -p dist
+          cp target/release/freminal "dist/freminal-${VERSION}-linux-amd64"
+          cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-amd64.deb"
+          cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-amd64.AppImage"
+          cp target/generate-rpm/*.rpm "dist/freminal-${VERSION}-linux-amd64.rpm"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-amd64
+          path: dist/*
+
+  build-linux-arm64:
+    name: Build Linux ARM64
+    needs: [ci, check-changes]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Bump version to nightly
+        run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
+
+      - name: Install cargo-bundle and cargo-generate-rpm
+        run: cargo install cargo-bundle cargo-generate-rpm
+
+      - name: Bundle .deb package and build release binary
+        run: cargo bundle --release -p freminal
+
+      - name: Generate RPM package
+        run: cargo generate-rpm -p freminal
+
+      - name: Rename artifacts
+        run: |
+          VERSION="${{ needs.check-changes.outputs.tag }}"
+          mkdir -p dist
+          cp target/release/freminal "dist/freminal-${VERSION}-linux-arm64"
+          cp target/release/bundle/deb/*.deb "dist/freminal-${VERSION}-linux-arm64.deb"
+          cp target/release/bundle/appimage/*.AppImage "dist/freminal-${VERSION}-linux-arm64.AppImage"
+          cp target/generate-rpm/*.rpm "dist/freminal-${VERSION}-linux-arm64.rpm"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-arm64
+          path: dist/*
+
+  build-windows:
+    name: Build Windows
+    needs: [ci, check-changes]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Bump version to nightly
+        run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
+
+      - name: Build release binary
+        run: cargo build --release -p freminal
+
+      - name: Rename artifacts
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-changes.outputs.tag }}"
+          mkdir -p dist
+          cp target/release/freminal.exe "dist/freminal-${VERSION}-windows-amd64.exe"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-amd64
+          path: dist/*
+
+  build-macos:
+    name: Build macOS
+    needs: [ci, check-changes]
+    runs-on: macos-latest
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Bump version to nightly
+        run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Bundle .app
+        run: cargo bundle --release -p freminal
+
+      - name: Stage .app for signing
+        run: |
+          cp -R target/release/bundle/osx/Freminal.app ./Freminal.app
+
+      - name: Import signing certificate
+        if: env.MACOS_CERTIFICATE != ''
+        uses: apple-actions/import-codesign-certs@fe74d46e82474f87e1ba79832ad28a4013d0e33a # v6.1.0
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERTIFICATE }}
+          p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+
+      - name: Codesign .app
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          codesign --force --deep --sign "${{ secrets.APPLE_TEAM_ID }}" \
+            --entitlements assets/macos/entitlements.plist \
+            --options=runtime \
+            --verbose=4 \
+            Freminal.app
+
+      - name: Notarize .app
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          ditto -c -k --keepParent Freminal.app Freminal.zip
+          xcrun notarytool submit Freminal.zip \
+            --wait \
+            --apple-id "${{ secrets.APPLE_ID_USERNAME }}" \
+            --password "${{ secrets.APPLE_ID_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --verbose
+          xcrun stapler staple -v Freminal.app
+
+      - name: Rename artifacts
+        run: |
+          VERSION="${{ needs.check-changes.outputs.tag }}"
+          mkdir -p dist
+          zip -r "dist/freminal-${VERSION}-macos-arm64.app.zip" Freminal.app
+          cp target/release/freminal "dist/freminal-${VERSION}-macos-arm64"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-arm64
+          path: dist/*
+
+  # ── Release: create a pre-release with the nightly tag ──────────────
+  release:
+    name: Create Nightly Release
+    runs-on: ubuntu-latest
+    needs:
+      - check-changes
+      - build-linux-amd64
+      - build-linux-arm64
+      - build-windows
+      - build-macos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create nightly tag
+        run: |
+          TAG="${{ needs.check-changes.outputs.tag }}"
+          # Delete the tag if it already exists (re-run on the same day).
+          git tag -d "$TAG" 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        with:
+          tag_name: ${{ needs.check-changes.outputs.tag }}
+          name: "Nightly ${{ needs.check-changes.outputs.tag }}"
+          prerelease: true
+          generate_release_notes: true
+          files: artifacts/*
+          body: |
+            Automated nightly build from `main` at ${{ github.sha }}.
+
+            **This is a pre-release build and may be unstable.**

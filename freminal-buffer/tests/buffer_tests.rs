@@ -177,7 +177,7 @@ fn bce_erase_display_fills_with_current_bg() {
 }
 
 #[test]
-fn bce_scroll_slice_up_fills_new_row_with_current_bg() {
+fn bce_scroll_does_not_fill_new_row_with_current_bg() {
     let mut buf = Buffer::new(5, 3);
 
     // Fill all rows with text
@@ -191,10 +191,10 @@ fn bce_scroll_slice_up_fills_new_row_with_current_bg() {
     buf.set_format(red_bg_tag());
     buf.scroll_region_up_n(1);
 
-    // The bottom row (row 2) should be filled with blanks carrying red-bg
+    // The bottom row (row 2) should be blank with DEFAULT background — scroll
+    // operations do not apply BCE.  Only explicit erase operations (ED, EL)
+    // fill with the current background color.
     let rows = buf.get_rows();
-    // We need to find the visible rows. In a 3-row buffer after scroll-up,
-    // the last row should be the newly blank one.
     let last_visible_idx = rows.len() - 1;
     let last_row = &rows[last_visible_idx];
     for col in 0..5 {
@@ -206,8 +206,8 @@ fn bce_scroll_slice_up_fills_new_row_with_current_bg() {
         );
         assert_eq!(
             cell.tag(),
-            &red_bg_tag(),
-            "col {col}: new row should have red-bg from BCE"
+            &FormatTag::default(),
+            "col {col}: scroll-created row should have default background (no BCE)"
         );
     }
 }
