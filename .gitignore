@@ -554,3 +554,4 @@ config.toml
 flamegraph.svg
 perf.data
 perf.data.old*
+profile_export*.xml

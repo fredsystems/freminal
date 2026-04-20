@@ -11,12 +11,12 @@ and triage platform-specific performance issues on Windows and macOS.
 
 ## Task Summary
 
-| #   | Feature                           | Scope  | Status  | Dependencies     |
-| --- | --------------------------------- | ------ | ------- | ---------------- |
-| 59  | FREC v2: Recording Overhaul       | Large  | Pending | Task 58          |
-| 61  | Saved Layouts (Session Templates) | Large  | Pending | Task 36, Task 58 |
-| 68  | Platform Performance Triage       | Medium | Pending | None             |
-| 69  | UI Polish & Settings Completeness | Medium | Pending | None             |
+| #   | Feature                           | Scope  | Status   | Dependencies     |
+| --- | --------------------------------- | ------ | -------- | ---------------- |
+| 59  | FREC v2: Recording Overhaul       | Large  | Pending  | Task 58          |
+| 61  | Saved Layouts (Session Templates) | Large  | Pending  | Task 36, Task 58 |
+| 68  | Platform Performance Triage       | Medium | Complete | None             |
+| 69  | UI Polish & Settings Completeness | Medium | Complete | None             |
 
 Task 60 (Playback v2) has been removed — see "Design Decisions" below.
 

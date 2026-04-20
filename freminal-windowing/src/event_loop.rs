@@ -104,6 +104,14 @@ impl<A: App> Handler<A> {
 
         self.windows.insert(winit_id, state);
 
+        // Track the first window as the primary clipboard source.
+
+        // Request an immediate redraw so the first frame renders as soon as
+        // the event loop is ready.  `repaint_at` alone only fires in
+        // `about_to_wait`, which may not schedule a second frame quickly
+        // enough for the terminal to display the initial shell prompt.
+        self.windows[&winit_id].window.request_redraw();
+
         let handle = WindowHandle {
             proxy: &self.proxy,
             pending_ops: &self.pending_ops,
@@ -217,13 +225,91 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         winit_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        // Mouse-motion events arrive at 100+ Hz on macOS.  We pass them to
+        // egui for pointer position tracking but only schedule a repaint if
+        // egui actually wants one (e.g. menu hover highlight).  We skip the
+        // full window_event path to avoid unnecessary work.
+        if matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+        ) {
+            if let Some(state) = self.windows.get_mut(&winit_id) {
+                let response = state.egui.on_window_event(&state.window, &event);
+                if response.repaint {
+                    let deadline = Instant::now() + std::time::Duration::from_millis(16);
+                    state.repaint_at = Some(
+                        state
+                            .repaint_at
+                            .map_or(deadline, |existing| existing.min(deadline)),
+                    );
+                }
+            }
+            self.update_control_flow(event_loop);
+            return;
+        }
+
+        // Intercept paste shortcuts before egui-winit can consume them.
+        //
+        // On Wayland, egui-winit creates a per-window smithay-clipboard instance.
+        // Only the first instance receives wl_data_device events, so clipboard
+        // reads silently fail on child windows — and egui-winit still swallows
+        // the keypress.  We fix this by reading clipboard from whichever window
+        // has a working clipboard and injecting Event::Paste into the target.
+        if let winit::event::WindowEvent::KeyboardInput {
+            event:
+                winit::event::KeyEvent {
+                    ref logical_key,
+                    state: winit::event::ElementState::Pressed,
+                    ..
+                },
+            ..
+        } = event
+        {
+            let is_paste = self.windows.get(&winit_id).is_some_and(|state| {
+                let mods = state.egui.modifiers();
+                matches!(
+                    logical_key,
+                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Paste)
+                ) || (mods.command
+                    && matches!(
+                        logical_key,
+                        winit::keyboard::Key::Character(c)
+                            if c.as_str().eq_ignore_ascii_case("v")
+                    ))
+            });
+
+            if is_paste {
+                let text = self
+                    .windows
+                    .values_mut()
+                    .find_map(|state| state.egui.clipboard_text());
+
+                if let Some(text) = text {
+                    let text = text.replace("\r\n", "\n");
+                    if !text.is_empty()
+                        && let Some(state) = self.windows.get_mut(&winit_id)
+                    {
+                        state.egui.inject_paste(text);
+                        state.repaint_at = Some(Instant::now());
+                        // Don't pass to egui-winit — it would produce a
+                        // duplicate paste on windows where its clipboard works.
+                        self.update_control_flow(event_loop);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Pass to egui first
         let egui_consumed = if let Some(state) = self.windows.get_mut(&winit_id) {
             let response = state.egui.on_window_event(&state.window, &event);
+
             if response.repaint {
                 state.repaint_at = Some(Instant::now());
-                state.window.request_redraw();
             }
+
             response.consumed
         } else {
             return;
@@ -298,11 +384,14 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
 
                 state.repaint_at = None;
 
-                // Schedule repaint based on egui's requested delay.
-                if !frame_output.repaint_delay.is_zero()
-                    && frame_output.repaint_delay < std::time::Duration::from_secs(3600)
-                {
-                    let deadline = Instant::now() + frame_output.repaint_delay;
+                // Honour egui's repaint_delay but clamp to a minimum of 16ms
+                // to prevent unbounded rendering from zero-delay requests
+                // (hover state, tooltip updates).  This ensures layout-settling
+                // frames still fire while keeping idle CPU near zero.
+                if frame_output.repaint_delay < std::time::Duration::from_secs(3600) {
+                    let min_delay = std::time::Duration::from_millis(16);
+                    let delay = frame_output.repaint_delay.max(min_delay);
+                    let deadline = Instant::now() + delay;
                     state.repaint_at = Some(deadline);
                 }
 
@@ -326,12 +415,18 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         self.update_control_flow(event_loop);
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::RequestRepaint(id) => {
                 if let Some(state) = self.windows.get_mut(&id.0) {
-                    state.repaint_at = Some(Instant::now());
-                    state.window.request_redraw();
+                    // Schedule rather than calling request_redraw() directly,
+                    // same throttle as window_event to prevent unbounded rendering.
+                    let min_deadline = Instant::now() + std::time::Duration::from_millis(16);
+                    state.repaint_at = Some(
+                        state
+                            .repaint_at
+                            .map_or(min_deadline, |existing| existing.min(min_deadline)),
+                    );
                 }
             }
             UserEvent::RequestRepaintAfter(id, delay) => {
@@ -345,10 +440,19 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 }
             }
         }
+
+        // Ensure the event loop wakes at the earliest deadline so timer-based
+        // repaints actually fire.  Without this, the loop may stay in `Wait`
+        // indefinitely on platforms where `about_to_wait` is not called after
+        // `user_event` (observed on macOS).
+        self.update_control_flow(event_loop);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Check if any windows need repaint based on timers
+        // Check if any windows need repaint based on timers.
+        // Clear `repaint_at` immediately so spurious wake-ups between
+        // now and the actual `RedrawRequested` delivery don't re-fire
+        // `request_redraw()` on every pass through `about_to_wait`.
         let now = Instant::now();
         let ids: Vec<winit::window::WindowId> = self.windows.keys().copied().collect();
         for winit_id in ids {
@@ -356,6 +460,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 && let Some(deadline) = state.repaint_at
                 && deadline <= now
             {
+                state.repaint_at = None;
                 state.window.request_redraw();
             }
         }

@@ -108,9 +108,11 @@ impl EguiState {
             .map(|vo| vo.commands.clone())
             .unwrap_or_default();
 
-        if repaint_delay.is_zero() {
-            window.request_redraw();
-        }
+        // Do NOT call `window.request_redraw()` here — let the event loop
+        // manage scheduling via `repaint_at` / `about_to_wait`.  Calling
+        // `request_redraw()` directly bypasses `ControlFlow::WaitUntil` and
+        // causes an unbounded render loop on platforms where `swap_buffers`
+        // returns immediately (macOS with vsync disabled).
 
         FrameOutput {
             commands,
@@ -119,11 +121,31 @@ impl EguiState {
     }
 
     /// Pass a winit `WindowEvent` to egui.
+    ///
+    /// Forward a window event to egui-winit.
     pub(crate) fn on_window_event(
         &mut self,
         window: &Window,
         event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
         self.winit_state.on_window_event(window, event)
+    }
+
+    /// Inject a paste event directly into egui's input queue.
+    pub(crate) fn inject_paste(&mut self, text: String) {
+        self.winit_state
+            .egui_input_mut()
+            .events
+            .push(egui::Event::Paste(text));
+    }
+
+    /// Read clipboard text via this window's egui-winit clipboard.
+    pub(crate) fn clipboard_text(&mut self) -> Option<String> {
+        self.winit_state.clipboard_text()
+    }
+
+    /// Read the current egui modifier state.
+    pub(crate) fn modifiers(&self) -> egui::Modifiers {
+        self.winit_state.egui_input().modifiers
     }
 }
