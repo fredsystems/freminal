@@ -111,6 +111,10 @@ let
         inherit (s.shader) path hot_reload;
       };
 
+      startupSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.startup) layout restore_last_session;
+      };
+
       result = {
         version = 1;
         managed_by = "home-manager";
@@ -126,6 +130,7 @@ let
       // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
       // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
+      // lib.optionalAttrs (startupSection != { }) { startup = startupSection; }
       // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
     in
     result;
@@ -496,6 +501,30 @@ in
           description = ''
             Allow applications to read the system clipboard via OSC 52 query.
             When true, OSC 52 queries return the clipboard contents base64-encoded.
+            Null uses the default (false).
+          '';
+        };
+      };
+
+      startup = {
+        layout = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Name or path of a layout file to load on startup.
+            If a plain name (no path separators), Freminal looks for
+            ~/.config/freminal/layouts/<name>.toml.
+            Overridden by the --layout CLI flag.
+            Null uses the default (single pane, no layout).
+          '';
+        };
+
+        restore_last_session = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, Freminal saves the current layout on exit and restores
+            it on the next launch (unless --layout is given on the CLI).
             Null uses the default (false).
           '';
         };

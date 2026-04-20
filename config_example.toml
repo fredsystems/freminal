@@ -215,6 +215,24 @@ limit = 4000
 # password_indicator = true
 
 ## ##############################################################################
+# STARTUP & LAYOUTS
+## ##############################################################################
+
+[startup]
+# Name of a layout file to load on startup. If the value contains a path
+# separator it is treated as a file path; otherwise Freminal looks for
+# ~/.config/freminal/layouts/<name>.toml.
+# Overridden by the --layout CLI flag.
+# Default: unset (open a single default pane).
+# layout = "dev"
+
+# When true, Freminal saves the current layout topology on exit and restores
+# it on the next launch (unless --layout is given on the command line).
+# The layout is written to ~/.config/freminal/layouts/last_session.toml.
+# Default: false.
+# restore_last_session = false
+
+## ##############################################################################
 # KEY BINDINGS
 ## ##############################################################################
 # Override the default key bindings. Each key is an action name, and the value

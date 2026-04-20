@@ -1777,6 +1777,9 @@ impl freminal_windowing::App for FreminalGui {
         // and return — no terminal state to process.
         if self.settings_window_id == Some(window_id) {
             let os_dark = ctx.global_style().visuals.dark_mode;
+            // Sync discovered layout list into the modal each frame so the
+            // Startup tab always shows fresh data.
+            self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
             let settings_action = self.settings_modal.show_standalone(ctx, os_dark);
             self.handle_settings_action(&settings_action, handle, window_id);
 
