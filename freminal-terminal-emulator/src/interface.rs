@@ -577,6 +577,7 @@ impl TerminalEmulator {
 
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
+        let prompt_rows = Arc::new(self.internal.handler.buffer().prompt_rows().to_vec());
         let theme = self.internal.handler.theme();
 
         // ── Inline image data ────────────────────────────────────────────────
@@ -628,6 +629,7 @@ impl TerminalEmulator {
             cwd,
             ftcs_state,
             last_exit_code,
+            prompt_rows,
             theme,
             images,
             visible_image_placements,

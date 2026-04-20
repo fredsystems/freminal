@@ -275,13 +275,23 @@ impl super::FreminalGui {
                 let tab = win.tabs.active_tab_mut();
                 let pane = tab.active_pane_mut();
                 let snap = pane.arc_swap.load();
-                super::search::jump_to_prev_command(&mut pane.view_state, &snap);
+                if let Some(offset) =
+                    super::search::jump_to_prev_command(&mut pane.view_state, &snap)
+                    && let Err(e) = pane.input_tx.send(InputEvent::ScrollOffset(offset))
+                {
+                    error!("Failed to send scroll offset to PTY: {e}");
+                }
             }
             KeyAction::NextCommand => {
                 let tab = win.tabs.active_tab_mut();
                 let pane = tab.active_pane_mut();
                 let snap = pane.arc_swap.load();
-                super::search::jump_to_next_command(&mut pane.view_state, &snap);
+                if let Some(offset) =
+                    super::search::jump_to_next_command(&mut pane.view_state, &snap)
+                    && let Err(e) = pane.input_tx.send(InputEvent::ScrollOffset(offset))
+                {
+                    error!("Failed to send scroll offset to PTY: {e}");
+                }
             }
             KeyAction::NewWindow => {
                 win.pending_new_window = true;
