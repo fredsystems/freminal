@@ -671,6 +671,43 @@ impl PaneNode {
             }
         }
     }
+
+    /// Set the ratio of the split whose subtree contains `target_id` to an
+    /// absolute value.  Mirror of `resize` but sets rather than adjusts.
+    fn set_ratio(&mut self, target_id: PaneId, direction: SplitDirection, new_ratio: f32) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Split {
+                direction: split_dir,
+                ratio,
+                first,
+                second,
+            } => {
+                let in_first = first.contains(target_id);
+                let in_second = second.contains(target_id);
+
+                if !in_first && !in_second {
+                    return false;
+                }
+
+                // Try deeper splits first (closest ancestor wins).
+                if in_first && first.set_ratio(target_id, direction, new_ratio) {
+                    return true;
+                }
+                if in_second && second.set_ratio(target_id, direction, new_ratio) {
+                    return true;
+                }
+
+                // No deeper match — try this split.
+                if *split_dir == direction {
+                    *ratio = new_ratio;
+                    return true;
+                }
+
+                false
+            }
+        }
+    }
 }
 
 // ── PaneTree (public wrapper) ────────────────────────────────────────
@@ -951,6 +988,39 @@ impl PaneTree {
         }
 
         if root.resize(target_id, direction, delta) {
+            Ok(())
+        } else {
+            Err(PaneError::NoSplitInDirection {
+                pane: target_id,
+                direction,
+            })
+        }
+    }
+
+    /// Set the split ratio for the split whose `first` subtree contains
+    /// `target_id`, for a split of the given `direction`.
+    ///
+    /// The ratio is clamped to `[MIN_SPLIT_RATIO, MAX_SPLIT_RATIO]`.
+    ///
+    /// # Errors
+    ///
+    /// - [`PaneError::NotFound`] if `target_id` does not exist.
+    /// - [`PaneError::InvalidState`] if the tree is empty (bug).
+    /// - [`PaneError::NoSplitInDirection`] if no matching split is found.
+    pub fn set_split_ratio(
+        &mut self,
+        target_id: PaneId,
+        direction: SplitDirection,
+        ratio: f32,
+    ) -> Result<(), PaneError> {
+        let root = self.root_mut()?;
+
+        if root.find(target_id).is_none() {
+            return Err(PaneError::NotFound(target_id));
+        }
+
+        let clamped = ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
+        if root.set_ratio(target_id, direction, clamped) {
             Ok(())
         } else {
             Err(PaneError::NoSplitInDirection {

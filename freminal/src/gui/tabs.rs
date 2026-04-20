@@ -28,6 +28,15 @@ impl TabId {
     pub const fn first() -> Self {
         Self(0)
     }
+
+    /// Create a `TabId` with an explicit numeric offset.
+    ///
+    /// Used when constructing a pre-defined set of tabs from a saved layout
+    /// where tab identifiers must match a known sequence.
+    #[must_use]
+    pub const fn offset(n: u64) -> Self {
+        Self(n)
+    }
 }
 
 /// A single terminal tab.
