@@ -46,44 +46,50 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 ///
-/// The scrollbar is only shown when the user is actively scrolled back
+/// The scrollbar is shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
 ///
-/// The indicator is purely visual — it does not handle drag input.
-pub(super) fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui: &Ui) {
+/// Supports click-to-position and drag-to-scroll.  Returns the new
+/// `scroll_offset` if the user interacted with the scrollbar, or `None`
+/// if no scrollbar interaction occurred.
+pub(super) fn handle_scrollbar(
+    scroll_offset: usize,
+    max_scroll_offset: usize,
+    ui: &Ui,
+    dragging: &mut bool,
+) -> Option<usize> {
     const SCROLLBAR_WIDTH: f32 = 6.0;
     const SCROLLBAR_MARGIN: f32 = 2.0;
     const MIN_THUMB_HEIGHT: f32 = 12.0;
+    // Wider hit-test area so the narrow pill is easy to grab.
+    const HIT_TEST_PADDING: f32 = 6.0;
 
-    // Only show when scrolled back into history.
-    if scroll_offset == 0 || max_scroll_offset == 0 {
-        return;
+    // Only show when scrolled back into history — but keep rendering
+    // while the user is mid-drag so the scrollbar doesn't vanish when
+    // they drag to the bottom.
+    if !*dragging && (scroll_offset == 0 || max_scroll_offset == 0) {
+        return None;
+    }
+    if max_scroll_offset == 0 {
+        *dragging = false;
+        return None;
     }
 
     let painter = ui.painter();
 
     // ── Dimensions ───────────────────────────────────────────────────────
-    // Anchor to the full viewport rect, not the text content rect, so the
-    // scrollbar stays pinned to the right edge regardless of content width.
     let viewport = ui.max_rect();
     let track_top = viewport.top();
     let track_bottom = viewport.bottom();
     let track_height = track_bottom - track_top;
     if track_height <= 0.0 {
-        return;
+        return None;
     }
 
     let track_right = viewport.right() - SCROLLBAR_MARGIN;
     let track_left = track_right - SCROLLBAR_WIDTH;
 
     // ── Thumb geometry ───────────────────────────────────────────────────
-    // The visible window covers `term_height` rows out of a total of
-    // `max_scroll_offset + term_height`.  We don't have `term_height` here
-    // but it cancels out: the thumb fraction in pixels equals
-    //   track_height / (max_scroll_offset + term_height)  * term_height
-    // which simplifies when we use the pixel track_height as the visible
-    // proxy (they are proportional).
-    //
     let max_f = max_scroll_offset.approx_as::<f32>().unwrap_or(0.0);
     let total = max_f + track_height;
     let thumb_fraction = (track_height / total).clamp(0.05, 1.0);
@@ -101,11 +107,72 @@ pub(super) fn paint_scrollbar(scroll_offset: usize, max_scroll_offset: usize, ui
         Pos2::new(track_right, thumb_top + thumb_height),
     );
 
+    // ── Mouse interaction ────────────────────────────────────────────────
+    // Use a wider hit-test rect so the narrow scrollbar is easy to click.
+    let hit_rect = Rect::from_min_max(
+        Pos2::new(track_left - HIT_TEST_PADDING, track_top),
+        Pos2::new(track_right + HIT_TEST_PADDING, track_bottom),
+    );
+
+    let new_offset = ui.input(|i| {
+        let ptr = &i.pointer;
+        let primary_down = ptr.primary_down();
+        let ptr_pos = ptr.interact_pos();
+
+        if !primary_down {
+            *dragging = false;
+            return None;
+        }
+
+        if let Some(pos) = ptr_pos {
+            // Start drag if clicking within the hit-test area.
+            if !*dragging && ptr.primary_pressed() && hit_rect.contains(pos) {
+                *dragging = true;
+            }
+
+            if *dragging {
+                // Map pointer Y to scroll_offset.
+                // Centre the thumb on the pointer position.
+                let thumb_centre_y = pos.y;
+                let thumb_top_y = thumb_centre_y - thumb_height / 2.0;
+                let clamped_top = thumb_top_y.clamp(track_top, track_top + scrollable_track);
+                let frac = if scrollable_track > 0.0 {
+                    1.0 - (clamped_top - track_top) / scrollable_track
+                } else {
+                    0.0
+                };
+                let new_off = (frac * max_f).round();
+                // Clamp to valid range.
+                let clamped = new_off
+                    .approx_as::<usize>()
+                    .unwrap_or(0)
+                    .min(max_scroll_offset);
+                return Some(clamped);
+            }
+        }
+
+        None
+    });
+
     // ── Appearance ───────────────────────────────────────────────────────
-    let color = Color32::from_rgba_premultiplied(200, 200, 200, 180);
-    let rounding = SCROLLBAR_WIDTH / 2.0; // pill shape
+    let is_hovered = ui.input(|i| {
+        i.pointer
+            .interact_pos()
+            .is_some_and(|pos| hit_rect.contains(pos))
+    });
+    let alpha = if *dragging {
+        220
+    } else if is_hovered {
+        200
+    } else {
+        150
+    };
+    let color = Color32::from_rgba_premultiplied(200, 200, 200, alpha);
+    let rounding = SCROLLBAR_WIDTH / 2.0;
 
     painter.rect_filled(thumb_rect, rounding, color);
+
+    new_offset
 }
 
 /// Duration of the visual bell flash overlay.
@@ -606,6 +673,8 @@ pub struct PaneRenderCache {
     pub(super) hover_snap_ptr: usize,
     /// Per-pane shaping cache for text layout.
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
+    /// Whether the user is currently dragging the scrollbar thumb.
+    pub(super) scrollbar_dragging: bool,
 }
 
 impl PaneRenderCache {
@@ -633,6 +702,7 @@ impl PaneRenderCache {
             cached_hovered_url: None,
             hover_snap_ptr: 0,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
+            scrollbar_dragging: false,
         }
     }
 
@@ -892,6 +962,33 @@ impl FreminalTerminalWidget {
         // (e.g. clicks on the tab bar).
         let terminal_rect = ui.available_rect_before_wrap();
 
+        // ── Scrollbar pre-check ──────────────────────────────────────────
+        // Detect if the user is clicking or starting a drag on the scrollbar
+        // BEFORE processing terminal input, so the click is not forwarded
+        // to the PTY as a terminal mouse event.
+        {
+            let scrollbar_hit = ui.input(|i| {
+                let ptr = &i.pointer;
+                if !ptr.primary_down() {
+                    return false;
+                }
+                ptr.interact_pos().is_some_and(|pos| {
+                    let vp = ui.max_rect();
+                    let track_right = vp.right() - 2.0; // SCROLLBAR_MARGIN
+                    let track_left = track_right - 6.0; // SCROLLBAR_WIDTH
+                    let hit_left = track_left - 6.0; // HIT_TEST_PADDING
+                    let hit_right = track_right + 6.0;
+                    pos.x >= hit_left
+                        && pos.x <= hit_right
+                        && pos.y >= vp.top()
+                        && pos.y <= vp.bottom()
+                })
+            });
+            if scrollbar_hit && snap.scroll_offset > 0 {
+                cache.scrollbar_dragging = true;
+            }
+        }
+
         // When a modal dialog (e.g. the settings window) or the right-click
         // context menu is open — or the modal was open last frame — do NOT
         // forward keyboard/mouse events to the PTY.  For modals, the one-frame
@@ -901,7 +998,11 @@ impl FreminalTerminalWidget {
         // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
         let mut left_mouse_button_pressed = false;
-        if suppress_input || context_menu_open || view_state.search_state.is_open {
+        if suppress_input
+            || context_menu_open
+            || view_state.search_state.is_open
+            || cache.scrollbar_dragging
+        {
             cache.previous_key = None;
             cache.previous_mouse_state = None;
             cache.previous_scroll_amount = 0.0;
@@ -1541,7 +1642,16 @@ impl FreminalTerminalWidget {
             })),
         });
 
-        paint_scrollbar(snap.scroll_offset, snap.max_scroll_offset, ui);
+        // ── Scrollbar (visual + interactive) ─────────────────────────
+        if let Some(new_offset) = handle_scrollbar(
+            snap.scroll_offset,
+            snap.max_scroll_offset,
+            ui,
+            &mut cache.scrollbar_dragging,
+        ) {
+            view_state.scroll_offset = new_offset;
+            let _ = input_tx.try_send(InputEvent::ScrollOffset(new_offset));
+        }
 
         // ── Visual bell flash overlay ────────────────────────────────
         paint_bell_flash(ui, rect, view_state);
