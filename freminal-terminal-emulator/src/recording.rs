@@ -734,11 +734,44 @@ impl WriterThread {
 /// # Errors
 ///
 /// Returns an error if the output file cannot be created.
+/// Handle returned alongside [`RecordingHandle`] to allow callers to
+/// deterministically wait for the writer thread to finish after all
+/// [`RecordingHandle`] clones have been dropped.
+pub struct RecordingJoinHandle {
+    inner: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RecordingJoinHandle {
+    /// Block until the writer thread has finalized the file and exited.
+    ///
+    /// This is a no-op if already joined.
+    pub fn join(&mut self) {
+        if let Some(h) = self.inner.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Start a recording session.
+///
+/// Creates the output file, spawns a dedicated writer thread, and returns a
+/// [`RecordingHandle`] that can be cloned and sent to any thread, plus a
+/// [`RecordingJoinHandle`] to deterministically wait for the writer to finish.
+/// Dropping all [`RecordingHandle`] clones causes the writer to finalize the
+/// file and exit.
+///
+/// The channel is bounded to `channel_capacity` events. If the channel is full,
+/// events are silently dropped (the writer is I/O-bound, not the PTY thread).
+///
+/// # Errors
+///
+/// Returns an error if the output file cannot be created or the writer thread
+/// cannot be spawned.
 pub fn start_recording(
     path: &std::path::Path,
     metadata: RecordingMetadata,
     channel_capacity: usize,
-) -> Result<RecordingHandle, RecordingError> {
+) -> Result<(RecordingHandle, RecordingJoinHandle), RecordingError> {
     let file = std::fs::File::create(path)?;
     let writer = std::io::BufWriter::new(file);
     let (tx, rx) = crossbeam_channel::bounded(channel_capacity);
@@ -752,15 +785,20 @@ pub fn start_recording(
         last_timestamp_us: 0,
     };
 
-    std::thread::Builder::new()
+    let join_handle = std::thread::Builder::new()
         .name("frec-writer".to_string())
         .spawn(move || thread.run(&metadata))
         .map_err(|e| RecordingError::Io(std::io::Error::other(e)))?;
 
-    Ok(RecordingHandle {
-        tx,
-        start: std::time::Instant::now(),
-    })
+    Ok((
+        RecordingHandle {
+            tx,
+            start: std::time::Instant::now(),
+        },
+        RecordingJoinHandle {
+            inner: Some(join_handle),
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1503,11 +1541,11 @@ mod tests {
         let path = dir.path().join("test.frec");
         let metadata = test_metadata();
 
-        let handle = start_recording(&path, metadata.clone(), 64).unwrap();
+        let (handle, mut join) = start_recording(&path, metadata.clone(), 64).unwrap();
         drop(handle); // Signal writer to finalize.
 
-        // Give writer thread time to finish.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait for writer thread to finish.
+        join.join();
 
         let parsed = read_frec_file(&path);
 
@@ -1524,7 +1562,7 @@ mod tests {
         let path = dir.path().join("test.frec");
         let metadata = test_metadata();
 
-        let handle = start_recording(&path, metadata.clone(), 64).unwrap();
+        let (handle, mut join) = start_recording(&path, metadata.clone(), 64).unwrap();
 
         handle.send(RecordingEvent {
             timestamp_us: 1000,
@@ -1547,7 +1585,7 @@ mod tests {
         });
 
         drop(handle);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        join.join();
 
         let parsed = read_frec_file(&path);
 
@@ -1579,7 +1617,7 @@ mod tests {
         let path = dir.path().join("test.frec");
         let metadata = test_metadata();
 
-        let handle = start_recording(&path, metadata, 256).unwrap();
+        let (handle, mut join) = start_recording(&path, metadata, 256).unwrap();
 
         // Write events spanning 3.5 seconds — should produce ~4 seek entries.
         for i in 0..35 {
@@ -1593,7 +1631,7 @@ mod tests {
         }
 
         drop(handle);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        join.join();
 
         let parsed = read_frec_file(&path);
 
@@ -1612,7 +1650,7 @@ mod tests {
         let path = dir.path().join("test.frec");
         let metadata = test_metadata();
 
-        let handle = start_recording(&path, metadata, 256).unwrap();
+        let (handle, mut join) = start_recording(&path, metadata, 256).unwrap();
 
         for i in 0..100u64 {
             handle.send(RecordingEvent {
@@ -1625,7 +1663,7 @@ mod tests {
         }
 
         drop(handle);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        join.join();
 
         let parsed = read_frec_file(&path);
 
@@ -1645,7 +1683,7 @@ mod tests {
         let path = dir.path().join("mixed.frec");
         let metadata = test_metadata();
 
-        let handle = start_recording(&path, metadata, 256).unwrap();
+        let (handle, mut join) = start_recording(&path, metadata, 256).unwrap();
 
         // Simulate a realistic session: window create, PTY output, keyboard input,
         // mouse events, clipboard paste, selection, pane close, window close.
@@ -1705,7 +1743,7 @@ mod tests {
 
         // Drop handle to trigger finalization.
         drop(handle);
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        join.join();
 
         let parsed = read_frec_file(&path);
 

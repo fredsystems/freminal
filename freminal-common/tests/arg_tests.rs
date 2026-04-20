@@ -27,6 +27,7 @@ fn parses_empty_args_defaults() {
     // The merge logic in main.rs will fall back to the config/default value.
     assert!(args.write_logs_to_file.is_none());
     assert!(args.config.is_none());
+    assert!(args.recording_path.is_none());
     assert!(args.command.is_empty());
 }
 
@@ -77,6 +78,21 @@ fn invalid_write_logs_to_file_value() {
 #[test]
 fn invalid_argument_is_error() {
     let result = parse_from(["freminal", "--not-a-real-flag"]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn parses_recording_path() {
+    let args = parse_from(["freminal", "--recording-path", "/tmp/session.frec"]).unwrap();
+    assert_eq!(
+        args.recording_path.as_deref(),
+        Some(std::path::Path::new("/tmp/session.frec"))
+    );
+}
+
+#[test]
+fn missing_recording_path_argument() {
+    let result = parse_from(["freminal", "--recording-path"]);
     assert!(result.is_err());
 }
 

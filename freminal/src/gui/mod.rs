@@ -946,9 +946,10 @@ impl freminal_windowing::App for FreminalGui {
         }
         self.windows.remove(&window_id);
 
-        // Emit WindowClose recording event.
-        let rec_wid = self.recording_window_id(window_id);
-        if let Some(ref h) = self.recording_handle {
+        // Emit WindowClose recording event (only for known windows), and clean up the mapping.
+        if let Some(rec_wid) = self.recording_window_ids.remove(&window_id)
+            && let Some(ref h) = self.recording_handle
+        {
             h.emit(
                 freminal_terminal_emulator::recording::EventPayload::WindowClose {
                     window_id: rec_wid,

@@ -443,17 +443,16 @@ impl InputModes {
 /// as individual characters rather than as literal typed text, causing
 /// them to be interpreted as individual typed characters.
 ///
-/// ## Mode parameters
+/// Encode terminal inputs into raw bytes using the given mode flags.
 ///
-/// The `modes` parameter bundles all terminal mode flags that affect input
-/// encoding. See [`InputModes`] for the individual fields.
-pub(super) fn send_terminal_inputs(
+/// This is the single source of truth for converting [`TerminalInput`] slices
+/// into the byte sequence that gets sent to the PTY.
+fn encode_terminal_inputs(
     inputs: &[TerminalInput],
-    input_tx: &Sender<InputEvent>,
     modes: &InputModes,
     meta: &KeyEventMeta,
-) {
-    let bytes: Vec<u8> = inputs
+) -> Vec<u8> {
+    inputs
         .iter()
         .flat_map(|input| {
             match input.to_payload(
@@ -471,7 +470,22 @@ pub(super) fn send_terminal_inputs(
                 TerminalInputPayload::Owned(bs) => bs,
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Encode and send terminal inputs to the PTY consumer thread.
+///
+/// ## Mode parameters
+///
+/// The `modes` parameter bundles all terminal mode flags that affect input
+/// encoding. See [`InputModes`] for the individual fields.
+pub(super) fn send_terminal_inputs(
+    inputs: &[TerminalInput],
+    input_tx: &Sender<InputEvent>,
+    modes: &InputModes,
+    meta: &KeyEventMeta,
+) {
+    let bytes = encode_terminal_inputs(inputs, modes, meta);
     if bytes.is_empty() {
         return;
     }
@@ -1590,25 +1604,7 @@ pub(super) fn write_input_to_terminal(
 
             // Capture encoded bytes for recording before sending.
             let modes = InputModes::from_snapshot(snap);
-            let encoded: Vec<u8> = inputs
-                .iter()
-                .flat_map(|input| {
-                    match input.to_payload(
-                        modes.cursor_key_app_mode,
-                        modes.keypad_app_mode,
-                        modes.modify_other_keys,
-                        modes.application_escape_key,
-                        modes.backarrow_sends_bs,
-                        modes.line_feed_mode,
-                        modes.kitty_keyboard_flags,
-                        &event_meta,
-                    ) {
-                        TerminalInputPayload::Single(b) => vec![b],
-                        TerminalInputPayload::Many(bs) => bs.to_vec(),
-                        TerminalInputPayload::Owned(bs) => bs,
-                    }
-                })
-                .collect();
+            let encoded = encode_terminal_inputs(&inputs, &modes, &event_meta);
 
             if !encoded.is_empty()
                 && let Err(e) = input_tx.send(InputEvent::Key(encoded.clone()))

@@ -85,7 +85,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
             scrollback_limit: cfg.scrollback.limit.try_into().unwrap_or(u32::MAX),
         };
         match start_recording(path, metadata, 4096) {
-            Ok(handle) => {
+            Ok((handle, _join)) => {
                 info!("Recording to {}", path.display());
                 Some(handle)
             }

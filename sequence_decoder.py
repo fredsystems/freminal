@@ -11,7 +11,7 @@
 # FREC v2 format:
 #   Header: b"FREC" + version (0x02) + flags (u32 LE) + metadata_len (u32 LE) + metadata (msgpack)
 #   Events: [u64 LE timestamp_us] [u8 event_type] [u32 LE payload_len] [payload (msgpack)]
-#   Seek index: [u32 LE entry_count] + entries (16 bytes each)
+#   Seek index: [u64 LE entry_count] + entries (16 bytes each)
 #   Footer: [u64 LE seek_index_offset] [u64 LE total_duration_us] [u64 LE total_events] [4B magic]
 #
 # Usage:
@@ -51,7 +51,15 @@ for arg in sys.argv[1:]:
     elif arg == "--summary":
         summary_only = True
     elif arg.startswith("--pane"):
-        filter_pane = int(arg.split("=", 1)[1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1])
+        if "=" in arg:
+            filter_pane = int(arg.split("=", 1)[1])
+        else:
+            idx = sys.argv.index(arg)
+            if idx + 1 < len(sys.argv):
+                filter_pane = int(sys.argv[idx + 1])
+            else:
+                print("Error: --pane requires a value (e.g. --pane=0 or --pane 0)")
+                sys.exit(1)
     elif arg == "--events-only":
         events_only = True
 
@@ -88,15 +96,15 @@ EVENT_TYPES = {
     0x01: "PtyOutput",
     0x02: "PtyInput",
     0x03: "PaneResize",
-    0x04: "TabCreate",
-    0x05: "TabClose",
-    0x06: "PaneSplit",
-    0x07: "TabSwitch",
+    0x04: "WindowResize",
+    0x05: "TabCreate",
+    0x06: "TabClose",
+    0x07: "PaneSplit",
     0x08: "PaneClose",
     0x09: "FocusChange",
     0x0A: "ZoomToggle",
-    0x0B: "ThemeChange",
-    0x0C: "BellEvent",
+    0x0B: "TabSwitch",
+    0x0C: "ThemeChange",
     0x0D: "KeyboardInput",
     0x0E: "MouseMove",
     0x0F: "MouseButton",
@@ -105,9 +113,9 @@ EVENT_TYPES = {
     0x12: "WindowClose",
     0x13: "WindowFocus",
     0x14: "ClipboardPaste",
-    0x15: "WindowMove",
+    0x15: "BellEvent",
     0x16: "SelectionEvent",
-    0x17: "WindowResize",
+    0x17: "WindowMove",
 }
 
 
@@ -223,18 +231,26 @@ metadata = msgpack.unpackb(metadata_blob, raw=False)
 # Footer: last 28 bytes
 FOOTER_SIZE = 28
 footer_start = len(data) - FOOTER_SIZE
+has_footer = True
 if footer_start < HEADER_FIXED + metadata_len:
-    print("File too short for footer.")
-    sys.exit(1)
+    print("File too short for footer — treating as truncated recording.")
+    has_footer = False
+    footer_start = len(data)  # No footer; events extend to EOF
 
-footer_magic = data[-4:]
-if footer_magic != b"FREC":
-    print(f"Invalid footer magic: {footer_magic!r}")
-    # Continue anyway — might be a truncated recording.
+footer_magic = data[-4:] if has_footer else b""
+if has_footer and footer_magic != b"FREC":
+    print(f"Invalid footer magic: {footer_magic!r} — treating as truncated recording.")
+    has_footer = False
+    footer_start = len(data)  # Decode events to EOF
 
-seek_index_offset = struct.unpack_from("<Q", data, footer_start)[0]
-total_duration_us = struct.unpack_from("<Q", data, footer_start + 8)[0]
-total_events = struct.unpack_from("<Q", data, footer_start + 16)[0]
+if has_footer:
+    seek_index_offset = struct.unpack_from("<Q", data, footer_start)[0]
+    total_duration_us = struct.unpack_from("<Q", data, footer_start + 8)[0]
+    total_events = struct.unpack_from("<Q", data, footer_start + 16)[0]
+else:
+    seek_index_offset = 0
+    total_duration_us = 0
+    total_events = 0
 
 # ---------------------------------------------------------------------------
 # Summary mode
@@ -264,7 +280,7 @@ if summary_only:
         print(f"    Window {wid}: {size[0]}x{size[1]}, {len(tabs)} tab(s)")
         for t in tabs:
             tid = t.get("tab_id", "?")
-            panes = t.get("panes", {})
+            panes = t.get("pane_tree", {})
             print(f"      Tab {tid}: pane tree = {json.dumps(panes, default=str)[:100]}")
     print()
 
@@ -279,6 +295,9 @@ if summary_only:
         _ts = struct.unpack_from("<Q", data, pos)[0]
         etype = data[pos + 8]
         plen = struct.unpack_from("<I", data, pos + 9)[0]
+        if pos + 13 + plen > end:
+            print(f"  Warning: truncated event at offset {pos}, stopping count.")
+            break
         pos += 13 + plen
         name = EVENT_TYPES.get(etype, f"Unknown(0x{etype:02X})")
         type_counts[name] = type_counts.get(name, 0) + 1

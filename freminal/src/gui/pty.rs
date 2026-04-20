@@ -228,16 +228,10 @@ fn spawn_pty_consumer_thread(
                     }
                     emulator.handle_resize_event(w, h, pw, ph);
                 }
-                Ok(InputEvent::Key(bytes)) if let Err(e) = emulator.write_raw_bytes(&bytes) => {
-                    if let Some(ref rec) = recording_handle {
-                        rec.emit(EventPayload::PtyInput {
-                            pane_id: recording_pane_id,
-                            data: bytes,
-                        });
-                    }
-                    error!("Failed to forward key bytes to PTY: {e}");
-                }
                 Ok(InputEvent::Key(bytes)) => {
+                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
+                        error!("Failed to forward key bytes to PTY: {e}");
+                    }
                     if let Some(ref rec) = recording_handle {
                         rec.emit(EventPayload::PtyInput {
                             pane_id: recording_pane_id,
