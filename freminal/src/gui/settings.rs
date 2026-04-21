@@ -332,16 +332,15 @@ impl SettingsModal {
             }
 
             // --- Tab bar ---
-            ui.horizontal(|ui| {
-                for tab in SettingsTab::ALL {
-                    ui.selectable_value(&mut self.active_tab, tab, tab.label());
-                }
-            });
-            ui.separator();
+            self.show_tab_bar(ui, "settings_tab_bar_standalone");
 
             // --- Tab content ---
-            egui::ScrollArea::vertical()
+            // Both axes so horizontally-overflowing content (long labels,
+            // wide swatches) is reachable. Scrollbars only appear when
+            // content actually overflows to avoid visual noise.
+            egui::ScrollArea::both()
                 .auto_shrink([false; 2])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
                     if is_read_only {
                         ui.disable();
@@ -428,17 +427,20 @@ impl SettingsModal {
                 }
 
                 // --- Tab bar ---
-                ui.horizontal(|ui| {
-                    for tab in SettingsTab::ALL {
-                        ui.selectable_value(&mut self.active_tab, tab, tab.label());
-                    }
-                });
-                ui.separator();
+                self.show_tab_bar(ui, "settings_tab_bar_modal");
 
                 // --- Tab content ---
-                egui::ScrollArea::vertical()
+                // Both axes so overflowed content is reachable without
+                // enlarging the modal. `max_height(300.0)` keeps the modal
+                // compact regardless of the selected tab's content size
+                // (keybindings, themes, etc.). Scrollbars only appear when
+                // content actually overflows.
+                egui::ScrollArea::both()
                     .auto_shrink([false; 2])
                     .max_height(300.0)
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
                     .show(ui, |ui| {
                         // In read-only mode, disable all interactive widgets
                         // so the user can browse but not edit.
@@ -551,6 +553,38 @@ impl SettingsModal {
     // -------------------------------------------------------------------------
     //  Tab implementations
     // -------------------------------------------------------------------------
+
+    /// Render the horizontally-scrolling tab selector bar. Shared between the
+    /// modal (`show`) and the standalone (`show_standalone`) renderers so the
+    /// scroll affordance behaviour stays consistent. `id_salt` must differ
+    /// between call sites to avoid egui id clashes when both renderers exist
+    /// in the same frame.
+    fn show_tab_bar(&mut self, ui: &mut Ui, id_salt: &'static str) {
+        // Use a non-floating (solid) scrollbar style scoped to this
+        // ScrollArea so the horizontal scrollbar gets its own strip below
+        // the tab buttons instead of floating over them and expanding on
+        // hover to cover nearly the full nav-area height. Also shrink the
+        // bar width since a tab bar is a small UI element.
+        ui.scope(|ui| {
+            let scroll = &mut ui.style_mut().spacing.scroll;
+            scroll.floating = false;
+            scroll.bar_width = 6.0;
+            scroll.bar_inner_margin = 2.0;
+            scroll.bar_outer_margin = 0.0;
+
+            egui::ScrollArea::horizontal()
+                .id_salt(id_salt)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for tab in SettingsTab::ALL {
+                            ui.selectable_value(&mut self.active_tab, tab, tab.label());
+                        }
+                    });
+                });
+        });
+        ui.separator();
+    }
 
     const DEFAULT_LABEL: &str = "Default (MesloLGS Nerd Font)";
 

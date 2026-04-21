@@ -14,7 +14,35 @@ use winit::window::{Window, WindowAttributes};
 use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
-use crate::{App, UserEvent, WindowConfig, WindowHandle, WindowId, WindowOp};
+use crate::{App, UserEvent, WindowConfig, WindowGeometry, WindowHandle, WindowId, WindowOp};
+
+use conv2::{ApproxFrom, RoundToZero};
+
+/// Convert a rounded `f64` logical coordinate to `u32`, clamping negatives
+/// to 0 and saturating on overflow.  Used for logical window dimensions
+/// which should never realistically exceed `u32::MAX`.
+fn logical_dim_to_u32(v: f64) -> u32 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0;
+    }
+    <u32 as ApproxFrom<f64, RoundToZero>>::approx_from(v.round()).unwrap_or(u32::MAX)
+}
+
+/// Convert a rounded `f64` logical coordinate to `i32`, saturating on
+/// overflow in either direction.  Used for logical window positions which
+/// can be negative on multi-monitor setups.
+fn logical_coord_to_i32(v: f64) -> i32 {
+    if !v.is_finite() {
+        return 0;
+    }
+    <i32 as ApproxFrom<f64, RoundToZero>>::approx_from(v.round()).unwrap_or_else(|_| {
+        if v.is_sign_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
+    })
+}
 
 /// Per-window state.
 struct WindowState {
@@ -33,6 +61,11 @@ struct Handler<A: App> {
     proxy: EventLoopProxy<UserEvent>,
     /// Scratch buffer for pending `WindowOp`s queued by `WindowHandle`.
     pending_ops: RefCell<Vec<WindowOp>>,
+    /// Last-known geometry for each window, updated on Resized / Moved.
+    ///
+    /// Shared with `WindowHandle` via `&RefCell` so the `App` can query
+    /// live geometry during its `update()` callback.
+    geometry: RefCell<HashMap<WindowId, WindowGeometry>>,
 }
 
 impl<A: App> Handler<A> {
@@ -108,6 +141,30 @@ impl<A: App> Handler<A> {
 
         self.windows.insert(winit_id, state);
 
+        // Seed geometry from the freshly-created window so the app can query
+        // it even before the first Resized / Moved event arrives.  We store
+        // geometry in logical pixels for consistency with `WindowConfig`.
+        let scale = self.windows[&winit_id].window.scale_factor();
+        let logical_size: winit::dpi::LogicalSize<f64> = phys.to_logical(scale);
+        let outer_pos_logical = self.windows[&winit_id]
+            .window
+            .outer_position()
+            .ok()
+            .map(|p| {
+                let lp: winit::dpi::LogicalPosition<f64> = p.to_logical(scale);
+                (logical_coord_to_i32(lp.x), logical_coord_to_i32(lp.y))
+            });
+        self.geometry.borrow_mut().insert(
+            window_id,
+            WindowGeometry {
+                size: Some((
+                    logical_dim_to_u32(logical_size.width),
+                    logical_dim_to_u32(logical_size.height),
+                )),
+                position: outer_pos_logical,
+            },
+        );
+
         // Track the first window as the primary clipboard source.
 
         // Request an immediate redraw so the first frame renders as soon as
@@ -119,6 +176,7 @@ impl<A: App> Handler<A> {
         let handle = WindowHandle {
             proxy: &self.proxy,
             pending_ops: &self.pending_ops,
+            geometry: &self.geometry,
         };
         self.app.on_window_created(
             window_id,
@@ -139,6 +197,7 @@ impl<A: App> Handler<A> {
             drop(state.egui);
             drop(state.gl);
             drop(state.window);
+            self.geometry.borrow_mut().remove(&WindowId(winit_id));
             debug!("Window closed: {winit_id:?}");
         }
     }
@@ -330,6 +389,11 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 }
             }
             WindowEvent::Resized(size) => {
+                let scale = self
+                    .windows
+                    .get(&winit_id)
+                    .map(|s| s.window.scale_factor())
+                    .unwrap_or(1.0);
                 if let Some(state) = self.windows.get_mut(&winit_id)
                     && let (Some(w), Some(h)) =
                         (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -342,6 +406,28 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     state.repaint_at = Some(Instant::now());
                     state.window.request_redraw();
                 }
+                // Track geometry in logical pixels (matches WindowConfig).
+                let logical: winit::dpi::LogicalSize<f64> = size.to_logical(scale);
+                let mut geom = self.geometry.borrow_mut();
+                let entry = geom.entry(WindowId(winit_id)).or_default();
+                entry.size = Some((
+                    logical_dim_to_u32(logical.width),
+                    logical_dim_to_u32(logical.height),
+                ));
+            }
+            WindowEvent::Moved(pos) => {
+                let scale = self
+                    .windows
+                    .get(&winit_id)
+                    .map(|s| s.window.scale_factor())
+                    .unwrap_or(1.0);
+                let logical: winit::dpi::LogicalPosition<f64> = pos.to_logical(scale);
+                let mut geom = self.geometry.borrow_mut();
+                let entry = geom.entry(WindowId(winit_id)).or_default();
+                entry.position = Some((
+                    logical_coord_to_i32(logical.x),
+                    logical_coord_to_i32(logical.y),
+                ));
             }
             WindowEvent::RedrawRequested => {
                 // Split borrows by destructuring
@@ -350,6 +436,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     windows,
                     proxy,
                     pending_ops,
+                    geometry,
                     ..
                 } = self;
                 let Some(state) = windows.get_mut(&winit_id) else {
@@ -358,7 +445,11 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 let window_id = WindowId(winit_id);
                 let clear_color = app.clear_color(window_id);
 
-                let handle = WindowHandle { proxy, pending_ops };
+                let handle = WindowHandle {
+                    proxy,
+                    pending_ops,
+                    geometry,
+                };
 
                 // Ensure this window's GL context is current before rendering.
                 if let Err(e) = state.gl.make_current() {
@@ -403,9 +494,18 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 self.process_pending_ops(event_loop);
 
                 if should_close {
-                    self.close_window(winit_id);
-                    if self.windows.is_empty() {
-                        event_loop.exit();
+                    // Route through `on_close_requested` so the app can run
+                    // its normal shutdown/save logic.  `ViewportCommand::Close`
+                    // (e.g. from a PTY exit triggering a last-pane close) used
+                    // to bypass this hook, which meant `auto_save_session`
+                    // and other cleanup never ran when the terminal exited
+                    // itself.
+                    let window_id = WindowId(winit_id);
+                    if self.app.on_close_requested(window_id) {
+                        self.close_window(winit_id);
+                        if self.windows.is_empty() {
+                            event_loop.exit();
+                        }
                     }
                 }
             }
@@ -552,6 +652,7 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
         windows: HashMap::new(),
         proxy,
         pending_ops: RefCell::new(Vec::new()),
+        geometry: RefCell::new(HashMap::new()),
     };
 
     event_loop

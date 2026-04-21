@@ -229,8 +229,8 @@ limit = 4000
 # When true, Freminal saves the current layout topology on exit and restores
 # it on the next launch (unless --layout is given on the command line).
 # The layout is written to ~/.config/freminal/layouts/last_session.toml.
-# Default: false.
-# restore_last_session = false
+# Default: true.
+# restore_last_session = true
 
 ## ##############################################################################
 # KEY BINDINGS
