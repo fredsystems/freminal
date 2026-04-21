@@ -192,6 +192,40 @@ impl Row {
         self.width = new_width;
     }
 
+    /// Clip the physical cell storage to `new_width` columns.
+    ///
+    /// Used by [`Buffer::set_size`] when shrinking the alternate screen (which
+    /// must not reflow).  Without this, rows retain cells beyond the new width
+    /// and [`Buffer::flatten_row`] emits them — the snapshot then contains
+    /// rows wider than `term_width`, producing a stale strip of glyphs/
+    /// backgrounds at the right edge of the viewport after a shrink.
+    ///
+    /// If a wide-glyph head sits at column `new_width - 1` its continuation
+    /// cell at column `new_width` would be orphaned, so the head is converted
+    /// to a blank using the head's own format tag (preserving background).
+    pub fn truncate_cells_to_width(&mut self, new_width: usize) {
+        if self.cells.len() <= new_width {
+            return;
+        }
+
+        // Guard against splitting a wide glyph at the boundary.  If the cell
+        // at new_width is a continuation, its head sits at new_width - 1 and
+        // must become a blank (keep its format so BCE background survives).
+        if new_width > 0
+            && let Some(boundary_cell) = self.cells.get(new_width)
+            && boundary_cell.is_continuation()
+        {
+            let head_tag = self.cells[new_width - 1].tag().clone();
+            self.cells[new_width - 1] = Cell::blank_with_tag(head_tag);
+        }
+
+        self.cells.truncate(new_width);
+        // We mutated `cells` (and possibly cell content at `new_width - 1`),
+        // so invalidate the Buffer's row cache. Matches every other mutator
+        // in this file.
+        self.dirty = true;
+    }
+
     /// How many cells are currently occupied.
     #[must_use]
     pub fn get_row_width(&self) -> usize {
@@ -920,6 +954,94 @@ mod tests {
         assert_eq!(row.max_width(), 80);
         row.set_max_width(40);
         assert_eq!(row.max_width(), 40);
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate_cells_to_width
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_cells_to_width_drops_cells_beyond_new_width() {
+        let mut row = Row::new(10);
+        let text: Vec<TChar> = b"abcdefghij".iter().map(|b| TChar::Ascii(*b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+        assert_eq!(row.get_characters().len(), 10);
+
+        row.set_max_width(5);
+        row.truncate_cells_to_width(5);
+
+        assert_eq!(row.get_characters().len(), 5);
+        assert_eq!(row.max_width(), 5);
+    }
+
+    #[test]
+    fn truncate_cells_to_width_noop_when_already_within_bounds() {
+        let mut row = Row::new(10);
+        let text: Vec<TChar> = b"abc".iter().map(|b| TChar::Ascii(*b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+        let before = row.get_characters().len();
+
+        // new_width >= cells.len() — nothing to truncate
+        row.truncate_cells_to_width(20);
+
+        assert_eq!(row.get_characters().len(), before);
+    }
+
+    #[test]
+    fn truncate_cells_to_width_handles_wide_glyph_at_boundary() {
+        // A wide glyph whose head sits at `new_width - 1` would leave an
+        // orphan continuation at `new_width` after truncation.  The head
+        // must be replaced with a blank so the row stays well-formed.
+        let mut row = Row::new(10);
+
+        // Build: 'a' at col 0, wide CJK glyph (head at col 1, continuation at col 2), 'b' at col 3.
+        row.cells_mut_push(Cell::new(TChar::Ascii(b'a'), FormatTag::default()));
+        row.cells_mut_push(Cell::new(TChar::from('中'), FormatTag::default()));
+        row.cells_mut_push(Cell::wide_continuation());
+        row.cells_mut_push(Cell::new(TChar::Ascii(b'b'), FormatTag::default()));
+        for _ in 4..10 {
+            row.cells_mut_push(Cell::blank_with_tag(FormatTag::default()));
+        }
+        assert!(row.get_characters()[1].is_head());
+        assert!(row.get_characters()[2].is_continuation());
+
+        // Truncate to 2 cols: the continuation at col 2 is cut, so the head
+        // at col 1 must become a blank.
+        row.truncate_cells_to_width(2);
+
+        assert_eq!(row.get_characters().len(), 2);
+        assert!(!row.get_characters()[1].is_head());
+        assert!(!row.get_characters()[1].is_continuation());
+    }
+
+    #[test]
+    fn truncate_cells_to_width_marks_row_dirty_when_it_mutates() {
+        let mut row = Row::new(10);
+        let text: Vec<TChar> = b"abcdefghij".iter().map(|b| TChar::Ascii(*b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+
+        // Clear the dirty flag so we can assert the mutation re-sets it.
+        row.dirty = false;
+        row.truncate_cells_to_width(5);
+        assert!(
+            row.dirty,
+            "truncate_cells_to_width must mark the row dirty so the Buffer's row cache is invalidated"
+        );
+    }
+
+    #[test]
+    fn truncate_cells_to_width_does_not_mark_row_dirty_on_noop() {
+        let mut row = Row::new(10);
+        let text: Vec<TChar> = b"abc".iter().map(|b| TChar::Ascii(*b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+
+        row.dirty = false;
+        // new_width >= cells.len() — no mutation should happen.
+        row.truncate_cells_to_width(20);
+        assert!(
+            !row.dirty,
+            "truncate_cells_to_width must not flip the dirty flag when there is nothing to truncate"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -875,6 +875,14 @@ impl Buffer {
         if width_changed {
             for (i, row) in self.rows.iter_mut().enumerate() {
                 row.set_max_width(new_width);
+                // On the alternate screen (which skips reflow) a shrink leaves
+                // stale cells beyond the new width in row.cells.  flatten_row
+                // iterates row.cells directly, so those stale cells would leak
+                // into the snapshot and render as a strip of old content at
+                // the right edge of the viewport.  `truncate_cells_to_width`
+                // is a no-op when cells.len() <= new_width, so it is safe to
+                // call unconditionally (including on grow).
+                row.truncate_cells_to_width(new_width);
                 row.dirty = true;
                 self.row_cache[i] = None;
             }
