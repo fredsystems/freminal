@@ -675,6 +675,15 @@ pub struct PaneRenderCache {
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
     /// Whether the user is currently dragging the scrollbar thumb.
     pub(super) scrollbar_dragging: bool,
+    /// Terminal width (columns) from the last full vertex rebuild.  When this
+    /// changes (window resize), the cell-instance VBOs still contain vertices
+    /// for the old column count; drawing them into a smaller viewport leaves
+    /// stale glyph slivers in the right-edge slop region.  We force a full
+    /// rebuild whenever the dimensions change.
+    pub(super) previous_term_width: usize,
+    /// Terminal height (rows) from the last full vertex rebuild.  See
+    /// `previous_term_width` for rationale.
+    pub(super) previous_term_height: usize,
 }
 
 impl PaneRenderCache {
@@ -703,6 +712,8 @@ impl PaneRenderCache {
             hover_snap_ptr: 0,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
             scrollbar_dragging: false,
+            previous_term_width: 0,
+            previous_term_height: 0,
         }
     }
 
@@ -1170,8 +1181,17 @@ impl FreminalTerminalWidget {
             let theme_changed = cache
                 .previous_theme
                 .is_none_or(|prev| !std::ptr::eq(prev, snap.theme));
+            // Detect terminal grid resize (cols or rows changed).  The cell
+            // background and foreground instance VBOs hold per-cell vertices
+            // that encode column indices and pixel positions based on the
+            // terminal width at build time; drawing them into a viewport sized
+            // for a different column count leaves stale glyph slivers at the
+            // right edge.  Force a full rebuild on resize.
+            let dims_changed = snap.term_width != cache.previous_term_width
+                || snap.term_height != cache.previous_term_height;
             let content_changed = snap.content_changed
                 || theme_changed
+                || dims_changed
                 || cache
                     .last_rendered_visible
                     .as_ref()
@@ -1474,6 +1494,8 @@ impl FreminalTerminalWidget {
                 cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
                 cache.previous_search_match_count = search_match_count;
                 cache.previous_search_current_match = search_current_match;
+                cache.previous_term_width = snap.term_width;
+                cache.previous_term_height = snap.term_height;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
