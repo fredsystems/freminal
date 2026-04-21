@@ -180,6 +180,15 @@ struct FreminalGui {
     /// Set to `true` when the existing settings window should be focused.
     pending_focus_settings: bool,
 
+    /// Persisted ephemeral UI window geometry for the Settings window
+    /// and each main terminal window.  Loaded from `window_state.toml`
+    /// at startup: the settings entry is consulted when the settings
+    /// window opens, and `main_windows` is consulted at app launch to
+    /// seed the initial window's `WindowConfig`.  Updated continuously
+    /// while windows are moving/resizing and persisted on window close
+    /// so the next launch restores the user's layout.
+    window_state: freminal_common::window_state::WindowState,
+
     /// Optional recording handle for FREC v2 session recording.
     /// When `Some`, topology and window events are emitted.
     recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
@@ -288,6 +297,10 @@ impl FreminalGui {
             settings_window_id: None,
             pending_settings_window: false,
             pending_focus_settings: false,
+            window_state: freminal_common::window_state::window_state_path()
+                .as_deref()
+                .map(freminal_common::window_state::WindowState::load_or_default)
+                .unwrap_or_default(),
             recording_handle,
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
@@ -1429,10 +1442,72 @@ impl FreminalGui {
         freminal_common::config::layout_library_dir().map(|d| d.join("last_session.toml"))
     }
 
+    /// Write the current ephemeral UI window state (currently just the
+    /// Settings window geometry) to `window_state.toml`.  Failures are
+    /// logged but never fatal — the worst case is that the settings window
+    /// reopens at its default size and position next time.
+    fn persist_window_state(&self) {
+        let Some(path) = freminal_common::window_state::window_state_path() else {
+            tracing::debug!("persist_window_state: cannot determine window state path");
+            return;
+        };
+        if let Err(e) = self.window_state.save(&path) {
+            tracing::warn!(
+                "persist_window_state: failed to save {}: {e}",
+                path.display()
+            );
+        }
+    }
+
+    /// Populate `self.window_state.main_windows` from the currently-open
+    /// terminal windows' tracked geometry (`last_known_size` /
+    /// `last_known_position`).  The settings window is excluded.
+    ///
+    /// If `prioritize` is `Some(id)`, that window's geometry is placed
+    /// first so it seeds the primary window on the next launch.  Used
+    /// when a window is closing — the closing window is the one the user
+    /// most recently interacted with, so its geometry is the best seed.
+    ///
+    /// Windows with no tracked geometry (e.g. freshly created, never
+    /// resized on a platform where seeding is unavailable) are skipped.
+    fn snapshot_main_window_geometry(&mut self, prioritize: Option<WindowId>) {
+        let settings_id = self.settings_window_id;
+        let terminal_entry = |wid: WindowId, win: &window::PerWindowState| {
+            if Some(wid) == settings_id {
+                return None;
+            }
+            let size = win.last_known_size;
+            let position = win.last_known_position;
+            if size.is_none() && position.is_none() {
+                return None;
+            }
+            Some(freminal_common::window_state::WindowGeometry { size, position })
+        };
+
+        let mut main_windows = Vec::with_capacity(self.windows.len());
+        if let Some(first_id) = prioritize
+            && let Some(win) = self.windows.get(&first_id)
+            && let Some(geom) = terminal_entry(first_id, win)
+        {
+            main_windows.push(geom);
+        }
+        for (wid, win) in &self.windows {
+            if prioritize == Some(*wid) {
+                continue;
+            }
+            if let Some(geom) = terminal_entry(*wid, win) {
+                main_windows.push(geom);
+            }
+        }
+        self.window_state.main_windows = main_windows;
+    }
+
     /// Save the current session to `last_session.toml` in the layout library.
     ///
-    /// Called automatically when the last terminal window closes and
-    /// `restore_last_session` is enabled.  Failures are logged but not fatal.
+    /// Called automatically when the last terminal window closes.  Runs
+    /// regardless of `restore_last_session` so the on-disk session stays
+    /// fresh; the flag only controls whether the saved session is
+    /// reapplied on next launch.  Failures are logged but not fatal.
     fn auto_save_session(&self) {
         let Some(path) = Self::last_session_path() else {
             error!("auto_save_session: cannot determine layout library path");
@@ -1811,6 +1886,7 @@ impl freminal_windowing::App for FreminalGui {
             self.settings_modal.is_open = false;
             self.settings_window_id = None;
             self.settings_owner = None;
+            self.persist_window_state();
             return true;
         }
         // If this window owns the settings modal, close it.
@@ -1821,17 +1897,33 @@ impl freminal_windowing::App for FreminalGui {
 
         // Auto-save session before the last terminal window is removed.
         // We check *before* remove so we still have access to the window's tabs.
+        //
+        // Saving is independent of `restore_last_session` — the flag only
+        // controls whether the saved session is *applied* on next launch.
+        // Always writing keeps `_last_session.toml` fresh so users can
+        // toggle the flag on at any time and get their real last session
+        // back, rather than whatever stale state happened to be on disk
+        // when they last had the flag enabled.
+        //
+        // We still skip saving when the user launched with an ad-hoc
+        // command (`freminal -- vim foo`): those panes are running a
+        // one-shot program and are not meaningfully restorable.
         let remaining_terminal_windows = self
             .windows
             .keys()
             .filter(|&&wid| Some(wid) != self.settings_window_id)
             .count();
-        if remaining_terminal_windows == 1
-            && self.config.startup.restore_last_session
-            && self.args.command.is_empty()
-        {
+        if remaining_terminal_windows == 1 && self.args.command.is_empty() {
             self.auto_save_session();
         }
+
+        // Capture geometry of every still-open terminal window (including
+        // the one being closed) into `window_state.main_windows`, with the
+        // closing window first so it seeds the primary window on next
+        // launch.  Persist unconditionally — this is independent of
+        // `restore_last_session`.
+        self.snapshot_main_window_geometry(Some(window_id));
+        self.persist_window_state();
 
         self.windows.remove(&window_id);
 
@@ -1903,8 +1995,26 @@ impl freminal_windowing::App for FreminalGui {
             let settings_action = self.settings_modal.show_standalone(ctx, os_dark);
             self.handle_settings_action(&settings_action, handle, window_id);
 
+            // Track the settings window's current geometry so we can restore
+            // it the next time it is opened.  We query the windowing layer
+            // directly rather than `ctx.input().viewport()` because the
+            // latter only populates `inner_rect` / `outer_rect` after a
+            // Resized / Moved event reaches the window's egui context, which
+            // is not guaranteed on the first frame of a freshly created
+            // window on every platform.  The windowing layer always tracks
+            // live geometry from winit events + direct window queries.
+            if let Some(geom) = handle.window_geometry(window_id) {
+                if let Some(size) = geom.size {
+                    self.window_state.settings.size = Some(<[u32; 2]>::from(size));
+                }
+                if let Some(pos) = geom.position {
+                    self.window_state.settings.position = Some(<[i32; 2]>::from(pos));
+                }
+            }
+
             // If the modal closed (Cancel or Apply), close the OS window.
             if !self.settings_modal.is_open {
+                self.persist_window_state();
                 self.settings_window_id = None;
                 self.settings_owner = None;
                 handle.close_window(window_id);
@@ -1921,10 +2031,17 @@ impl freminal_windowing::App for FreminalGui {
         }
         if self.pending_settings_window && self.settings_window_id.is_none() {
             // Don't clear pending_settings_window here — cleared in on_window_created.
+            // Seed inner_size and position from the last-known geometry so the
+            // window reopens where the user left it (both within a session and
+            // across sessions via window_state.toml).  Falls back to the 600x500
+            // default on first open / missing state.
+            let settings_geom = self.window_state.settings;
+            let inner_size = settings_geom.size.map_or((600_u32, 500_u32), <_>::from);
+            let position = settings_geom.position.map(<_>::from);
             handle.create_window(freminal_windowing::WindowConfig {
                 title: "Freminal Settings".to_owned(),
-                inner_size: Some((600, 500)),
-                position: None,
+                inner_size: Some(inner_size),
+                position,
                 transparent: false,
                 icon: self.icon.clone(),
                 app_id: Some("freminal-settings".into()),
@@ -1962,24 +2079,16 @@ impl freminal_windowing::App for FreminalGui {
         }
 
         // ── Track last known window geometry (for save_layout) ───────────────
-        ctx.input(|i| {
-            use conv2::ConvUtil as _;
-            let vp = i.viewport();
-            if let Some(inner) = vp.inner_rect {
-                let w = inner.width().approx_as::<u32>().ok();
-                let h = inner.height().approx_as::<u32>().ok();
-                if let (Some(w), Some(h)) = (w, h) {
-                    win.last_known_size = Some([w, h]);
-                }
+        // Query the windowing layer directly.  See the settings-window branch
+        // above for why `ctx.input().viewport()` is not reliable here.
+        if let Some(geom) = handle.window_geometry(window_id) {
+            if let Some(size) = geom.size {
+                win.last_known_size = Some(<[u32; 2]>::from(size));
             }
-            if let Some(outer) = vp.outer_rect {
-                let x = outer.min.x.approx_as::<i32>().ok();
-                let y = outer.min.y.approx_as::<i32>().ok();
-                if let (Some(x), Some(y)) = (x, y) {
-                    win.last_known_position = Some([x, y]);
-                }
+            if let Some(pos) = geom.position {
+                win.last_known_position = Some(<[i32; 2]>::from(pos));
             }
-        });
+        }
 
         // ── Deferred egui font update from standalone settings window ────────
         win.terminal_widget
@@ -2973,10 +3082,26 @@ pub fn run(
         height,
     };
 
+    // Seed the initial window's geometry from window_state.toml if
+    // available.  Setting this at creation time (rather than via a later
+    // viewport command) is essential on Wayland: xdg-shell ignores
+    // resize requests that arrive after the initial surface configure in
+    // many compositors.
+    let (initial_size, initial_position) = freminal_common::window_state::window_state_path()
+        .as_deref()
+        .map(freminal_common::window_state::WindowState::load_or_default)
+        .and_then(|state| state.main_windows.into_iter().next())
+        .map_or((None, None), |geom| {
+            (
+                geom.size.map(<[u32; 2]>::into),
+                geom.position.map(<[i32; 2]>::into),
+            )
+        });
+
     let window_config = freminal_windowing::WindowConfig {
         title: "Freminal".to_owned(),
-        inner_size: None,
-        position: None,
+        inner_size: initial_size,
+        position: initial_position,
         transparent: true,
         icon: Some(icon.clone()),
         app_id: Some("freminal".into()),

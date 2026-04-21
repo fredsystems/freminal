@@ -81,6 +81,24 @@ pub trait App {
     fn raw_input_hook(&mut self, _window_id: WindowId, _raw_input: &mut egui::RawInput) {}
 }
 
+/// Last-known geometry for a window, tracked by the windowing layer.
+///
+/// All values are in **logical pixels** to match the units used by
+/// [`WindowConfig::inner_size`] and [`WindowConfig::position`] when
+/// creating a window.  This lets the app roundtrip geometry across
+/// sessions without having to know the current scale factor.
+///
+/// On Wayland, `position` is typically `None` because the compositor does
+/// not expose window position.  Either field may be `None` on a freshly
+/// created window that has not yet received its first configure event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowGeometry {
+    /// Inner (client-area) size in logical pixels: `(width, height)`.
+    pub size: Option<(u32, u32)>,
+    /// Outer (frame) position in logical pixels: `(x, y)`.
+    pub position: Option<(i32, i32)>,
+}
+
 /// Handle for requesting window operations from the [`App`].
 ///
 /// Passed by reference during event loop callbacks. Operations are queued
@@ -88,6 +106,7 @@ pub trait App {
 pub struct WindowHandle<'a> {
     proxy: &'a winit::event_loop::EventLoopProxy<UserEvent>,
     pending_ops: &'a std::cell::RefCell<Vec<WindowOp>>,
+    geometry: &'a std::cell::RefCell<std::collections::HashMap<WindowId, WindowGeometry>>,
 }
 
 impl<'a> WindowHandle<'a> {
@@ -152,6 +171,21 @@ impl<'a> WindowHandle<'a> {
         RepaintProxy {
             proxy: self.proxy.clone(),
         }
+    }
+
+    /// Query the last-known geometry for a window.
+    ///
+    /// Returns `None` if the window does not exist.  Either field inside the
+    /// returned `WindowGeometry` may still be `None` if the compositor has
+    /// not reported that value (e.g. `position` on Wayland).
+    ///
+    /// Geometry is tracked from winit `Resized` / `Moved` events and is
+    /// always up to date with the window's current state at the time of
+    /// this call.  This is more reliable than `ctx.input().viewport()`,
+    /// which only populates `inner_rect` / `outer_rect` after the first
+    /// such event arrives for the target window's egui context.
+    pub fn window_geometry(&self, id: WindowId) -> Option<WindowGeometry> {
+        self.geometry.borrow().get(&id).copied()
     }
 }
 

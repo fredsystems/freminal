@@ -62,6 +62,8 @@ pub mod terminal_size;
 pub mod terminfo;
 /// Embedded color theme palettes.
 pub mod themes;
+/// Persisted ephemeral UI window geometry (e.g. Settings window).
+pub mod window_state;
 
 #[macro_use]
 extern crate tracing;

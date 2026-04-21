@@ -473,9 +473,10 @@ impl Default for SecurityConfig {
 ///
 /// # When true, save the current layout on exit and restore it on next launch.
 /// # The layout is saved to ~/.config/freminal/layouts/last_session.toml.
-/// restore_last_session = false
+/// # Defaults to true.
+/// restore_last_session = true
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StartupConfig {
     /// Layout name or path to load on startup.
@@ -493,8 +494,27 @@ pub struct StartupConfig {
     ///
     /// The saved layout is written to
     /// `~/.config/freminal/layouts/last_session.toml`.
-    #[serde(default)]
+    ///
+    /// Defaults to `true` — session restore is the expected behaviour for a
+    /// daily-driver terminal. Users who prefer a clean session each launch
+    /// can opt out by setting this to `false` in `config.toml`.
+    #[serde(default = "default_restore_last_session")]
     pub restore_last_session: bool,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            layout: None,
+            restore_last_session: default_restore_last_session(),
+        }
+    }
+}
+
+/// Default value for [`StartupConfig::restore_last_session`]. Kept as a free
+/// function so `#[serde(default = "...")]` can reference it.
+const fn default_restore_last_session() -> bool {
+    true
 }
 
 /// Returns the platform-canonical layout library directory.

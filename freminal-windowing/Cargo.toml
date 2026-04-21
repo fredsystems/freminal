@@ -11,6 +11,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+conv2.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 egui_glow.workspace = true

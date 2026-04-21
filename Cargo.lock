@@ -1568,6 +1568,7 @@ dependencies = [
 name = "freminal-windowing"
 version = "0.7.0"
 dependencies = [
+ "conv2",
  "egui",
  "egui-winit",
  "egui_glow",

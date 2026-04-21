@@ -3,3 +3,4 @@ Ot
 ratatui
 iterm
 TE
+ser
