@@ -54,10 +54,16 @@ const fn layout_dir_to_pane_dir(
     dir: freminal_common::layout::LayoutSplitDirection,
 ) -> panes::SplitDirection {
     match dir {
+        // LayoutSplitDirection::Horizontal = top/bottom (horizontal divider)
+        // panes::SplitDirection::Vertical  = top/bottom (horizontal divider)
         freminal_common::layout::LayoutSplitDirection::Horizontal => {
+            panes::SplitDirection::Vertical
+        }
+        // LayoutSplitDirection::Vertical = left/right (vertical divider)
+        // panes::SplitDirection::Horizontal = left/right (vertical divider)
+        freminal_common::layout::LayoutSplitDirection::Vertical => {
             panes::SplitDirection::Horizontal
         }
-        freminal_common::layout::LayoutSplitDirection::Vertical => panes::SplitDirection::Vertical,
     }
 }
 
@@ -899,17 +905,34 @@ impl FreminalGui {
     ///
     /// On Linux this resolves `/proc/<pid>/cwd`.  Returns `None` on non-Linux
     /// platforms or when the child PID is unknown.
-    fn read_cwd_for_pane(&self, pane_id: panes::PaneId) -> Option<String> {
-        // Find the pane across all windows and tabs.
-        let child_pid = self.windows.values().find_map(|win| {
-            win.tabs.iter().find_map(|tab| {
-                tab.pane_tree.iter_panes().ok().and_then(|ps| {
-                    ps.into_iter()
-                        .find(|p| p.id == pane_id)
-                        .and_then(|p| p.child_pid)
+    fn read_cwd_for_pane_with_extra(
+        &self,
+        pane_id: panes::PaneId,
+        extra_win: Option<&PerWindowState>,
+    ) -> Option<String> {
+        // Search extra_win first (current window removed from self.windows during update()).
+        let child_pid = extra_win
+            .and_then(|win| {
+                win.tabs.iter().find_map(|tab| {
+                    tab.pane_tree.iter_panes().ok().and_then(|ps| {
+                        ps.into_iter()
+                            .find(|p| p.id == pane_id)
+                            .and_then(|p| p.child_pid)
+                    })
                 })
             })
-        })?;
+            .or_else(|| {
+                // Find the pane across all other windows and tabs.
+                self.windows.values().find_map(|win| {
+                    win.tabs.iter().find_map(|tab| {
+                        tab.pane_tree.iter_panes().ok().and_then(|ps| {
+                            ps.into_iter()
+                                .find(|p| p.id == pane_id)
+                                .and_then(|p| p.child_pid)
+                        })
+                    })
+                })
+            })?;
 
         #[cfg(target_os = "linux")]
         {
@@ -951,21 +974,30 @@ impl FreminalGui {
         let mut windows: Vec<LayoutWindow> = Vec::new();
 
         // Helper closure: build a `LayoutWindow` from any `PerWindowState`.
-        let build_window = |win: &PerWindowState| {
+        // `win_extra` is the window that was removed from self.windows for the
+        // current frame — used so CWD lookups can search it when it is the same
+        // window being serialised.
+        let build_window = |win: &PerWindowState, win_extra: Option<&PerWindowState>| {
+            let active_tab_idx = win.tabs.active_index();
             let mut tabs: Vec<LayoutTab> = Vec::new();
             for (tab_idx, tab) in win.tabs.iter().enumerate() {
-                let panes = tab
-                    .pane_tree
-                    .to_layout_panes(|pane_id| self.read_cwd_for_pane(pane_id));
+                let active_pane_id = if tab_idx == active_tab_idx {
+                    Some(tab.active_pane)
+                } else {
+                    None
+                };
+                let panes = tab.pane_tree.to_layout_panes(active_pane_id, |pane_id| {
+                    self.read_cwd_for_pane_with_extra(pane_id, win_extra)
+                });
                 tabs.push(LayoutTab {
                     title: None,
-                    active: tab_idx == 0,
+                    active: tab_idx == active_tab_idx,
                     panes,
                 });
             }
             LayoutWindow {
-                size: None,
-                position: None,
+                size: win.last_known_size,
+                position: win.last_known_position,
                 monitor: None,
                 tabs,
             }
@@ -973,12 +1005,12 @@ impl FreminalGui {
 
         // If a current window was extracted from self.windows, include it first.
         if let Some(win) = extra_win {
-            windows.push(build_window(win));
+            windows.push(build_window(win, Some(win)));
         }
 
         // Then all other windows (or all windows when extra_win is None).
         for win in self.windows.values() {
-            windows.push(build_window(win));
+            windows.push(build_window(win, extra_win));
         }
 
         let layout_name = if name.is_empty() {
@@ -1053,7 +1085,7 @@ impl FreminalGui {
                 // Schedule geometry restoration for this window — applied on the
                 // next frame via ctx.send_viewport_cmd in update().
                 if first_window.size.is_some() || first_window.position.is_some() {
-                    win.pending_geometry = first_window.size.map(|s| (s, first_window.position));
+                    win.pending_geometry = Some((first_window.size, first_window.position));
                 }
             }
         }
@@ -1100,7 +1132,7 @@ impl FreminalGui {
             } else {
                 tabs::TabId::offset(u64::try_from(i).unwrap_or(u64::MAX))
             };
-            if let Some((tab, _active_pane)) = self.build_tab_from_resolved(
+            if let Some((mut tab, active_pane)) = self.build_tab_from_resolved(
                 resolved_tab,
                 tab_id,
                 repaint_handle,
@@ -1110,6 +1142,10 @@ impl FreminalGui {
             ) {
                 if resolved_tab.active || active_tab_idx.is_none() {
                     active_tab_idx = Some(built_tabs.len());
+                }
+                // Apply the active pane from the layout if one was marked.
+                if let Some(id) = active_pane {
+                    tab.active_pane = id;
                 }
                 built_tabs.push(tab);
             }
@@ -1181,6 +1217,8 @@ impl FreminalGui {
             repaint_handle,
             pending_new_window: false,
             pending_geometry: None,
+            last_known_size: None,
+            last_known_position: None,
         };
         self.windows.insert(window_id, win);
 
@@ -1435,8 +1473,8 @@ impl FreminalGui {
             return;
         }
         match freminal_common::layout::Layout::from_file(&path).and_then(|l| {
-            l.validate()?;
-            l.resolve()
+            l.apply_variables(&[], &std::collections::HashMap::new())
+                .resolve()
         }) {
             Ok(resolved) => {
                 let commands = self.apply_layout(&resolved, window_id, handle);
@@ -1548,28 +1586,58 @@ impl freminal_windowing::App for FreminalGui {
                 repaint_handle: initial.repaint_handle,
                 pending_new_window: false,
                 pending_geometry: None,
+                last_known_size: None,
+                last_known_position: None,
             };
             self.windows.insert(window_id, win);
 
             // If --layout was given on the CLI, apply it to this first window.
-            if let Some(ref layout_path) = self.args.layout.clone() {
-                match freminal_common::layout::Layout::from_file(std::path::Path::new(layout_path))
-                {
-                    Ok(layout) => match layout.resolve() {
+            // Fall through to config.startup.layout when absent.
+            let startup_layout_name = self
+                .args
+                .layout
+                .clone()
+                .or_else(|| self.config.startup.layout.clone());
+
+            if let Some(ref name_or_path) = startup_layout_name {
+                // Resolve bare name (e.g. "dev") to library path; treat anything
+                // with a path separator or .toml suffix as a literal path.
+                let path = {
+                    let p = std::path::Path::new(name_or_path.as_str());
+                    if p.extension().is_some_and(|e| e == "toml") || p.components().count() > 1 {
+                        p.to_path_buf()
+                    } else {
+                        freminal_common::config::layout_library_dir().map_or_else(
+                            || p.to_path_buf(),
+                            |d| d.join(format!("{name_or_path}.toml")),
+                        )
+                    }
+                };
+                let positional: Vec<String> = self
+                    .args
+                    .layout_vars
+                    .iter()
+                    .filter(|s| !s.contains('='))
+                    .cloned()
+                    .collect();
+                let var_map = self.args.layout_var_map();
+                match freminal_common::layout::Layout::from_file(&path) {
+                    Ok(layout) => match layout.apply_variables(&positional, &var_map).resolve() {
                         Ok(resolved) => {
                             let cmds = self.apply_layout(&resolved, window_id, handle);
                             self.inject_layout_commands(&cmds);
                         }
                         Err(e) => {
-                            error!("Failed to resolve layout '{layout_path}': {e}");
+                            error!("Failed to resolve layout '{}': {e}", path.display());
                         }
                     },
                     Err(e) => {
-                        error!("Failed to load layout '{layout_path}': {e}");
+                        error!("Failed to load layout '{}': {e}", path.display());
                     }
                 }
             } else {
-                // No --layout CLI flag — try to restore the last session if configured.
+                // No --layout CLI flag and no startup.layout — try to restore
+                // the last session if configured.
                 self.maybe_restore_last_session(window_id, handle);
             }
 
@@ -1707,6 +1775,8 @@ impl freminal_windowing::App for FreminalGui {
                         repaint_handle,
                         pending_new_window: false,
                         pending_geometry: None,
+                        last_known_size: None,
+                        last_known_position: None,
                     };
                     self.windows.insert(window_id, win);
 
@@ -1756,7 +1826,10 @@ impl freminal_windowing::App for FreminalGui {
             .keys()
             .filter(|&&wid| Some(wid) != self.settings_window_id)
             .count();
-        if remaining_terminal_windows == 1 && self.config.startup.restore_last_session {
+        if remaining_terminal_windows == 1
+            && self.config.startup.restore_last_session
+            && self.args.command.is_empty()
+        {
             self.auto_save_session();
         }
 
@@ -1872,17 +1945,41 @@ impl freminal_windowing::App for FreminalGui {
         }
 
         // ── Apply pending window geometry from layout engine ─────────────────
-        if let Some(([w, h], pos_opt)) = win.pending_geometry.take() {
+        if let Some((size_opt, pos_opt)) = win.pending_geometry.take() {
             use conv2::ConvUtil as _;
-            let w_f: f32 = w.approx_as().unwrap_or(f32::MAX);
-            let h_f: f32 = h.approx_as().unwrap_or(f32::MAX);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w_f, h_f)));
+            if let Some([w, h]) = size_opt {
+                // u32 -> f32 via approx is always Ok for window dimensions.
+                let w_f: f32 = w.approx_as().unwrap_or(f32::MAX);
+                let h_f: f32 = h.approx_as().unwrap_or(f32::MAX);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w_f, h_f)));
+            }
             if let Some([x, y]) = pos_opt {
+                // i32 -> f32 via approx is always Ok for screen coordinates.
                 let x_f: f32 = x.approx_as().unwrap_or(0.0_f32);
                 let y_f: f32 = y.approx_as().unwrap_or(0.0_f32);
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x_f, y_f)));
             }
         }
+
+        // ── Track last known window geometry (for save_layout) ───────────────
+        ctx.input(|i| {
+            use conv2::ConvUtil as _;
+            let vp = i.viewport();
+            if let Some(inner) = vp.inner_rect {
+                let w = inner.width().approx_as::<u32>().ok();
+                let h = inner.height().approx_as::<u32>().ok();
+                if let (Some(w), Some(h)) = (w, h) {
+                    win.last_known_size = Some([w, h]);
+                }
+            }
+            if let Some(outer) = vp.outer_rect {
+                let x = outer.min.x.approx_as::<i32>().ok();
+                let y = outer.min.y.approx_as::<i32>().ok();
+                if let (Some(x), Some(y)) = (x, y) {
+                    win.last_known_position = Some([x, y]);
+                }
+            }
+        });
 
         // ── Deferred egui font update from standalone settings window ────────
         win.terminal_widget

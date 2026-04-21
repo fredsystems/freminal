@@ -12,6 +12,12 @@ use super::{
     terminal::FreminalTerminalWidget,
 };
 
+/// Pending window geometry from layout engine: `(size_px, position_px)`.
+///
+/// Each component is independent — either or both may be `Some`.
+/// Position is typically `None` on Wayland.
+pub(super) type PendingGeometry = (Option<[u32; 2]>, Option<[i32; 2]>);
+
 /// Per-window state for a single OS window.
 ///
 /// Each window (whether it was the first or spawned later via `Ctrl+Shift+N`)
@@ -69,6 +75,18 @@ pub(super) struct PerWindowState {
     ///
     /// Populated by the layout engine when applying a layout to an existing
     /// window.  Consumed in `update()` via `ctx.send_viewport_cmd`.
-    /// `(size_px, position_px)` — position is `None` on Wayland.
-    pub(super) pending_geometry: Option<([u32; 2], Option<[i32; 2]>)>,
+    /// Each component is independent — either or both may be `Some`.
+    pub(super) pending_geometry: Option<PendingGeometry>,
+
+    /// Last known inner size (width, height) in physical pixels.
+    ///
+    /// Updated every frame from `ctx.input(|i| i.screen_rect())`.  Used by
+    /// `save_layout` to persist window geometry without needing `ctx`.
+    pub(super) last_known_size: Option<[u32; 2]>,
+
+    /// Last known outer position in physical pixels.
+    ///
+    /// Updated every frame from `ViewportInfo::outer_rect` when available.
+    /// `None` on Wayland (position is not reported) or before the first frame.
+    pub(super) last_known_position: Option<[i32; 2]>,
 }

@@ -1043,13 +1043,17 @@ impl PaneTree {
     /// working directory of that pane as a string (e.g. read from
     /// `/proc/<pid>/cwd`).  Returning `None` omits the `directory` field.
     #[must_use]
-    pub fn to_layout_panes<F>(&self, cwd_fn: F) -> Vec<freminal_common::layout::LayoutPane>
+    pub fn to_layout_panes<F>(
+        &self,
+        active_pane: Option<PaneId>,
+        cwd_fn: F,
+    ) -> Vec<freminal_common::layout::LayoutPane>
     where
         F: Fn(PaneId) -> Option<String>,
     {
         let mut out = Vec::new();
         if let Some(root) = &self.root {
-            collect_layout_panes(root, None, None, &cwd_fn, &mut out);
+            collect_layout_panes(root, None, None, active_pane, &cwd_fn, &mut out);
         }
         out
     }
@@ -1067,6 +1071,7 @@ fn collect_layout_panes<F>(
     node: &PaneNode,
     parent_id: Option<&str>,
     position: Option<freminal_common::layout::LayoutPanePosition>,
+    active_pane: Option<PaneId>,
     cwd_fn: &F,
     out: &mut Vec<freminal_common::layout::LayoutPane>,
 ) where
@@ -1090,7 +1095,7 @@ fn collect_layout_panes<F>(
                 } else {
                     Some(pane.title.clone())
                 },
-                active: false,
+                active: active_pane == Some(pane.id),
             });
         }
         PaneNode::Split {
@@ -1109,10 +1114,16 @@ fn collect_layout_panes<F>(
             let split_id = format!("split_{first_leaf}_{second_leaf}");
 
             let layout_dir = match direction {
+                // SplitDirection::Horizontal = left/right split (vertical divider)
+                // LayoutSplitDirection::Vertical = left/right split (vertical divider)
                 SplitDirection::Horizontal => {
+                    freminal_common::layout::LayoutSplitDirection::Vertical
+                }
+                // SplitDirection::Vertical = top/bottom split (horizontal divider)
+                // LayoutSplitDirection::Horizontal = top/bottom split (horizontal divider)
+                SplitDirection::Vertical => {
                     freminal_common::layout::LayoutSplitDirection::Horizontal
                 }
-                SplitDirection::Vertical => freminal_common::layout::LayoutSplitDirection::Vertical,
             };
 
             out.push(freminal_common::layout::LayoutPane {
@@ -1133,6 +1144,7 @@ fn collect_layout_panes<F>(
                 first,
                 Some(&split_id),
                 Some(freminal_common::layout::LayoutPanePosition::First),
+                active_pane,
                 cwd_fn,
                 out,
             );
@@ -1140,6 +1152,7 @@ fn collect_layout_panes<F>(
                 second,
                 Some(&split_id),
                 Some(freminal_common::layout::LayoutPanePosition::Second),
+                active_pane,
                 cwd_fn,
                 out,
             );

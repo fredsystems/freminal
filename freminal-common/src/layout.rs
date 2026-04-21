@@ -531,7 +531,6 @@ fn substitute_variables(s: &str, positional: &[String], named: &HashMap<String, 
 
     // Expand `$N` positional args (try longest number first).
     let mut expanded = String::new();
-    let cursor = 0;
     let chars: Vec<char> = result.chars().collect();
     let mut ci = 0;
     while ci < chars.len() {
@@ -566,9 +565,6 @@ fn substitute_variables(s: &str, positional: &[String], named: &HashMap<String, 
     {
         result = format!("{home}{}", &result[1..]);
     }
-
-    // Track cursor usage to avoid unused variable warning.
-    let _ = cursor;
 
     result
 }
@@ -1167,26 +1163,19 @@ project_dir = "~/default"
 
     #[test]
     fn substitute_env_variable() {
-        // Set a temp env var and verify substitution.
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("FREMINAL_TEST_VAR", "testvalue");
-        }
-        let content = r#"
-[[tabs]]
-  [[tabs.panes]]
-  id = "main"
-  directory = "$ENV{FREMINAL_TEST_VAR}"
-"#;
-        let layout = Layout::from_str_content(Path::new("test.toml"), content).expect("parse");
+        // Use an env var that is guaranteed to exist on all platforms.
+        let (var_name, expected_value) = std::env::vars()
+            .find(|(_, v)| !v.is_empty())
+            .expect("at least one env var must be set");
+        let content = format!(
+            "[[tabs]]\n  [[tabs.panes]]\n  id = \"main\"\n  directory = \"$ENV{{{var_name}}}\"\n"
+        );
+        let layout = Layout::from_str_content(Path::new("test.toml"), &content).expect("parse");
         let substituted = layout.apply_variables(&[], &HashMap::new());
         assert_eq!(
             substituted.tabs[0].panes[0].directory.as_deref(),
-            Some("testvalue")
+            Some(expected_value.as_str())
         );
-        unsafe {
-            std::env::remove_var("FREMINAL_TEST_VAR");
-        }
     }
 
     #[test]

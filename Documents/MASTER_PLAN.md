@@ -18,7 +18,7 @@ and plan document maintenance rules.
 | v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52       | Complete |
 | v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58       | Complete |
 | v0.6.0  | Foundation              | `PLAN_VERSION_060.md` | 62–67       | Complete |
-| v0.7.0  | Recording & Layouts     | `PLAN_VERSION_070.md` | 59,61,68,69 | Pending  |
+| v0.7.0  | Recording & Layouts     | `PLAN_VERSION_070.md` | 59,61,68,69 | Complete |
 
 See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
 B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been

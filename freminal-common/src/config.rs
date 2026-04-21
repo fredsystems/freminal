@@ -472,7 +472,7 @@ impl Default for SecurityConfig {
 /// layout = "dev"
 ///
 /// # When true, save the current layout on exit and restore it on next launch.
-/// # The layout is saved to ~/.config/freminal/layouts/_last_session.toml.
+/// # The layout is saved to ~/.config/freminal/layouts/last_session.toml.
 /// restore_last_session = false
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -492,7 +492,7 @@ pub struct StartupConfig {
     /// on next launch (unless `--layout` is given on the command line).
     ///
     /// The saved layout is written to
-    /// `~/.config/freminal/layouts/_last_session.toml`.
+    /// `~/.config/freminal/layouts/last_session.toml`.
     #[serde(default)]
     pub restore_last_session: bool,
 }
@@ -512,14 +512,14 @@ pub fn layout_library_dir() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        let mut p = base.data_dir().join("Freminal").join("layouts");
+        let p = base.data_dir().join("Freminal").join("layouts");
         create_dir_if_missing(&p);
         return Some(p);
     }
 
     #[cfg(target_os = "windows")]
     {
-        let mut p = base.data_dir().join("Freminal").join("layouts");
+        let p = base.data_dir().join("Freminal").join("layouts");
         create_dir_if_missing(&p);
         return Some(p);
     }

@@ -150,8 +150,8 @@ impl super::FreminalGui {
             for summary in &layouts {
                 if ui.button(&summary.name).clicked() {
                     match freminal_common::layout::Layout::from_file(&summary.path).and_then(|l| {
-                        l.validate()?;
-                        l.resolve()
+                        l.apply_variables(&[], &std::collections::HashMap::new())
+                            .resolve()
                     }) {
                         Ok(resolved) => {
                             self.pending_load_layout = Some(resolved);
