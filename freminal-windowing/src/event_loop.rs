@@ -18,14 +18,19 @@ use crate::{App, UserEvent, WindowConfig, WindowGeometry, WindowHandle, WindowId
 
 use conv2::{ApproxFrom, RoundToZero};
 
-/// Convert a rounded `f64` logical coordinate to `u32`, clamping negatives
-/// to 0 and saturating on overflow.  Used for logical window dimensions
-/// which should never realistically exceed `u32::MAX`.
+/// Convert an `f64` logical dimension to `u32`, clamping non-positive and
+/// non-finite values to 0 and saturating on overflow.  Used for logical
+/// window sizes, which should never realistically exceed `u32::MAX`.
+///
+/// Positive sub-pixel values (e.g. `0.25`) are rounded *up* so that any
+/// strictly-positive dimension yields at least `1`.  `round()` would map
+/// such values to `0`, turning a "tiny but non-empty" window into a
+/// zero-size window on round-trip through persisted state.
 fn logical_dim_to_u32(v: f64) -> u32 {
     if !v.is_finite() || v <= 0.0 {
         return 0;
     }
-    <u32 as ApproxFrom<f64, RoundToZero>>::approx_from(v.round()).unwrap_or(u32::MAX)
+    <u32 as ApproxFrom<f64, RoundToZero>>::approx_from(v.ceil()).unwrap_or(u32::MAX)
 }
 
 /// Convert a rounded `f64` logical coordinate to `i32`, saturating on
@@ -660,4 +665,48 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
         .map_err(|e| Error::EventLoopCreation(format!("event loop exited with error: {e}")))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::{logical_coord_to_i32, logical_dim_to_u32};
+
+    #[test]
+    fn logical_dim_to_u32_clamps_non_positive_and_non_finite() {
+        assert_eq!(logical_dim_to_u32(0.0), 0);
+        assert_eq!(logical_dim_to_u32(-1.0), 0);
+        assert_eq!(logical_dim_to_u32(f64::NAN), 0);
+        assert_eq!(logical_dim_to_u32(f64::NEG_INFINITY), 0);
+    }
+
+    #[test]
+    fn logical_dim_to_u32_ceils_positive_subpixel_to_one() {
+        // Regression: `round()` maps 0.25 to 0, which would persist a
+        // zero-size window.  `ceil()` guarantees any strictly positive
+        // dimension becomes at least 1.
+        assert_eq!(logical_dim_to_u32(0.25), 1);
+        assert_eq!(logical_dim_to_u32(0.5), 1);
+        assert_eq!(logical_dim_to_u32(0.99), 1);
+        assert_eq!(logical_dim_to_u32(1.0), 1);
+        assert_eq!(logical_dim_to_u32(1.01), 2);
+        assert_eq!(logical_dim_to_u32(1280.0), 1280);
+    }
+
+    #[test]
+    fn logical_dim_to_u32_saturates_on_overflow() {
+        assert_eq!(logical_dim_to_u32(f64::INFINITY), 0);
+        // A value well beyond u32::MAX saturates rather than panicking.
+        assert_eq!(logical_dim_to_u32(1.0e20), u32::MAX);
+    }
+
+    #[test]
+    fn logical_coord_to_i32_handles_edge_cases() {
+        assert_eq!(logical_coord_to_i32(0.0), 0);
+        assert_eq!(logical_coord_to_i32(f64::NAN), 0);
+        assert_eq!(logical_coord_to_i32(100.4), 100);
+        assert_eq!(logical_coord_to_i32(-100.4), -100);
+        assert_eq!(logical_coord_to_i32(1.0e20), i32::MAX);
+        assert_eq!(logical_coord_to_i32(-1.0e20), i32::MIN);
+    }
 }

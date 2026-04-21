@@ -5,17 +5,17 @@
 
 //! Persisted ephemeral window geometry for Freminal UI windows.
 //!
-//! This module tracks the last-known size and position of auxiliary UI
-//! windows (currently just the Settings window) across Freminal sessions.
-//! It is deliberately separate from both:
+//! This module tracks the last-known size and position of Freminal's UI
+//! windows — both the Settings window and each main terminal window —
+//! across sessions.  It is deliberately separate from both:
 //!
 //! - `config.toml` — user-authored preferences that are intentionally edited
 //! - saved layouts — user-authored or auto-saved descriptions of terminal
 //!   workspaces (tabs, panes, CWDs, commands)
 //!
-//! The rationale for a separate file is that settings-window geometry is
-//! purely ephemeral UI state: it is written automatically, never edited by
-//! the user, and should not round-trip through the Settings Modal.
+//! The rationale for a separate file is that window geometry is purely
+//! ephemeral UI state: it is written automatically, never edited by the
+//! user, and should not round-trip through the Settings Modal.
 //!
 //! The file is stored at `~/.config/freminal/window_state.toml` (Linux/BSD),
 //! `~/Library/Application Support/Freminal/window_state.toml` (macOS), or
@@ -31,17 +31,23 @@ use serde::{Deserialize, Serialize};
 
 /// Rectangular window geometry.
 ///
-/// `size` is the inner (client-area) size in physical pixels.  `position` is
-/// the outer (frame) position in screen-space pixels.  Either may be absent.
-/// On platforms like Wayland, `position` cannot be reliably reported by the
-/// compositor and will typically be `None`.
+/// `size` is the inner (client-area) size in *logical* pixels (DPI-independent
+/// units).  `position` is the outer (frame) position in logical pixels in the
+/// display's coordinate space.  Either may be absent.  On platforms like
+/// Wayland, `position` cannot be reliably reported by the compositor and will
+/// typically be `None`.
+///
+/// Logical pixels are used (rather than physical pixels) because both the
+/// winit `LogicalSize`/`LogicalPosition` APIs and Freminal's
+/// `freminal_windowing::WindowConfig` consume geometry in logical units, so
+/// storing logical values avoids a round-trip conversion on save and load.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowGeometry {
-    /// Inner size in physical pixels: `[width, height]`.
+    /// Inner size in logical pixels: `[width, height]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[u32; 2]>,
 
-    /// Outer position in screen pixels: `[x, y]`.
+    /// Outer position in logical pixels: `[x, y]`.
     ///
     /// `None` on platforms where the compositor does not expose window
     /// position (e.g. Wayland).
@@ -92,9 +98,9 @@ pub struct WindowState {
 impl WindowState {
     /// Load the persisted window state from `path`.
     ///
-    /// Returns `Ok(WindowState::default())` if the file does not exist,
-    /// cannot be read, or contains malformed TOML.  An unreadable/invalid
-    /// state file is never fatal — the caller falls back to defaults.
+    /// Returns [`WindowState::default`] if the file does not exist, cannot
+    /// be read, or contains malformed TOML.  An unreadable/invalid state
+    /// file is never fatal — the caller falls back to defaults.
     #[must_use]
     pub fn load_or_default(path: &Path) -> Self {
         let Ok(content) = std::fs::read_to_string(path) else {
@@ -141,9 +147,29 @@ impl WindowState {
         // if the process is killed mid-write.
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, toml_str)?;
-        std::fs::rename(&tmp, path)?;
+        replace_file(&tmp, path)?;
         Ok(())
     }
+}
+
+/// Rename `src` onto `dst`, replacing `dst` if it already exists.
+///
+/// On Unix, [`std::fs::rename`] already replaces the destination atomically.
+/// On Windows, [`std::fs::rename`] fails with `ERROR_ALREADY_EXISTS` when the
+/// destination exists, so we must remove the destination first.  The window
+/// between `remove_file` and `rename` is tolerable here: if the process is
+/// killed in that window the next save simply writes a fresh file, and
+/// readers fall back to defaults on any missing/malformed file.
+fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        match std::fs::remove_file(dst) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    std::fs::rename(src, dst)
 }
 
 /// Returns the platform-canonical path to `window_state.toml`.
@@ -305,6 +331,40 @@ mod tests {
         s.save(&path).expect("save");
         let loaded = WindowState::load_or_default(&path);
         assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn save_overwrites_existing_file_when_called_twice() {
+        // Regression: on Windows `std::fs::rename` fails if the destination
+        // exists, so the second save would error unless we explicitly
+        // replace the destination.  Exercise the replace-file path by
+        // saving twice to the same location.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("window_state.toml");
+
+        let first = WindowState {
+            settings: WindowGeometry {
+                size: Some([800, 600]),
+                position: None,
+            },
+            main_windows: Vec::new(),
+        };
+        first.save(&path).expect("first save");
+
+        let second = WindowState {
+            settings: WindowGeometry {
+                size: Some([1280, 720]),
+                position: Some([40, 60]),
+            },
+            main_windows: vec![WindowGeometry {
+                size: Some([640, 480]),
+                position: None,
+            }],
+        };
+        second.save(&path).expect("second save must overwrite");
+
+        let loaded = WindowState::load_or_default(&path);
+        assert_eq!(loaded, second);
     }
 
     #[test]

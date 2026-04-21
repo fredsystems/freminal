@@ -180,10 +180,13 @@ struct FreminalGui {
     /// Set to `true` when the existing settings window should be focused.
     pending_focus_settings: bool,
 
-    /// Persisted ephemeral UI window state (currently just the Settings
-    /// window geometry).  Loaded from `window_state.toml` at startup,
-    /// updated each frame while the settings window is rendering, and
-    /// written back to disk when the settings window closes.
+    /// Persisted ephemeral UI window geometry for the Settings window
+    /// and each main terminal window.  Loaded from `window_state.toml`
+    /// at startup: the settings entry is consulted when the settings
+    /// window opens, and `main_windows` is consulted at app launch to
+    /// seed the initial window's `WindowConfig`.  Updated continuously
+    /// while windows are moving/resizing and persisted on window close
+    /// so the next launch restores the user's layout.
     window_state: freminal_common::window_state::WindowState,
 
     /// Optional recording handle for FREC v2 session recording.
@@ -1501,8 +1504,10 @@ impl FreminalGui {
 
     /// Save the current session to `last_session.toml` in the layout library.
     ///
-    /// Called automatically when the last terminal window closes and
-    /// `restore_last_session` is enabled.  Failures are logged but not fatal.
+    /// Called automatically when the last terminal window closes.  Runs
+    /// regardless of `restore_last_session` so the on-disk session stays
+    /// fresh; the flag only controls whether the saved session is
+    /// reapplied on next launch.  Failures are logged but not fatal.
     fn auto_save_session(&self) {
         let Some(path) = Self::last_session_path() else {
             error!("auto_save_session: cannot determine layout library path");
@@ -1892,15 +1897,23 @@ impl freminal_windowing::App for FreminalGui {
 
         // Auto-save session before the last terminal window is removed.
         // We check *before* remove so we still have access to the window's tabs.
+        //
+        // Saving is independent of `restore_last_session` — the flag only
+        // controls whether the saved session is *applied* on next launch.
+        // Always writing keeps `_last_session.toml` fresh so users can
+        // toggle the flag on at any time and get their real last session
+        // back, rather than whatever stale state happened to be on disk
+        // when they last had the flag enabled.
+        //
+        // We still skip saving when the user launched with an ad-hoc
+        // command (`freminal -- vim foo`): those panes are running a
+        // one-shot program and are not meaningfully restorable.
         let remaining_terminal_windows = self
             .windows
             .keys()
             .filter(|&&wid| Some(wid) != self.settings_window_id)
             .count();
-        if remaining_terminal_windows == 1
-            && self.config.startup.restore_last_session
-            && self.args.command.is_empty()
-        {
+        if remaining_terminal_windows == 1 && self.args.command.is_empty() {
             self.auto_save_session();
         }
 
