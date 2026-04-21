@@ -25,11 +25,12 @@ pub enum SettingsTab {
     Bell,
     Security,
     Keybindings,
+    Startup,
 }
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -41,6 +42,7 @@ impl SettingsTab {
         Self::Bell,
         Self::Security,
         Self::Keybindings,
+        Self::Startup,
     ];
 
     const fn label(self) -> &'static str {
@@ -56,6 +58,7 @@ impl SettingsTab {
             Self::Bell => "Bell",
             Self::Security => "Security",
             Self::Keybindings => "Keybindings",
+            Self::Startup => "Startup",
         }
     }
 }
@@ -66,6 +69,9 @@ impl SettingsTab {
 /// fonts, etc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsAction {
+    /// The user clicked the delete button next to a layout in the library.
+    /// The contained path is the layout file to delete.
+    DeleteLayout(std::path::PathBuf),
     /// No action this frame (modal still open or closed without applying).
     None,
     /// The user clicked Apply — the new config has been saved to disk and
@@ -174,6 +180,17 @@ pub struct SettingsModal {
 
     /// State for the press-to-record keybinding editor.
     key_recording: KeyRecordingState,
+
+    /// Snapshot of discovered layout files for the Startup tab.
+    ///
+    /// Updated by the caller before opening or each frame via
+    /// [`Self::set_discovered_layouts`].
+    pub discovered_layouts: Vec<freminal_common::layout::LayoutSummary>,
+
+    /// Set by `show_startup_tab` when the user clicks a delete button next to
+    /// a layout.  Consumed by `show_standalone` / `show` which return it as
+    /// `SettingsAction::DeleteLayout`.
+    pending_delete_layout: Option<std::path::PathBuf>,
 }
 
 impl SettingsModal {
@@ -195,6 +212,8 @@ impl SettingsModal {
             base_font_defs: None,
             preview_registered: None,
             key_recording: KeyRecordingState::Idle,
+            discovered_layouts: Vec::new(),
+            pending_delete_layout: None,
         }
     }
 
@@ -332,6 +351,10 @@ impl SettingsModal {
         });
 
         // Revert / preview logic (same as show())
+        if let Some(path) = self.pending_delete_layout.take() {
+            return SettingsAction::DeleteLayout(path);
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -460,6 +483,10 @@ impl SettingsModal {
 
         // If the modal just closed (Cancel or X) without Apply, revert any
         // previewed settings to their originals.
+        if let Some(path) = self.pending_delete_layout.take() {
+            return SettingsAction::DeleteLayout(path);
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -517,6 +544,7 @@ impl SettingsModal {
             SettingsTab::Bell => self.show_bell_tab(ui),
             SettingsTab::Security => self.show_security_tab(ui),
             SettingsTab::Keybindings => self.show_keybindings_tab(ui),
+            SettingsTab::Startup => self.show_startup_tab(ui),
         }
     }
 
@@ -1385,6 +1413,118 @@ impl SettingsModal {
             }
         }
     }
+
+    // ── Startup tab ──────────────────────────────────────────────────────────
+
+    fn show_startup_tab(&mut self, ui: &mut Ui) {
+        ui.heading("Startup & Layouts");
+        ui.add_space(8.0);
+
+        // ── Session restore ─────────────────────────────────────────────────
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Session Restore").strong());
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.draft.startup.restore_last_session,
+                "Restore last session on startup",
+            );
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "When enabled, Freminal saves the current layout on exit and \
+                     reopens it on the next launch (unless --layout is given on the \
+                     command line).",
+                )
+                .weak()
+                .small(),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        // ── Default startup layout ───────────────────────────────────────────
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Default Layout").strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Layout name:");
+                let mut layout_text = self.draft.startup.layout.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut layout_text).changed() {
+                    self.draft.startup.layout = if layout_text.is_empty() {
+                        None
+                    } else {
+                        Some(layout_text)
+                    };
+                }
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "Name of a layout file in ~/.config/freminal/layouts/ to load on startup. \
+                     Leave empty for the default single-pane session.",
+                )
+                .weak()
+                .small(),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        // ── Layout library ───────────────────────────────────────────────────
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Layout Library").strong());
+            ui.add_space(4.0);
+
+            if self.discovered_layouts.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "No layouts found in ~/.config/freminal/layouts/.\n\
+                         Use Layouts → Save Current Layout… to create one.",
+                    )
+                    .weak(),
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for layout in &self.discovered_layouts {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(&layout.name).strong());
+                                if let Some(ref desc) = layout.description {
+                                    ui.label(egui::RichText::new(format!("— {desc}")).weak());
+                                }
+                                // Right-align the delete button.
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("Delete").color(
+                                                        egui::Color32::from_rgb(220, 80, 80),
+                                                    ),
+                                                )
+                                                .small(),
+                                            )
+                                            .on_hover_text("Delete this layout file")
+                                            .clicked()
+                                        {
+                                            self.pending_delete_layout = Some(layout.path.clone());
+                                        }
+                                    },
+                                );
+                            });
+                            ui.label(
+                                egui::RichText::new(layout.path.display().to_string())
+                                    .weak()
+                                    .small(),
+                            );
+                            ui.add_space(4.0);
+                        }
+                    });
+            }
+        });
+    }
 }
 
 /// Human-readable label for a `CursorShapeConfig` variant.
@@ -1506,6 +1646,7 @@ mod tests {
         assert_eq!(SettingsTab::Bell.label(), "Bell");
         assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
+        assert_eq!(SettingsTab::Startup.label(), "Startup");
     }
 
     #[test]
@@ -1526,7 +1667,7 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 11);
+        assert_eq!(SettingsTab::ALL.len(), 12);
     }
 
     #[test]

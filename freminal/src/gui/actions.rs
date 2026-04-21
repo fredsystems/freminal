@@ -378,10 +378,61 @@ impl super::FreminalGui {
             | KeyAction::ScrollToTop
             | KeyAction::ScrollToBottom
             | KeyAction::ScrollLineUp
-            | KeyAction::ScrollLineDown => {
+            | KeyAction::ScrollLineDown
+            | KeyAction::LoadLayout => {
                 trace!(
                     "Unexpected deferred key action (should be handled at input layer): {action:?}"
                 );
+            }
+            KeyAction::SaveLayout => {
+                // The name is provided by the inline prompt in the Layouts menu
+                // via `pending_save_layout`.  Take it now; fall back to empty
+                // string so `save_layout` derives a name from the path stem.
+                let name = self.pending_save_layout.take().unwrap_or_default();
+
+                // Determine where to write the layout file.
+                let Some(layout_dir) = freminal_common::config::layout_library_dir() else {
+                    error!("SaveLayout: cannot determine layout library directory");
+                    return;
+                };
+                // Derive a filename from the user-supplied name, falling back
+                // to a unix timestamp when the name is blank.
+                let filename = if name.is_empty() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    format!("layout-{now}.toml")
+                } else {
+                    // Sanitise: replace spaces/slashes with underscores.
+                    let safe: String = name
+                        .chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || c == '-' || c == '_' {
+                                c
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect();
+                    format!("{safe}.toml")
+                };
+                let path = layout_dir.join(filename);
+                // Ensure the directory exists.
+                if let Err(e) = std::fs::create_dir_all(&layout_dir) {
+                    error!("SaveLayout: cannot create layout library dir: {e}");
+                    return;
+                }
+                match self.save_layout(&path, &name, Some(win)) {
+                    Ok(()) => {
+                        tracing::info!("Layout saved to {}", path.display());
+                        // Refresh the layout library so the new file appears in the menu.
+                        self.discovered_layouts =
+                            freminal_common::layout::discover_layouts(&layout_dir);
+                    }
+                    Err(e) => {
+                        error!("SaveLayout: failed to write {}: {e}", path.display());
+                    }
+                }
             }
         }
     }

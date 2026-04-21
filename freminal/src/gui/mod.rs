@@ -47,6 +47,48 @@ pub(crate) mod window;
 
 use tracing::{debug, error, trace};
 
+// ── Layout helpers ────────────────────────────────────────────────────────────
+
+/// Convert a `LayoutSplitDirection` to a `panes::SplitDirection`.
+const fn layout_dir_to_pane_dir(
+    dir: freminal_common::layout::LayoutSplitDirection,
+) -> panes::SplitDirection {
+    match dir {
+        // LayoutSplitDirection::Horizontal = top/bottom (horizontal divider)
+        // panes::SplitDirection::Vertical  = top/bottom (horizontal divider)
+        freminal_common::layout::LayoutSplitDirection::Horizontal => {
+            panes::SplitDirection::Vertical
+        }
+        // LayoutSplitDirection::Vertical = left/right (vertical divider)
+        // panes::SplitDirection::Horizontal = left/right (vertical divider)
+        freminal_common::layout::LayoutSplitDirection::Vertical => {
+            panes::SplitDirection::Horizontal
+        }
+    }
+}
+
+/// Extract the root leaf from a `ResolvedNode` tree.
+///
+/// If the root is a `Leaf`, returns `(Some(leaf), None)`.
+/// If the root is a `Split`, returns `(Some(first_leaf), Some(root_split))` — the
+/// `first_leaf` is the leftmost/topmost leaf, suitable for constructing the initial
+/// `Tab` pane, and the `root_split` is the full tree (used to build the rest).
+fn extract_root_leaf(
+    node: &freminal_common::layout::ResolvedNode,
+) -> (
+    Option<&freminal_common::layout::ResolvedLeaf>,
+    Option<&freminal_common::layout::ResolvedNode>,
+) {
+    use freminal_common::layout::ResolvedNode;
+    match node {
+        ResolvedNode::Leaf(leaf) => (Some(leaf), None),
+        split @ ResolvedNode::Split { first, .. } => {
+            let (leaf, _) = extract_root_leaf(first);
+            (leaf, Some(split))
+        }
+    }
+}
+
 /// Action requested by the tab bar UI.
 ///
 /// Returned by `show_tab_bar()` and consumed by the main `ui()` method
@@ -147,6 +189,33 @@ struct FreminalGui {
 
     /// Counter for assigning monotonic recording window IDs.
     next_recording_window_id: u32,
+
+    /// Queue of resolved windows waiting to be instantiated as OS windows.
+    ///
+    /// Populated by `apply_layout`.  Each call to `on_window_created` (for a
+    /// non-settings, non-initial window) pops one entry from this queue and
+    /// uses it instead of spawning a default single-pane window.
+    pending_layout_windows: std::collections::VecDeque<freminal_common::layout::ResolvedWindow>,
+
+    /// Cached list of layouts discovered in the layout library directory.
+    ///
+    /// Populated at startup from `layout_library_dir()` and refreshed after
+    /// `SaveLayout` writes a new file.  Used to populate the Layouts menu.
+    discovered_layouts: Vec<freminal_common::layout::LayoutSummary>,
+
+    /// A layout that has been selected from the menu and is waiting to be
+    /// applied once `update()` has access to `WindowHandle`.
+    ///
+    /// `None` when no layout application is pending.
+    pending_load_layout: Option<freminal_common::layout::ResolvedLayout>,
+
+    /// When `Some`, the Layouts menu is showing an inline name-entry prompt.
+    /// The string holds the name being typed; an empty string is a valid
+    /// initial state (user hasn't typed yet).
+    pending_save_layout: Option<String>,
+    /// True only on the first frame after the save-layout prompt opens.
+    /// Used to focus the text field exactly once instead of every frame.
+    save_layout_prompt_just_opened: bool,
 }
 
 impl FreminalGui {
@@ -222,6 +291,13 @@ impl FreminalGui {
             recording_handle,
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
+            pending_layout_windows: std::collections::VecDeque::new(),
+            discovered_layouts: freminal_common::config::layout_library_dir()
+                .map(|dir| freminal_common::layout::discover_layouts(&dir))
+                .unwrap_or_default(),
+            pending_load_layout: None,
+            pending_save_layout: None,
+            save_layout_prompt_just_opened: false,
         }
     }
 
@@ -321,9 +397,13 @@ impl FreminalGui {
             theme,
             &win.repaint_handle,
             initial_size,
-            self.recording_handle.clone(),
-            pane_id.raw().try_into().unwrap_or(u32::MAX),
-            cwd_path,
+            pty::PtyTabConfig {
+                cwd: cwd_path,
+                shell_override: None,
+                extra_env: None,
+                recording_handle: self.recording_handle.clone(),
+                recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
         ) {
             Ok(channels) => {
                 let id = win.tabs.next_tab_id();
@@ -341,6 +421,7 @@ impl FreminalGui {
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
+                    child_pid: channels.child_pid,
                     render_state: new_render_state(Arc::clone(&win.window_post)),
                     render_cache: terminal::PaneRenderCache::new(),
                 };
@@ -445,9 +526,13 @@ impl FreminalGui {
             theme,
             &win.repaint_handle,
             initial_size,
-            self.recording_handle.clone(),
-            new_pane_id.raw().try_into().unwrap_or(u32::MAX),
-            cwd_path,
+            pty::PtyTabConfig {
+                cwd: cwd_path,
+                shell_override: None,
+                extra_env: None,
+                recording_handle: self.recording_handle.clone(),
+                recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
         ) {
             Ok(ch) => ch,
             Err(e) => {
@@ -476,6 +561,7 @@ impl FreminalGui {
                 title_stack: Vec::new(),
                 view_state: view_state::ViewState::new(),
                 echo_off: channels.echo_off,
+                child_pid: channels.child_pid,
                 render_state: new_render_state(Arc::clone(&win.window_post)),
                 render_cache: terminal::PaneRenderCache::new(),
             };
@@ -534,10 +620,623 @@ impl FreminalGui {
         handle.create_window(freminal_windowing::WindowConfig {
             title: "Freminal".to_owned(),
             inner_size: None,
+            position: None,
             transparent: true,
             icon: self.icon.clone(),
             app_id: Some("freminal".into()),
         });
+    }
+
+    // ── Layout application (Task 61.2) ───────────────────────────────────────
+
+    /// Spawn a PTY-backed `Pane` for a resolved layout leaf.
+    ///
+    /// Returns `None` and logs an error if the PTY cannot be spawned.
+    #[allow(clippy::significant_drop_tightening)]
+    fn spawn_pane_from_leaf(
+        &self,
+        leaf: &freminal_common::layout::ResolvedLeaf,
+        repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
+        window_post: &Arc<Mutex<renderer::WindowPostRenderer>>,
+        initial_size: freminal_common::pty_write::FreminalTerminalSize,
+    ) -> Option<panes::Pane> {
+        let theme = freminal_common::themes::by_slug(self.config.theme.active_slug(false))
+            .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+
+        let pane_id = self
+            .pane_id_gen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_id();
+
+        let cwd = leaf.directory.as_deref().map(std::path::Path::new);
+        let shell_override = leaf.shell.as_deref();
+        let extra_env = if leaf.env.is_empty() {
+            None
+        } else {
+            Some(&leaf.env)
+        };
+
+        let channels = match pty::spawn_pty_tab(
+            &self.args,
+            self.config.scrollback.limit,
+            theme,
+            repaint_handle,
+            initial_size,
+            pty::PtyTabConfig {
+                cwd,
+                shell_override,
+                extra_env,
+                recording_handle: self.recording_handle.clone(),
+                recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
+        ) {
+            Ok(ch) => ch,
+            Err(e) => {
+                error!("layout: failed to spawn pane '{}': {e}", leaf.id);
+                return None;
+            }
+        };
+
+        Some(panes::Pane {
+            id: pane_id,
+            arc_swap: channels.arc_swap,
+            input_tx: channels.input_tx,
+            pty_write_tx: channels.pty_write_tx,
+            window_cmd_rx: channels.window_cmd_rx,
+            clipboard_rx: channels.clipboard_rx,
+            search_buffer_rx: channels.search_buffer_rx,
+            pty_dead_rx: channels.pty_dead_rx,
+            title: leaf.title.clone().unwrap_or_else(|| "Terminal".to_owned()),
+            bell_active: false,
+            title_stack: Vec::new(),
+            view_state: view_state::ViewState::new(),
+            echo_off: channels.echo_off,
+            child_pid: channels.child_pid,
+            render_state: terminal::new_render_state(Arc::clone(window_post)),
+            render_cache: terminal::PaneRenderCache::new(),
+        })
+    }
+
+    /// Insert all panes from `node` as the `second` child of a split on
+    /// `target_id`.  Returns the ID of the deepest leaf inserted.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_subtree_as_split(
+        &self,
+        node: &freminal_common::layout::ResolvedNode,
+        tab: &mut tabs::Tab,
+        target_id: panes::PaneId,
+        direction: panes::SplitDirection,
+        ratio: f32,
+        repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
+        window_post: &Arc<Mutex<renderer::WindowPostRenderer>>,
+        initial_size: &freminal_common::pty_write::FreminalTerminalSize,
+        commands: &mut Vec<(panes::PaneId, String)>,
+        active_pane: &mut Option<panes::PaneId>,
+    ) -> Option<panes::PaneId> {
+        use freminal_common::layout::ResolvedNode;
+        match node {
+            ResolvedNode::Leaf(leaf) => {
+                let pane = self.spawn_pane_from_leaf(
+                    leaf,
+                    repaint_handle,
+                    window_post,
+                    initial_size.clone(),
+                )?;
+                let id = pane.id;
+                if leaf.active {
+                    *active_pane = Some(id);
+                }
+                if let Some(ref cmd) = leaf.command {
+                    commands.push((id, cmd.clone()));
+                }
+                if let Err(e) = pane
+                    .input_tx
+                    .send(InputEvent::ThemeModeUpdate(self.config.theme.mode, false))
+                {
+                    error!("layout: failed to send ThemeModeUpdate: {e}");
+                }
+                if let Err(e) = tab.pane_tree.split_with_id(target_id, direction, pane) {
+                    error!("layout: failed to split pane: {e}");
+                    return None;
+                }
+                // Adjust ratio away from the default 0.5.
+                if (ratio - 0.5_f32).abs() > f32::EPSILON
+                    && let Err(e) = tab.pane_tree.set_split_ratio(target_id, direction, ratio)
+                {
+                    debug!("layout: could not set split ratio: {e}");
+                }
+                Some(id)
+            }
+            ResolvedNode::Split {
+                direction: sub_dir,
+                ratio: sub_ratio,
+                first,
+                second,
+            } => {
+                // Insert first sub-node as the split, then split it further.
+                let first_id = self.insert_subtree_as_split(
+                    first,
+                    tab,
+                    target_id,
+                    direction,
+                    ratio,
+                    repaint_handle,
+                    window_post,
+                    initial_size,
+                    commands,
+                    active_pane,
+                )?;
+                let sub_dir_pane = layout_dir_to_pane_dir(*sub_dir);
+                self.insert_subtree_as_split(
+                    second,
+                    tab,
+                    first_id,
+                    sub_dir_pane,
+                    *sub_ratio,
+                    repaint_handle,
+                    window_post,
+                    initial_size,
+                    commands,
+                    active_pane,
+                )
+            }
+        }
+    }
+
+    /// Build a tab from a `ResolvedTab`, returning the tab and a list of
+    /// `(pane_id, command)` pairs for deferred command injection.
+    ///
+    /// Returns `None` if the tab has no panes or all pane spawns fail.
+    fn build_tab_from_resolved(
+        &self,
+        resolved_tab: &freminal_common::layout::ResolvedTab,
+        tab_id: tabs::TabId,
+        repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
+        window_post: &Arc<Mutex<renderer::WindowPostRenderer>>,
+        initial_size: &freminal_common::pty_write::FreminalTerminalSize,
+        commands: &mut Vec<(panes::PaneId, String)>,
+    ) -> Option<(tabs::Tab, Option<panes::PaneId>)> {
+        let root_node = resolved_tab.root.as_ref()?;
+
+        // Spawn root leaf or first leaf of the tree as the initial pane.
+        let (root_pane, root_node_rest) = extract_root_leaf(root_node);
+        let root_leaf = root_pane?;
+        let root_spawned = self.spawn_pane_from_leaf(
+            root_leaf,
+            repaint_handle,
+            window_post,
+            initial_size.clone(),
+        )?;
+
+        let root_id = root_spawned.id;
+        let mut active_pane: Option<panes::PaneId> = if root_leaf.active {
+            Some(root_id)
+        } else {
+            None
+        };
+        if let Some(ref cmd) = root_leaf.command {
+            commands.push((root_id, cmd.clone()));
+        }
+        if let Err(e) = root_spawned
+            .input_tx
+            .send(InputEvent::ThemeModeUpdate(self.config.theme.mode, false))
+        {
+            error!("layout: failed to send ThemeModeUpdate: {e}");
+        }
+
+        // Build the tab with the root pane.
+        let mut tab = tabs::Tab::new(tab_id, root_spawned);
+        if let Some(title) = resolved_tab.title.as_deref() {
+            // Title will be overridden by PTY title changes but set it now.
+            if let Ok(panes_mut) = tab.pane_tree.iter_panes_mut() {
+                for p in panes_mut {
+                    title.clone_into(&mut p.title);
+                }
+            }
+        }
+
+        // If there's a rest subtree (Split), insert it.
+        if let Some(rest) = root_node_rest {
+            use freminal_common::layout::ResolvedNode;
+            if let ResolvedNode::Split {
+                direction,
+                ratio,
+                second,
+                ..
+            } = rest
+            {
+                let dir = layout_dir_to_pane_dir(*direction);
+                self.insert_subtree_as_split(
+                    second,
+                    &mut tab,
+                    root_id,
+                    dir,
+                    *ratio,
+                    repaint_handle,
+                    window_post,
+                    initial_size,
+                    commands,
+                    &mut active_pane,
+                );
+            }
+        }
+
+        Some((tab, active_pane))
+    }
+
+    /// Inject startup commands into panes after layout application.
+    ///
+    /// Each `(pane_id, command)` pair was collected during layout application;
+    /// the command is sent to the pane's PTY immediately followed by a newline.
+    /// The shell receives the text as if the user typed it.
+    fn inject_layout_commands(&self, commands: &[(panes::PaneId, String)]) {
+        if commands.is_empty() {
+            return;
+        }
+        // Build a flat map of pane_id → pty_write_tx across all windows.
+        for (pane_id, command) in commands {
+            let found = self.windows.values().find_map(|win| {
+                win.tabs.iter().find_map(|tab| {
+                    tab.pane_tree.iter_panes().ok().and_then(|panes| {
+                        panes
+                            .into_iter()
+                            .find(|p| p.id == *pane_id)
+                            .map(|p| p.pty_write_tx.clone())
+                    })
+                })
+            });
+            if let Some(tx) = found {
+                let mut payload = command.as_bytes().to_owned();
+                payload.push(b'\n');
+                if let Err(e) = tx.send(freminal_common::pty_write::PtyWrite::Write(payload)) {
+                    error!(
+                        "layout: failed to inject command into pane {:?}: {e}",
+                        pane_id
+                    );
+                }
+            } else {
+                debug!("layout: pane {:?} not found for command injection", pane_id);
+            }
+        }
+    }
+
+    /// Read the current working directory of the shell in the given pane.
+    ///
+    /// On Linux this resolves `/proc/<pid>/cwd`.  Returns `None` on non-Linux
+    /// platforms or when the child PID is unknown.
+    fn read_cwd_for_pane_with_extra(
+        &self,
+        pane_id: panes::PaneId,
+        extra_win: Option<&PerWindowState>,
+    ) -> Option<String> {
+        // Search extra_win first (current window removed from self.windows during update()).
+        let child_pid = extra_win
+            .and_then(|win| {
+                win.tabs.iter().find_map(|tab| {
+                    tab.pane_tree.iter_panes().ok().and_then(|ps| {
+                        ps.into_iter()
+                            .find(|p| p.id == pane_id)
+                            .and_then(|p| p.child_pid)
+                    })
+                })
+            })
+            .or_else(|| {
+                // Find the pane across all other windows and tabs.
+                self.windows.values().find_map(|win| {
+                    win.tabs.iter().find_map(|tab| {
+                        tab.pane_tree.iter_panes().ok().and_then(|ps| {
+                            ps.into_iter()
+                                .find(|p| p.id == pane_id)
+                                .and_then(|p| p.child_pid)
+                        })
+                    })
+                })
+            })?;
+
+        #[cfg(target_os = "linux")]
+        {
+            let link = format!("/proc/{child_pid}/cwd");
+            std::fs::read_link(&link)
+                .ok()
+                .and_then(|p| p.into_os_string().into_string().ok())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = child_pid;
+            None
+        }
+    }
+
+    /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]
+    /// and write it to `path` in TOML format.
+    ///
+    /// `extra_win` should be `Some(win)` when called during `update()`, because
+    /// the current window has been removed from `self.windows` for the duration
+    /// of the frame.  Pass `None` when called outside `update()` (e.g. from
+    /// `auto_save_session` in `on_close_requested`) where all windows are still
+    /// in `self.windows`.
+    ///
+    /// `name` is the human-readable name for the layout; if empty the path
+    /// file stem is used as a fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the layout cannot be serialised or the file cannot be written.
+    pub fn save_layout(
+        &self,
+        path: &std::path::Path,
+        name: &str,
+        extra_win: Option<&PerWindowState>,
+    ) -> anyhow::Result<()> {
+        use freminal_common::layout::{Layout, LayoutMeta, LayoutTab, LayoutWindow};
+
+        let mut windows: Vec<LayoutWindow> = Vec::new();
+
+        // Helper closure: build a `LayoutWindow` from any `PerWindowState`.
+        // `win_extra` is the window that was removed from self.windows for the
+        // current frame — used so CWD lookups can search it when it is the same
+        // window being serialised.
+        let build_window = |win: &PerWindowState, win_extra: Option<&PerWindowState>| {
+            let active_tab_idx = win.tabs.active_index();
+            let mut tabs: Vec<LayoutTab> = Vec::new();
+            for (tab_idx, tab) in win.tabs.iter().enumerate() {
+                let active_pane_id = if tab_idx == active_tab_idx {
+                    Some(tab.active_pane)
+                } else {
+                    None
+                };
+                let panes = tab.pane_tree.to_layout_panes(active_pane_id, |pane_id| {
+                    self.read_cwd_for_pane_with_extra(pane_id, win_extra)
+                });
+                tabs.push(LayoutTab {
+                    title: None,
+                    active: tab_idx == active_tab_idx,
+                    panes,
+                });
+            }
+            LayoutWindow {
+                size: win.last_known_size,
+                position: win.last_known_position,
+                monitor: None,
+                tabs,
+            }
+        };
+
+        // If a current window was extracted from self.windows, include it first.
+        if let Some(win) = extra_win {
+            windows.push(build_window(win, Some(win)));
+        }
+
+        // Then all other windows (or all windows when extra_win is None).
+        for win in self.windows.values() {
+            windows.push(build_window(win, extra_win));
+        }
+
+        let layout_name = if name.is_empty() {
+            path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+        } else {
+            Some(name.to_owned())
+        };
+
+        let layout = Layout {
+            layout: LayoutMeta {
+                name: layout_name,
+                description: None,
+                variables: std::collections::HashMap::new(),
+            },
+            windows,
+            tabs: Vec::new(),
+        };
+
+        let toml_str = layout.to_toml_string()?;
+        std::fs::write(path, toml_str)?;
+        Ok(())
+    }
+
+    /// Apply a resolved layout to the current frontmost window and spawn any
+    /// additional windows.
+    ///
+    /// - The first window in the layout is applied to `window_id` (replacing
+    ///   existing tabs).
+    /// - Additional windows are queued in `pending_layout_windows` and created
+    ///   via deferred `handle.create_window()` calls.
+    ///
+    /// Returns a list of `(pane_id, command)` pairs for the caller to inject
+    /// after shell startup.
+    pub fn apply_layout(
+        &mut self,
+        resolved: &freminal_common::layout::ResolvedLayout,
+        window_id: WindowId,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) -> Vec<(panes::PaneId, String)> {
+        let mut all_commands: Vec<(panes::PaneId, String)> = Vec::new();
+
+        let mut windows = resolved.windows.iter();
+
+        // Apply first window to current window.
+        // Extract the Arc handles before any &self method calls to avoid borrow conflicts.
+        if let Some(first_window) = windows.next()
+            && let Some(win) = self.windows.get(&window_id)
+        {
+            let repaint_handle = Arc::clone(&win.repaint_handle);
+            let window_post = Arc::clone(&win.window_post);
+            // `win` borrow ends here; we can now call &self methods.
+
+            let initial_size = freminal_common::pty_write::FreminalTerminalSize {
+                width: usize::from(DEFAULT_WIDTH),
+                height: usize::from(DEFAULT_HEIGHT),
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+
+            let (new_tabs_opt, cmds) = self.build_tabs_for_window(
+                first_window,
+                &repaint_handle,
+                &window_post,
+                &initial_size,
+            );
+            all_commands.extend(cmds);
+
+            if let Some(new_tabs) = new_tabs_opt
+                && let Some(win) = self.windows.get_mut(&window_id)
+            {
+                win.tabs = new_tabs;
+                // Schedule geometry restoration for this window — applied on the
+                // next frame via ctx.send_viewport_cmd in update().
+                if first_window.size.is_some() || first_window.position.is_some() {
+                    win.pending_geometry = Some((first_window.size, first_window.position));
+                }
+            }
+        }
+
+        // Queue remaining windows for creation.
+        for extra_window in windows {
+            self.pending_layout_windows.push_back(extra_window.clone());
+            handle.create_window(freminal_windowing::WindowConfig {
+                title: "Freminal".to_owned(),
+                inner_size: extra_window.size.map(<[u32; 2]>::into),
+                position: extra_window.position.map(<[i32; 2]>::into),
+                transparent: true,
+                icon: self.icon.clone(),
+                app_id: Some("freminal".into()),
+            });
+        }
+
+        all_commands
+    }
+
+    /// Build a `TabManager` from all tabs in a `ResolvedWindow`.
+    ///
+    /// Returns `(Some(TabManager), commands)` on success, `(None, commands)` if no
+    /// tabs could be built.
+    fn build_tabs_for_window(
+        &self,
+        resolved_window: &freminal_common::layout::ResolvedWindow,
+        repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
+        window_post: &Arc<Mutex<renderer::WindowPostRenderer>>,
+        initial_size: &freminal_common::pty_write::FreminalTerminalSize,
+    ) -> (Option<tabs::TabManager>, Vec<(panes::PaneId, String)>) {
+        let mut commands: Vec<(panes::PaneId, String)> = Vec::new();
+
+        if resolved_window.tabs.is_empty() {
+            return (None, commands);
+        }
+
+        let mut built_tabs: Vec<tabs::Tab> = Vec::new();
+        let mut active_tab_idx: Option<usize> = None;
+
+        for (i, resolved_tab) in resolved_window.tabs.iter().enumerate() {
+            let tab_id = if i == 0 {
+                tabs::TabId::first()
+            } else {
+                tabs::TabId::offset(u64::try_from(i).unwrap_or(u64::MAX))
+            };
+            if let Some((mut tab, active_pane)) = self.build_tab_from_resolved(
+                resolved_tab,
+                tab_id,
+                repaint_handle,
+                window_post,
+                initial_size,
+                &mut commands,
+            ) {
+                if resolved_tab.active || active_tab_idx.is_none() {
+                    active_tab_idx = Some(built_tabs.len());
+                }
+                // Apply the active pane from the layout if one was marked.
+                if let Some(id) = active_pane {
+                    tab.active_pane = id;
+                }
+                built_tabs.push(tab);
+            }
+        }
+
+        if built_tabs.is_empty() {
+            return (None, commands);
+        }
+
+        let first = built_tabs.remove(0);
+        let mut tab_mgr = tabs::TabManager::new(first);
+        for extra in built_tabs {
+            tab_mgr.add_tab(extra);
+        }
+        if let Some(idx) = active_tab_idx
+            && let Err(e) = tab_mgr.switch_to(idx)
+        {
+            debug!("layout: could not switch to active tab {idx}: {e}");
+        }
+
+        (Some(tab_mgr), commands)
+    }
+
+    /// Consume the next pending layout window and build a `PerWindowState` for it.
+    ///
+    /// Called from `on_window_created` when `pending_layout_windows` is non-empty.
+    fn build_window_from_pending_layout(
+        &mut self,
+        window_id: WindowId,
+        ctx: &egui::Context,
+        handle: &freminal_windowing::WindowHandle<'_>,
+        inner_size: (u32, u32),
+        os_dark_mode: bool,
+    ) -> Option<Vec<(panes::PaneId, String)>> {
+        let resolved_window = self.pending_layout_windows.pop_front()?;
+
+        let theme = freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
+            .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+        rendering::set_egui_options(ctx, theme, self.config.ui.background_opacity);
+
+        let repaint_handle = Arc::new(OnceLock::new());
+        let proxy = handle.event_loop_proxy();
+        let _ = repaint_handle.set((proxy, window_id));
+        let window_post = Arc::new(Mutex::new(renderer::WindowPostRenderer::new()));
+
+        let terminal_widget = terminal::FreminalTerminalWidget::new(ctx, &self.config);
+        let (cell_w, cell_h) = terminal_widget.cell_size();
+        let initial_size = Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
+
+        let (tab_mgr_opt, commands) = self.build_tabs_for_window(
+            &resolved_window,
+            &repaint_handle,
+            &window_post,
+            &initial_size,
+        );
+        let tab_mgr = tab_mgr_opt?;
+
+        let win = window::PerWindowState {
+            tabs: tab_mgr,
+            terminal_widget,
+            last_window_title: String::from("Freminal"),
+            os_dark_mode,
+            style_cache: None,
+            pending_close_pane: false,
+            pending_focus_direction: None,
+            border_drag: None,
+            shader_last_mtime: None,
+            window_post,
+            repaint_handle,
+            pending_new_window: false,
+            pending_geometry: None,
+            last_known_size: None,
+            last_known_position: None,
+        };
+        self.windows.insert(window_id, win);
+
+        // Emit WindowCreate recording event.
+        let rec_wid = self.recording_window_id(window_id);
+        if let Some(ref h) = self.recording_handle {
+            h.emit(
+                freminal_terminal_emulator::recording::EventPayload::WindowCreate {
+                    window_id: rec_wid,
+                    width_px: inner_size.0,
+                    height_px: inner_size.1,
+                    x: 0,
+                    y: 0,
+                },
+            );
+        }
+
+        Some(commands)
     }
 
     /// Handle a `SettingsAction` from the standalone settings window.
@@ -712,6 +1411,81 @@ impl FreminalGui {
             SettingsAction::RevertTheme(_, _)
             | SettingsAction::PreviewTheme(_)
             | SettingsAction::None => {}
+            SettingsAction::DeleteLayout(path) => {
+                if let Err(e) = std::fs::remove_file(path) {
+                    error!("Failed to delete layout file '{}': {e}", path.display());
+                }
+                // Refresh the layout list regardless (file may already be gone).
+                self.discovered_layouts = freminal_common::config::layout_library_dir()
+                    .map(|dir| freminal_common::layout::discover_layouts(&dir))
+                    .unwrap_or_default();
+                self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
+            }
+        }
+    }
+
+    /// Return the path used for auto-save/restore of the last session.
+    fn last_session_path() -> Option<std::path::PathBuf> {
+        freminal_common::config::layout_library_dir().map(|d| d.join("last_session.toml"))
+    }
+
+    /// Save the current session to `last_session.toml` in the layout library.
+    ///
+    /// Called automatically when the last terminal window closes and
+    /// `restore_last_session` is enabled.  Failures are logged but not fatal.
+    fn auto_save_session(&self) {
+        let Some(path) = Self::last_session_path() else {
+            error!("auto_save_session: cannot determine layout library path");
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            error!("auto_save_session: cannot create layout library dir: {e}");
+            return;
+        }
+        match self.save_layout(&path, "Last Session", None) {
+            Ok(()) => {
+                tracing::info!("Session auto-saved to {}", path.display());
+            }
+            Err(e) => {
+                error!("auto_save_session: failed: {e}");
+            }
+        }
+    }
+
+    /// Apply the last-session layout if `restore_last_session` is enabled and
+    /// the file exists.  Called once after the first window is ready.
+    ///
+    /// Only called when no `--layout` CLI flag was provided.
+    fn maybe_restore_last_session(
+        &mut self,
+        window_id: WindowId,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        if !self.config.startup.restore_last_session {
+            return;
+        }
+        let Some(path) = Self::last_session_path() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        match freminal_common::layout::Layout::from_file(&path).and_then(|l| {
+            l.apply_variables(&[], &std::collections::HashMap::new())
+                .resolve()
+        }) {
+            Ok(resolved) => {
+                let commands = self.apply_layout(&resolved, window_id, handle);
+                self.inject_layout_commands(&commands);
+            }
+            Err(e) => {
+                error!(
+                    "restore_last_session: failed to apply {}: {e}",
+                    path.display()
+                );
+            }
         }
     }
 }
@@ -811,8 +1585,61 @@ impl freminal_windowing::App for FreminalGui {
                 window_post: initial.window_post,
                 repaint_handle: initial.repaint_handle,
                 pending_new_window: false,
+                pending_geometry: None,
+                last_known_size: None,
+                last_known_position: None,
             };
             self.windows.insert(window_id, win);
+
+            // If --layout was given on the CLI, apply it to this first window.
+            // Fall through to config.startup.layout when absent.
+            let startup_layout_name = self
+                .args
+                .layout
+                .clone()
+                .or_else(|| self.config.startup.layout.clone());
+
+            if let Some(ref name_or_path) = startup_layout_name {
+                // Resolve bare name (e.g. "dev") to library path; treat anything
+                // with a path separator or .toml suffix as a literal path.
+                let path = {
+                    let p = std::path::Path::new(name_or_path.as_str());
+                    if p.extension().is_some_and(|e| e == "toml") || p.components().count() > 1 {
+                        p.to_path_buf()
+                    } else {
+                        freminal_common::config::layout_library_dir().map_or_else(
+                            || p.to_path_buf(),
+                            |d| d.join(format!("{name_or_path}.toml")),
+                        )
+                    }
+                };
+                let positional: Vec<String> = self
+                    .args
+                    .layout_vars
+                    .iter()
+                    .filter(|s| !s.contains('='))
+                    .cloned()
+                    .collect();
+                let var_map = self.args.layout_var_map();
+                match freminal_common::layout::Layout::from_file(&path) {
+                    Ok(layout) => match layout.apply_variables(&positional, &var_map).resolve() {
+                        Ok(resolved) => {
+                            let cmds = self.apply_layout(&resolved, window_id, handle);
+                            self.inject_layout_commands(&cmds);
+                        }
+                        Err(e) => {
+                            error!("Failed to resolve layout '{}': {e}", path.display());
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to load layout '{}': {e}", path.display());
+                    }
+                }
+            } else {
+                // No --layout CLI flag and no startup.layout — try to restore
+                // the last session if configured.
+                self.maybe_restore_last_session(window_id, handle);
+            }
 
             // Emit WindowCreate recording event.
             let rec_wid = self.recording_window_id(window_id);
@@ -828,6 +1655,21 @@ impl freminal_windowing::App for FreminalGui {
                 );
             }
         } else {
+            // Subsequent window — check if a layout window is waiting, otherwise
+            // spawn a default single-pane PTY tab.
+            if !self.pending_layout_windows.is_empty() {
+                if let Some(cmds) = self.build_window_from_pending_layout(
+                    window_id,
+                    ctx,
+                    handle,
+                    inner_size,
+                    os_dark_mode,
+                ) {
+                    self.inject_layout_commands(&cmds);
+                }
+                return;
+            }
+
             // Subsequent window — spawn a new PTY tab.
             let theme =
                 freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
@@ -857,9 +1699,13 @@ impl freminal_windowing::App for FreminalGui {
                 theme,
                 &repaint_handle,
                 initial_size,
-                self.recording_handle.clone(),
-                pane_id.raw().try_into().unwrap_or(u32::MAX),
-                None,
+                pty::PtyTabConfig {
+                    cwd: None,
+                    shell_override: None,
+                    extra_env: None,
+                    recording_handle: self.recording_handle.clone(),
+                    recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                },
             ) {
                 Ok(channels) => {
                     let pane = panes::Pane {
@@ -876,6 +1722,7 @@ impl freminal_windowing::App for FreminalGui {
                         title_stack: Vec::new(),
                         view_state: view_state::ViewState::new(),
                         echo_off: channels.echo_off,
+                        child_pid: channels.child_pid,
                         render_state: new_render_state(Arc::clone(&window_post)),
                         render_cache: terminal::PaneRenderCache::new(),
                     };
@@ -927,6 +1774,9 @@ impl freminal_windowing::App for FreminalGui {
                         window_post,
                         repaint_handle,
                         pending_new_window: false,
+                        pending_geometry: None,
+                        last_known_size: None,
+                        last_known_position: None,
                     };
                     self.windows.insert(window_id, win);
 
@@ -968,6 +1818,21 @@ impl freminal_windowing::App for FreminalGui {
             self.settings_modal.is_open = false;
             self.settings_owner = None;
         }
+
+        // Auto-save session before the last terminal window is removed.
+        // We check *before* remove so we still have access to the window's tabs.
+        let remaining_terminal_windows = self
+            .windows
+            .keys()
+            .filter(|&&wid| Some(wid) != self.settings_window_id)
+            .count();
+        if remaining_terminal_windows == 1
+            && self.config.startup.restore_last_session
+            && self.args.command.is_empty()
+        {
+            self.auto_save_session();
+        }
+
         self.windows.remove(&window_id);
 
         // Emit WindowClose recording event (only for known windows), and clean up the mapping.
@@ -1032,6 +1897,9 @@ impl freminal_windowing::App for FreminalGui {
         // and return — no terminal state to process.
         if self.settings_window_id == Some(window_id) {
             let os_dark = ctx.global_style().visuals.dark_mode;
+            // Sync discovered layout list into the modal each frame so the
+            // Startup tab always shows fresh data.
+            self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
             let settings_action = self.settings_modal.show_standalone(ctx, os_dark);
             self.handle_settings_action(&settings_action, handle, window_id);
 
@@ -1056,6 +1924,7 @@ impl freminal_windowing::App for FreminalGui {
             handle.create_window(freminal_windowing::WindowConfig {
                 title: "Freminal Settings".to_owned(),
                 inner_size: Some((600, 500)),
+                position: None,
                 transparent: false,
                 icon: self.icon.clone(),
                 app_id: Some("freminal-settings".into()),
@@ -1074,6 +1943,43 @@ impl freminal_windowing::App for FreminalGui {
             win.pending_new_window = false;
             self.spawn_new_window(handle);
         }
+
+        // ── Apply pending window geometry from layout engine ─────────────────
+        if let Some((size_opt, pos_opt)) = win.pending_geometry.take() {
+            use conv2::ConvUtil as _;
+            if let Some([w, h]) = size_opt {
+                // u32 -> f32 via approx is always Ok for window dimensions.
+                let w_f: f32 = w.approx_as().unwrap_or(f32::MAX);
+                let h_f: f32 = h.approx_as().unwrap_or(f32::MAX);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w_f, h_f)));
+            }
+            if let Some([x, y]) = pos_opt {
+                // i32 -> f32 via approx is always Ok for screen coordinates.
+                let x_f: f32 = x.approx_as().unwrap_or(0.0_f32);
+                let y_f: f32 = y.approx_as().unwrap_or(0.0_f32);
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x_f, y_f)));
+            }
+        }
+
+        // ── Track last known window geometry (for save_layout) ───────────────
+        ctx.input(|i| {
+            use conv2::ConvUtil as _;
+            let vp = i.viewport();
+            if let Some(inner) = vp.inner_rect {
+                let w = inner.width().approx_as::<u32>().ok();
+                let h = inner.height().approx_as::<u32>().ok();
+                if let (Some(w), Some(h)) = (w, h) {
+                    win.last_known_size = Some([w, h]);
+                }
+            }
+            if let Some(outer) = vp.outer_rect {
+                let x = outer.min.x.approx_as::<i32>().ok();
+                let y = outer.min.y.approx_as::<i32>().ok();
+                if let (Some(x), Some(y)) = (x, y) {
+                    win.last_known_position = Some([x, y]);
+                }
+            }
+        });
 
         // ── Deferred egui font update from standalone settings window ────────
         win.terminal_widget
@@ -1476,10 +2382,18 @@ impl freminal_windowing::App for FreminalGui {
 
             let mut all_deferred_actions = Vec::new();
 
+            // Floating "Save Layout" name-entry prompt.  Shown whenever the
+            // user clicked "Save Layout" in the Layouts menu.  Returns true
+            // exactly once (the frame the user confirms), at which point we
+            // enqueue the SaveLayout action for dispatch.
+            if self.show_save_layout_prompt(ctx) {
+                all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
+            }
+
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
-            let ui_overlay_open = any_menu_open;
+            let ui_overlay_open = any_menu_open || self.pending_save_layout.is_some();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
@@ -2006,6 +2920,12 @@ impl freminal_windowing::App for FreminalGui {
 
         // Reinsert per-window state before returning.
         self.windows.insert(window_id, win);
+
+        // Apply a pending layout (set from the Layouts menu).
+        if let Some(resolved) = self.pending_load_layout.take() {
+            let commands = self.apply_layout(&resolved, window_id, handle);
+            self.inject_layout_commands(&commands);
+        }
     }
 
     fn raw_input_hook(&mut self, _window_id: WindowId, raw_input: &mut egui::RawInput) {
@@ -2056,6 +2976,7 @@ pub fn run(
     let window_config = freminal_windowing::WindowConfig {
         title: "Freminal".to_owned(),
         inner_size: None,
+        position: None,
         transparent: true,
         icon: Some(icon.clone()),
         app_id: Some("freminal".into()),

@@ -14,7 +14,7 @@ and triage platform-specific performance issues on Windows and macOS.
 | #   | Feature                           | Scope  | Status   | Dependencies     |
 | --- | --------------------------------- | ------ | -------- | ---------------- |
 | 59  | FREC v2: Recording Overhaul       | Large  | Complete | Task 58          |
-| 61  | Saved Layouts (Session Templates) | Large  | Pending  | Task 36, Task 58 |
+| 61  | Saved Layouts (Session Templates) | Large  | Complete | Task 36, Task 58 |
 | 68  | Platform Performance Triage       | Medium | Complete | None             |
 | 69  | UI Polish & Settings Completeness | Medium | Complete | None             |
 
@@ -697,13 +697,16 @@ topology.
     tab to the Settings Modal showing discovered layouts with previews. Update
     `config_example.toml` and home-manager module.
 
-12. **61.12 — Tests and integration**
+12. **61.12 — Tests and integration** ✅ 2026-04-20
     End-to-end: write a layout file (including multi-window with geometry), launch with
     `--layout`, verify correct window count and geometry, correct tab/pane topology,
     correct CWDs, correct command injection. Test variable substitution with CLI overrides.
     Test save/load round-trip (verify window positions survive round-trip). Test
     auto-restore. Test malformed layouts produce clear error messages. Test partial
     application (append mode). Test single-window shorthand format.
+    Added: `multi_window_layout_parses`, `multi_window_layout_round_trip`,
+    `save_to_file_and_from_file_round_trip`, `from_file_rejects_malformed_toml`,
+    `discover_layouts_finds_valid_files`. All 22 layout tests pass.
 
 ### 61 Primary Files
 

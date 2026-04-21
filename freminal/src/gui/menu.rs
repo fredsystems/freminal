@@ -96,6 +96,13 @@ impl super::FreminalGui {
                 any_menu_open = true;
             }
 
+            let layout_resp = ui.menu_button("Layouts", |ui| {
+                self.show_layouts_menu(ui, win, window_id);
+            });
+            if layout_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
             // Password-prompt lock indicator: shown in the menu bar (which is
             // always visible) so it works regardless of tab bar visibility.
             if self.config.security.password_indicator
@@ -115,6 +122,48 @@ impl super::FreminalGui {
             }
         });
         (menu_action, any_menu_open)
+    }
+
+    /// Render the "Layouts" dropdown menu contents.
+    fn show_layouts_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        _win: &mut PerWindowState,
+        _window_id: super::WindowId,
+    ) {
+        if ui
+            .add(self.menu_button_for("Save Layout", KeyAction::SaveLayout))
+            .clicked()
+        {
+            // Open the floating name-entry prompt (rendered in update() via
+            // show_save_layout_prompt) and close the dropdown.
+            self.pending_save_layout = Some(String::new());
+            self.save_layout_prompt_just_opened = true;
+            ui.close();
+        }
+
+        if !self.discovered_layouts.is_empty() {
+            ui.separator();
+            // Clone to avoid holding an immutable borrow of `self` while
+            // the loop body needs `&mut self`.
+            let layouts = self.discovered_layouts.clone();
+            for summary in &layouts {
+                if ui.button(&summary.name).clicked() {
+                    match freminal_common::layout::Layout::from_file(&summary.path).and_then(|l| {
+                        l.apply_variables(&[], &std::collections::HashMap::new())
+                            .resolve()
+                    }) {
+                        Ok(resolved) => {
+                            self.pending_load_layout = Some(resolved);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to load layout '{}': {e}", summary.name);
+                        }
+                    }
+                    ui.close();
+                }
+            }
+        }
     }
 
     /// Render the "Tab" dropdown menu contents.
@@ -356,5 +405,78 @@ impl super::FreminalGui {
         });
 
         action
+    }
+
+    /// Show the floating "Save Layout" name-entry prompt.
+    ///
+    /// Rendered every frame when `pending_save_layout` is `Some`.  Returns
+    /// `true` exactly once — on the frame when the user confirms the save —
+    /// which the caller should use to dispatch `KeyAction::SaveLayout`.
+    ///
+    /// The prompt is dismissed (setting `pending_save_layout` back to `None`)
+    /// on both Save and Cancel.
+    pub(super) fn show_save_layout_prompt(&mut self, ctx: &egui::Context) -> bool {
+        if self.pending_save_layout.is_none() {
+            return false;
+        }
+
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        egui::Window::new("Save Layout")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Enter a name for this layout:");
+                ui.add_space(4.0);
+
+                let mut name_buf = self.pending_save_layout.clone().unwrap_or_default();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut name_buf)
+                        .hint_text("e.g. dev, work, personal")
+                        .desired_width(240.0),
+                );
+                // Request focus only on the first frame so the user can start
+                // typing immediately, but clicking elsewhere (e.g. the Save or
+                // Cancel button) is not overridden on subsequent frames.
+                if self.save_layout_prompt_just_opened {
+                    response.request_focus();
+                    self.save_layout_prompt_just_opened = false;
+                }
+                self.pending_save_layout = Some(name_buf.clone());
+
+                let can_save = !name_buf.is_empty();
+                // Confirm on Enter (whether focus was lost by Enter or not).
+                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save"))
+                        .clicked()
+                        || (enter_pressed && can_save)
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancelled = true;
+                    }
+                });
+            });
+
+        if confirmed || cancelled {
+            self.pending_save_layout = if confirmed {
+                // Leave the name in place so `dispatch_deferred_action` can
+                // read it via `pending_save_layout.take()`.
+                self.pending_save_layout.clone()
+            } else {
+                None
+            };
+        }
+
+        confirmed
     }
 }

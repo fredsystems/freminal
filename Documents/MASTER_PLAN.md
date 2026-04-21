@@ -18,7 +18,7 @@ and plan document maintenance rules.
 | v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52       | Complete |
 | v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58       | Complete |
 | v0.6.0  | Foundation              | `PLAN_VERSION_060.md` | 62–67       | Complete |
-| v0.7.0  | Recording & Layouts     | `PLAN_VERSION_070.md` | 59,61,68,69 | Pending  |
+| v0.7.0  | Recording & Layouts     | `PLAN_VERSION_070.md` | 59,61,68,69 | Complete |
 
 See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
 B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been
@@ -79,7 +79,7 @@ Task 61 (Saved Layouts).
 | 53  | Multiple Windows                         | `PLAN_VERSION_050.md` (Task 53)             | Complete | Task 36 (Tabs)       |
 | 58  | Built-in Multiplexer (Split Panes)       | `PLAN_VERSION_050.md` (Task 58)             | Complete | Task 36 (Tabs)       |
 | 59  | FREC v2: Recording Overhaul              | `PLAN_VERSION_070.md` (Task 59)             | Complete | Task 58              |
-| 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_070.md` (Task 61)             | Pending  | Tasks 36, 58         |
+| 61  | Saved Layouts (Session Templates)        | `PLAN_VERSION_070.md` (Task 61)             | Complete | Tasks 36, 58         |
 | 68  | Platform Performance Triage              | `PLAN_VERSION_070.md` (Task 68)             | Complete | None                 |
 | 69  | UI Polish & Settings Completeness        | `PLAN_VERSION_070.md` (Task 69)             | Complete | None                 |
 | 62  | freminal-windowing crate + event loop    | `PLAN_VERSION_060.md` (Task 62)             | Complete | None                 |
@@ -481,6 +481,7 @@ Update this section as tasks complete:
 | 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                    |
 | 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window            |
 | 59   | 2026-04-19 | 2026-04-20 | All 12 subtasks complete on task-59/frec-v2-recording                 |
+| 61   | 2026-04-20 | 2026-04-20 | All 12 subtasks complete on task-61/saved-layouts                     |
 
 ---
 

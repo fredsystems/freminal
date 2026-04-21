@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::{io::Write, path::Path, path::PathBuf};
+use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::{PtyRead, PtyWrite};
 use anyhow::Result;
@@ -59,6 +59,11 @@ pub struct FreminalPtyInputOutput {
     /// at its default `false`.  Read by the GUI via a cheap `Relaxed` load
     /// without any locking overhead.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// OS process ID of the PTY child shell.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    pub child_pid: Option<u32>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -136,6 +141,11 @@ pub struct RunTerminalResult {
     /// reads it atomically when building snapshots.
     /// `Arc` lets both threads share ownership without a lock.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// OS process ID of the PTY child (shell or direct command).
+    ///
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    pub child_pid: Option<u32>,
 }
 
 /// Process a single `PtyWrite` message: either write data or resize the PTY.
@@ -167,6 +177,18 @@ fn process_pty_write(
     }
 }
 
+/// Configuration for spawning a PTY child process.
+pub struct PtySpawnConfig<'a> {
+    /// Optional explicit command to run instead of the shell.
+    pub command: Option<(String, Vec<String>)>,
+    /// Shell executable override. Used when `command` is `None`.
+    pub shell: Option<String>,
+    /// Working directory for the child process.
+    pub cwd: Option<&'a Path>,
+    /// Extra environment variables to set on the child process.
+    pub extra_env: Option<&'a HashMap<String, String>>,
+}
+
 // Inherently large: the PTY thread event loop integrating the PTY reader, input channel, and
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
@@ -174,12 +196,16 @@ fn process_pty_write(
 pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,
     send_tx: Sender<PtyRead>,
-    command: Option<(String, Vec<String>)>,
-    shell: Option<String>,
+    spawn_cfg: PtySpawnConfig<'_>,
     termcaps: Option<&Path>,
     initial_size: &FreminalTerminalSize,
-    cwd: Option<&Path>,
 ) -> Result<RunTerminalResult> {
+    let PtySpawnConfig {
+        command,
+        shell,
+        cwd,
+        extra_env,
+    } = spawn_cfg;
     let pty_system = NativePtySystem::default();
 
     let pair = pty_system
@@ -294,7 +320,16 @@ pub fn run_terminal(
         cmd.cwd(dir);
     }
 
+    // Apply per-pane extra environment variables from the layout.
+    // These are applied last so they can override any default env vars set above.
+    if let Some(env) = extra_env {
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+    }
+
     let mut child = pair.slave.spawn_command(cmd)?;
+    let child_pid = child.process_id();
 
     // Release any handles owned by the slave: we don't need it now
     // that we've spawned the child.
@@ -457,6 +492,7 @@ pub fn run_terminal(
     Ok(RunTerminalResult {
         child_exit_rx,
         echo_off,
+        child_pid,
     })
 }
 
@@ -468,10 +504,8 @@ impl FreminalPtyInputOutput {
     pub fn new(
         write_rx: Receiver<PtyWrite>,
         send_tx: Sender<PtyRead>,
-        command: Option<(String, Vec<String>)>,
-        shell: Option<String>,
+        spawn_cfg: PtySpawnConfig<'_>,
         initial_size: &FreminalTerminalSize,
-        cwd: Option<&Path>,
     ) -> Result<Self> {
         // don't use it.  Skip extraction entirely on Windows to avoid issues
         // with symlinks in the tarball requiring elevated privileges.
@@ -487,16 +521,15 @@ impl FreminalPtyInputOutput {
         let result = run_terminal(
             write_rx,
             send_tx,
-            command,
-            shell,
+            spawn_cfg,
             termcaps.as_ref().map(TempDir::path),
             initial_size,
-            cwd,
         )?;
         Ok(Self {
             _termcaps: termcaps,
             child_exit_rx: result.child_exit_rx,
             echo_off: result.echo_off,
+            child_pid: result.child_pid,
         })
     }
 

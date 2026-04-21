@@ -48,6 +48,10 @@ pub struct Config {
     /// are not cluttered with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_by: Option<String>,
+
+    /// Startup and layout configuration.
+    #[serde(default)]
+    pub startup: StartupConfig,
 }
 
 impl Default for Config {
@@ -67,6 +71,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
+            startup: StartupConfig::default(),
         }
     }
 }
@@ -455,6 +460,89 @@ impl Default for SecurityConfig {
 }
 
 // ------------------------------------------------------------------------------------------------
+//  Startup / Layout
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for startup behaviour and the layout system.
+///
+/// ```toml
+/// [startup]
+/// # Load a named layout from ~/.config/freminal/layouts/<name>.toml on
+/// # startup.  Can also be a full path.
+/// layout = "dev"
+///
+/// # When true, save the current layout on exit and restore it on next launch.
+/// # The layout is saved to ~/.config/freminal/layouts/last_session.toml.
+/// restore_last_session = false
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupConfig {
+    /// Layout name or path to load on startup.
+    ///
+    /// If this is a bare name (no path separators, no `.toml` extension), the
+    /// layout file `~/.config/freminal/layouts/<name>.toml` is used.
+    /// Otherwise it is treated as a file path.
+    ///
+    /// Overridden by the `--layout` CLI flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+
+    /// When `true`, save the current layout topology on exit and restore it
+    /// on next launch (unless `--layout` is given on the command line).
+    ///
+    /// The saved layout is written to
+    /// `~/.config/freminal/layouts/last_session.toml`.
+    #[serde(default)]
+    pub restore_last_session: bool,
+}
+
+/// Returns the platform-canonical layout library directory.
+///
+/// | Platform  | Path                                        |
+/// |-----------|---------------------------------------------|
+/// | Linux/BSD | `$XDG_CONFIG_HOME/freminal/layouts/`        |
+/// | macOS     | `~/Library/Application Support/Freminal/layouts/` |
+/// | Windows   | `%APPDATA%\Freminal\layouts\`               |
+///
+/// Returns `None` if the base directories cannot be determined.
+#[must_use]
+pub fn layout_library_dir() -> Option<PathBuf> {
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.data_dir().join("Freminal").join("layouts");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_dir().join("Freminal").join("layouts");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // Linux / BSD
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        let p = base.config_dir().join("freminal").join("layouts");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+// ------------------------------------------------------------------------------------------------
 //  Keybindings
 // ------------------------------------------------------------------------------------------------
 
@@ -514,6 +602,7 @@ struct ConfigPartial {
     pub security: Option<SecurityConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
+    pub startup: Option<StartupConfig>,
 }
 
 impl Config {
@@ -562,6 +651,9 @@ impl Config {
         }
         if partial.managed_by.is_some() {
             self.managed_by = partial.managed_by;
+        }
+        if let Some(startup) = partial.startup {
+            self.startup = startup;
         }
     }
 

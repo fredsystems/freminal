@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 mod pty;
-pub use pty::FreminalPtyInputOutput;
+pub use pty::{FreminalPtyInputOutput, PtySpawnConfig};
 
 // Re-export the shared PTY I/O types from freminal-common so that all crates
 // can use the same definitions without creating a circular dependency.

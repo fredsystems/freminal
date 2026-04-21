@@ -28,6 +28,15 @@ impl TabId {
     pub const fn first() -> Self {
         Self(0)
     }
+
+    /// Create a `TabId` with an explicit numeric offset.
+    ///
+    /// Used when constructing a pre-defined set of tabs from a saved layout
+    /// where tab identifiers must match a known sequence.
+    #[must_use]
+    pub const fn offset(n: u64) -> Self {
+        Self(n)
+    }
 }
 
 /// A single terminal tab.
@@ -379,6 +388,7 @@ mod tests {
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
             ))),

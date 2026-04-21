@@ -50,7 +50,7 @@ pub use crate::input::{
 
 use conv2::ValueFrom;
 
-use crate::io::FreminalPtyInputOutput;
+use crate::io::{FreminalPtyInputOutput, PtySpawnConfig};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
@@ -243,6 +243,8 @@ impl TerminalEmulator {
         scrollback_limit: Option<usize>,
         initial_size: FreminalTerminalSize,
         cwd: Option<&Path>,
+        extra_env: Option<&std::collections::HashMap<String, String>>,
+        shell_override: Option<&str>,
     ) -> Result<(Self, Receiver<PtyRead>)> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
@@ -259,13 +261,26 @@ impl TerminalEmulator {
         };
 
         // When a positional command is specified, shell is ignored.
+        // A layout-level shell_override takes precedence over args.shell.
         let shell = if command.is_some() {
             None
         } else {
-            args.shell.clone()
+            shell_override
+                .map(ToOwned::to_owned)
+                .or_else(|| args.shell.clone())
         };
 
-        let io = FreminalPtyInputOutput::new(read_rx, pty_tx, command, shell, &initial_size, cwd)?;
+        let io = FreminalPtyInputOutput::new(
+            read_rx,
+            pty_tx,
+            PtySpawnConfig {
+                command,
+                shell,
+                cwd,
+                extra_env,
+            },
+            &initial_size,
+        )?;
 
         if let Err(e) = write_tx.send(PtyWrite::Resize(initial_size)) {
             error!("Failed to send resize to pty: {e}");
@@ -479,6 +494,15 @@ impl TerminalEmulator {
         self.pty_io
             .as_ref()
             .map(|io| std::sync::Arc::clone(&io.echo_off))
+    }
+
+    /// Return the OS process ID of the PTY child shell.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Returns `None` on headless terminals or platforms where the PID is unavailable.
+    #[must_use]
+    pub fn child_pid(&self) -> Option<u32> {
+        self.pty_io.as_ref().and_then(|io| io.child_pid)
     }
 
     /// Build a point-in-time snapshot of the terminal state.

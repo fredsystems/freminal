@@ -71,6 +71,30 @@ pub struct TabChannels {
     /// only published on PTY output — if the shell is idle waiting for a
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
+
+    /// OS process ID of the PTY child shell.
+    ///
+    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// `None` on platforms where `portable_pty` cannot report the PID.
+    pub child_pid: Option<u32>,
+}
+
+/// Per-pane configuration forwarded to the PTY child process.
+///
+/// Carries optional overrides from a layout file: shell binary, extra
+/// environment variables, and working directory.  All fields are `None`
+/// / empty when spawning a regular (non-layout) pane.
+pub struct PtyTabConfig<'a> {
+    /// Working directory for the child process.
+    pub cwd: Option<&'a Path>,
+    /// Shell executable override (replaces the global `--shell` / default shell).
+    pub shell_override: Option<&'a str>,
+    /// Extra environment variables to set on the child process.
+    pub extra_env: Option<&'a std::collections::HashMap<String, String>>,
+    /// Recording handle for FREC v2 recording (None if not recording).
+    pub recording_handle: Option<RecordingHandle>,
+    /// Pane ID used in FREC v2 recording event payloads.
+    pub recording_pane_id: u32,
 }
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
@@ -86,20 +110,22 @@ pub struct TabChannels {
 ///
 /// Returns an error if `TerminalEmulator::new` fails (e.g. the shell
 /// cannot be started).
-// Constructor-like function: all parameters are required to set up the PTY session.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty_tab(
     args: &Args,
     scrollback_limit: usize,
     theme: &'static freminal_common::themes::ThemePalette,
     repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
     initial_size: FreminalTerminalSize,
-    recording_handle: Option<RecordingHandle>,
-    recording_pane_id: u32,
-    cwd: Option<&Path>,
+    tab_cfg: PtyTabConfig<'_>,
 ) -> Result<TabChannels> {
-    let (mut terminal, pty_read_rx) =
-        TerminalEmulator::new(args, Some(scrollback_limit), initial_size, cwd)?;
+    let (mut terminal, pty_read_rx) = TerminalEmulator::new(
+        args,
+        Some(scrollback_limit),
+        initial_size,
+        tab_cfg.cwd,
+        tab_cfg.extra_env,
+        tab_cfg.shell_override,
+    )?;
 
     // Apply the configured theme so all snapshots carry the correct palette.
     terminal.internal.handler.set_theme(theme);
@@ -114,6 +140,7 @@ pub fn spawn_pty_tab(
     let echo_off = terminal
         .echo_off_atomic()
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let child_pid = terminal.child_pid();
 
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
@@ -134,8 +161,8 @@ pub fn spawn_pty_tab(
         arc_swap,
         repaint_handle_pty,
         pty_dead_tx,
-        recording_handle,
-        recording_pane_id,
+        tab_cfg.recording_handle,
+        tab_cfg.recording_pane_id,
     );
 
     Ok(TabChannels {
@@ -147,6 +174,7 @@ pub fn spawn_pty_tab(
         search_buffer_rx,
         pty_dead_rx,
         echo_off,
+        child_pid,
     })
 }
 

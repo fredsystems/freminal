@@ -45,6 +45,7 @@ fn main() {
     let config = WindowConfig {
         title: "Hello freminal-windowing".to_owned(),
         inner_size: Some((800, 600)),
+        position: None,
         transparent: false,
         icon: None,
         app_id: Some("freminal-hello".to_owned()),

@@ -64,7 +64,7 @@ use freminal_common::{args::Args, config, config::load_config, themes};
 use freminal_terminal_emulator::recording::{
     RecordingHandle, RecordingMetadata, TopologySnapshot, start_recording,
 };
-use gui::pty::spawn_pty_tab;
+use gui::pty::{PtyTabConfig, spawn_pty_tab};
 
 use clap::Parser;
 
@@ -124,9 +124,13 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
             pixel_width: 0,
             pixel_height: 0,
         },
-        recording_handle.clone(),
-        0, // recording pane ID for initial pane
-        None,
+        PtyTabConfig {
+            cwd: None,
+            shell_override: None,
+            extra_env: None,
+            recording_handle: recording_handle.clone(),
+            recording_pane_id: 0,
+        },
     )?;
 
     let config_path = args.config.clone();
@@ -147,6 +151,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         title_stack: Vec::new(),
         view_state: gui::view_state::ViewState::new(),
         echo_off: channels.echo_off,
+        child_pid: channels.child_pid,
         render_state: gui::terminal::new_render_state(Arc::clone(&window_post)),
         render_cache: gui::terminal::PaneRenderCache::new(),
     };
