@@ -69,6 +69,9 @@ impl SettingsTab {
 /// fonts, etc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsAction {
+    /// The user clicked the delete button next to a layout in the library.
+    /// The contained path is the layout file to delete.
+    DeleteLayout(std::path::PathBuf),
     /// No action this frame (modal still open or closed without applying).
     None,
     /// The user clicked Apply — the new config has been saved to disk and
@@ -183,6 +186,11 @@ pub struct SettingsModal {
     /// Updated by the caller before opening or each frame via
     /// [`Self::set_discovered_layouts`].
     pub discovered_layouts: Vec<freminal_common::layout::LayoutSummary>,
+
+    /// Set by `show_startup_tab` when the user clicks a delete button next to
+    /// a layout.  Consumed by `show_standalone` / `show` which return it as
+    /// `SettingsAction::DeleteLayout`.
+    pending_delete_layout: Option<std::path::PathBuf>,
 }
 
 impl SettingsModal {
@@ -205,6 +213,7 @@ impl SettingsModal {
             preview_registered: None,
             key_recording: KeyRecordingState::Idle,
             discovered_layouts: Vec::new(),
+            pending_delete_layout: None,
         }
     }
 
@@ -342,6 +351,10 @@ impl SettingsModal {
         });
 
         // Revert / preview logic (same as show())
+        if let Some(path) = self.pending_delete_layout.take() {
+            return SettingsAction::DeleteLayout(path);
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -470,6 +483,10 @@ impl SettingsModal {
 
         // If the modal just closed (Cancel or X) without Apply, revert any
         // previewed settings to their originals.
+        if let Some(path) = self.pending_delete_layout.take() {
+            return SettingsAction::DeleteLayout(path);
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -1476,6 +1493,26 @@ impl SettingsModal {
                                 if let Some(ref desc) = layout.description {
                                     ui.label(egui::RichText::new(format!("— {desc}")).weak());
                                 }
+                                // Right-align the delete button.
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("Delete").color(
+                                                        egui::Color32::from_rgb(220, 80, 80),
+                                                    ),
+                                                )
+                                                .small(),
+                                            )
+                                            .on_hover_text("Delete this layout file")
+                                            .clicked()
+                                        {
+                                            self.pending_delete_layout = Some(layout.path.clone());
+                                        }
+                                    },
+                                );
                             });
                             ui.label(
                                 egui::RichText::new(layout.path.display().to_string())

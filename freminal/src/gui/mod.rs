@@ -1369,6 +1369,16 @@ impl FreminalGui {
             SettingsAction::RevertTheme(_, _)
             | SettingsAction::PreviewTheme(_)
             | SettingsAction::None => {}
+            SettingsAction::DeleteLayout(path) => {
+                if let Err(e) = std::fs::remove_file(path) {
+                    error!("Failed to delete layout file '{}': {e}", path.display());
+                }
+                // Refresh the layout list regardless (file may already be gone).
+                self.discovered_layouts = freminal_common::config::layout_library_dir()
+                    .map(|dir| freminal_common::layout::discover_layouts(&dir))
+                    .unwrap_or_default();
+                self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
+            }
         }
     }
 
@@ -2270,6 +2280,14 @@ impl freminal_windowing::App for FreminalGui {
             };
 
             let mut all_deferred_actions = Vec::new();
+
+            // Floating "Save Layout" name-entry prompt.  Shown whenever the
+            // user clicked "Save Layout" in the Layouts menu.  Returns true
+            // exactly once (the frame the user confirms), at which point we
+            // enqueue the SaveLayout action for dispatch.
+            if self.show_save_layout_prompt(ctx) {
+                all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
+            }
 
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;

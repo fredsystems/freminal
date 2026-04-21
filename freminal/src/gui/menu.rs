@@ -128,70 +128,38 @@ impl super::FreminalGui {
     fn show_layouts_menu(
         &mut self,
         ui: &mut egui::Ui,
-        win: &mut PerWindowState,
-        window_id: super::WindowId,
+        _win: &mut PerWindowState,
+        _window_id: super::WindowId,
     ) {
-        if self.pending_save_layout.is_some() {
-            // Inline name-entry prompt: show a text edit and Save/Cancel buttons.
-            ui.label("Layout name:");
-            // Work with a local copy to avoid a long-lived mutable borrow of
-            // `self.pending_save_layout` that would block the closures below.
-            let mut name_buf = self.pending_save_layout.clone().unwrap_or_default();
-            let response = ui.text_edit_singleline(&mut name_buf);
-            // Write the updated text back.
-            self.pending_save_layout = Some(name_buf.clone());
-            // Auto-focus the text field the first time it appears.
-            response.request_focus();
+        if ui
+            .add(self.menu_button_for("Save Layout", KeyAction::SaveLayout))
+            .clicked()
+        {
+            // Open the floating name-entry prompt (rendered in update() via
+            // show_save_layout_prompt) and close the dropdown.
+            self.pending_save_layout = Some(String::new());
+            ui.close();
+        }
 
-            let can_save = !name_buf.is_empty();
-            let enter_pressed =
-                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(can_save, egui::Button::new("Save"))
-                    .clicked()
-                    || (enter_pressed && can_save)
-                {
-                    self.dispatch_deferred_action(KeyAction::SaveLayout, win, window_id);
-                    ui.close();
-                }
-                if ui.button("Cancel").clicked() {
-                    self.pending_save_layout = None;
-                    ui.close();
-                }
-            });
-        } else {
-            if ui
-                .add(self.menu_button_for("Save Layout", KeyAction::SaveLayout))
-                .clicked()
-            {
-                // Open the inline name prompt instead of saving immediately.
-                self.pending_save_layout = Some(String::new());
-            }
-
-            if !self.discovered_layouts.is_empty() {
-                ui.separator();
-                // Clone to avoid holding an immutable borrow of `self` while
-                // the loop body needs `&mut self`.
-                let layouts = self.discovered_layouts.clone();
-                for summary in &layouts {
-                    if ui.button(&summary.name).clicked() {
-                        match freminal_common::layout::Layout::from_file(&summary.path).and_then(
-                            |l| {
-                                l.validate()?;
-                                l.resolve()
-                            },
-                        ) {
-                            Ok(resolved) => {
-                                self.pending_load_layout = Some(resolved);
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to load layout '{}': {e}", summary.name);
-                            }
+        if !self.discovered_layouts.is_empty() {
+            ui.separator();
+            // Clone to avoid holding an immutable borrow of `self` while
+            // the loop body needs `&mut self`.
+            let layouts = self.discovered_layouts.clone();
+            for summary in &layouts {
+                if ui.button(&summary.name).clicked() {
+                    match freminal_common::layout::Layout::from_file(&summary.path).and_then(|l| {
+                        l.validate()?;
+                        l.resolve()
+                    }) {
+                        Ok(resolved) => {
+                            self.pending_load_layout = Some(resolved);
                         }
-                        ui.close();
+                        Err(e) => {
+                            tracing::error!("Failed to load layout '{}': {e}", summary.name);
+                        }
                     }
+                    ui.close();
                 }
             }
         }
@@ -436,5 +404,74 @@ impl super::FreminalGui {
         });
 
         action
+    }
+
+    /// Show the floating "Save Layout" name-entry prompt.
+    ///
+    /// Rendered every frame when `pending_save_layout` is `Some`.  Returns
+    /// `true` exactly once — on the frame when the user confirms the save —
+    /// which the caller should use to dispatch `KeyAction::SaveLayout`.
+    ///
+    /// The prompt is dismissed (setting `pending_save_layout` back to `None`)
+    /// on both Save and Cancel.
+    pub(super) fn show_save_layout_prompt(&mut self, ctx: &egui::Context) -> bool {
+        if self.pending_save_layout.is_none() {
+            return false;
+        }
+
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        egui::Window::new("Save Layout")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Enter a name for this layout:");
+                ui.add_space(4.0);
+
+                let mut name_buf = self.pending_save_layout.clone().unwrap_or_default();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut name_buf)
+                        .hint_text("e.g. dev, work, personal")
+                        .desired_width(240.0),
+                );
+                // Keep the text field focused every frame so the user can
+                // start typing immediately without clicking.
+                response.request_focus();
+                self.pending_save_layout = Some(name_buf.clone());
+
+                let can_save = !name_buf.is_empty();
+                // Confirm on Enter (whether focus was lost by Enter or not).
+                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save"))
+                        .clicked()
+                        || (enter_pressed && can_save)
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancelled = true;
+                    }
+                });
+            });
+
+        if confirmed || cancelled {
+            self.pending_save_layout = if confirmed {
+                // Leave the name in place so `dispatch_deferred_action` can
+                // read it via `pending_save_layout.take()`.
+                self.pending_save_layout.clone()
+            } else {
+                None
+            };
+        }
+
+        confirmed
     }
 }
