@@ -138,6 +138,7 @@ impl super::FreminalGui {
             // Open the floating name-entry prompt (rendered in update() via
             // show_save_layout_prompt) and close the dropdown.
             self.pending_save_layout = Some(String::new());
+            self.save_layout_prompt_just_opened = true;
             ui.close();
         }
 
@@ -436,9 +437,13 @@ impl super::FreminalGui {
                         .hint_text("e.g. dev, work, personal")
                         .desired_width(240.0),
                 );
-                // Keep the text field focused every frame so the user can
-                // start typing immediately without clicking.
-                response.request_focus();
+                // Request focus only on the first frame so the user can start
+                // typing immediately, but clicking elsewhere (e.g. the Save or
+                // Cancel button) is not overridden on subsequent frames.
+                if self.save_layout_prompt_just_opened {
+                    response.request_focus();
+                    self.save_layout_prompt_just_opened = false;
+                }
                 self.pending_save_layout = Some(name_buf.clone());
 
                 let can_save = !name_buf.is_empty();

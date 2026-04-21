@@ -207,6 +207,9 @@ struct FreminalGui {
     /// The string holds the name being typed; an empty string is a valid
     /// initial state (user hasn't typed yet).
     pending_save_layout: Option<String>,
+    /// True only on the first frame after the save-layout prompt opens.
+    /// Used to focus the text field exactly once instead of every frame.
+    save_layout_prompt_just_opened: bool,
 }
 
 impl FreminalGui {
@@ -288,6 +291,7 @@ impl FreminalGui {
                 .unwrap_or_default(),
             pending_load_layout: None,
             pending_save_layout: None,
+            save_layout_prompt_just_opened: false,
         }
     }
 
@@ -2292,7 +2296,7 @@ impl freminal_windowing::App for FreminalGui {
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
-            let ui_overlay_open = any_menu_open;
+            let ui_overlay_open = any_menu_open || self.pending_save_layout.is_some();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
