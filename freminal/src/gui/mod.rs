@@ -202,6 +202,11 @@ struct FreminalGui {
     ///
     /// `None` when no layout application is pending.
     pending_load_layout: Option<freminal_common::layout::ResolvedLayout>,
+
+    /// When `Some`, the Layouts menu is showing an inline name-entry prompt.
+    /// The string holds the name being typed; an empty string is a valid
+    /// initial state (user hasn't typed yet).
+    pending_save_layout: Option<String>,
 }
 
 impl FreminalGui {
@@ -282,6 +287,7 @@ impl FreminalGui {
                 .map(|dir| freminal_common::layout::discover_layouts(&dir))
                 .unwrap_or_default(),
             pending_load_layout: None,
+            pending_save_layout: None,
         }
     }
 
@@ -918,17 +924,31 @@ impl FreminalGui {
     /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]
     /// and write it to `path` in TOML format.
     ///
+    /// `extra_win` should be `Some(win)` when called during `update()`, because
+    /// the current window has been removed from `self.windows` for the duration
+    /// of the frame.  Pass `None` when called outside `update()` (e.g. from
+    /// `auto_save_session` in `on_close_requested`) where all windows are still
+    /// in `self.windows`.
+    ///
+    /// `name` is the human-readable name for the layout; if empty the path
+    /// file stem is used as a fallback.
+    ///
     /// # Errors
     ///
     /// Returns an error if the layout cannot be serialised or the file cannot be written.
-    pub fn save_layout(&self, path: &std::path::Path) -> anyhow::Result<()> {
+    pub fn save_layout(
+        &self,
+        path: &std::path::Path,
+        name: &str,
+        extra_win: Option<&PerWindowState>,
+    ) -> anyhow::Result<()> {
         use freminal_common::layout::{Layout, LayoutMeta, LayoutTab, LayoutWindow};
 
         let mut windows: Vec<LayoutWindow> = Vec::new();
 
-        for win in self.windows.values() {
+        // Helper closure: build a `LayoutWindow` from any `PerWindowState`.
+        let build_window = |win: &PerWindowState| {
             let mut tabs: Vec<LayoutTab> = Vec::new();
-
             for (tab_idx, tab) in win.tabs.iter().enumerate() {
                 let panes = tab
                     .pane_tree
@@ -939,20 +959,33 @@ impl FreminalGui {
                     panes,
                 });
             }
-
-            windows.push(LayoutWindow {
+            LayoutWindow {
                 size: None,
                 position: None,
                 monitor: None,
                 tabs,
-            });
+            }
+        };
+
+        // If a current window was extracted from self.windows, include it first.
+        if let Some(win) = extra_win {
+            windows.push(build_window(win));
         }
 
-        let name = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+        // Then all other windows (or all windows when extra_win is None).
+        for win in self.windows.values() {
+            windows.push(build_window(win));
+        }
+
+        let layout_name = if name.is_empty() {
+            path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+        } else {
+            Some(name.to_owned())
+        };
 
         let layout = Layout {
             layout: LayoutMeta {
-                name,
+                name: layout_name,
                 description: None,
                 variables: std::collections::HashMap::new(),
             },
@@ -1359,7 +1392,7 @@ impl FreminalGui {
             error!("auto_save_session: cannot create layout library dir: {e}");
             return;
         }
-        match self.save_layout(&path) {
+        match self.save_layout(&path, "Last Session", None) {
             Ok(()) => {
                 tracing::info!("Session auto-saved to {}", path.display());
             }

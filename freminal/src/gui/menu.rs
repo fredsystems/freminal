@@ -131,33 +131,67 @@ impl super::FreminalGui {
         win: &mut PerWindowState,
         window_id: super::WindowId,
     ) {
-        if ui
-            .add(self.menu_button_for("Save Layout", KeyAction::SaveLayout))
-            .clicked()
-        {
-            self.dispatch_deferred_action(KeyAction::SaveLayout, win, window_id);
-            ui.close();
-        }
+        if self.pending_save_layout.is_some() {
+            // Inline name-entry prompt: show a text edit and Save/Cancel buttons.
+            ui.label("Layout name:");
+            // Work with a local copy to avoid a long-lived mutable borrow of
+            // `self.pending_save_layout` that would block the closures below.
+            let mut name_buf = self.pending_save_layout.clone().unwrap_or_default();
+            let response = ui.text_edit_singleline(&mut name_buf);
+            // Write the updated text back.
+            self.pending_save_layout = Some(name_buf.clone());
+            // Auto-focus the text field the first time it appears.
+            response.request_focus();
 
-        if !self.discovered_layouts.is_empty() {
-            ui.separator();
-            // Clone to avoid holding an immutable borrow of `self` while
-            // the loop body needs `&mut self`.
-            let layouts = self.discovered_layouts.clone();
-            for summary in &layouts {
-                if ui.button(&summary.name).clicked() {
-                    match freminal_common::layout::Layout::from_file(&summary.path).and_then(|l| {
-                        l.validate()?;
-                        l.resolve()
-                    }) {
-                        Ok(resolved) => {
-                            self.pending_load_layout = Some(resolved);
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to load layout '{}': {e}", summary.name);
-                        }
-                    }
+            let can_save = !name_buf.is_empty();
+            let enter_pressed =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(can_save, egui::Button::new("Save"))
+                    .clicked()
+                    || (enter_pressed && can_save)
+                {
+                    self.dispatch_deferred_action(KeyAction::SaveLayout, win, window_id);
                     ui.close();
+                }
+                if ui.button("Cancel").clicked() {
+                    self.pending_save_layout = None;
+                    ui.close();
+                }
+            });
+        } else {
+            if ui
+                .add(self.menu_button_for("Save Layout", KeyAction::SaveLayout))
+                .clicked()
+            {
+                // Open the inline name prompt instead of saving immediately.
+                self.pending_save_layout = Some(String::new());
+            }
+
+            if !self.discovered_layouts.is_empty() {
+                ui.separator();
+                // Clone to avoid holding an immutable borrow of `self` while
+                // the loop body needs `&mut self`.
+                let layouts = self.discovered_layouts.clone();
+                for summary in &layouts {
+                    if ui.button(&summary.name).clicked() {
+                        match freminal_common::layout::Layout::from_file(&summary.path).and_then(
+                            |l| {
+                                l.validate()?;
+                                l.resolve()
+                            },
+                        ) {
+                            Ok(resolved) => {
+                                self.pending_load_layout = Some(resolved);
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to load layout '{}': {e}", summary.name);
+                            }
+                        }
+                        ui.close();
+                    }
                 }
             }
         }
