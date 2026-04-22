@@ -5,7 +5,7 @@
 
 use egui;
 use freminal_terminal_emulator::io::InputEvent;
-use tracing::{error, trace};
+use tracing::{error, trace, warn};
 
 use super::window::PerWindowState;
 
@@ -19,8 +19,10 @@ impl PerWindowState {
     pub(super) fn switch_to_tab_n(&mut self, index: usize) {
         if let Err(e) = self.tabs.switch_to(index) {
             trace!("Cannot switch to tab {index}: {e}");
+        } else if let Some(pane) = self.tabs.active_tab_mut().active_pane_mut() {
+            pane.bell_active = false;
         } else {
-            self.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+            warn!("switch_to_tab_n: active tab has no active pane");
         }
     }
 
@@ -39,7 +41,11 @@ impl PerWindowState {
     }
 
     pub(super) fn apply_zoom(&mut self, delta: f32, base_font_size: f32) {
-        let vs = &mut self.tabs.active_tab_mut().active_pane_mut().view_state;
+        let Some(pane) = self.tabs.active_tab_mut().active_pane_mut() else {
+            warn!("apply_zoom: active tab has no active pane");
+            return;
+        };
+        let vs = &mut pane.view_state;
         vs.adjust_zoom(base_font_size, delta);
         let effective = vs.effective_font_size(base_font_size);
         self.terminal_widget.apply_font_zoom(effective);
@@ -174,8 +180,10 @@ impl super::FreminalGui {
             super::TabBarAction::SwitchTo(i) => {
                 if let Err(e) = win.tabs.switch_to(i) {
                     error!("Failed to switch tab: {e}");
+                } else if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    pane.bell_active = false;
                 } else {
-                    win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                    warn!("TabBarAction::SwitchTo: active tab has no active pane");
                 }
             }
             super::TabBarAction::Close(i) => win.close_tab(i),
@@ -213,11 +221,19 @@ impl super::FreminalGui {
             KeyAction::CloseTab => {}
             KeyAction::NextTab => {
                 win.tabs.next_tab();
-                win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    pane.bell_active = false;
+                } else {
+                    warn!("NextTab: active tab has no active pane");
+                }
             }
             KeyAction::PrevTab => {
                 win.tabs.prev_tab();
-                win.tabs.active_tab_mut().active_pane_mut().bell_active = false;
+                if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    pane.bell_active = false;
+                } else {
+                    warn!("PrevTab: active tab has no active pane");
+                }
             }
             KeyAction::SwitchToTab1 => win.switch_to_tab_n(0),
             KeyAction::SwitchToTab2 => win.switch_to_tab_n(1),
@@ -233,25 +249,27 @@ impl super::FreminalGui {
             KeyAction::ZoomIn => win.apply_zoom(1.0, self.config.font.size),
             KeyAction::ZoomOut => win.apply_zoom(-1.0, self.config.font.size),
             KeyAction::ZoomReset => {
-                win.tabs
-                    .active_tab_mut()
-                    .active_pane_mut()
-                    .view_state
-                    .reset_zoom();
+                if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    pane.view_state.reset_zoom();
+                } else {
+                    warn!("ZoomReset: active tab has no active pane");
+                }
                 win.terminal_widget.apply_font_zoom(self.config.font.size);
                 win.invalidate_all_pane_atlases();
             }
             KeyAction::OpenSearch => {
-                win.tabs
-                    .active_tab_mut()
-                    .active_pane_mut()
-                    .view_state
-                    .search_state
-                    .is_open = true;
+                if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    pane.view_state.search_state.is_open = true;
+                } else {
+                    warn!("OpenSearch: active tab has no active pane");
+                }
             }
             KeyAction::SearchNext => {
                 let tab = win.tabs.active_tab_mut();
-                let pane = tab.active_pane_mut();
+                let Some(pane) = tab.active_pane_mut() else {
+                    warn!("SearchNext: active tab has no active pane");
+                    return;
+                };
                 pane.view_state.search_state.next_match();
                 let snap = pane.arc_swap.load();
                 super::search::scroll_to_match_and_send(
@@ -262,7 +280,10 @@ impl super::FreminalGui {
             }
             KeyAction::SearchPrev => {
                 let tab = win.tabs.active_tab_mut();
-                let pane = tab.active_pane_mut();
+                let Some(pane) = tab.active_pane_mut() else {
+                    warn!("SearchPrev: active tab has no active pane");
+                    return;
+                };
                 pane.view_state.search_state.prev_match();
                 let snap = pane.arc_swap.load();
                 super::search::scroll_to_match_and_send(
@@ -273,7 +294,10 @@ impl super::FreminalGui {
             }
             KeyAction::PrevCommand => {
                 let tab = win.tabs.active_tab_mut();
-                let pane = tab.active_pane_mut();
+                let Some(pane) = tab.active_pane_mut() else {
+                    warn!("PrevCommand: active tab has no active pane");
+                    return;
+                };
                 let snap = pane.arc_swap.load();
                 if let Some(offset) =
                     super::search::jump_to_prev_command(&mut pane.view_state, &snap)
@@ -284,7 +308,10 @@ impl super::FreminalGui {
             }
             KeyAction::NextCommand => {
                 let tab = win.tabs.active_tab_mut();
-                let pane = tab.active_pane_mut();
+                let Some(pane) = tab.active_pane_mut() else {
+                    warn!("NextCommand: active tab has no active pane");
+                    return;
+                };
                 let snap = pane.arc_swap.load();
                 if let Some(offset) =
                     super::search::jump_to_next_command(&mut pane.view_state, &snap)

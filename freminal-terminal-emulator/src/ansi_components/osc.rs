@@ -119,7 +119,10 @@ impl AnsiOscParser {
                 ParserOutcome::Continue
             }
             AnsiOscParserState::Finished | AnsiOscParserState::InvalidFinished => {
-                unreachable!()
+                // Guarded by the early-return at the top of `push`, but surface
+                // explicitly as an invalid outcome rather than panicking if the
+                // invariant ever breaks.
+                ParserOutcome::Invalid("OSC parser received byte after termination".to_string())
             }
             AnsiOscParserState::Invalid => {
                 if is_osc_terminator(&self.params) {

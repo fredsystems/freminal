@@ -156,22 +156,25 @@ impl GlState {
     }
 }
 
-/// Pick the GL config with the most samples.
+/// Pick the GL config with the highest multisample count.
 ///
-/// # Panics
-///
-/// Panics if the iterator is empty. This should never happen — glutin only
-/// calls the picker when at least one config matches the template. If this
-/// panics, the GL driver/display is broken.
-#[allow(clippy::expect_used)]
-fn pick_best_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
-    configs
-        .reduce(|accum, c| {
-            if c.num_samples() > accum.num_samples() {
-                c
-            } else {
-                accum
-            }
-        })
-        .expect("glutin returned zero GL configs")
+/// If the iterator is empty — which should be impossible given that a prior
+/// `DisplayBuilder` step succeeded — this logs a diagnostic and exits the
+/// process rather than panicking, because the glutin API forces the closure
+/// to return a `Config` (no error channel available).
+fn pick_best_config(mut configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
+    let Some(first) = configs.next() else {
+        // Unreachable under glutin's documented contract (successful display
+        // build guarantees at least one config). If the invariant ever breaks,
+        // exit with a diagnostic rather than panicking.
+        tracing::error!("glutin returned zero GL configs; cannot continue");
+        std::process::exit(1);
+    };
+    configs.fold(first, |accum, c| {
+        if c.num_samples() > accum.num_samples() {
+            c
+        } else {
+            accum
+        }
+    })
 }

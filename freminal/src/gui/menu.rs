@@ -110,8 +110,7 @@ impl super::FreminalGui {
                     .tabs
                     .active_tab()
                     .active_pane()
-                    .echo_off
-                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed))
             {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -307,8 +306,7 @@ impl super::FreminalGui {
                 let is_echo_off = self.config.security.password_indicator
                     && tab
                         .active_pane()
-                        .echo_off
-                        .load(std::sync::atomic::Ordering::Relaxed);
+                        .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed));
 
                 let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
                 if !matches!(tab_action, TabBarAction::None) {
@@ -347,13 +345,12 @@ impl super::FreminalGui {
     ) -> TabBarAction {
         let mut action = TabBarAction::None;
         let pane = tab.active_pane();
-        let label = if pane.title.is_empty() {
-            "Shell"
-        } else {
-            &pane.title
+        let label = match pane {
+            Some(p) if !p.title.is_empty() => p.title.as_str(),
+            _ => "Shell",
         };
 
-        let has_bell = pane.bell_active && !is_active;
+        let has_bell = pane.is_some_and(|p| p.bell_active) && !is_active;
 
         // Build the display label: prepend a lock indicator when echo is disabled
         // (password prompt active), and a bell indicator when the tab has an

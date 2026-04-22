@@ -1090,6 +1090,7 @@ pub(super) fn extract_atlas_rect(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use freminal_common::buffer_states::cursor::CursorPos;
     use freminal_common::buffer_states::fonts::FontDecorationFlags;
@@ -1528,7 +1529,7 @@ mod tests {
         build_foreground_instances(
             &[],
             &mut GlyphAtlas::default(),
-            &FontManager::new(&Config::default(), 1.0),
+            &FontManager::new(&Config::default(), 1.0).unwrap(),
             16,
             13.0,
             &FgRenderOptions::all_visible(None),
@@ -1540,7 +1541,7 @@ mod tests {
 
     #[test]
     fn fg_instances_produces_data_for_ascii_glyphs() {
-        let mut fm = FontManager::new(&Config::default(), 1.0);
+        let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
         let mut atlas = GlyphAtlas::new(256, 1024);
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;

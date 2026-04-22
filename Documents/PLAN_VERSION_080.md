@@ -78,23 +78,24 @@ semantics"). The 5,741-line integration test file is similarly misplaced.
 - **70.C.5** — Run full verification suite; run all benchmarks to confirm zero perf regression
   (pure code movement).
 
-#### 70.D — HIGH: Eliminate Production Panic Sites
+#### 70.D — HIGH: Eliminate Production Panic Sites ✅ COMPLETE (2026-04-22)
 
 `agents.md` forbids `unwrap`/`expect` and requires panics never to enforce invariants. All
 surviving production panic sites must become typed errors.
 
-- **70.D.1** — `freminal/src/gui/tabs.rs:87,100` — `active_pane()` panics. Return
-  `Option<&Pane>` or `Result<&Pane, TabError>` and propagate.
-- **70.D.2** — `freminal-terminal-emulator/src/ansi_components/osc.rs:122` — replace
-  `unreachable!()` with a typed `OscHandlerError` variant.
-- **70.D.3** — `freminal-terminal-emulator/src/ansi_components/csi.rs:184` — replace
-  `unreachable!()` with a typed `CsiHandlerError` variant.
-- **70.D.4** — `freminal/src/gui/font_manager.rs` lines 814, 816, 818, 820, 901, 905, 909,
-  1130 — replace each `unreachable!()` with a typed `FontManagerError` variant. This file is
-  in the binary crate so `anyhow` is permitted, but prefer typed errors for matchability.
-- **70.D.5** — `freminal-windowing/src/gl_context.rs:176` — remove the `expect` + `allow`;
-  return `GlInitError::NoSuitableConfig`. Surface to the user via a dialog at startup instead
-  of panicking.
+- **70.D.1** ✅ — `freminal/src/gui/tabs.rs` — `active_pane()` / `active_pane_mut()` now return
+  `Option<&Pane>` / `Option<&mut Pane>`; 27 non-test + 38 test callers updated across
+  `tabs.rs`, `actions.rs`, `menu.rs`, `mod.rs`.
+- **70.D.2** ✅ — `osc.rs:122` — `unreachable!()` replaced with `ParserOutcome::Invalid`.
+- **70.D.3** ✅ — `csi.rs:184` — `unreachable!()` replaced with `ParserOutcome::Invalid`.
+- **70.D.4** ✅ — `font_manager.rs` — introduced typed `FontManagerError` (thiserror) with
+  variants `BundledFontCorrupt`, `ReparseFailed`, `FontRefUnavailable`. All 8 `unreachable!()`
+  sites eliminated. `FontManager::new/rebuild/set_font_size/update_pixels_per_point` now
+  return `Result`. Cascade through `FreminalTerminalWidget::new`. Runtime-path methods
+  (`sync_pixels_per_point`, `apply_config_changes{,_no_ctx}`, `apply_font_zoom`) log+exit(1)
+  on error. Unused `impl Default for FontManager` removed. Introduced private `CellMetrics`
+  struct to avoid type_complexity lint.
+- **70.D.5** ✅ — `gl_context.rs:176` — prime-and-fold pattern + log+exit(1).
 
 #### 70.E — HIGH: Typed Errors for GPU Renderer
 

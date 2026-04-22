@@ -687,12 +687,13 @@ fn build_tofu_glyphs(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use freminal_common::config::Config;
 
     /// Helper: create a default `FontManager` for tests.
     fn test_font_manager() -> FontManager {
-        FontManager::new(&Config::default(), 1.0)
+        FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
     /// Helper: create a simple format tag covering a range.

@@ -353,7 +353,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("shape_visible", label), |b| {
             b.iter_batched(
                 || {
-                    let fm = FontManager::new(&Config::default(), 1.0);
+                    let fm = FontManager::new(&Config::default(), 1.0).unwrap();
                     let cache = ShapingCache::new();
                     (fm, cache)
                 },
@@ -377,7 +377,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
 
     // Also benchmark cache hit path (second call with same data).
     group.bench_function("shape_visible_cache_hit", |b| {
-        let mut fm = FontManager::new(&Config::default(), 1.0);
+        let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
         let mut cache = ShapingCache::new();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
@@ -416,7 +416,7 @@ fn build_shaped_lines_for_size(
     FontManager,
 ) {
     let (chars, tags) = ligature_heavy_visible_chars(width, height);
-    let mut fm = FontManager::new(&Config::default(), 1.0);
+    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;

@@ -44,6 +44,7 @@ use egui_glow::CallbackFn;
 use glow::HasContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tracing::error;
 
 ///
 /// The scrollbar is shown when the user is actively scrolled back
@@ -779,8 +780,17 @@ pub struct FreminalTerminalWidget {
 impl FreminalTerminalWidget {
     /// Create a new `FreminalTerminalWidget`, loading fonts and initialising
     /// shared rendering resources from the provided config.
-    #[must_use]
-    pub fn new(ctx: &Context, config: &Config) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`crate::gui::font_manager::FontManagerError`] from
+    /// [`FontManager::new`].  Such errors indicate build-time packaging or
+    /// memory corruption issues and should be treated as fatal by the binary
+    /// (e.g. log and exit from `main()`).
+    pub fn new(
+        ctx: &Context,
+        config: &Config,
+    ) -> Result<Self, crate::gui::font_manager::FontManagerError> {
         let font_config = FontConfig {
             size: config.font.size,
             user_font: config.font.family.clone(),
@@ -790,8 +800,8 @@ impl FreminalTerminalWidget {
 
         let pixels_per_point = ctx.pixels_per_point();
 
-        Self {
-            font_manager: FontManager::new(config, pixels_per_point),
+        Ok(Self {
+            font_manager: FontManager::new(config, pixels_per_point)?,
             ligatures: config.font.ligatures,
             cursor_trail: config.cursor.trail,
             cursor_trail_duration: Duration::from_millis(u64::from(
@@ -799,7 +809,7 @@ impl FreminalTerminalWidget {
             )),
             base_font_defs,
             egui_fonts_dirty: false,
-        }
+        })
     }
 
     /// Returns the authoritative cell size in integer pixels `(width, height)`.
@@ -859,7 +869,12 @@ impl FreminalTerminalWidget {
     /// **Must be called before [`Self::cell_size`] each frame** so that resize
     /// calculations in `FreminalGui::ui()` use up-to-date metrics.
     pub fn sync_pixels_per_point(&mut self, ppp: f32) -> bool {
-        self.font_manager.update_pixels_per_point(ppp)
+        self.font_manager
+            .update_pixels_per_point(ppp)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager could not recompute metrics for pixels_per_point change: {e}");
+                std::process::exit(1);
+            })
     }
 
     /// Render the terminal for one egui frame and process all pending input.
@@ -1852,7 +1867,13 @@ impl FreminalTerminalWidget {
         new_config: &Config,
     ) -> bool {
         let pixels_per_point = ctx.pixels_per_point();
-        let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
+        let rebuild_result = self
+            .font_manager
+            .rebuild(new_config, pixels_per_point)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager rebuild failed during config apply: {e}");
+                std::process::exit(1);
+            });
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
         self.ligatures = new_config.font.ligatures;
@@ -1889,7 +1910,13 @@ impl FreminalTerminalWidget {
         new_config: &Config,
     ) -> bool {
         let pixels_per_point = self.font_manager.pixels_per_point();
-        let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
+        let rebuild_result = self
+            .font_manager
+            .rebuild(new_config, pixels_per_point)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager rebuild failed during config apply (no-ctx): {e}");
+                std::process::exit(1);
+            });
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
         self.ligatures = new_config.font.ligatures;
@@ -1919,7 +1946,12 @@ impl FreminalTerminalWidget {
     /// resize-detection logic in the render loop (it compares
     /// `available_pixels / cell_size` against `view_state.last_sent_size`).
     pub fn apply_font_zoom(&mut self, effective_size: f32) -> bool {
-        self.font_manager.set_font_size(effective_size)
+        self.font_manager
+            .set_font_size(effective_size)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager could not apply font zoom: {e}");
+                std::process::exit(1);
+            })
     }
 }
 
@@ -2076,7 +2108,7 @@ mod subtask_1_7_tests {
     #[test]
     fn cell_size_from_font_manager_is_nonzero() {
         let config = freminal_common::config::Config::default();
-        let fm = FontManager::new(&config, 1.0);
+        let fm = FontManager::new(&config, 1.0).unwrap();
         let (w, h) = fm.cell_size();
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");

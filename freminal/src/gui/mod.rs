@@ -45,7 +45,7 @@ mod menu;
 mod rendering;
 pub(crate) mod window;
 
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 // ── Layout helpers ────────────────────────────────────────────────────────────
 
@@ -242,12 +242,15 @@ impl FreminalGui {
         // dark/light preference so DECRPM ?2031 responses are correct from the start.
         // OS dark mode is not yet known (no egui context). Assume light mode initially.
         let os_dark_mode = false;
-        if let Err(e) = initial_tab
-            .active_pane()
-            .input_tx
-            .send(InputEvent::ThemeModeUpdate(config.theme.mode, os_dark_mode))
-        {
-            error!("Failed to send initial ThemeModeUpdate to tab: {e}");
+        if let Some(pane) = initial_tab.active_pane() {
+            if let Err(e) = pane
+                .input_tx
+                .send(InputEvent::ThemeModeUpdate(config.theme.mode, os_dark_mode))
+            {
+                error!("Failed to send initial ThemeModeUpdate to tab: {e}");
+            }
+        } else {
+            warn!("initial tab has no active pane when sending ThemeModeUpdate");
         }
 
         // Apply initial background image from config (if set).
@@ -370,8 +373,7 @@ impl FreminalGui {
             .tabs
             .active_tab()
             .active_pane()
-            .view_state
-            .last_sent_size;
+            .map_or((0, 0), |p| p.view_state.last_sent_size);
         let initial_size = if last_cols > 0 && last_rows > 0 {
             FreminalTerminalSize {
                 width: last_cols,
@@ -398,10 +400,7 @@ impl FreminalGui {
             .tabs
             .active_tab()
             .active_pane()
-            .arc_swap
-            .load()
-            .cwd
-            .clone();
+            .and_then(|p| p.arc_swap.load().cwd.clone());
         let cwd_path = pane_cwd.as_deref().map(std::path::Path::new);
 
         match pty::spawn_pty_tab(
@@ -441,11 +440,15 @@ impl FreminalGui {
                 let tab = Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
                 // ?2031 queries return the correct locked/dynamic status.
-                if let Err(e) = tab.active_pane().input_tx.send(InputEvent::ThemeModeUpdate(
-                    self.config.theme.mode,
-                    win.os_dark_mode,
-                )) {
-                    error!("Failed to send ThemeModeUpdate to new tab: {e}");
+                if let Some(active) = tab.active_pane() {
+                    if let Err(e) = active.input_tx.send(InputEvent::ThemeModeUpdate(
+                        self.config.theme.mode,
+                        win.os_dark_mode,
+                    )) {
+                        error!("Failed to send ThemeModeUpdate to new tab: {e}");
+                    }
+                } else {
+                    warn!("new tab has no active pane when sending ThemeModeUpdate");
                 }
                 win.tabs.add_tab(tab);
             }
@@ -468,8 +471,7 @@ impl FreminalGui {
             .tabs
             .active_tab()
             .active_pane()
-            .view_state
-            .last_sent_size;
+            .map_or((0, 0), |p| p.view_state.last_sent_size);
         if last_cols > 0 && last_rows > 0 {
             let cols = match direction {
                 panes::SplitDirection::Horizontal => last_cols / 2,
@@ -526,10 +528,7 @@ impl FreminalGui {
             .tabs
             .active_tab()
             .active_pane()
-            .arc_swap
-            .load()
-            .cwd
-            .clone();
+            .and_then(|p| p.arc_swap.load().cwd.clone());
         let cwd_path = pane_cwd.as_deref().map(std::path::Path::new);
 
         // Spawn the new PTY before touching `win.tabs` so there is no borrow conflict.
@@ -1204,7 +1203,11 @@ impl FreminalGui {
         let _ = repaint_handle.set((proxy, window_id));
         let window_post = Arc::new(Mutex::new(renderer::WindowPostRenderer::new()));
 
-        let terminal_widget = terminal::FreminalTerminalWidget::new(ctx, &self.config);
+        let terminal_widget = terminal::FreminalTerminalWidget::new(ctx, &self.config)
+            .unwrap_or_else(|e| {
+                tracing::error!("fatal: failed to initialise terminal widget (font manager): {e}");
+                std::process::exit(1);
+            });
         let (cell_w, cell_h) = terminal_widget.cell_size();
         let initial_size = Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
 
@@ -1605,7 +1608,13 @@ impl freminal_windowing::App for FreminalGui {
 
             // Re-create terminal widget with real egui context for correct
             // font registration and DPI scaling.
-            let terminal_widget = FreminalTerminalWidget::new(ctx, &self.config);
+            let terminal_widget =
+                FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
+                    tracing::error!(
+                        "fatal: failed to initialise terminal widget (font manager): {e}"
+                    );
+                    std::process::exit(1);
+                });
 
             // Send an immediate resize to the PTY so the shell starts at the
             // correct dimensions instead of the pre-spawn defaults (100x100).
@@ -1757,7 +1766,13 @@ impl freminal_windowing::App for FreminalGui {
 
             let window_post = Arc::new(Mutex::new(WindowPostRenderer::new()));
 
-            let terminal_widget = FreminalTerminalWidget::new(ctx, &self.config);
+            let terminal_widget =
+                FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
+                    tracing::error!(
+                        "fatal: failed to initialise terminal widget (font manager): {e}"
+                    );
+                    std::process::exit(1);
+                });
             let (cell_w, cell_h) = terminal_widget.cell_size();
             let initial_size =
                 Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
@@ -1804,11 +1819,15 @@ impl freminal_windowing::App for FreminalGui {
                     let tab_id = tabs::TabId::first();
                     let tab = Tab::new(tab_id, pane);
 
-                    if let Err(e) = tab.active_pane().input_tx.send(InputEvent::ThemeModeUpdate(
-                        self.config.theme.mode,
-                        os_dark_mode,
-                    )) {
-                        error!("Failed to send ThemeModeUpdate to new window tab: {e}");
+                    if let Some(active) = tab.active_pane() {
+                        if let Err(e) = active.input_tx.send(InputEvent::ThemeModeUpdate(
+                            self.config.theme.mode,
+                            os_dark_mode,
+                        )) {
+                            error!("Failed to send ThemeModeUpdate to new window tab: {e}");
+                        }
+                    } else {
+                        warn!("new window tab has no active pane when sending ThemeModeUpdate");
                     }
 
                     // Copy shader from config if present.
@@ -2273,18 +2292,25 @@ impl freminal_windowing::App for FreminalGui {
         }
 
         // Load the latest snapshot from the PTY thread — no lock, single atomic load.
-        let snap = win.tabs.active_tab().active_pane().arc_swap.load();
+        let (snap, pane_scroll_offset) = {
+            let Some(active_pane_ref) = win.tabs.active_tab().active_pane() else {
+                warn!("update: active tab has no active pane; skipping render frame");
+                return;
+            };
+            (
+                active_pane_ref.arc_swap.load_full(),
+                active_pane_ref.view_state.scroll_offset,
+            )
+        };
 
         // Sync the GUI's scroll offset from the snapshot.  When new PTY output
         // arrives the PTY thread resets its offset to 0, so the snapshot will
         // carry scroll_offset = 0 even if the GUI previously sent a non-zero
         // value.  Adopting the snapshot's value keeps ViewState in sync.
-        if win.tabs.active_tab().active_pane().view_state.scroll_offset != snap.scroll_offset {
-            win.tabs
-                .active_tab_mut()
-                .active_pane_mut()
-                .view_state
-                .scroll_offset = snap.scroll_offset;
+        if pane_scroll_offset != snap.scroll_offset
+            && let Some(p) = win.tabs.active_tab_mut().active_pane_mut()
+        {
+            p.view_state.scroll_offset = snap.scroll_offset;
         }
 
         // Create a root Ui covering the full available area.  Panels reserve
@@ -2337,8 +2363,9 @@ impl freminal_windowing::App for FreminalGui {
                 .tabs
                 .active_tab()
                 .active_pane()
-                .view_state
-                .effective_font_size(self.config.font.size);
+                .map_or(self.config.font.size, |p| {
+                    p.view_state.effective_font_size(self.config.font.size)
+                });
             let zoom_changed = win.terminal_widget.apply_font_zoom(effective);
 
             // When pixels-per-point or font zoom changes, every pane's GL
@@ -2374,8 +2401,7 @@ impl freminal_windowing::App for FreminalGui {
                 .tabs
                 .active_tab()
                 .active_pane()
-                .view_state
-                .window_focused;
+                .is_some_and(|p| p.view_state.window_focused);
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
                 let is_only_pane = match tab.pane_tree.pane_count() {
@@ -3001,11 +3027,15 @@ impl freminal_windowing::App for FreminalGui {
             // Only issue the viewport command when the title actually changed;
             // calling `send_viewport_cmd` unconditionally every frame triggers
             // an infinite repaint loop (~3 % idle CPU).
-            let active_title = &win.tabs.active_tab().active_pane().title;
+            let active_title = win
+                .tabs
+                .active_tab()
+                .active_pane()
+                .map_or("", |p| p.title.as_str());
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
-                active_title.as_str()
+                active_title
             };
             if window_title != win.last_window_title {
                 window_title.clone_into(&mut win.last_window_title);
