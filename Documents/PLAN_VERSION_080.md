@@ -208,8 +208,20 @@ Executed as a file-by-file sweep so each commit is reviewable in isolation:
   site was replaced with `u32::from(ch)`. Removed the one `#[allow(clippy::cast_possible_truncation)]`
   attribute. No benchmark required — input encoding is not on the hot path (one call per
   keystroke).
-- **70.H.c** — Renderer cluster: `freminal/src/gui/renderer/vertex.rs` (13 casts, 3 allows),
-  `freminal/src/gui/atlas.rs` (13 casts), `freminal/src/gui/renderer/gpu.rs` (2 casts).
+- **70.H.c** ✅ — Renderer cluster: `freminal/src/gui/renderer/vertex.rs` (4 production
+  casts in `extract_atlas_rect`; remaining 8 apparent hits were all in `#[cfg(test)]` or
+  in format-string literals, not real casts), `freminal/src/gui/atlas.rs` (13 production
+  casts across `new`, `blit_glyph`, `evict_shelf`, and `try_grow`), `freminal/src/gui/renderer/gpu.rs`
+  (0 production casts — all grep hits were in `error!` format strings). Introduced a
+  local `usize_from_u32` helper in `atlas.rs` (and an inline closure in `vertex.rs`) using
+  `conv2::ValueFrom` with a `0` fallback and `saturating_mul` for products. Graceful
+  degradation: on hypothetical 32-bit hosts where an atlas coordinate exceeds `usize::MAX`,
+  the bounds-checked slice access in each call site silently declines to blit/copy — no
+  panic path. No benchmark: on 64-bit targets the generated code is identical to the
+  previous `as` casts (`value_from` + `unwrap_or(0)` folds to a no-op), and atlas blit
+  is not exercised by `render_loop_bench.rs` (glyphs are rasterised once on cache miss).
+  The 3 `#[allow(clippy::cast_precision_loss)]` attributes in this cluster all sit in the
+  `#[cfg(test)]` module and are left in place per the workspace test-code exception.
 - **70.H.d** — GUI shaping cluster: `freminal/src/gui/shaping.rs` (12 casts, 8 allows),
   `freminal/src/gui/terminal/input.rs` (11 casts, 3 allows),
   `freminal/src/gui/font_manager.rs` (6 casts, 1 allow),

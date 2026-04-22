@@ -9,7 +9,7 @@
 //! They build flat `Vec<f32>` buffers that are subsequently uploaded to the
 //! GPU by the [`super::gpu`] module.
 
-use conv2::{ApproxFrom, ConvUtil};
+use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, UnderlineStyle};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
@@ -1067,13 +1067,18 @@ pub(super) fn extract_atlas_rect(
     atlas_size: u32,
     rect: &super::super::atlas::DirtyRect,
 ) -> Vec<u8> {
-    let stride = (atlas_size as usize) * 4;
-    let row_bytes = (rect.width as usize) * 4;
-    let mut out = Vec::with_capacity((rect.height as usize) * row_bytes);
+    // `u32 -> usize` is lossless on all 64-bit targets; `value_from` degrades
+    // gracefully on hypothetical 32-bit hosts by returning an empty region
+    // rather than panicking.
+    let usize_from_u32 = |v: u32| usize::value_from(v).unwrap_or(0);
+    let stride = usize_from_u32(atlas_size).saturating_mul(4);
+    let row_bytes = usize_from_u32(rect.width).saturating_mul(4);
+    let height_usize = usize_from_u32(rect.height);
+    let mut out = Vec::with_capacity(height_usize.saturating_mul(row_bytes));
 
     for row in 0..rect.height {
-        let y = (rect.y + row) as usize;
-        let x = rect.x as usize;
+        let y = usize_from_u32(rect.y.saturating_add(row));
+        let x = usize_from_u32(rect.x);
         let offset = y * stride + x * 4;
         let end = offset + row_bytes;
         if end <= pixels.len() {
