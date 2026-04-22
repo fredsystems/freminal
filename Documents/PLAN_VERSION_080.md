@@ -363,32 +363,46 @@ Task 29 is marked complete, but three files are still oversized:
   `RequestSecondaryDeviceAttributes::param`) intentionally left as-is — both
   represent legitimately open-ended numeric namespaces, not a closed mode set.
 
-#### 70.L — MEDIUM: Dead Code Attribute Cleanup
+#### 70.L — MEDIUM: Dead Code Attribute Cleanup ✅
 
-- **70.L.1** — `freminal/src/gui/terminal/mouse.rs:87` — either delete, wire up, or replace
-  the bare `#[allow(dead_code)]` with a `// TODO(task-NN): ...` justification per rule.
-- **70.L.2** — `freminal/src/gui/renderer/gpu.rs:73` — same.
+- **70.L.1** ✅ — `freminal/src/gui/terminal/mouse.rs` — deleted unused
+  `FreminalMousePosition` pixel fields; derived `Eq` on `PreviousMouseState`.
+- **70.L.2** ✅ — `freminal/src/gui/renderer/gpu.rs` — deleted unused `gl_f32_u32`
+  duplicate helper.
 
-#### 70.M — MEDIUM: Extract Duplicated Helpers
+#### 70.M — MEDIUM: Extract Duplicated Helpers ✅
 
-- **70.M.1** — Lift `param_or` (currently duplicated verbatim in
-  `freminal-terminal-emulator/src/ansi_components/csi_commands/decstbm.rs` and
-  `decslpp.rs`) into a shared `csi_commands/util.rs`. Update both call sites.
+- **70.M.1** ✅ — Lifted `param_or` into
+  `freminal-terminal-emulator/src/ansi_components/csi_commands/util.rs`; updated
+  both `decstbm.rs` and `decslpp.rs` call sites.
 
-#### 70.N — MEDIUM: `send_or_log` Helper
+#### 70.N — MEDIUM: `send_or_log` Helper ✅
 
-- **70.N.1** — Introduce a small macro or helper that wraps the 38 repeated
-  `match sender.send(...) { Err(e) => warn!(...) }` blocks. Prefer macro for zero-overhead
-  inlining and to preserve `tracing` span context.
-- **70.N.2** — Apply the helper at every call site.
+- **70.N.1** ✅ — Added `send_or_log!` macro in `freminal-common/src/logging.rs`.
+  Macro form preserves `tracing` span context and avoids closure overhead.
+- **70.N.2** ✅ — Applied at 28 call sites across 12 files. Remaining `.send()`
+  sites were either in tests or had non-standard error handling (e.g. returning
+  `Err` rather than logging-and-continuing) and were intentionally left as-is.
+  Added `#[allow(clippy::too_many_lines)]` on `dispatch_binding_action` — rustfmt
+  expands the macro call sites to multi-line form, pushing the function over the
+  100-line clippy limit; the expansion is mechanical and splitting would harm
+  readability.
 
 #### 70.O — LOW: Convention & Polish
 
-- **70.O.1** — Rename the 27 `get_*` accessor methods in production code to drop the `get_`
-  prefix per Rust convention. Take care around deprecation aliases if any are public.
-- **70.O.2** — Add `#[non_exhaustive]` to semver-sensitive enums: `KeyAction`, `InputEvent`,
-  `WindowCommand`, and any other public enum whose variant set is expected to grow.
-- **70.O.3** — Change public API `collect_text(text: &String)` to take `&str`.
+- **70.O.1** ✅ — Dropped `get_` prefix from 14 accessors (15 impl sites including
+  3 `win_size`); ~400+ call sites updated across the workspace.
+- **70.O.2** ⏭️ **SKIPPED** — `#[non_exhaustive]` provides value only across
+  SemVer boundaries. All `freminal-*` crates are consumed exclusively via
+  `path = "..."` dependencies within this single-repo workspace — there is no
+  external SemVer boundary. Adding `#[non_exhaustive]` would force `_ => { ... }`
+  catch-all arms in workspace-internal matches, which _removes_ the compiler's
+  exhaustiveness check — precisely the diagnostic we rely on when adding new
+  variants. Revisit when Task 84 (scripting layer) exposes a genuine public
+  plugin API with third-party consumers.
+- **70.O.3** ✅ — `collect_text` now takes `&str` instead of `&String`; deref
+  coercion makes this transparent at all non-test call sites. Two test sites
+  updated to pass string literals directly.
 - **70.O.4** — Refactor `build_background_instances` to take a `BackgroundFrame` struct
   rather than 20 positional parameters.
 - **70.O.5** — Add clarifying doc comments to the `Arc<Mutex<WindowPostRenderer>>` and

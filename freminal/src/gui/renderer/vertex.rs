@@ -176,6 +176,30 @@ pub struct MatchHighlight {
     pub is_current: bool,
 }
 
+/// Groups all frame-level rendering state required by [`build_background_instances`].
+///
+/// Passing a struct instead of 18 positional parameters keeps call sites
+/// readable and eliminates the need for `#[allow(clippy::too_many_arguments)]`.
+pub struct BackgroundFrame<'a> {
+    pub shaped_lines: &'a [Arc<ShapedLine>],
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub ascent: f32,
+    pub underline_offset: f32,
+    pub strikeout_offset: f32,
+    pub stroke_size: f32,
+    pub show_cursor: bool,
+    pub cursor_blink_on: bool,
+    pub cursor_pixel_pos: (f32, f32),
+    pub cursor_width_scale: f32,
+    pub cursor_visual_style: &'a CursorVisualStyle,
+    pub selection: Option<(usize, usize, usize, usize)>,
+    pub selection_is_block: bool,
+    pub match_highlights: &'a [MatchHighlight],
+    pub theme: &'a ThemePalette,
+    pub cursor_color_override: Option<(u8, u8, u8)>,
+}
+
 /// Build the two-pass background data: instanced cell BGs + decoration quads.
 ///
 /// Returns `(bg_instances, deco_verts)`:
@@ -192,28 +216,29 @@ pub struct MatchHighlight {
 /// so that cursor-only partial updates can patch just the tail.
 // All parameters are required geometric and style inputs for GPU instance data generation.
 // Inherently large: iterates all shaped lines, resolving background color for every cell.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 pub fn build_background_instances(
-    shaped_lines: &[Arc<ShapedLine>],
-    cell_width: u32,
-    cell_height: u32,
-    ascent: f32,
-    underline_offset: f32,
-    strikeout_offset: f32,
-    stroke_size: f32,
-    show_cursor: bool,
-    cursor_blink_on: bool,
-    cursor_pixel_pos: (f32, f32),
-    cursor_width_scale: f32,
-    cursor_visual_style: &CursorVisualStyle,
-    selection: Option<(usize, usize, usize, usize)>,
-    selection_is_block: bool,
-    match_highlights: &[MatchHighlight],
-    theme: &ThemePalette,
-    cursor_color_override: Option<(u8, u8, u8)>,
+    frame: &BackgroundFrame<'_>,
     instances: &mut Vec<f32>,
     deco: &mut Vec<f32>,
 ) {
+    let shaped_lines = frame.shaped_lines;
+    let cell_width = frame.cell_width;
+    let cell_height = frame.cell_height;
+    let ascent = frame.ascent;
+    let underline_offset = frame.underline_offset;
+    let strikeout_offset = frame.strikeout_offset;
+    let stroke_size = frame.stroke_size;
+    let show_cursor = frame.show_cursor;
+    let cursor_blink_on = frame.cursor_blink_on;
+    let cursor_pixel_pos = frame.cursor_pixel_pos;
+    let cursor_width_scale = frame.cursor_width_scale;
+    let cursor_visual_style = frame.cursor_visual_style;
+    let selection = frame.selection;
+    let selection_is_block = frame.selection_is_block;
+    let match_highlights = frame.match_highlights;
+    let theme = frame.theme;
+    let cursor_color_override = frame.cursor_color_override;
     // Reuse existing heap allocations — clear but keep capacity.
     instances.clear();
     deco.clear();
@@ -1189,23 +1214,25 @@ mod tests {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
         build_background_instances(
-            lines,
-            cell_width,
-            cell_height,
-            14.0, // ascent (approximate for test font)
-            13.0,
-            8.0,
-            1.0,
-            show_cursor,
-            cursor_blink_on,
-            cursor_pixel_pos,
-            1.0, // cursor_width_scale (normal for tests)
-            cursor_style,
-            None,
-            false,
-            &[],
-            &themes::CATPPUCCIN_MOCHA,
-            None,
+            &BackgroundFrame {
+                shaped_lines: lines,
+                cell_width,
+                cell_height,
+                ascent: 14.0, // ascent (approximate for test font)
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                show_cursor,
+                cursor_blink_on,
+                cursor_pixel_pos,
+                cursor_width_scale: 1.0, // cursor_width_scale (normal for tests)
+                cursor_visual_style: cursor_style,
+                selection: None,
+                selection_is_block: false,
+                match_highlights: &[],
+                theme: &themes::CATPPUCCIN_MOCHA,
+                cursor_color_override: None,
+            },
             &mut instances,
             &mut deco,
         );
