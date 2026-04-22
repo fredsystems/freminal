@@ -2,28 +2,40 @@
 
 ## Overview
 
-This document tracks all development work for Freminal: the 35 completed v0.2.0 tasks, 2 pending
-housekeeping tasks, and the versioned roadmap for v0.3.0–v0.7.0. Agents executing any task MUST
-read this document first for context on dependencies and ordering.
+This document tracks all development work for Freminal. Agents executing any task MUST read
+this document first for context on dependencies and ordering.
 
 All tasks are governed by the rules in `agents.md`, including the mandatory testing, benchmarking,
 and plan document maintenance rules.
 
 ### Version Roadmap
 
-| Version | Codename                | Plan Document         | Tasks       | Status   |
-| ------- | ----------------------- | --------------------- | ----------- | -------- |
-| v0.2.0  | —                       | (Tasks 1–35 below)    | 35          | Done     |
-| v0.3.0  | Daily Driver            | `PLAN_VERSION_030.md` | 36–44       | Active   |
-| v0.4.0  | Search & Protocol       | `PLAN_VERSION_040.md` | 45–52       | Complete |
-| v0.5.0  | Multi-Instance & Visual | `PLAN_VERSION_050.md` | 53–58       | Complete |
-| v0.6.0  | Foundation              | `PLAN_VERSION_060.md` | 62–67       | Complete |
-| v0.7.0  | Recording & Layouts     | `PLAN_VERSION_070.md` | 59,61,68,69 | Complete |
+| Version | Codename                   | Plan Document         | Tasks       | Status   |
+| ------- | -------------------------- | --------------------- | ----------- | -------- |
+| v0.2.0  | —                          | (Tasks 1–35 below)    | 35          | Done     |
+| v0.3.0  | Daily Driver               | `PLAN_VERSION_030.md` | 36–44       | Active   |
+| v0.4.0  | Search & Protocol          | `PLAN_VERSION_040.md` | 45–52       | Complete |
+| v0.5.0  | Multi-Instance & Visual    | `PLAN_VERSION_050.md` | 53–58       | Complete |
+| v0.6.0  | Foundation                 | `PLAN_VERSION_060.md` | 62–67       | Complete |
+| v0.7.0  | Recording & Layouts        | `PLAN_VERSION_070.md` | 59,61,68,69 | Complete |
+| v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md` | 70–71       | Pending  |
+| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md` | 72–77       | Stub     |
+| v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md` | 78–83       | Stub     |
+| v0.11.0 | Platform Play              | `PLAN_VERSION_110.md` | 84–87       | Stub     |
+| v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md` | 88–93       | Stub     |
 
-See `FUTURE_PLANS.md` for deferred features not yet assigned to a version (B.1, B.2, B.3,
-B.7, B.8) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split Panes) has been
-subsumed by Task 58. Task 56 (Session Restore) has been moved to v0.7.0 and subsumed by
-Task 61 (Saved Layouts).
+**v0.8.0 is a hard gate.** No work on v0.9.0 or later begins until v0.8.0 (Tasks 70 and 71)
+is complete. v0.8.0 closes every correctness and hygiene gap identified in the post-v0.7.0
+senior-engineer audit, plus the full UX Top-20. This is non-negotiable: we do not build new
+features on top of latent correctness debt.
+
+v0.9.0–v0.12.0 plan documents currently contain **stub tasks only**. Each task has a summary,
+a scope estimate, and open design questions. Detailed subtask breakdown happens when the
+version is activated, not before.
+
+See `FUTURE_PLANS.md` for deferred items (B.1, B.2, B.3, B.7, B.8 have now been absorbed
+into v0.10.0–v0.12.0) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split
+Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 61.
 
 ---
 
@@ -88,6 +100,30 @@ Task 61 (Saved Layouts).
 | 65  | Frame pacing + idle optimization         | `PLAN_VERSION_060.md` (Task 65)             | Complete | Task 63              |
 | 66  | Cleanup + eframe removal                 | `PLAN_VERSION_060.md` (Task 66)             | Complete | Task 64              |
 | 67  | Window spawn truncation diagnostic       | `PLAN_VERSION_060.md` (Task 67)             | Pending  | Task 64              |
+| 70  | Code Correctness & Hygiene Sweep         | `PLAN_VERSION_080.md` (Task 70)             | Pending  | None                 |
+| 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)             | Pending  | None                 |
+| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)             | Stub     | v0.8.0               |
+| 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)             | Stub     | Task 72              |
+| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)             | Stub     | v0.8.0, Task 58      |
+| 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)             | Stub     | v0.8.0, Task 61      |
+| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)             | Stub     | v0.8.0, Task 72      |
+| 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)             | Stub     | v0.8.0               |
+| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)             | Stub     | v0.8.0               |
+| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)             | Stub     | v0.8.0               |
+| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_100.md` (Task 80)             | Stub     | Task 78              |
+| 81  | GPU-Accelerated Scrollback Regex Search  | `PLAN_VERSION_100.md` (Task 81)             | Stub     | v0.8.0               |
+| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_100.md` (Task 82)             | Stub     | v0.8.0               |
+| 83  | Command Palette                          | `PLAN_VERSION_100.md` (Task 83)             | Stub     | v0.8.0               |
+| 84  | Scripting Layer (Lua or WASM)            | `PLAN_VERSION_110.md` (Task 84)             | Stub     | v0.10.0              |
+| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_110.md` (Task 85)             | Stub     | Task 84 preferred    |
+| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_110.md` (Task 86)             | Stub     | v0.10.0              |
+| 87  | AI Command Assist (opt-in)               | `PLAN_VERSION_110.md` (Task 87)             | Stub     | Tasks 72, 84         |
+| 88  | IME / CJK Input Support                  | `PLAN_VERSION_120.md` (Task 88)             | Stub     | v0.8.0               |
+| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_120.md` (Task 89)             | Stub     | v0.8.0               |
+| 90  | Windows Platform Quality Pass            | `PLAN_VERSION_120.md` (Task 90)             | Stub     | v0.8.0               |
+| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)             | Stub     | Task 19              |
+| 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)             | Stub     | None                 |
+| 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)             | Stub     | None                 |
 
 ---
 
@@ -495,6 +531,11 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_050.md` — v0.5.0 "Multi-Instance & Visual" roadmap (Tasks 53–56)
 - `Documents/PLAN_VERSION_060.md` — v0.6.0 "Foundation" roadmap (Tasks 62–66)
 - `Documents/PLAN_VERSION_070.md` — v0.7.0 "Recording & Layouts" roadmap (Tasks 59, 61)
+- `Documents/PLAN_VERSION_080.md` — v0.8.0 "Correctness & Polish" roadmap (Tasks 70–71)
+- `Documents/PLAN_VERSION_090.md` — v0.9.0 "Modern Workflow Terminal" (stubs, Tasks 72–77)
+- `Documents/PLAN_VERSION_100.md` — v0.10.0 "Power-User Toolkit" (stubs, Tasks 78–83)
+- `Documents/PLAN_VERSION_110.md` — v0.11.0 "Platform Play" (stubs, Tasks 84–87)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Completeness & Credibility" (stubs, Tasks 88–93)
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
 - `config_example.toml` — Current config format

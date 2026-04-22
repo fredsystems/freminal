@@ -12,6 +12,25 @@ For scoped, versioned work see:
 - `PLAN_VERSION_040.md` — v0.4.0 (Search & Protocol)
 - `PLAN_VERSION_050.md` — v0.5.0 (Multi-Instance & Visual)
 - `PLAN_VERSION_060.md` — v0.6.0 (Foundation / eframe Replacement)
+- `PLAN_VERSION_070.md` — v0.7.0 (Recording & Layouts)
+- `PLAN_VERSION_080.md` — v0.8.0 (Correctness & Polish — hard gate)
+- `PLAN_VERSION_090.md` — v0.9.0 (Modern Workflow Terminal, stubs)
+- `PLAN_VERSION_100.md` — v0.10.0 (Power-User Toolkit, stubs)
+- `PLAN_VERSION_110.md` — v0.11.0 (Platform Play, stubs)
+- `PLAN_VERSION_120.md` — v0.12.0 (Completeness & Credibility, stubs)
+
+### Promotion Note (post-v0.7.0 audit)
+
+Items B.1, B.2, B.3, B.7, and B.8 below have been **promoted from deferred into scheduled
+versions** as a result of the post-v0.7.0 senior-engineer audit:
+
+- **B.1 (Remote Mux)** and **B.7 (SSH Integration)** → absorbed into **Task 86** in v0.11.0.
+- **B.2 (Command Palette)** → absorbed into **Task 83** in v0.10.0.
+- **B.3 (Quick-Select / Hints)** → absorbed into **Task 82** in v0.10.0.
+- **B.8 (IME / CJK)** → absorbed into **Task 88** in v0.12.0.
+
+Their entries below are retained for historical context but the source of truth is now the
+respective version plan document.
 
 ### Severity Ratings
 
