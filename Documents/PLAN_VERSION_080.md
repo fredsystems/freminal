@@ -198,7 +198,16 @@ Executed as a file-by-file sweep so each commit is reviewable in isolation:
   24.2 µs → 25.0 µs on 10 000 iterations (+3.4%, ≈ +0.1 ns/call), well under the 15%
   regression threshold. Removed one `#[allow(clippy::cast_*)]` attribute. Remaining casts
   in this file are all in `#[cfg(test)]` modules and left as-is.
-- **70.H.b** — `freminal-terminal-emulator/src/input.rs` (26 production casts, 1 allow-attr).
+- **70.H.b** ✅ — `freminal-terminal-emulator/src/input.rs`. Audit showed only 3 cast sites
+  in production: 22 `b'X' as u32` lossless byte-to-codepoint casts in the const fn
+  `us_qwerty_shifted`, one `codepoint as u8` guarded truncation in `build_csi_u`, and one
+  `ch as u32` in the text-field codepoint serialisation. The `as u32` casts in the const fn
+  are kept per the workspace policy exception for trivially-lossless `u8 → u32` casts
+  (`u32::from` is not yet const-stable; tracking rust-lang/rust#143874); the `codepoint as u8`
+  site was replaced with `u8::try_from(codepoint).ok().and_then(...)` and the `ch as u32`
+  site was replaced with `u32::from(ch)`. Removed the one `#[allow(clippy::cast_possible_truncation)]`
+  attribute. No benchmark required — input encoding is not on the hot path (one call per
+  keystroke).
 - **70.H.c** — Renderer cluster: `freminal/src/gui/renderer/vertex.rs` (13 casts, 3 allows),
   `freminal/src/gui/atlas.rs` (13 casts), `freminal/src/gui/renderer/gpu.rs` (2 casts).
 - **70.H.d** — GUI shaping cluster: `freminal/src/gui/shaping.rs` (12 casts, 8 allows),

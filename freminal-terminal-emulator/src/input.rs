@@ -108,6 +108,9 @@ fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
 /// Returns `None` for bytes outside the printable ASCII range or that have
 /// no distinct shifted form.
 const fn us_qwerty_shifted(c: u8) -> Option<u32> {
+    // `u8 -> u32` is guaranteed lossless by the type system. `u32::from` is
+    // not yet const-stable (see rust-lang/rust#143874), so `as` is used here
+    // per the workspace policy exception for trivially-lossless casts.
     match c {
         b'a'..=b'z' => Some((c - 32) as u32), // lowercase → uppercase
         b'1' => Some(b'!' as u32),
@@ -506,12 +509,11 @@ impl TerminalInput {
         // Build the codepoint field: `codepoint[:shifted[:base]]`
         let codepoint_field = if report_alt {
             // Only ASCII codepoints have meaningful shifted forms in US QWERTY.
+            // The `u8::try_from` is guaranteed to succeed under `codepoint <= 127`;
+            // the `ok()` + `and_then` pattern avoids any `unwrap`/`expect` in
+            // production code per the workspace policy.
             let shifted = if codepoint <= 127 {
-                // SAFETY: The guard `codepoint <= 127` ensures the value fits in u8 without
-                // truncation. The `as` cast is lossless here.
-                #[allow(clippy::cast_possible_truncation)]
-                let byte = codepoint as u8;
-                us_qwerty_shifted(byte)
+                u8::try_from(codepoint).ok().and_then(us_qwerty_shifted)
             } else {
                 None
             };
@@ -530,7 +532,7 @@ impl TerminalInput {
                 if t.is_empty() {
                     None
                 } else {
-                    let cps: Vec<String> = t.chars().map(|ch| (ch as u32).to_string()).collect();
+                    let cps: Vec<String> = t.chars().map(|ch| u32::from(ch).to_string()).collect();
                     Some(cps.join(":"))
                 }
             })
@@ -2405,9 +2407,10 @@ mod tests {
         );
     }
 
-    /// The `codepoint as u8` cast inside `build_csi_u` is only reached when
-    /// `codepoint <= 127`, so it is lossless.  This test verifies that the
-    /// `us_qwerty_shifted` helper is only called for ASCII codepoints.
+    /// The `u8::try_from(codepoint)` conversion inside `build_csi_u` is only
+    /// reached when `codepoint <= 127`, so it is guaranteed to succeed.  This
+    /// test verifies that the `us_qwerty_shifted` helper handles the ASCII
+    /// boundary without panicking.
     #[test]
     fn build_csi_u_report_alt_ascii_boundary() {
         let meta = KeyEventMeta::PRESS;
