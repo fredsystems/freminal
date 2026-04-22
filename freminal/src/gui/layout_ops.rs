@@ -581,6 +581,8 @@ impl FreminalGui {
             pending_geometry: None,
             last_known_size: None,
             last_known_position: None,
+            renaming_tab: None,
+            rename_buffer: String::new(),
         };
         self.windows.insert(window_id, win);
 

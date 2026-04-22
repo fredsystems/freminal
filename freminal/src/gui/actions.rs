@@ -11,6 +11,15 @@ use super::window::PerWindowState;
 
 impl PerWindowState {
     pub(super) fn close_tab(&mut self, index: usize) {
+        // If the tab being closed is the one currently being renamed,
+        // clear the rename state so the inline editor doesn't linger on
+        // whichever tab shifts into its position.
+        if let Some(target) = self.tabs.iter().nth(index).map(|t| t.id)
+            && self.renaming_tab == Some(target)
+        {
+            self.renaming_tab = None;
+            self.rename_buffer.clear();
+        }
         if let Err(e) = self.tabs.close_tab(index) {
             trace!("Cannot close tab: {e}");
         }
@@ -187,6 +196,40 @@ impl super::FreminalGui {
                 }
             }
             super::TabBarAction::Close(i) => win.close_tab(i),
+            super::TabBarAction::BeginRename(i) => {
+                // Start inline rename: seed the buffer with the current
+                // display name and mark the tab as renaming.  Clamp to a
+                // valid index — a stale action from an earlier frame may
+                // reference a tab that has since been closed.
+                if let Some(tab) = win.tabs.iter().nth(i) {
+                    let tab_id = tab.id;
+                    let current = tab.display_name().to_owned();
+                    win.renaming_tab = Some(tab_id);
+                    win.rename_buffer = current;
+                } else {
+                    warn!("TabBarAction::BeginRename: tab index {i} out of bounds");
+                }
+            }
+            super::TabBarAction::CommitRename(i, name) => {
+                // Commit the rename.  Empty string clears the custom name
+                // (revert to the pane-derived title).
+                if let Some(tab) = win.tabs.iter_mut().nth(i) {
+                    let trimmed = name.trim();
+                    tab.custom_name = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_owned())
+                    };
+                } else {
+                    warn!("TabBarAction::CommitRename: tab index {i} out of bounds");
+                }
+                win.renaming_tab = None;
+                win.rename_buffer.clear();
+            }
+            super::TabBarAction::CancelRename => {
+                win.renaming_tab = None;
+                win.rename_buffer.clear();
+            }
             super::TabBarAction::None => {}
         }
     }
@@ -324,7 +367,14 @@ impl super::FreminalGui {
                 win.pending_new_window = true;
             }
             KeyAction::RenameTab => {
-                trace!("Unhandled deferred key action: {action:?}");
+                // Begin an inline rename on the active tab.  The tab bar
+                // renders a TextEdit in place of the label while
+                // `renaming_tab` is set; Enter commits, Escape cancels.
+                let tab = win.tabs.active_tab();
+                let tab_id = tab.id;
+                let current = tab.display_name().to_owned();
+                win.renaming_tab = Some(tab_id);
+                win.rename_buffer = current;
             }
             KeyAction::SplitVertical => {
                 self.spawn_split_pane(win, super::panes::SplitDirection::Horizontal);

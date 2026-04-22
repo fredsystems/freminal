@@ -182,7 +182,12 @@ pub(super) fn handle_window_manipulation(
     bell_since: &mut Option<Instant>,
     bell_mode: BellMode,
     flags: &WindowManipFlags,
-) {
+) -> bool {
+    // Whether the shell set (or restored) a title during this frame.  Used
+    // by the caller to clear any user-assigned custom tab name, so
+    // shell-driven titles take precedence once the user stops pinning a
+    // rename.  Returned at end of function.
+    let mut shell_set_title = false;
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
         let window_event = match wc {
@@ -216,6 +221,7 @@ pub(super) fn handle_window_manipulation(
             // ── Title: inactive tabs update their own title only ─────
             WindowManipulation::SetTitleBarText(title) if !flags.is_active => {
                 tab_title.clone_from(&title);
+                shell_set_title = true;
             }
 
             // ── Title stack: inactive tabs save their own tab title ──
@@ -228,6 +234,7 @@ pub(super) fn handle_window_manipulation(
                 } else {
                     tab_title.clear();
                 }
+                shell_set_title = true;
             }
             WindowManipulation::DeIconifyWindow => {
                 ui.ctx()
@@ -426,6 +433,7 @@ pub(super) fn handle_window_manipulation(
             WindowManipulation::SetTitleBarText(title) => {
                 // Update the tab title for the tab bar display.
                 tab_title.clone_from(&title);
+                shell_set_title = true;
                 // Set the window title bar to the active tab's title.
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -448,6 +456,7 @@ pub(super) fn handle_window_manipulation(
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Title("Freminal".to_string()));
                 }
+                shell_set_title = true;
             }
             // These are ignored. eGui doesn't give us a stacking order thing (that I can tell).
             // Refresh window is already happening because we ended up here.
@@ -494,4 +503,5 @@ pub(super) fn handle_window_manipulation(
             }
         }
     }
+    shell_set_title
 }

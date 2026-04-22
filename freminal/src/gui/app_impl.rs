@@ -132,6 +132,8 @@ impl freminal_windowing::App for FreminalGui {
                 pending_geometry: None,
                 last_known_size: None,
                 last_known_position: None,
+                renaming_tab: None,
+                rename_buffer: String::new(),
             };
             self.windows.insert(window_id, win);
 
@@ -331,6 +333,8 @@ impl freminal_windowing::App for FreminalGui {
                         pending_geometry: None,
                         last_known_size: None,
                         last_known_position: None,
+                        renaming_tab: None,
+                        rename_buffer: String::new(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -803,7 +807,7 @@ impl freminal_windowing::App for FreminalGui {
                 freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
             };
             let tab_action = panel
-                .show_inside(&mut root_ui, |ui| self.show_tab_bar(&win, ui))
+                .show_inside(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui))
                 .inner;
             self.dispatch_tab_bar_action(tab_action, &mut win);
         }
@@ -872,9 +876,10 @@ impl freminal_windowing::App for FreminalGui {
                     }
                 };
                 if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    let mut tab_shell_set_title = false;
                     for pane in panes {
                         let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
-                        rendering::handle_window_manipulation(
+                        let shell_set = rendering::handle_window_manipulation(
                             ui,
                             &pane.window_cmd_rx,
                             &pane.pty_write_tx,
@@ -893,6 +898,15 @@ impl freminal_windowing::App for FreminalGui {
                                 is_only_pane,
                             },
                         );
+                        if shell_set {
+                            tab_shell_set_title = true;
+                        }
+                    }
+                    // Once the shell asserts a title via OSC 0/1/2, any
+                    // user-pinned custom name for this tab is cleared so
+                    // shell-driven titles become authoritative again.
+                    if tab_shell_set_title && tab.custom_name.is_some() {
+                        tab.custom_name = None;
                     }
                 }
             }
@@ -1485,14 +1499,16 @@ impl freminal_windowing::App for FreminalGui {
             // This handles tab switches, OSC 0/2 title changes, and restore
             // from the title stack — all in one place.
             //
+            // A user-assigned custom tab name (via `RenameTab` or a
+            // double-click rename) takes precedence over the pane-derived
+            // title.  The custom name is cleared by `handle_window_manipulation`
+            // the next time the shell asserts a title via OSC 0/1/2.
+            //
             // Only issue the viewport command when the title actually changed;
             // calling `send_viewport_cmd` unconditionally every frame triggers
             // an infinite repaint loop (~3 % idle CPU).
-            let active_title = win
-                .tabs
-                .active_tab()
-                .active_pane()
-                .map_or("", |p| p.title.as_str());
+            let active_tab = win.tabs.active_tab();
+            let active_title = active_tab.display_name();
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {

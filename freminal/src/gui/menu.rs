@@ -285,11 +285,17 @@ impl super::FreminalGui {
     /// more than one tab is open, and a "+" button at the end to create
     /// new tabs. Tabs are separated by thin vertical dividers.
     ///
+    /// When `win.renaming_tab` matches a tab, that tab's label is replaced
+    /// with a `TextEdit` bound to `win.rename_buffer`.  Enter commits,
+    /// Escape cancels, and loss of focus also cancels (matches most
+    /// file-manager rename UX).
+    ///
     /// Returns a `TabBarAction` describing what the user did (if anything).
-    pub(super) fn show_tab_bar(&self, win: &PerWindowState, ui: &mut egui::Ui) -> TabBarAction {
+    pub(super) fn show_tab_bar(&self, win: &mut PerWindowState, ui: &mut egui::Ui) -> TabBarAction {
         ui.horizontal(|ui| {
             let active = win.tabs.active_index();
             let count = win.tabs.tab_count();
+            let renaming = win.renaming_tab;
             let mut action = TabBarAction::None;
 
             for (i, tab) in win.tabs.iter().enumerate() {
@@ -308,7 +314,17 @@ impl super::FreminalGui {
                         .active_pane()
                         .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed));
 
-                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
+                let is_renaming = renaming == Some(tab.id);
+                let tab_action = Self::show_single_tab(
+                    ui,
+                    tab,
+                    i,
+                    i == active,
+                    count,
+                    is_echo_off,
+                    is_renaming,
+                    &mut win.rename_buffer,
+                );
                 if !matches!(tab_action, TabBarAction::None) {
                     action = tab_action;
                 }
@@ -335,6 +351,14 @@ impl super::FreminalGui {
     /// A lock icon is prepended to the label when `is_echo_off` is `true`,
     /// indicating that the foreground process has disabled terminal echo (i.e.
     /// a password prompt such as `sudo` or `ssh` is waiting for input).
+    ///
+    /// When `is_renaming` is `true`, the label is replaced by a `TextEdit`
+    /// bound to `rename_buffer`.  Enter returns `CommitRename`; Escape
+    /// returns `CancelRename`; losing focus also cancels to avoid leaving
+    /// the window in a stuck-edit state.
+    ///
+    /// A double-click on the label returns `BeginRename(index)`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
@@ -342,13 +366,19 @@ impl super::FreminalGui {
         is_active: bool,
         count: usize,
         is_echo_off: bool,
+        is_renaming: bool,
+        rename_buffer: &mut String,
     ) -> TabBarAction {
         let mut action = TabBarAction::None;
         let pane = tab.active_pane();
-        let label = match pane {
-            Some(p) if !p.title.is_empty() => p.title.as_str(),
-            _ => "Shell",
-        };
+        // Prefer the user-assigned tab name over the pane-derived title.
+        let label = tab.custom_name.as_deref().map_or_else(
+            || match pane {
+                Some(p) if !p.title.is_empty() => p.title.as_str(),
+                _ => "Shell",
+            },
+            |name| if name.is_empty() { "Shell" } else { name },
+        );
 
         let has_bell = pane.is_some_and(|p| p.bell_active) && !is_active;
 
@@ -380,23 +410,47 @@ impl super::FreminalGui {
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Bell-active tabs use amber text for visibility.
-                let rich_label = if has_bell {
-                    egui::RichText::new(&display_label)
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(255, 180, 50))
+                if is_renaming {
+                    // Inline rename editor.  Commit on Enter, cancel on
+                    // Escape or focus loss.
+                    let edit_id = egui::Id::new(("tab_rename", tab.id));
+                    let edit = egui::TextEdit::singleline(rename_buffer)
+                        .id(edit_id)
+                        .desired_width(120.0);
+                    let response = ui.add(edit);
+                    // Auto-focus on the first frame the editor appears.
+                    if !response.has_focus() && !response.lost_focus() {
+                        response.request_focus();
+                    }
+                    let enter =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if enter {
+                        action = TabBarAction::CommitRename(index, rename_buffer.clone());
+                    } else if escape || response.lost_focus() {
+                        action = TabBarAction::CancelRename;
+                    }
                 } else {
-                    egui::RichText::new(&display_label).size(13.0)
-                };
+                    // Bell-active tabs use amber text for visibility.
+                    let rich_label = if has_bell {
+                        egui::RichText::new(&display_label)
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(255, 180, 50))
+                    } else {
+                        egui::RichText::new(&display_label).size(13.0)
+                    };
 
-                let response = ui.selectable_label(is_active, rich_label);
-                if response.clicked() && !is_active {
-                    action = TabBarAction::SwitchTo(index);
-                }
+                    let response = ui.selectable_label(is_active, rich_label);
+                    if response.double_clicked() {
+                        action = TabBarAction::BeginRename(index);
+                    } else if response.clicked() && !is_active {
+                        action = TabBarAction::SwitchTo(index);
+                    }
 
-                // Show close button when more than one tab is open.
-                if count > 1 && ui.small_button("\u{00d7}").clicked() {
-                    action = TabBarAction::Close(index);
+                    // Show close button when more than one tab is open.
+                    if count > 1 && ui.small_button("\u{00d7}").clicked() {
+                        action = TabBarAction::Close(index);
+                    }
                 }
             });
         });

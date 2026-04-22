@@ -53,7 +53,7 @@ use tracing::{error, warn};
 ///
 /// Returned by `show_tab_bar()` and consumed by the main `ui()` method
 /// after the panel finishes rendering.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum TabBarAction {
     /// No tab bar interaction this frame.
     None,
@@ -63,6 +63,12 @@ enum TabBarAction {
     SwitchTo(usize),
     /// User clicked the "x" close button — close tab at `index`.
     Close(usize),
+    /// User double-clicked a tab label — begin inline rename on tab at `index`.
+    BeginRename(usize),
+    /// User pressed Enter in the rename editor — commit the new name.
+    CommitRename(usize, String),
+    /// User pressed Escape in the rename editor — discard the edit.
+    CancelRename,
 }
 
 /// Tracks an in-progress mouse drag on a pane split border.

@@ -447,7 +447,13 @@ error paths that log-and-disappear with no user feedback.
 - **71.1** — Wire up `RenameTab`. `freminal/src/gui/actions.rs:299-301` is currently a
   `trace!` no-op. Implement an inline text-entry overlay on the target tab (similar to
   a rename in a file manager). Persist the custom name on the tab struct; clear it if the
-  shell sets a title via OSC 0/1/2.
+  shell sets a title via OSC 0/1/2. **COMPLETE (2026-04-22).** Added `custom_name:
+Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_buffer`
+  to `PerWindowState`. `KeyAction::RenameTab` and double-click on a tab now open an
+  inline `TextEdit`. `TabBarAction` gained `BeginRename` / `CommitRename` / `CancelRename`.
+  `handle_window_manipulation` now returns whether the shell asserted a title this frame;
+  the caller clears `tab.custom_name` so shell-driven OSC 0/1/2 titles remain authoritative.
+  Window title sync uses `Tab::display_name()`. 4 new unit tests.
 - **71.2** — PTY spawn failure surface. When a shell fails to launch (bad path, missing
   binary, permission error), show an inline error row inside the tab (or a toast) with the
   error message and a retry button. Currently silent.

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::{
-    PaneBorderDrag, renderer::WindowPostRenderer, tabs::TabManager,
+    PaneBorderDrag, renderer::WindowPostRenderer, tabs::TabId, tabs::TabManager,
     terminal::FreminalTerminalWidget,
 };
 
@@ -94,4 +94,21 @@ pub(super) struct PerWindowState {
     /// Updated every frame from `ViewportInfo::outer_rect` when available.
     /// `None` on Wayland (position is not reported) or before the first frame.
     pub(super) last_known_position: Option<[i32; 2]>,
+
+    /// Tab currently being renamed via an inline text editor.
+    ///
+    /// Set by `KeyAction::RenameTab` (renames the active tab) or a
+    /// double-click on a tab label.  While `Some`, the tab bar renders
+    /// a `TextEdit` widget in place of the label for this tab.
+    ///
+    /// Cleared when the user commits (Enter) or cancels (Escape) the
+    /// rename, or when the target tab is closed.
+    pub(super) renaming_tab: Option<TabId>,
+
+    /// Scratch buffer for the in-progress rename.
+    ///
+    /// Initialised from the target tab's current display name when
+    /// `renaming_tab` is set, mutated by the `TextEdit`, and consumed on
+    /// commit.  Cleared when rename ends.
+    pub(super) rename_buffer: String,
 }
