@@ -5,6 +5,20 @@
 
 use crate::{buffer_states::fonts::UnderlineStyle, colors::TerminalColor};
 use anyhow::Result;
+use thiserror::Error;
+
+/// Errors produced when parsing an SGR (Select Graphic Rendition) sequence.
+#[derive(Debug, Error, Eq, PartialEq, Clone)]
+pub enum SgrParseError {
+    /// A direct-color component (R/G/B) exceeded the u8 range.
+    #[error("SGR color component {component} = {value} exceeds u8::MAX (255)")]
+    ColorComponentOutOfRange {
+        /// Which component was out of range ("r", "g", or "b").
+        component: &'static str,
+        /// The out-of-range value received.
+        value: usize,
+    },
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum SelectGraphicRendition {

@@ -3,7 +3,71 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::str::Utf8Error;
 use thiserror::Error;
+
+/// Errors produced by the low-level ANSI parameter parsers in
+/// [`crate::ansi`] and related modules.
+#[derive(Debug, Error)]
+pub enum AnsiParseError {
+    /// A parameter byte slice was not valid UTF-8.
+    #[error("parameter bytes were not valid UTF-8")]
+    InvalidUtf8(#[from] Utf8Error),
+    /// A parameter segment could not be parsed as the requested numeric type.
+    #[error("failed to parse parameter {bytes:?} as {type_name}")]
+    ParseFailed {
+        /// Raw bytes that failed to parse.
+        bytes: Vec<u8>,
+        /// The Rust type name the caller was trying to parse into.
+        type_name: &'static str,
+    },
+}
+
+/// Errors produced while handling OSC (Operating System Command) sequences.
+#[derive(Debug, Error)]
+pub enum OscHandlerError {
+    /// A sub-parameter inside an OSC payload failed to parse.
+    #[error("failed to parse OSC sub-parameter")]
+    ParamParse(#[from] AnsiParseError),
+    /// An OSC dispatch site reached a branch that should be unreachable given
+    /// the grammar. See 70.D.2.
+    #[error("OSC dispatch reached an unreachable branch: {context}")]
+    UnreachableDispatch {
+        /// Free-form context identifying the call site.
+        context: &'static str,
+    },
+}
+
+/// Errors produced while handling CSI (Control Sequence Introducer) sequences.
+#[derive(Debug, Error)]
+pub enum CsiHandlerError {
+    /// A CSI dispatch site reached a branch that should be unreachable given
+    /// the grammar. See 70.D.3.
+    #[error("CSI dispatch reached an unreachable branch: {context}")]
+    UnreachableDispatch {
+        /// Free-form context identifying the call site.
+        context: &'static str,
+    },
+}
+
+/// Errors produced by the [`crate::interface::TerminalEmulator`] public API.
+#[derive(Debug, Error)]
+pub enum InterfaceError {
+    /// Failed to send a message to the PTY write channel.
+    #[error("failed to send to PTY write channel: {0}")]
+    PtySendFailed(String),
+    /// PTY initialization failed while constructing a new emulator.
+    #[error("failed to initialize PTY")]
+    PtyInit(#[from] crate::io::pty::PtyInitError),
+}
+
+/// Errors produced by the `TerminalState` write path.
+#[derive(Debug, Error)]
+pub enum InternalStateError {
+    /// Failed to send a message to the PTY write channel.
+    #[error("failed to send to PTY write channel: {0}")]
+    PtySendFailed(String),
+}
 
 #[derive(Debug, Error, Eq, PartialEq, Clone)]
 #[error(transparent)]

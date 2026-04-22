@@ -6,6 +6,15 @@
 use crate::themes::ThemePalette;
 use conv2::ValueInto;
 use std::fmt;
+use thiserror::Error;
+
+/// Errors produced when parsing a color from a string representation.
+#[derive(Debug, Error, Eq, PartialEq, Clone)]
+pub enum ColorParseError {
+    /// The input string did not match any recognised named color.
+    #[error("invalid color name: {0:?}")]
+    InvalidName(String),
+}
 
 /// Number of entries in the 256-color palette.
 pub const PALETTE_SIZE: usize = 256;

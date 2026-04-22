@@ -4,6 +4,23 @@
 // https://opensource.org/licenses/MIT.
 
 use anyhow::Result;
+use thiserror::Error;
+
+/// Errors produced when converting a raw `(Ps1, Ps2, Ps3)` XTWINOPS parameter
+/// triple into a [`WindowManipulation`].
+#[derive(Debug, Error, Eq, PartialEq, Clone)]
+pub enum WindowManipulationError {
+    /// The parameter triple did not match any known XTWINOPS command.
+    #[error("unrecognized XTWINOPS command: ({command}, {param_ps2}, {param_ps3})")]
+    UnrecognizedCommand {
+        /// Primary command code (`Ps1`).
+        command: usize,
+        /// Second parameter (`Ps2`).
+        param_ps2: usize,
+        /// Third parameter (`Ps3`).
+        param_ps3: usize,
+    },
+}
 
 /// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).
 ///

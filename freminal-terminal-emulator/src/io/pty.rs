@@ -128,6 +128,32 @@ enum ExtractTerminfoError {
     },
 }
 
+/// Errors produced while initializing a PTY (opening the pty, spawning the
+/// child, installing terminfo, cloning reader handles, etc.).
+///
+/// `portable_pty` surfaces its own errors as `anyhow::Error`. To keep
+/// `freminal-terminal-emulator` free of `anyhow` we eagerly stringify those
+/// errors into the [`PtyInitError::Spawn`] variant. Typed variants are used
+/// for categories we can act on programmatically.
+#[derive(Error, Debug)]
+pub enum PtyInitError {
+    /// A PTY dimension (rows, cols, `pixel_width`, `pixel_height`) exceeded
+    /// `u16::MAX` during conversion to [`portable_pty::PtySize`].
+    #[error("PTY dimension exceeded u16::MAX")]
+    SizeConversion(#[source] conv2::PosOverflow<usize>),
+    /// `portable_pty` failed to open the pty, spawn the child, or clone the
+    /// reader. The wrapped string is the upstream error's `Display`.
+    #[error("portable_pty error: {0}")]
+    Spawn(String),
+    /// An I/O error occurred while configuring the PTY (e.g. writing
+    /// recording preambles, creating directories).
+    #[error("I/O error during PTY setup")]
+    Io(#[from] std::io::Error),
+    /// Extracting the embedded terminfo tarball failed.
+    #[error("failed to extract embedded terminfo")]
+    ExtractTerminfo(String),
+}
+
 /// The result of [`run_terminal`], bundling all values that the caller
 /// needs after the PTY threads are launched.
 pub struct RunTerminalResult {
@@ -189,6 +215,17 @@ pub struct PtySpawnConfig<'a> {
     pub extra_env: Option<&'a HashMap<String, String>>,
 }
 
+/// Spawn the child process on a new PTY and run the PTY thread event loop.
+///
+/// Integrates the PTY reader, GUI input channel, and window-command dispatch
+/// until the child exits or the input channel is closed.
+///
+/// # Errors
+///
+/// Returns a [`PtyInitError`] if the initial PTY size cannot be represented as
+/// [`portable_pty::PtySize`], if `portable_pty` fails to open the PTY or spawn
+/// the child, if the embedded terminfo tarball cannot be extracted, or if any
+/// I/O error occurs during PTY setup.
 // Inherently large: the PTY thread event loop integrating the PTY reader, input channel, and
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
