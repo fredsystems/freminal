@@ -22,6 +22,8 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
+mod tabs;
+
 /// Apply a signed `delta` (in cells or rows) to an unsigned `base` coordinate and clamp the
 /// result into `[lo, hi]`.
 ///
@@ -57,19 +59,19 @@ pub struct Buffer {
     /// All rows in this buffer: scrollback + visible region.
     /// In the primary buffer, this grows until `scrollback_limit` is hit.
     /// In the alternate buffer, this always has exactly `height` rows.
-    rows: Vec<Row>,
+    pub(in crate::buffer) rows: Vec<Row>,
 
     /// Per-row flat-representation cache.  Index matches `self.rows`.
     /// `None` = dirty (must be re-flattened on next snapshot).
     /// `Some((chars, tags))` = clean cached flat representation for that row.
-    row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+    pub(in crate::buffer) row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
 
     /// Width and height of the terminal grid.
-    width: usize,
-    height: usize,
+    pub(in crate::buffer) width: usize,
+    pub(in crate::buffer) height: usize,
 
     /// Current cursor position (row, col).
-    cursor: CursorState,
+    pub(in crate::buffer) cursor: CursorState,
 
     /// Maximum number of scrollback lines allowed.
     ///
@@ -77,7 +79,7 @@ pub struct Buffer {
     ///  - height = 40
     ///  - `scrollback_limit` = 1000
     ///    Means `rows.len()` will be at most 1040.
-    scrollback_limit: usize,
+    pub(in crate::buffer) scrollback_limit: usize,
 
     /// Whether this is the primary or alternate buffer mode.
     ///
@@ -87,75 +89,75 @@ pub struct Buffer {
     /// Alternate:
     ///   - No scrollback
     ///   - Switching back restores primary buffer's saved state
-    kind: BufferType,
+    pub(in crate::buffer) kind: BufferType,
 
     /// Saved primary buffer content, cursor, and `scroll_offset`,
     /// used when switching to and from alternate buffer.
     /// The scroll offset is owned by the caller (`ViewState`) and passed
     /// in / returned from `enter_alternate` / `leave_alternate`.
-    saved_primary: Option<SavedPrimaryState>,
+    pub(in crate::buffer) saved_primary: Option<SavedPrimaryState>,
 
     /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
     /// Independent of the alternate-screen save (`saved_primary`).
-    saved_cursor: Option<CursorState>,
+    pub(in crate::buffer) saved_cursor: Option<CursorState>,
 
     /// Current format tag to apply to inserted text.
-    current_tag: FormatTag,
+    pub(in crate::buffer) current_tag: FormatTag,
 
     /// LNM mode
-    lnm_enabled: Lnm,
+    pub(in crate::buffer) lnm_enabled: Lnm,
 
     /// DECAWM — whether soft-wrapping is enabled.
     /// `AutoWrap` (default): text wraps at the terminal width.
     /// `NoAutoWrap`: text is clamped to the last column; overflow is discarded.
-    wrap_enabled: Decawm,
+    pub(in crate::buffer) wrap_enabled: Decawm,
 
     /// Preserve the scrollback anchor when resizing
-    preserve_scrollback_anchor: bool,
+    pub(in crate::buffer) preserve_scrollback_anchor: bool,
 
     /// DECSTBM top and bottom margins, 0-indexed, inclusive.
     /// When disabled, the region is full-screen: [0, height-1]
-    scroll_region_top: usize,
-    scroll_region_bottom: usize,
+    pub(in crate::buffer) scroll_region_top: usize,
+    pub(in crate::buffer) scroll_region_bottom: usize,
 
     /// DECLRMM left and right margins, 0-indexed, inclusive.
     /// When DECLRMM is disabled these are ignored.
     /// Default: [0, width-1] (full screen).
-    scroll_region_left: usize,
-    scroll_region_right: usize,
+    pub(in crate::buffer) scroll_region_left: usize,
+    pub(in crate::buffer) scroll_region_right: usize,
 
     /// Whether DECLRMM (`?69`) is currently enabled.
     /// When disabled, `scroll_region_left`/`scroll_region_right` are ignored by
     /// all buffer operations that would otherwise respect them.
-    declrmm_enabled: Declrmm,
+    pub(in crate::buffer) declrmm_enabled: Declrmm,
 
     /// Tab stops as a boolean vector indexed by column.
     /// `tab_stops[c] == true` means column `c` is a tab stop.
     /// Default: every 8 columns (8, 16, 24, ...).
-    tab_stops: Vec<bool>,
+    pub(in crate::buffer) tab_stops: Vec<bool>,
 
     /// DECOM (Origin Mode) — when enabled, cursor addressing is relative
     /// to the scroll region top/bottom instead of the full screen.
-    decom_enabled: Decom,
+    pub(in crate::buffer) decom_enabled: Decom,
 
     /// Central storage for inline images.
     ///
     /// Cells reference images by ID via `ImagePlacement`; the actual pixel
     /// data lives here behind `Arc`s so snapshots can share it cheaply.
-    image_store: ImageStore,
+    pub(in crate::buffer) image_store: ImageStore,
 
     /// Total number of cells across all rows that carry an image placement.
     ///
     /// Maintained incrementally so `has_visible_images` / `has_any_image_cell`
     /// can short-circuit in O(1) when no images are present (the overwhelmingly
     /// common case).
-    image_cell_count: usize,
+    pub(in crate::buffer) image_cell_count: usize,
 
     /// Buffer-relative row indices where OSC 133 `PromptStart` markers fired.
     ///
     /// Maintained atomically with row drains: when rows are removed from the
     /// front, all indices are shifted down and entries that fell off are dropped.
-    prompt_rows: Vec<usize>,
+    pub(in crate::buffer) prompt_rows: Vec<usize>,
 }
 
 /// Snapshot of the primary buffer state saved when entering the alternate screen.
@@ -1481,74 +1483,6 @@ impl Buffer {
             self.cursor.pos.x = self.width.saturating_sub(1);
         }
         // Otherwise: at absolute top or scrollback not allowed — no-op.
-    }
-
-    /// Advance the cursor to the next tab stop (HT / 0x09).
-    ///
-    /// If the cursor is already at or past the last tab stop, it moves to
-    /// the rightmost column.  HT never wraps to the next line.
-    pub fn advance_to_next_tab_stop(&mut self) {
-        let col = self.cursor.pos.x;
-        let max_col = self.width.saturating_sub(1);
-
-        // Search for the next tab stop after the current column
-        let next = self
-            .tab_stops
-            .iter()
-            .enumerate()
-            .skip(col + 1)
-            .find(|&(_, &is_stop)| is_stop)
-            .map(|(i, _)| i);
-
-        self.cursor.pos.x = next.map_or(max_col, |stop| stop.min(max_col));
-    }
-
-    /// Set a tab stop at the current cursor column (HTS — ESC H).
-    pub fn set_tab_stop(&mut self) {
-        let col = self.cursor.pos.x;
-        if col < self.tab_stops.len() {
-            self.tab_stops[col] = true;
-        }
-    }
-
-    /// Clear the tab stop at the current cursor column (TBC Ps=0).
-    pub fn clear_tab_stop_at_cursor(&mut self) {
-        let col = self.cursor.pos.x;
-        if col < self.tab_stops.len() {
-            self.tab_stops[col] = false;
-        }
-    }
-
-    /// Clear all tab stops (TBC Ps=3).
-    pub fn clear_all_tab_stops(&mut self) {
-        self.tab_stops.iter_mut().for_each(|s| *s = false);
-    }
-
-    /// Move cursor backward to the Ps-th previous tab stop (CBT — CSI Z).
-    ///
-    /// If there is no previous tab stop, moves to column 0.
-    /// CBT never wraps to the previous line.
-    pub fn tab_backward(&mut self, count: usize) {
-        let mut col = self.cursor.pos.x;
-        for _ in 0..count {
-            // Search backward from current column
-            if col == 0 {
-                break;
-            }
-            let prev = self.tab_stops[..col].iter().rposition(|&is_stop| is_stop);
-            col = prev.unwrap_or(0);
-        }
-        self.cursor.pos.x = col;
-    }
-
-    /// Move cursor forward by `count` tab stops (CHT — CSI I).
-    ///
-    /// If there are fewer than `count` tab stops remaining, moves to the
-    /// rightmost column.  CHT never wraps to the next line.
-    pub fn tab_forward(&mut self, count: usize) {
-        for _ in 0..count {
-            self.advance_to_next_tab_stop();
-        }
     }
 
     /// Fill the entire visible screen with 'E' characters (DECALN — ESC # 8).
