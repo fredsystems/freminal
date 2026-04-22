@@ -102,11 +102,21 @@ surviving production panic sites must become typed errors.
 `freminal/src/gui/renderer/gpu.rs` currently returns `Result<(), String>` across 12 functions
 with 22 `.map_err(|e| format!(...))` call sites.
 
-- **70.E.1** — Introduce `GpuInitError`, `ShaderCompileError`, `TextureUploadError`,
-  `BufferAllocError` enums. Use `#[source]` for chains.
-- **70.E.2** — Convert all 12 functions and 22 call sites. Preserve log messages via `Display`
-  impls on the error types.
-- **70.E.3** — Surface shader compile errors to the user (see Task 71 item 4).
+- **70.E.1** ✅ — Introduced `GpuInitError`, `ShaderCompileError`, `TextureUploadError`,
+  `BufferAllocError` enums in new `freminal/src/gui/renderer/errors.rs`. `GpuInitError`
+  flattens the three sub-errors via `#[from]`. `TextureUploadError::ImageDecode` uses
+  `#[source]` to chain the underlying `image::ImageError`. `Display` impls preserve the
+  original string messages byte-for-byte so `error!("... {e}")` log output is unchanged.
+- **70.E.2** ✅ — Converted all 12 functions and 22 call sites in `gpu.rs`. `init`,
+  `init_bg_inst_pass`, `init_deco_pass`, `init_fg_pass`, `init_atlas_texture`,
+  `init_image_pass`, `init_bg_image_pass`, `update_background_image`,
+  `WindowPostRenderer::init`, `WindowPostRenderer::update_shader` now return
+  `Result<(), GpuInitError>`. `compile_program` and `compile_shader` return
+  `Result<_, ShaderCompileError>`. `label` parameter tightened to `&'static str`
+  (all callers were literals). External callers in `widget.rs` and `mod.rs` unchanged
+  (they use `{e}` Display).
+- **70.E.3** — Surface shader compile errors to the user (see Task 71 item 4) — deferred
+  to Task 71.
 
 #### 70.F — HIGH: Thread Hygiene
 

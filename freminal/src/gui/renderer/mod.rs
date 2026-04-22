@@ -12,6 +12,7 @@
 //! - [`vertex`] — CPU-side vertex/instance builders, `FgRenderOptions`, and helpers.
 //!   Contains the full test suite for vertex generation logic.
 
+pub mod errors;
 pub mod gpu;
 pub(super) mod shaders;
 pub mod vertex;
