@@ -4,14 +4,9 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{ParserOutcome, split_params_into_semicolon_delimited_usize};
+use crate::ansi_components::csi_commands::util::param_or;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
-
-/// Extract a parameter value or return a default.
-#[inline]
-fn param_or(params: &[Option<usize>], idx: usize, default: usize) -> usize {
-    params.get(idx).and_then(|opt| *opt).unwrap_or(default)
-}
 
 /// DECSTBM — Set Top and Bottom Margins (`CSI Ps ; Ps r`)
 ///

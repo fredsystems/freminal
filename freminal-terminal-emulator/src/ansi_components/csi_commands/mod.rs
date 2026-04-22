@@ -82,5 +82,6 @@ pub mod sd;
 pub mod sgr;
 pub mod su;
 pub mod tbc;
+pub mod util;
 pub mod vpa;
 pub mod xtversion;
