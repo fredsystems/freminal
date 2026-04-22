@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use conv2::ValueFrom;
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
     cursor::{CursorPos, CursorState},
@@ -20,6 +21,30 @@ use crate::{
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
 };
+
+/// Apply a signed `delta` (in cells or rows) to an unsigned `base` coordinate and clamp the
+/// result into `[lo, hi]`.
+///
+/// Used by cursor-movement escape sequences (CUU, CUD, CUF, CUB) where the caller provides
+/// an `i32` delta and the buffer needs a `usize` screen coordinate.
+///
+/// If the `usize → i32` conversion of any argument would overflow (terminal dimensions
+/// exceeding `i32::MAX`, which is not physically possible), the function falls back to `base`
+/// — i.e. the cursor does not move. This is the safe no-op on bogus input.
+fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
+    let Ok(base_i) = i32::value_from(base) else {
+        return base;
+    };
+    let Ok(lo_i) = i32::value_from(lo) else {
+        return base;
+    };
+    let Ok(hi_i) = i32::value_from(hi) else {
+        return base;
+    };
+    let clamped = base_i.saturating_add(delta).max(lo_i).min(hi_i);
+    // After max(lo_i) with lo_i >= 0 (usize origin), clamped is non-negative, so this is lossless.
+    usize::value_from(clamped).unwrap_or(base)
+}
 
 /// The primary terminal buffer owning all rows, the cursor, and display state.
 ///
@@ -2684,11 +2709,6 @@ impl Buffer {
     }
 
     /// Move cursor relatively (CUU, CUD, CUF, CUB)
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        clippy::cast_sign_loss
-    )]
     /// Move the cursor by a relative offset `(dx, dy)` in screen coordinates.
     ///
     /// Positive `dx` moves right; negative moves left. Positive `dy` moves down; negative moves
@@ -2700,25 +2720,17 @@ impl Buffer {
             let cx = self.cursor.pos.x;
             if cx >= self.scroll_region_left && cx <= self.scroll_region_right {
                 // Cursor is inside the margin zone: clamp to [left, right].
-                (cx as i32 + dx)
-                    .max(self.scroll_region_left as i32)
-                    .min(self.scroll_region_right as i32) as usize
+                clamped_offset(cx, dx, self.scroll_region_left, self.scroll_region_right)
             } else {
                 // Cursor is outside the margin zone: use normal full-width clamp.
-                (cx as i32 + dx)
-                    .max(0)
-                    .min(self.width.saturating_sub(1) as i32) as usize
+                clamped_offset(cx, dx, 0, self.width.saturating_sub(1))
             }
         } else {
-            (self.cursor.pos.x as i32 + dx)
-                .max(0)
-                .min(self.width.saturating_sub(1) as i32) as usize
+            clamped_offset(self.cursor.pos.x, dx, 0, self.width.saturating_sub(1))
         };
 
         let current_screen_y = self.cursor_screen_y();
-        let new_screen_y = (current_screen_y as i32 + dy)
-            .max(0)
-            .min(self.height.saturating_sub(1) as i32) as usize;
+        let new_screen_y = clamped_offset(current_screen_y, dy, 0, self.height.saturating_sub(1));
 
         // PTY always operates at live bottom (scroll_offset = 0)
         let new_buffer_y = self.visible_window_start(0) + new_screen_y;

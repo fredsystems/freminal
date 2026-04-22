@@ -1507,6 +1507,7 @@ dependencies = [
 name = "freminal-buffer"
 version = "0.8.0"
 dependencies = [
+ "conv2",
  "criterion",
  "freminal-common",
  "proptest",

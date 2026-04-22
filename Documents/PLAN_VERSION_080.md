@@ -185,18 +185,44 @@ Original subtasks preserved for reference (not to be executed now):
 
 #### 70.H — MEDIUM: Complete Cast Audit (Task 30 re-open)
 
-Task 30 is marked complete in `MASTER_PLAN.md`, but ~165 raw `as` casts remain and ~32
-allow-attributes (`#[allow(clippy::cast_*)]`) survive. Hot spots:
-`freminal/src/gui/shaping.rs` (8× `as f32`), `freminal-buffer/src/buffer.rs` (39 casts).
+Task 30 is marked complete in `MASTER_PLAN.md`, but ~190 raw `as` casts remain in production
+code and ~33 allow-attributes (`#[allow(clippy::cast_*)]`) survive.
 
-- **70.H.1** — Full audit pass: every remaining `as` cast in production code is either
-  justified by the type system as provably lossless, or replaced with the appropriate `conv2`
-  trait (`ValueFrom` / `ValueInto` / `ApproxFrom` with `RoundToZero`).
+Executed as a file-by-file sweep so each commit is reviewable in isolation:
+
+- **70.H.a** ✅ — `freminal-buffer/src/buffer.rs`. Audit revealed only one production cast
+  site (`move_cursor_relative`, 9 casts behind a single `#[allow(...)]`). Extracted helper
+  `clamped_offset(base, delta, lo, hi)` using `conv2::ValueFrom` for both `usize → i32` and
+  `i32 → usize` conversions. Fallback on overflow: no-op (cursor does not move). Added
+  `bench_move_cursor_relative` benchmark to the buffer bench suite. Benchmark result:
+  24.2 µs → 25.0 µs on 10 000 iterations (+3.4%, ≈ +0.1 ns/call), well under the 15%
+  regression threshold. Removed one `#[allow(clippy::cast_*)]` attribute. Remaining casts
+  in this file are all in `#[cfg(test)]` modules and left as-is.
+- **70.H.b** — `freminal-terminal-emulator/src/input.rs` (26 production casts, 1 allow-attr).
+- **70.H.c** — Renderer cluster: `freminal/src/gui/renderer/vertex.rs` (13 casts, 3 allows),
+  `freminal/src/gui/atlas.rs` (13 casts), `freminal/src/gui/renderer/gpu.rs` (2 casts).
+- **70.H.d** — GUI shaping cluster: `freminal/src/gui/shaping.rs` (12 casts, 8 allows),
+  `freminal/src/gui/terminal/input.rs` (11 casts, 3 allows),
+  `freminal/src/gui/font_manager.rs` (6 casts, 1 allow),
+  `freminal/src/gui/view_state.rs` (5 casts, 3 allows),
+  `freminal/src/gui/terminal/coords.rs` (2 casts),
+  `freminal/src/gui/terminal/widget.rs` (2 casts),
+  `freminal/src/gui/mod.rs` (3 casts, 2 allows),
+  `freminal/src/gui/colors.rs` (3 casts).
+- **70.H.e** — Emulator + common tail: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (8 casts), `freminal-common/src/buffer_states/tchar.rs` (8 casts, 2 allows),
+  `freminal-terminal-emulator/src/recording.rs` (7 casts, 1 allow),
+  `freminal-terminal-emulator/src/terminal_handler/mod.rs` (6 casts, 1 allow),
+  `freminal-common/src/base64.rs` (4 casts),
+  `freminal-common/src/buffer_states/sixel.rs` (2 casts, 2 allows),
+  `freminal-common/src/buffer_states/fonts.rs` (2 casts),
+  `freminal-windowing/src/egui_integration.rs` (1 cast).
 - **70.H.2** — Delete every `#[allow(clippy::cast_*)]` attribute whose underlying cast has
   been replaced. Document any remaining allow with a `// SAFETY:` comment explaining why the
-  conversion is lossless in context.
+  conversion is lossless in context. Performed as part of each file cluster.
 - **70.H.3** — Re-enable workspace-level `#![deny(clippy::cast_possible_truncation,
-clippy::cast_sign_loss, clippy::cast_possible_wrap)]` in the three library crates.
+clippy::cast_sign_loss, clippy::cast_possible_wrap)]` in the three library crates (run
+  last, after all clusters are done).
 
 #### 70.I — MEDIUM: Complete Bool-to-Enum (Task 26 re-open)
 
