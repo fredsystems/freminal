@@ -69,6 +69,38 @@ pub enum FaceId {
     System(usize),
 }
 
+/// Errors that can occur when constructing or rebuilding a [`FontManager`].
+///
+/// All variants represent build-time or environment invariant violations that
+/// would have previously triggered a panic.  They are surfaced as typed errors
+/// so the binary can log a diagnostic and exit cleanly rather than aborting.
+#[derive(Debug, thiserror::Error)]
+pub enum FontManagerError {
+    /// A bundled font embedded via `include_bytes!` failed to parse with swash.
+    /// This indicates a packaging or build-time corruption error.
+    #[error("bundled font '{face}' is corrupt and cannot be parsed by swash")]
+    BundledFontCorrupt {
+        /// Human-readable name of the bundled face that failed.
+        face: &'static str,
+    },
+
+    /// Re-parsing font data that was just successfully parsed failed.  This
+    /// should only occur if the backing `Vec<u8>` was mutated between the
+    /// successful parse and the re-parse, which is not possible in the current
+    /// code paths.
+    #[error("failed to re-parse previously-validated font data for {variant} variant")]
+    ReparseFailed {
+        /// Style variant being re-parsed (e.g., "bold", "italic").
+        variant: &'static str,
+    },
+
+    /// Obtaining a `swash::FontRef` from a previously-loaded face failed.  The
+    /// face was successfully parsed on load, so this indicates memory corruption
+    /// or a bug in swash.
+    #[error("swash FontRef unavailable for primary regular face")]
+    FontRefUnavailable,
+}
+
 /// Style selector for glyph resolution, derived from format tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphStyle {
@@ -306,17 +338,24 @@ impl FontManager {
     /// `egui::Context::pixels_per_point()`. It is used together with the
     /// configured font size (in typographic points) to compute the correct
     /// ppem value for swash metric queries.
-    #[must_use]
-    pub fn new(config: &Config, pixels_per_point: f32) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontManagerError`] if the bundled fonts fail to parse, if
+    /// re-parsing validated font data fails, or if a swash `FontRef` cannot be
+    /// obtained from a loaded face.  All such errors indicate build-time or
+    /// memory-corruption invariant violations and should be treated as fatal
+    /// by the binary.
+    pub fn new(config: &Config, pixels_per_point: f32) -> Result<Self, FontManagerError> {
         let mut font_db = Database::new();
         font_db.load_system_fonts();
 
-        let bundled = load_bundled_faces();
+        let bundled = load_bundled_faces()?;
         let font_size_pt = config.font.size;
 
         let (primary, bundled_fallback, current_family) =
             if let Some(family) = config.font.family.as_deref() {
-                if let Some(user_primary) = load_user_faces(family, &font_db) {
+                if let Some(user_primary) = load_user_faces(family, &font_db)? {
                     info!("Loaded user font '{}' as primary", family);
                     (user_primary, Some(bundled), Some(family.to_owned()))
                 } else {
@@ -348,7 +387,7 @@ impl FontManager {
         }
 
         let font_size_ppem = pt_to_ppem(font_size_pt, pixels_per_point);
-        let (
+        let CellMetrics {
             cell_width,
             cell_height,
             ascent,
@@ -356,9 +395,9 @@ impl FontManager {
             underline_offset,
             strikeout_offset,
             stroke_size,
-        ) = compute_cell_metrics(&primary.regular, font_size_ppem);
+        } = compute_cell_metrics(&primary.regular, font_size_ppem)?;
 
-        Self {
+        Ok(Self {
             primary,
             bundled_fallback,
             emoji_face,
@@ -376,7 +415,7 @@ impl FontManager {
             pixels_per_point,
             current_family,
             font_db,
-        }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -471,7 +510,7 @@ impl FontManager {
     /// when no user font is active).
     #[must_use]
     pub fn face_data(&self, face_id: FaceId) -> Option<&[u8]> {
-        self.get_loaded_face(face_id).map(LoadedFace::as_bytes)
+        self.loaded_face(face_id).map(LoadedFace::as_bytes)
     }
 
     /// Get the font collection index for a given `FaceId`.
@@ -479,7 +518,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded.
     #[must_use]
     pub fn face_index(&self, face_id: FaceId) -> Option<usize> {
-        self.get_loaded_face(face_id).map(|f| f.index)
+        self.loaded_face(face_id).map(|f| f.index)
     }
 
     /// Create a `rustybuzz::Face` for the given `FaceId`.
@@ -490,7 +529,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded or the data cannot be parsed.
     #[must_use]
     pub fn rustybuzz_face(&self, face_id: FaceId) -> Option<rustybuzz::Face<'_>> {
-        let loaded = self.get_loaded_face(face_id)?;
+        let loaded = self.loaded_face(face_id)?;
         rustybuzz::Face::from_slice(
             loaded.as_bytes(),
             u32::value_from(loaded.index).unwrap_or(0),
@@ -502,7 +541,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded.
     #[must_use]
     pub fn swash_font_ref(&self, face_id: FaceId) -> Option<swash::FontRef<'_>> {
-        self.get_loaded_face(face_id)?.as_font_ref()
+        self.loaded_face(face_id)?.as_font_ref()
     }
 
     /// Get the swash `CacheKey` for a given `FaceId`.
@@ -510,7 +549,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded.
     #[must_use]
     pub fn face_cache_key(&self, face_id: FaceId) -> Option<swash::CacheKey> {
-        self.get_loaded_face(face_id).map(LoadedFace::cache_key)
+        self.loaded_face(face_id).map(LoadedFace::cache_key)
     }
 
     // -----------------------------------------------------------------------
@@ -526,7 +565,17 @@ impl FontManager {
     /// `pixels_per_point` is the current display scale factor; it may have
     /// changed since the last rebuild (e.g. the window was dragged to a
     /// different monitor).
-    pub fn rebuild(&mut self, config: &Config, pixels_per_point: f32) -> RebuildResult {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontManagerError`] if the bundled fonts or user font data
+    /// cannot be (re-)loaded.  Such errors represent build-time or memory
+    /// corruption invariant violations and should be treated as fatal.
+    pub fn rebuild(
+        &mut self,
+        config: &Config,
+        pixels_per_point: f32,
+    ) -> Result<RebuildResult, FontManagerError> {
         let new_family = config.font.family.as_deref();
         let new_size = config.font.size;
 
@@ -535,7 +584,7 @@ impl FontManager {
         let ppp_changed = (pixels_per_point - self.pixels_per_point).abs() > f32::EPSILON;
 
         if !requested_family_differs && !size_changed && !ppp_changed {
-            return RebuildResult::NoChange;
+            return Ok(RebuildResult::NoChange);
         }
 
         // Track whether the effective font family actually changed (as opposed
@@ -545,10 +594,10 @@ impl FontManager {
         let mut effective_family_changed = false;
 
         if requested_family_differs {
-            let bundled = load_bundled_faces();
+            let bundled = load_bundled_faces()?;
 
             let (primary, bundled_fallback, current_family) = if let Some(family) = new_family {
-                if let Some(user_primary) = load_user_faces(family, &self.font_db) {
+                if let Some(user_primary) = load_user_faces(family, &self.font_db)? {
                     info!("Reloaded user font '{}' as primary", family);
                     (user_primary, Some(bundled), Some(family.to_owned()))
                 } else {
@@ -571,15 +620,8 @@ impl FontManager {
         self.font_size_pt = new_size;
         self.pixels_per_point = pixels_per_point;
         let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-        let (cw, ch, ascent, descent, uo, so, ss) =
-            compute_cell_metrics(&self.primary.regular, font_size_ppem);
-        self.cell_width = cw;
-        self.cell_height = ch;
-        self.ascent = ascent;
-        self.descent = descent;
-        self.underline_offset = uo;
-        self.strikeout_offset = so;
-        self.stroke_size = ss;
+        let metrics = compute_cell_metrics(&self.primary.regular, font_size_ppem)?;
+        self.apply_cell_metrics(metrics);
 
         // Clear caches — glyph IDs and system face mappings may differ.
         self.glyph_cache.clear();
@@ -587,49 +629,48 @@ impl FontManager {
         self.system_faces.clear();
 
         if effective_family_changed {
-            RebuildResult::FamilyChanged
+            Ok(RebuildResult::FamilyChanged)
         } else if size_changed || ppp_changed {
-            RebuildResult::SizeChanged
+            Ok(RebuildResult::SizeChanged)
         } else {
             // The config requested a different family, but after attempting to
             // load it, the effective font is the same (e.g. both old and new
             // fell back to bundled MesloLGS).  No observable change.
-            RebuildResult::NoChange
+            Ok(RebuildResult::NoChange)
         }
     }
 
     /// Change the font size without altering the font family.
     ///
     /// Used by font zoom (Ctrl+Plus/Minus/0) to apply a per-tab effective
-    /// font size that differs from the config's base size.  Returns `true`
+    /// font size that differs from the config's base size.  Returns `Ok(true)`
     /// if the size actually changed and caches were invalidated.
-    pub fn set_font_size(&mut self, size_pt: f32) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontManagerError::FontRefUnavailable`] if re-computing cell
+    /// metrics fails due to swash being unable to produce a `FontRef` from the
+    /// previously-validated primary face.
+    pub fn set_font_size(&mut self, size_pt: f32) -> Result<bool, FontManagerError> {
         if (size_pt - self.font_size_pt).abs() <= f32::EPSILON {
-            return false;
+            return Ok(false);
         }
 
         self.font_size_pt = size_pt;
         let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-        let (cw, ch, ascent, descent, uo, so, ss) =
-            compute_cell_metrics(&self.primary.regular, font_size_ppem);
-        self.cell_width = cw;
-        self.cell_height = ch;
-        self.ascent = ascent;
-        self.descent = descent;
-        self.underline_offset = uo;
-        self.strikeout_offset = so;
-        self.stroke_size = ss;
+        let metrics = compute_cell_metrics(&self.primary.regular, font_size_ppem)?;
+        self.apply_cell_metrics(metrics);
 
         // Clear caches — glyph sizes differ at the new ppem.
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
 
-        true
+        Ok(true)
     }
 
     /// Check whether `pixels_per_point` has changed and recompute cell metrics
-    /// if so.  Returns `true` when metrics were recomputed (callers should
+    /// if so.  Returns `Ok(true)` when metrics were recomputed (callers should
     /// invalidate the glyph atlas and shaping cache).
     ///
     /// This is a lightweight per-frame check intended to handle monitor DPI
@@ -641,29 +682,31 @@ impl FontManager {
         self.pixels_per_point
     }
 
-    pub fn update_pixels_per_point(&mut self, pixels_per_point: f32) -> bool {
+    /// Recompute cell metrics if the `pixels_per_point` has changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontManagerError::FontRefUnavailable`] if re-computing cell
+    /// metrics fails.
+    pub fn update_pixels_per_point(
+        &mut self,
+        pixels_per_point: f32,
+    ) -> Result<bool, FontManagerError> {
         if (pixels_per_point - self.pixels_per_point).abs() <= f32::EPSILON {
-            return false;
+            return Ok(false);
         }
 
         self.pixels_per_point = pixels_per_point;
         let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-        let (cw, ch, ascent, descent, uo, so, ss) =
-            compute_cell_metrics(&self.primary.regular, font_size_ppem);
-        self.cell_width = cw;
-        self.cell_height = ch;
-        self.ascent = ascent;
-        self.descent = descent;
-        self.underline_offset = uo;
-        self.strikeout_offset = so;
-        self.stroke_size = ss;
+        let metrics = compute_cell_metrics(&self.primary.regular, font_size_ppem)?;
+        self.apply_cell_metrics(metrics);
 
         // Clear caches — glyph sizes differ at new ppem.
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
 
-        true
+        Ok(true)
     }
 
     /// Return a sorted, deduplicated list of all monospaced font family names
@@ -774,7 +817,7 @@ impl FontManager {
     }
 
     /// Look up a `LoadedFace` by its `FaceId`.
-    fn get_loaded_face(&self, face_id: FaceId) -> Option<&LoadedFace> {
+    fn loaded_face(&self, face_id: FaceId) -> Option<&LoadedFace> {
         match face_id {
             FaceId::PrimaryRegular => Some(&self.primary.regular),
             FaceId::PrimaryBold => Some(&self.primary.bold),
@@ -788,11 +831,16 @@ impl FontManager {
             FaceId::System(idx) => self.system_faces.get(idx),
         }
     }
-}
 
-impl Default for FontManager {
-    fn default() -> Self {
-        Self::new(&Config::default(), 1.0)
+    /// Copy freshly-computed cell metrics into the manager's cached fields.
+    const fn apply_cell_metrics(&mut self, metrics: CellMetrics) {
+        self.cell_width = metrics.cell_width;
+        self.cell_height = metrics.cell_height;
+        self.ascent = metrics.ascent;
+        self.descent = metrics.descent;
+        self.underline_offset = metrics.underline_offset;
+        self.strikeout_offset = metrics.strikeout_offset;
+        self.stroke_size = metrics.stroke_size;
     }
 }
 
@@ -802,43 +850,58 @@ impl Default for FontManager {
 
 /// Load all four bundled `MesloLGS` Nerd Font Mono faces.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the bundled font data is corrupt and cannot be parsed by swash.
-/// This is a build-time invariant — the font files are embedded via
-/// `include_bytes!` and should always be valid.
-fn load_bundled_faces() -> PrimaryFaces {
-    // Safety: bundled fonts are known-good TTF files. If they fail to parse,
-    // it indicates a build/packaging error, not a runtime condition.
-    let regular = LoadedFace::from_static(MESLO_REGULAR)
-        .unwrap_or_else(|| unreachable!("bundled MesloLGS-Regular.ttf is corrupt"));
-    let bold = LoadedFace::from_static(MESLO_BOLD)
-        .unwrap_or_else(|| unreachable!("bundled MesloLGS-Bold.ttf is corrupt"));
-    let italic = LoadedFace::from_static(MESLO_ITALIC)
-        .unwrap_or_else(|| unreachable!("bundled MesloLGS-Italic.ttf is corrupt"));
-    let bold_italic = LoadedFace::from_static(MESLO_BOLD_ITALIC)
-        .unwrap_or_else(|| unreachable!("bundled MesloLGS-BoldItalic.ttf is corrupt"));
+/// Returns [`FontManagerError::BundledFontCorrupt`] if any bundled font data
+/// fails to parse by swash.  This is a build-time invariant — the font files
+/// are embedded via `include_bytes!` and should always be valid; a failure here
+/// indicates a packaging error.
+fn load_bundled_faces() -> Result<PrimaryFaces, FontManagerError> {
+    let regular =
+        LoadedFace::from_static(MESLO_REGULAR).ok_or(FontManagerError::BundledFontCorrupt {
+            face: "MesloLGS-Regular.ttf",
+        })?;
+    let bold = LoadedFace::from_static(MESLO_BOLD).ok_or(FontManagerError::BundledFontCorrupt {
+        face: "MesloLGS-Bold.ttf",
+    })?;
+    let italic =
+        LoadedFace::from_static(MESLO_ITALIC).ok_or(FontManagerError::BundledFontCorrupt {
+            face: "MesloLGS-Italic.ttf",
+        })?;
+    let bold_italic =
+        LoadedFace::from_static(MESLO_BOLD_ITALIC).ok_or(FontManagerError::BundledFontCorrupt {
+            face: "MesloLGS-BoldItalic.ttf",
+        })?;
 
-    PrimaryFaces {
+    Ok(PrimaryFaces {
         regular,
         bold,
         italic,
         bold_italic,
-    }
+    })
 }
 
 /// Attempt to load a user font by file path or system font name.
 ///
 /// If the string is an existing file, loads it directly. Otherwise, searches
-/// `fontdb` for a matching family name. Returns `None` on failure.
-fn load_user_faces(path_or_name: &str, font_db: &Database) -> Option<PrimaryFaces> {
+/// `fontdb` for a matching family name.
+///
+/// # Errors
+///
+/// Returns [`FontManagerError::ReparseFailed`] if a previously-validated font
+/// buffer fails to re-parse.  `Ok(None)` means the font was not found and the
+/// caller should fall back to the bundled default.
+fn load_user_faces(
+    path_or_name: &str,
+    font_db: &Database,
+) -> Result<Option<PrimaryFaces>, FontManagerError> {
     // Try file path first.
     let path = Path::new(path_or_name);
     if path.exists()
         && path.is_file()
         && let Ok(data) = std::fs::read(path)
     {
-        return build_user_primary_from_data(data, path_or_name, font_db);
+        return Ok(build_user_primary_from_data(data, path_or_name, font_db));
     }
 
     // Try system font name lookup.
@@ -875,11 +938,25 @@ fn build_user_primary_from_data(
 ///
 /// Searches for regular, bold, italic, and bold-italic variants. Falls back
 /// to the regular face for missing variants.
-fn load_user_faces_by_name(name: &str, font_db: &Database) -> Option<PrimaryFaces> {
+///
+/// # Errors
+///
+/// Returns [`FontManagerError::ReparseFailed`] if re-parsing the already-validated
+/// regular face data fails when building a style fallback.  `Ok(None)` means the
+/// family was not found in the system font database.
+fn load_user_faces_by_name(
+    name: &str,
+    font_db: &Database,
+) -> Result<Option<PrimaryFaces>, FontManagerError> {
     // Find the family in fontdb (case-insensitive substring match).
-    let regular_data =
-        find_system_font_data(font_db, name, fontdb::Weight::NORMAL, fontdb::Style::Normal)?;
-    let regular = LoadedFace::from_owned(regular_data, 0)?;
+    let Some(regular_data) =
+        find_system_font_data(font_db, name, fontdb::Weight::NORMAL, fontdb::Style::Normal)
+    else {
+        return Ok(None);
+    };
+    let Some(regular) = LoadedFace::from_owned(regular_data, 0) else {
+        return Ok(None);
+    };
 
     // Try to find bold variant.
     let bold = find_system_font_data(font_db, name, fontdb::Weight::BOLD, fontdb::Style::Normal)
@@ -896,25 +973,31 @@ fn load_user_faces_by_name(name: &str, font_db: &Database) -> Option<PrimaryFace
             .and_then(|d| LoadedFace::from_owned(d, 0));
 
     // Fall back to regular for missing variants (clone the data).
-    let bold = bold.unwrap_or_else(|| {
-        LoadedFace::from_owned(regular.data.as_bytes().to_vec(), 0)
-            .unwrap_or_else(|| unreachable!("re-parsing known-good regular data"))
-    });
-    let italic = italic.unwrap_or_else(|| {
-        LoadedFace::from_owned(regular.data.as_bytes().to_vec(), 0)
-            .unwrap_or_else(|| unreachable!("re-parsing known-good regular data"))
-    });
-    let bold_italic = bold_italic.unwrap_or_else(|| {
-        LoadedFace::from_owned(regular.data.as_bytes().to_vec(), 0)
-            .unwrap_or_else(|| unreachable!("re-parsing known-good regular data"))
-    });
+    let bold = match bold {
+        Some(face) => face,
+        None => LoadedFace::from_owned(regular.data.as_bytes().to_vec(), 0)
+            .ok_or(FontManagerError::ReparseFailed { variant: "bold" })?,
+    };
+    let italic = match italic {
+        Some(face) => face,
+        None => LoadedFace::from_owned(regular.data.as_bytes().to_vec(), 0)
+            .ok_or(FontManagerError::ReparseFailed { variant: "italic" })?,
+    };
+    let bold_italic = match bold_italic {
+        Some(face) => face,
+        None => LoadedFace::from_owned(regular.data.as_bytes().to_vec(), 0).ok_or(
+            FontManagerError::ReparseFailed {
+                variant: "bold-italic",
+            },
+        )?,
+    };
 
-    Some(PrimaryFaces {
+    Ok(Some(PrimaryFaces {
         regular,
         bold,
         italic,
         bold_italic,
-    })
+    }))
 }
 
 /// Remove all whitespace from a string (for fuzzy font name matching).
@@ -1017,7 +1100,8 @@ fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
 
             if let fontdb::Source::File(path) = &face.source
                 && let Ok(bytes) = std::fs::read(path)
-                && let Some(loaded) = LoadedFace::from_owned(bytes, face.index as usize)
+                && let Some(loaded) =
+                    LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
             {
                 return Some(loaded);
             }
@@ -1032,7 +1116,8 @@ fn find_system_face_for_char(font_db: &Database, c: char) -> Option<LoadedFace> 
     for face in font_db.faces() {
         if let fontdb::Source::File(path) = &face.source
             && let Ok(bytes) = std::fs::read(path)
-            && let Some(loaded) = LoadedFace::from_owned(bytes, face.index as usize)
+            && let Some(loaded) =
+                LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
             && loaded.has_glyph(c)
         {
             return Some(loaded);
@@ -1122,12 +1207,12 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_ppem: f32,
-) -> (u32, u32, f32, f32, f32, f32, f32) {
+) -> Result<CellMetrics, FontManagerError> {
     use swash::{TableProvider, tag_from_bytes};
 
     let font_ref = face
         .as_font_ref()
-        .unwrap_or_else(|| unreachable!("primary regular face data is corrupt"));
+        .ok_or(FontManagerError::FontRefUnavailable)?;
 
     let metrics = font_ref.metrics(&[]).scale(font_size_ppem);
 
@@ -1207,15 +1292,27 @@ fn compute_cell_metrics(
     let cell_width = cell_width.max(1);
     let cell_height = cell_height.max(1);
 
-    (
+    Ok(CellMetrics {
         cell_width,
         cell_height,
-        baseline_offset,
-        metrics.descent.abs(),
-        metrics.underline_offset,
-        metrics.strikeout_offset,
-        metrics.stroke_size,
-    )
+        ascent: baseline_offset,
+        descent: metrics.descent.abs(),
+        underline_offset: metrics.underline_offset,
+        strikeout_offset: metrics.strikeout_offset,
+        stroke_size: metrics.stroke_size,
+    })
+}
+
+/// Cell-geometry output of [`compute_cell_metrics`].
+#[derive(Debug, Clone, Copy)]
+struct CellMetrics {
+    cell_width: u32,
+    cell_height: u32,
+    ascent: f32,
+    descent: f32,
+    underline_offset: f32,
+    strikeout_offset: f32,
+    stroke_size: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,13 +1321,14 @@ fn compute_cell_metrics(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Helper to create a default `FontManager` with bundled fonts.
     ///
     /// Uses `pixels_per_point = 1.0` (standard non-HiDPI).
     fn default_manager() -> FontManager {
-        FontManager::new(&Config::default(), 1.0)
+        FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
     // --- Test 1: Bundled font loading produces non-zero metrics ---
@@ -1397,7 +1495,7 @@ mod tests {
     fn user_font_failure_falls_back_to_bundled() {
         let mut config = Config::default();
         config.font.family = Some("/nonexistent/path/to/font.ttf".to_owned());
-        let fm = FontManager::new(&config, 1.0);
+        let fm = FontManager::new(&config, 1.0).unwrap();
 
         // Should have fallen back to bundled MesloLGS as primary.
         assert!(
@@ -1413,8 +1511,8 @@ mod tests {
     #[test]
     fn rebuild_no_change() {
         let config = Config::default();
-        let mut fm = FontManager::new(&config, 1.0);
-        let result = fm.rebuild(&config, 1.0);
+        let mut fm = FontManager::new(&config, 1.0).unwrap();
+        let result = fm.rebuild(&config, 1.0).unwrap();
         assert_eq!(result, RebuildResult::NoChange);
     }
 
@@ -1423,7 +1521,7 @@ mod tests {
     #[test]
     fn rebuild_size_change() {
         let config = Config::default();
-        let mut fm = FontManager::new(&config, 1.0);
+        let mut fm = FontManager::new(&config, 1.0).unwrap();
 
         // Pre-populate the glyph cache.
         let style = GlyphStyle::new(false, false);
@@ -1435,7 +1533,7 @@ mod tests {
 
         let mut new_config = config;
         new_config.font.size = 24.0;
-        let result = fm.rebuild(&new_config, 1.0);
+        let result = fm.rebuild(&new_config, 1.0).unwrap();
 
         assert_eq!(result, RebuildResult::SizeChanged);
         assert!(fm.glyph_cache.is_empty(), "cache should be cleared");
@@ -1454,11 +1552,11 @@ mod tests {
     #[test]
     fn rebuild_family_change_with_invalid_font() {
         let config = Config::default();
-        let mut fm = FontManager::new(&config, 1.0);
+        let mut fm = FontManager::new(&config, 1.0).unwrap();
 
         let mut new_config = config;
         new_config.font.family = Some("/nonexistent/font.ttf".to_owned());
-        let result = fm.rebuild(&new_config, 1.0);
+        let result = fm.rebuild(&new_config, 1.0).unwrap();
 
         // The requested font fails to load, so the effective family stays as
         // bundled MesloLGS (None → None).  No observable change.
@@ -1521,11 +1619,11 @@ mod tests {
     fn cell_size_scales_with_font_size() {
         let mut config_small = Config::default();
         config_small.font.size = 8.0;
-        let fm_small = FontManager::new(&config_small, 1.0);
+        let fm_small = FontManager::new(&config_small, 1.0).unwrap();
 
         let mut config_large = Config::default();
         config_large.font.size = 32.0;
-        let fm_large = FontManager::new(&config_large, 1.0);
+        let fm_large = FontManager::new(&config_large, 1.0).unwrap();
 
         assert!(
             fm_large.cell_width > fm_small.cell_width,
@@ -1577,7 +1675,7 @@ mod tests {
         // The manager was created with ppp = 1.0; updating with the same
         // value must be a no-op.
         assert!(
-            !fm.update_pixels_per_point(1.0),
+            !fm.update_pixels_per_point(1.0).unwrap(),
             "Same pixels_per_point should return false"
         );
     }
@@ -1593,7 +1691,7 @@ mod tests {
         // Switching to 2.0 (simulating a HiDPI monitor) must return true
         // and produce different cell metrics.
         assert!(
-            fm.update_pixels_per_point(2.0),
+            fm.update_pixels_per_point(2.0).unwrap(),
             "Different pixels_per_point should return true"
         );
         assert_ne!(
@@ -1623,7 +1721,7 @@ mod tests {
         let _ = fm.resolve_glyph('A', style);
         assert!(!fm.glyph_cache.is_empty(), "cache should be populated");
 
-        fm.update_pixels_per_point(2.0);
+        let _ = fm.update_pixels_per_point(2.0).unwrap();
         assert!(
             fm.glyph_cache.is_empty(),
             "glyph cache must be cleared after DPI change"
@@ -1672,7 +1770,7 @@ mod tests {
         let old_pt = fm.font_size_pt();
 
         // Increase by 8pt — should produce larger cells.
-        let changed = fm.set_font_size(old_pt + 8.0);
+        let changed = fm.set_font_size(old_pt + 8.0).unwrap();
         assert!(
             changed,
             "set_font_size should return true when size differs"
@@ -1695,7 +1793,7 @@ mod tests {
     fn set_font_size_same_size_returns_false() {
         let mut fm = default_manager();
         let current = fm.font_size_pt();
-        let changed = fm.set_font_size(current);
+        let changed = fm.set_font_size(current).unwrap();
         assert!(
             !changed,
             "set_font_size should return false when size is unchanged"
@@ -1709,7 +1807,7 @@ mod tests {
         let _ = fm.resolve_glyph('A', style);
         assert!(!fm.glyph_cache.is_empty(), "cache should be populated");
 
-        fm.set_font_size(fm.font_size_pt() + 4.0);
+        let _ = fm.set_font_size(fm.font_size_pt() + 4.0).unwrap();
         assert!(
             fm.glyph_cache.is_empty(),
             "glyph cache must be cleared after font size change"

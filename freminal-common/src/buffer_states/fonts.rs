@@ -230,8 +230,8 @@ impl Iterator for FontDecorationFlagsIter {
     type Item = FontDecorations;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while (self.index as usize) < ALL_DECORATIONS.len() {
-            let dec = ALL_DECORATIONS[self.index as usize];
+        while usize::from(self.index) < ALL_DECORATIONS.len() {
+            let dec = ALL_DECORATIONS[usize::from(self.index)];
             self.index += 1;
             if self.flags.contains(dec) {
                 return Some(dec);

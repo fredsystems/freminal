@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use anyhow::Result;
+use crate::error::InternalStateError;
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -30,6 +30,7 @@ use freminal_common::{
     },
     config::ThemeMode,
     cursor::CursorVisualStyle,
+    send_or_log,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
 
@@ -41,7 +42,7 @@ use crate::{
     io::PtyWrite,
 };
 
-use freminal_buffer::terminal_handler::TerminalHandler as NewHandler;
+use crate::terminal_handler::TerminalHandler as NewHandler;
 
 /// Format the first `max_bytes` of `data` as a hex string for trace logging.
 ///
@@ -133,7 +134,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub(crate) fn get_cursor_visual_style(&self) -> CursorVisualStyle {
+    pub(crate) fn cursor_visual_style(&self) -> CursorVisualStyle {
         self.handler.cursor_visual_style()
     }
 
@@ -158,8 +159,8 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn get_win_size(&mut self) -> (usize, usize) {
-        self.handler.get_win_size()
+    pub const fn win_size(&mut self) -> (usize, usize) {
+        self.handler.win_size()
     }
 
     #[must_use]
@@ -179,7 +180,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub(crate) const fn get_cursor_key_mode(&self) -> Decckm {
+    pub(crate) const fn cursor_key_mode(&self) -> Decckm {
         self.modes.cursor_key
     }
 
@@ -647,8 +648,8 @@ impl TerminalState {
     ///
     /// # Errors
     /// Will return an error if the write fails
-    pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
-        let decckm = self.get_cursor_key_mode();
+    pub fn write(&self, to_write: &TerminalInput) -> Result<(), InternalStateError> {
+        let decckm = self.cursor_key_mode();
         let keypad_app = self.modes.keypad_mode;
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
@@ -666,13 +667,19 @@ impl TerminalState {
             &KeyEventMeta::PRESS,
         ) {
             TerminalInputPayload::Single(c) => {
-                self.write_tx.send(PtyWrite::Write(vec![c]))?;
+                self.write_tx
+                    .send(PtyWrite::Write(vec![c]))
+                    .map_err(|e| InternalStateError::PtySendFailed(e.to_string()))?;
             }
             TerminalInputPayload::Many(to_write) => {
-                self.write_tx.send(PtyWrite::Write(to_write.to_vec()))?;
+                self.write_tx
+                    .send(PtyWrite::Write(to_write.to_vec()))
+                    .map_err(|e| InternalStateError::PtySendFailed(e.to_string()))?;
             }
             TerminalInputPayload::Owned(bytes) => {
-                self.write_tx.send(PtyWrite::Write(bytes))?;
+                self.write_tx
+                    .send(PtyWrite::Write(bytes))
+                    .map_err(|e| InternalStateError::PtySendFailed(e.to_string()))?;
             }
         }
 
@@ -684,12 +691,11 @@ impl TerminalState {
     /// This bypasses the `TerminalInput` encoding path — the response is an
     /// escape sequence that must be sent verbatim.
     fn send_decrpm(&self, response: &str) {
-        if let Err(e) = self
-            .write_tx
-            .send(PtyWrite::Write(response.as_bytes().to_vec()))
-        {
-            error!("Failed to send DECRPM response: {e}");
-        }
+        send_or_log!(
+            self.write_tx,
+            PtyWrite::Write(response.as_bytes().to_vec()),
+            "Failed to send DECRPM response"
+        );
     }
 }
 

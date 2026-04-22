@@ -134,7 +134,7 @@ impl VtTestHelper {
     /// Get the cursor position in screen coordinates (0-indexed).
     #[must_use]
     pub fn cursor_pos(&self) -> CursorPos {
-        self.state.handler.buffer().get_cursor_screen_pos()
+        self.state.handler.buffer().cursor_screen_pos()
     }
 
     /// Assert the cursor is at the given screen position (0-indexed).

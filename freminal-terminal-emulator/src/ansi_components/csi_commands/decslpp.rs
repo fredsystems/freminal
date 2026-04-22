@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{ParserOutcome, split_params_into_semicolon_delimited_usize};
+use crate::ansi_components::csi_commands::util::param_or;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
@@ -71,11 +72,6 @@ use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 ///            Ps2 0, 1, 2    Restore window title.
 ///
 /// ESC [ Ps1 ; Ps2 ; Ps3 t
-#[inline]
-fn param_or(params: &[Option<usize>], idx: usize, default: usize) -> usize {
-    params.get(idx).and_then(|opt| *opt).unwrap_or(default)
-}
-
 /// DECSLPP — Window Manipulation (`CSI Ps ; Ps ; Ps t`)
 ///
 /// Handles xterm window manipulation operations. See the full operation

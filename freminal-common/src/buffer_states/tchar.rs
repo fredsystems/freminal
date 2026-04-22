@@ -6,7 +6,6 @@
 use core::fmt;
 
 use crate::buffer_states::error::TCharError;
-use anyhow::Result;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum byte length of a UTF-8 grapheme that `TChar` can store inline.
@@ -47,7 +46,7 @@ impl TChar {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Ascii(c) => core::slice::from_ref(c),
-            Self::Utf8(buf, len) => &buf[..*len as usize],
+            Self::Utf8(buf, len) => &buf[..usize::from(*len)],
             Self::Space => b" ",
             Self::NewLine => b"\n",
         }
@@ -62,7 +61,7 @@ impl TChar {
             Self::NewLine => 0,
 
             Self::Utf8(buf, len) => {
-                let bytes = &buf[..*len as usize];
+                let bytes = &buf[..usize::from(*len)];
                 // Try to interpret as UTF-8; fallback to width 1 for invalid sequences
                 std::str::from_utf8(bytes).map_or(1, unicode_width::UnicodeWidthStr::width)
             }
@@ -77,17 +76,19 @@ impl TChar {
     /// # Errors
     /// Returns an error if the slice is empty or longer than
     /// [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn new_from_many_chars(v: &[u8]) -> Result<Self> {
+    pub fn new_from_many_chars(v: &[u8]) -> Result<Self, TCharError> {
         if v.is_empty() {
-            return Err(TCharError::EmptyTChar.into());
+            return Err(TCharError::EmptyTChar);
         }
         if v.len() > TCHAR_MAX_UTF8_LEN {
-            return Err(TCharError::TooLong(v.len()).into());
+            return Err(TCharError::TooLong(v.len()));
         }
         let mut buf = [0u8; TCHAR_MAX_UTF8_LEN];
         buf[..v.len()].copy_from_slice(v);
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(Self::Utf8(buf, v.len() as u8))
+        // Length already bounded by the `v.len() > TCHAR_MAX_UTF8_LEN` check above
+        // (TCHAR_MAX_UTF8_LEN = 16), so `u8::try_from` always succeeds.
+        let len_u8 = u8::try_from(v.len()).unwrap_or(0);
+        Ok(Self::Utf8(buf, len_u8))
     }
 
     #[must_use]
@@ -104,7 +105,7 @@ impl TChar {
     /// # Errors
     /// Returns an error if the slice is not valid UTF-8, or if any grapheme
     /// cluster exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn from_vec(v: &[u8]) -> Result<Vec<Self>> {
+    pub fn from_vec(v: &[u8]) -> Result<Vec<Self>, TCharError> {
         // Fast path: if every byte is ASCII (< 0x80), each byte is its own
         // grapheme cluster and we can skip unicode_segmentation entirely.
         if v.iter().all(|&b| b < 0x80) {
@@ -121,7 +122,7 @@ impl TChar {
     ///
     /// # Errors
     /// Returns an error if any grapheme exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn from_vec_of_graphemes(v: &[&str]) -> Result<Vec<Self>> {
+    pub fn from_vec_of_graphemes(v: &[&str]) -> Result<Vec<Self>, TCharError> {
         v.iter()
             .map(|s| {
                 Ok(if s.len() == 1 {
@@ -130,7 +131,7 @@ impl TChar {
                     Self::new_from_many_chars(s.as_bytes())?
                 })
             })
-            .collect::<Result<Vec<Self>>>()
+            .collect::<Result<Vec<Self>, TCharError>>()
     }
 
     /// Convert a string to a vector of `TChar` by splitting on grapheme
@@ -138,7 +139,7 @@ impl TChar {
     ///
     /// # Errors
     /// Returns an error if any grapheme exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn from_string(s: &str) -> Result<Vec<Self>> {
+    pub fn from_string(s: &str) -> Result<Vec<Self>, TCharError> {
         // Fast path: if the string is pure ASCII, each byte is one grapheme.
         if s.is_ascii() {
             return Ok(s.bytes().map(Self::new_from_single_char).collect());
@@ -155,7 +156,7 @@ impl TChar {
                     Self::new_from_many_chars(s.as_bytes())?
                 })
             })
-            .collect::<Result<Vec<Self>>>()
+            .collect::<Result<Vec<Self>, TCharError>>()
     }
 }
 
@@ -168,24 +169,25 @@ impl From<u8> for TChar {
 impl From<char> for TChar {
     fn from(c: char) -> Self {
         if c.is_ascii() {
-            // single-byte fast path
-            Self::new_from_single_char(c as u8)
+            // single-byte fast path; `is_ascii()` guarantees `c as u32 <= 127`
+            // so `u8::try_from` always succeeds.
+            Self::new_from_single_char(u8::try_from(u32::from(c)).unwrap_or(0))
         } else {
             // non-ASCII: encode as UTF-8 scalar into the inline buffer
             let mut buf = [0u8; TCHAR_MAX_UTF8_LEN];
             let s = c.encode_utf8(&mut buf[..4]); // max 4 bytes for a single scalar
             let len = s.len();
-            // Zero-fill the rest (already zero from array init)
-            #[allow(clippy::cast_possible_truncation)]
-            Self::Utf8(buf, len as u8)
+            // `len` is at most 4 (UTF-8 scalar), so `u8::try_from` always succeeds.
+            let len_u8 = u8::try_from(len).unwrap_or(0);
+            Self::Utf8(buf, len_u8)
         }
     }
 }
 
 impl TryFrom<&[u8]> for TChar {
-    type Error = anyhow::Error;
+    type Error = TCharError;
 
-    fn try_from(v: &[u8]) -> Result<Self> {
+    fn try_from(v: &[u8]) -> Result<Self, TCharError> {
         Self::new_from_many_chars(v)
     }
 }
@@ -204,7 +206,7 @@ impl PartialEq<u8> for TChar {
 impl PartialEq<Vec<u8>> for TChar {
     fn eq(&self, other: &Vec<u8>) -> bool {
         match self {
-            Self::Utf8(buf, len) => &buf[..*len as usize] == other.as_slice(),
+            Self::Utf8(buf, len) => &buf[..usize::from(*len)] == other.as_slice(),
             _ => false,
         }
     }
@@ -219,7 +221,7 @@ impl PartialEq<Self> for TChar {
             },
             Self::Utf8(buf, len) => match other {
                 Self::Utf8(obuf, olen) => {
-                    len == olen && buf[..*len as usize] == obuf[..*len as usize]
+                    len == olen && buf[..usize::from(*len)] == obuf[..usize::from(*len)]
                 }
                 _ => false,
             },
@@ -234,10 +236,10 @@ impl fmt::Display for TChar {
         match self {
             Self::Ascii(c) => match c {
                 0x00..=0x1F => write!(f, "0x{c:02X}"),
-                _ => write!(f, "{}", *c as char),
+                _ => write!(f, "{}", char::from(*c)),
             },
             Self::Utf8(buf, len) => {
-                let bytes = &buf[..*len as usize];
+                let bytes = &buf[..usize::from(*len)];
                 write!(f, "{}", std::str::from_utf8(bytes).unwrap_or(""))
             }
             Self::Space => write!(f, " "),

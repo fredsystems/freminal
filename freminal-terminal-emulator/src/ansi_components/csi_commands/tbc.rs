@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
@@ -33,7 +33,11 @@ pub fn ansi_parser_inner_csi_finished_tbc(
 
     let ps = param.unwrap_or(0);
 
-    output.push(TerminalOutput::TabClear(ps));
+    if let Ok(mode) = TabClearMode::try_from(ps) {
+        output.push(TerminalOutput::TabClear(mode));
+    } else {
+        tracing::warn!("TBC with unsupported Ps={ps} (ignored)");
+    }
 
     ParserOutcome::Finished
 }
@@ -41,7 +45,7 @@ pub fn ansi_parser_inner_csi_finished_tbc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+    use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 
     #[test]
     fn tbc_non_numeric_is_invalid() {
@@ -56,7 +60,10 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_tbc(b"", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(output, vec![TerminalOutput::TabClear(0)]);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::TabClear(TabClearMode::CurrentColumn)]
+        );
     }
 
     #[test]
@@ -64,6 +71,17 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_tbc(b"3", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(output, vec![TerminalOutput::TabClear(3)]);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::TabClear(TabClearMode::AllCharacter)]
+        );
+    }
+
+    #[test]
+    fn tbc_unknown_ps_is_ignored() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_tbc(b"99", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(output.is_empty(), "Unknown Ps should produce no output");
     }
 }

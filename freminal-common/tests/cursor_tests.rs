@@ -45,7 +45,7 @@ fn test_new_equals_default() {
 fn test_get_color_reverse_off() {
     // ReverseVideo::Off → returns the raw `color` field.
     let sc = StateColors::default(); // color = Default, reverse = Off
-    assert_eq!(sc.get_color(), TerminalColor::Default);
+    assert_eq!(sc.color(), TerminalColor::Default);
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn test_get_color_reverse_on_default() {
     // ReverseVideo::On → returns background_color.default_to_regular().
     // DefaultBackground.default_to_regular() == Black.
     let sc = StateColors::default().with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.get_color(), TerminalColor::Black);
+    assert_eq!(sc.color(), TerminalColor::Black);
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn test_get_color_reverse_on_custom_colors() {
         .with_background_color(TerminalColor::Blue)
         .with_reverse_video(ReverseVideo::On);
     // get_color() returns background_color.default_to_regular() = Blue (unchanged)
-    assert_eq!(sc.get_color(), TerminalColor::Blue);
+    assert_eq!(sc.color(), TerminalColor::Blue);
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ fn test_get_color_reverse_on_custom_colors() {
 #[test]
 fn test_get_background_color_reverse_off() {
     let sc = StateColors::default(); // reverse = Off
-    assert_eq!(sc.get_background_color(), TerminalColor::DefaultBackground);
+    assert_eq!(sc.background_color(), TerminalColor::DefaultBackground);
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn test_get_background_color_reverse_on_default() {
     // ReverseVideo::On → returns color.default_to_regular().
     // Default.default_to_regular() == White.
     let sc = StateColors::default().with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.get_background_color(), TerminalColor::White);
+    assert_eq!(sc.background_color(), TerminalColor::White);
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_get_background_color_reverse_on_custom_colors() {
         .with_background_color(TerminalColor::Blue)
         .with_reverse_video(ReverseVideo::On);
     // get_background_color() returns color.default_to_regular() = Red (unchanged)
-    assert_eq!(sc.get_background_color(), TerminalColor::Red);
+    assert_eq!(sc.background_color(), TerminalColor::Red);
 }
 
 // ---------------------------------------------------------------------------
@@ -103,10 +103,7 @@ fn test_get_background_color_reverse_on_custom_colors() {
 #[test]
 fn test_get_underline_color_reverse_off() {
     let sc = StateColors::default(); // reverse = Off
-    assert_eq!(
-        sc.get_underline_color(),
-        TerminalColor::DefaultUnderlineColor
-    );
+    assert_eq!(sc.underline_color(), TerminalColor::DefaultUnderlineColor);
 }
 
 #[test]
@@ -114,7 +111,7 @@ fn test_get_underline_color_reverse_on() {
     // ReverseVideo::On → returns background_color.default_to_regular().
     // DefaultBackground.default_to_regular() == Black.
     let sc = StateColors::default().with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.get_underline_color(), TerminalColor::Black);
+    assert_eq!(sc.underline_color(), TerminalColor::Black);
 }
 
 #[test]
@@ -125,7 +122,7 @@ fn test_get_underline_color_reverse_on_custom_ul() {
         .with_underline_color(TerminalColor::Green)
         .with_background_color(TerminalColor::Cyan)
         .with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.get_underline_color(), TerminalColor::Green);
+    assert_eq!(sc.underline_color(), TerminalColor::Green);
 }
 
 // ---------------------------------------------------------------------------

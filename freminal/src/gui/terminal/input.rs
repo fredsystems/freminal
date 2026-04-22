@@ -21,6 +21,7 @@ use freminal_common::buffer_states::modes::{
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
+use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
     input::{
         KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
@@ -190,6 +191,13 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
 ///
 /// **All bound keys are consumed** — they are never forwarded to the PTY,
 /// regardless of whether the action is handled here or deferred.
+// Clippy `too_many_lines` fires at 106 lines after Task 70.N expanded the
+// in-body `if let Err` blocks to `send_or_log!` macro calls (which rustfmt
+// formats on multiple lines). The function is a flat `match` over
+// `KeyAction` variants — splitting it would just move the match into helper
+// functions that each forward one variant, which adds indirection without
+// clarity. Suppressing for this specific function.
+#[allow(clippy::too_many_lines)]
 pub(super) fn dispatch_binding_action(
     action: KeyAction,
     view_state: &mut ViewState,
@@ -210,9 +218,11 @@ pub(super) fn dispatch_binding_action(
                     } else {
                         text
                     };
-                    if let Err(e) = input_tx.send(InputEvent::Key(payload.into_bytes())) {
-                        error!("Failed to send paste to PTY consumer: {e}");
-                    }
+                    send_or_log!(
+                        input_tx,
+                        InputEvent::Key(payload.into_bytes()),
+                        "Failed to send paste to PTY consumer"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -240,34 +250,42 @@ pub(super) fn dispatch_binding_action(
                 .min(snap.max_scroll_offset);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollPageDown => {
             let new_offset = view_state.scroll_offset.saturating_sub(snap.term_height);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollToTop => {
             let new_offset = snap.max_scroll_offset;
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollToBottom if view_state.scroll_offset != 0 => {
             view_state.scroll_offset = 0;
-            if let Err(e) = input_tx.send(InputEvent::ScrollOffset(0)) {
-                error!("Failed to send scroll offset to PTY consumer: {e}");
-            }
+            send_or_log!(
+                input_tx,
+                InputEvent::ScrollOffset(0),
+                "Failed to send scroll offset to PTY consumer"
+            );
         }
         KeyAction::ScrollLineUp => {
             let new_offset = view_state
@@ -276,18 +294,22 @@ pub(super) fn dispatch_binding_action(
                 .min(snap.max_scroll_offset);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollLineDown => {
             let new_offset = view_state.scroll_offset.saturating_sub(1);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         // All other actions (zoom, settings, tabs, etc.) require GUI state
@@ -489,9 +511,11 @@ pub(super) fn send_terminal_inputs(
     if bytes.is_empty() {
         return;
     }
-    if let Err(e) = input_tx.send(InputEvent::Key(bytes)) {
-        error!("Failed to send key input to PTY consumer: {e}");
-    }
+    send_or_log!(
+        input_tx,
+        InputEvent::Key(bytes),
+        "Failed to send key input to PTY consumer"
+    );
 }
 
 /// Handle mouse scroll when mouse tracking is off.
@@ -559,9 +583,11 @@ pub(super) fn handle_scroll_fallback(
 
         if new_offset != view_state.scroll_offset {
             view_state.scroll_offset = new_offset;
-            if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                error!("Failed to send scroll offset to PTY consumer: {e}");
-            }
+            send_or_log!(
+                input_tx,
+                InputEvent::ScrollOffset(new_offset),
+                "Failed to send scroll offset to PTY consumer"
+            );
         }
     }
 }
@@ -1166,9 +1192,11 @@ pub(super) fn write_input_to_terminal(
                 view_state.window_focused = *focused;
                 // Forward focus change to the PTY consumer thread so it can
                 // send the focus-reporting escape sequence if enabled.
-                if let Err(e) = input_tx.send(InputEvent::FocusChange(*focused)) {
-                    error!("Failed to send focus change event: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::FocusChange(*focused),
+                    "Failed to send focus change event"
+                );
 
                 if !*focused {
                     view_state.mouse_position = None;
@@ -1193,7 +1221,7 @@ pub(super) fn write_input_to_terminal(
                     terminal_origin,
                 );
 
-                let position = FreminalMousePosition::new(x, y, pos.x, pos.y);
+                let position = FreminalMousePosition::new(x, y);
                 let (previous, current) =
                     if let Some(last_mouse_position) = &mut last_reported_mouse_pos {
                         (
@@ -1223,12 +1251,13 @@ pub(super) fn write_input_to_terminal(
 
                 // Record mouse move event (every move — debouncing is a future optimization).
                 if let Some(ctx) = recording_ctx {
-                    #[allow(clippy::cast_possible_truncation)]
+                    // Saturating `usize -> u32` for recording coords: any
+                    // realistic window size fits in u32; clamp on overflow.
                     ctx.handle.emit(EventPayload::MouseMove {
                         window_id: ctx.window_id,
                         pane_id: ctx.pane_id,
-                        x: x as u32,
-                        y: y as u32,
+                        x: u32::try_from(x).unwrap_or(u32::MAX),
+                        y: u32::try_from(y).unwrap_or(u32::MAX),
                         coalesced_count: 1,
                     });
                 }
@@ -1301,7 +1330,7 @@ pub(super) fn write_input_to_terminal(
                     (character_size_x, character_size_y),
                     terminal_origin,
                 );
-                let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
+                let mouse_pos = FreminalMousePosition::new(x, y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
 
@@ -1329,14 +1358,14 @@ pub(super) fn write_input_to_terminal(
 
                 // Record mouse button event.
                 if let Some(ctx) = recording_ctx {
-                    #[allow(clippy::cast_possible_truncation)]
+                    // Saturating `usize -> u32` for recording coords.
                     ctx.handle.emit(EventPayload::MouseButton {
                         window_id: ctx.window_id,
                         pane_id: ctx.pane_id,
                         button: pointer_button_to_u8(*button),
                         pressed: *pressed,
-                        x: x as u32,
-                        y: y as u32,
+                        x: u32::try_from(x).unwrap_or(u32::MAX),
+                        y: u32::try_from(y).unwrap_or(u32::MAX),
                     });
                 }
 
@@ -1437,13 +1466,14 @@ pub(super) fn write_input_to_terminal(
                                 && let Some(anchor) = view_state.selection.anchor
                                 && anchor != end_coord
                             {
-                                #[allow(clippy::cast_possible_truncation)]
+                                // Saturating `usize -> u32` for recording
+                                // row/col — any realistic terminal fits in u32.
                                 ctx.handle.emit(EventPayload::SelectionEvent {
                                     pane_id: ctx.pane_id,
-                                    start_row: anchor.row as u32,
-                                    start_col: anchor.col as u32,
-                                    end_row: end_coord.row as u32,
-                                    end_col: end_coord.col as u32,
+                                    start_row: u32::try_from(anchor.row).unwrap_or(u32::MAX),
+                                    start_col: u32::try_from(anchor.col).unwrap_or(u32::MAX),
+                                    end_row: u32::try_from(end_coord.row).unwrap_or(u32::MAX),
+                                    end_col: u32::try_from(end_coord.col).unwrap_or(u32::MAX),
                                     is_block: view_state.selection.is_block,
                                 });
                             }
@@ -1524,7 +1554,7 @@ pub(super) fn write_input_to_terminal(
                         (character_size_x, character_size_y),
                         terminal_origin,
                     );
-                    let position = FreminalMousePosition::new(x, y, hover.x, hover.y);
+                    let position = FreminalMousePosition::new(x, y);
                     last_reported_mouse_pos = Some(PreviousMouseState::new(
                         PointerButton::Primary,
                         false,

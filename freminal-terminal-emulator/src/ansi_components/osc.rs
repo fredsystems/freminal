@@ -5,7 +5,7 @@
 
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
-use anyhow::Result;
+use crate::error::AnsiParseError;
 use freminal_common::buffer_states::ftcs::parse_ftcs_params;
 use freminal_common::buffer_states::osc::{
     AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
@@ -119,7 +119,10 @@ impl AnsiOscParser {
                 ParserOutcome::Continue
             }
             AnsiOscParserState::Finished | AnsiOscParserState::InvalidFinished => {
-                unreachable!()
+                // Guarded by the early-return at the top of `push`, but surface
+                // explicitly as an invalid outcome rather than panicking if the
+                // invariant ever breaks.
+                ParserOutcome::Invalid("OSC parser received byte after termination".to_string())
             }
             AnsiOscParserState::Invalid => {
                 if is_osc_terminator(&self.params) {
@@ -347,11 +350,11 @@ fn is_valid_osc_param(b: u8) -> bool {
 /// Will return an error if a parameter segment cannot be parsed as an `AnsiOscToken`.
 fn split_params_into_semicolon_delimited_tokens(
     params: &[u8],
-) -> Result<Vec<Option<AnsiOscToken>>> {
+) -> Result<Vec<Option<AnsiOscToken>>, AnsiParseError> {
     params
         .split(|b| *b == b';')
         .map(parse_param_as::<AnsiOscToken>)
-        .collect::<Result<Vec<Option<AnsiOscToken>>>>()
+        .collect::<Result<Vec<Option<AnsiOscToken>>, AnsiParseError>>()
 }
 
 fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {

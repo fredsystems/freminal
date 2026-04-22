@@ -25,7 +25,7 @@ use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, format_kitty_response,
 };
 
-use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
 
 use super::KittyImageState;
 use super::TerminalHandler;
@@ -128,7 +128,7 @@ impl TerminalHandler {
             );
         }
 
-        let capacity = cmd.control.data_size.unwrap_or(0) as usize;
+        let capacity = usize::value_from(cmd.control.data_size.unwrap_or(0)).unwrap_or(0);
         let mut accumulated_data = Vec::with_capacity(capacity);
         accumulated_data.extend_from_slice(&cmd.payload);
 
@@ -252,7 +252,7 @@ impl TerminalHandler {
         };
 
         // Apply display-size overrides from the Put command, if present.
-        let (term_width, term_height) = self.get_win_size();
+        let (term_width, term_height) = self.win_size();
 
         let display_cols = cmd
             .control
@@ -294,12 +294,12 @@ impl TerminalHandler {
         } else {
             // Save cursor position if `C=1` (no cursor movement).
             let saved_cursor = if cmd.control.no_cursor_movement {
-                Some(self.buffer.get_cursor().pos)
+                Some(self.buffer.cursor().pos)
             } else {
                 None
             };
 
-            let cursor = self.buffer.get_cursor().pos;
+            let cursor = self.buffer.cursor().pos;
             tracing::debug!(
                 "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
                  {display_cols}x{display_rows} cells, C={}",
@@ -358,7 +358,11 @@ impl TerminalHandler {
         match format {
             KittyFormat::Rgba => {
                 let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
-                let expected = (w as usize) * (h as usize) * 4;
+                // `w` and `h` are `u32`; on 32-bit platforms the multiplication
+                // could overflow, so use saturating arithmetic to avoid wrap.
+                let w_us = usize::value_from(w).unwrap_or(0);
+                let h_us = usize::value_from(h).unwrap_or(0);
+                let expected = w_us.saturating_mul(h_us).saturating_mul(4);
                 if image_data.len() != expected {
                     tracing::warn!(
                         "Kitty RGBA: expected {expected} bytes, got {}",
@@ -371,7 +375,9 @@ impl TerminalHandler {
             }
             KittyFormat::Rgb => {
                 let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
-                let expected = (w as usize) * (h as usize) * 3;
+                let w_us = usize::value_from(w).unwrap_or(0);
+                let h_us = usize::value_from(h).unwrap_or(0);
+                let expected = w_us.saturating_mul(h_us).saturating_mul(3);
                 if image_data.len() != expected {
                     tracing::warn!(
                         "Kitty RGB: expected {expected} bytes, got {}",
@@ -380,8 +386,8 @@ impl TerminalHandler {
                     self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
                     return None;
                 }
-                let pixel_count = (w as usize) * (h as usize);
-                let mut rgba = Vec::with_capacity(pixel_count * 4);
+                let pixel_count = w_us.saturating_mul(h_us);
+                let mut rgba = Vec::with_capacity(pixel_count.saturating_mul(4));
                 for chunk in image_data.chunks_exact(3) {
                     rgba.extend_from_slice(chunk);
                     rgba.push(255);
@@ -548,7 +554,7 @@ impl TerminalHandler {
             return;
         }
 
-        let (term_width, term_height) = self.get_win_size();
+        let (term_width, term_height) = self.win_size();
 
         let display_cols = control.display_cols.map_or_else(
             || {
@@ -696,9 +702,15 @@ impl TerminalHandler {
             KittyDeleteTarget::AtCellRange | KittyDeleteTarget::AtCellRangeAndAfter => {
                 // Uses the x and y from the control data to define the cell range.
                 // Per Kitty spec, x/y default to cursor position if not specified.
-                let cursor = self.buffer.get_cursor().pos;
-                let col = cmd.control.src_x.map_or(cursor.x, |v| v as usize);
-                let row = cmd.control.src_y.map_or(cursor.y, |v| v as usize);
+                let cursor = self.buffer.cursor().pos;
+                let col = cmd
+                    .control
+                    .src_x
+                    .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+                let row = cmd
+                    .control
+                    .src_y
+                    .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
                 tracing::debug!("Kitty graphics: deleting images at cell ({row},{col})");
                 // For the "and after" variant, clear from that position onward.
                 if matches!(target, KittyDeleteTarget::AtCellRangeAndAfter) {
@@ -710,15 +722,21 @@ impl TerminalHandler {
             }
             KittyDeleteTarget::InColumnRange | KittyDeleteTarget::InColumnRangeAndAfter => {
                 // Delete images that intersect the specified column.
-                let cursor = self.buffer.get_cursor().pos;
-                let col = cmd.control.src_x.map_or(cursor.x, |v| v as usize);
+                let cursor = self.buffer.cursor().pos;
+                let col = cmd
+                    .control
+                    .src_x
+                    .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
                 tracing::debug!("Kitty graphics: deleting images in column {col}");
                 self.buffer.clear_image_placements_in_column(col);
             }
             KittyDeleteTarget::InRowRange | KittyDeleteTarget::InRowRangeAndAfter => {
                 // Delete images that intersect the specified row.
-                let cursor = self.buffer.get_cursor().pos;
-                let row = cmd.control.src_y.map_or(cursor.y, |v| v as usize);
+                let cursor = self.buffer.cursor().pos;
+                let row = cmd
+                    .control
+                    .src_y
+                    .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
                 tracing::debug!("Kitty graphics: deleting images in row {row}");
                 self.buffer.clear_image_placements_in_row(row);
             }
@@ -1138,11 +1156,11 @@ mod tests {
         );
 
         // No image cells should remain.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(!has_image, "Delete all should clear image cells");
     }
 
@@ -1226,10 +1244,10 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         // Row 0 should have no image cells.
-        let row0_has_image = handler.buffer().get_rows()[0]
+        let row0_has_image = handler.buffer().rows()[0]
             .cells()
             .iter()
-            .any(crate::cell::Cell::has_image);
+            .any(freminal_buffer::cell::Cell::has_image);
         assert!(!row0_has_image, "AtCursor delete should clear row 0 images");
     }
 
@@ -1260,11 +1278,11 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         // All rows from cursor onward should have no image cells.
-        let any_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let any_image = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !any_image,
             "AtCursorAndAfter should clear all image cells from cursor onward"
@@ -1491,11 +1509,11 @@ mod tests {
         );
 
         // But NO image cells should be placed in the buffer.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !has_image,
             "Virtual placement should NOT place image cells directly"
@@ -1531,7 +1549,7 @@ mod tests {
         handler.handle_data(&data);
 
         // Step 4: Verify image cells were placed.
-        let row0 = &handler.buffer().get_rows()[0];
+        let row0 = &handler.buffer().rows()[0];
         assert!(
             row0.cells()[0].has_image(),
             "Cell (0,0) should have an image placement"
@@ -1572,7 +1590,7 @@ mod tests {
         // Send second placeholder with NO diacritics — should inherit row=0, col=1.
         handler.handle_data(PLACEHOLDER_BYTES);
 
-        let row0 = &handler.buffer().get_rows()[0];
+        let row0 = &handler.buffer().rows()[0];
         let p0 = row0.cells()[0].image_placement().unwrap();
         assert_eq!(p0.row_in_image, 0);
         assert_eq!(p0.col_in_image, 0);
@@ -1601,7 +1619,7 @@ mod tests {
         let second = placeholder_with_row(0);
         handler.handle_data(&second);
 
-        let row0 = &handler.buffer().get_rows()[0];
+        let row0 = &handler.buffer().rows()[0];
         let p1 = row0.cells()[1].image_placement().unwrap();
         assert_eq!(p1.row_in_image, 0);
         assert_eq!(p1.col_in_image, 1, "Should inherit col+1 from previous");
@@ -1631,7 +1649,7 @@ mod tests {
         // Row 1, col 0 with row-only diacritic — different row, so col resets to 0.
         handler.handle_data(&placeholder_with_row(1));
 
-        let row1 = &handler.buffer().get_rows()[1];
+        let row1 = &handler.buffer().rows()[1];
         let p = row1.cells()[0].image_placement().unwrap();
         assert_eq!(p.row_in_image, 1, "Should be row 1");
         assert_eq!(p.col_in_image, 0, "New row should start at col 0");
@@ -1654,7 +1672,7 @@ mod tests {
         handler.handle_data(&data);
 
         // The cell should NOT have an image placement.
-        let row0 = &handler.buffer().get_rows()[0];
+        let row0 = &handler.buffer().rows()[0];
         assert!(
             !row0.cells()[0].has_image(),
             "Without virtual placements, placeholder should not create image cells"
@@ -1726,7 +1744,7 @@ mod tests {
         handler.handle_data(b"Hello World");
 
         // Cursor should have advanced.
-        let cursor = handler.buffer().get_cursor();
+        let cursor = handler.buffer().cursor();
         assert_eq!(
             cursor.pos.x, 11,
             "Cursor should be at column 11 after 'Hello World'"
@@ -2167,11 +2185,11 @@ mod tests {
         handler.handle_kitty_graphics(put_cmd);
 
         // No image cells should be placed.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !has_image,
             "Put for nonexistent image should not place cells"
@@ -2243,11 +2261,11 @@ mod tests {
         assert!(handler.buffer().image_store().get(42).is_some());
 
         // Should NOT be placed.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !has_image,
             "Default action (None → Transmit) should not place image cells"
@@ -3156,7 +3174,7 @@ mod tests {
         handler.handle_kitty_graphics(transmit_cmd);
 
         // Record cursor before Put
-        let cursor_before = handler.buffer.get_cursor().pos;
+        let cursor_before = handler.buffer.cursor().pos;
 
         // Step 2: Put with C=1
         let put_cmd = KittyGraphicsCommand {
@@ -3171,7 +3189,7 @@ mod tests {
         handler.handle_kitty_graphics(put_cmd);
 
         // Cursor should be restored to original position
-        let cursor_after = handler.buffer.get_cursor().pos;
+        let cursor_after = handler.buffer.cursor().pos;
         assert_eq!(
             cursor_before, cursor_after,
             "Cursor should not move with C=1"
@@ -3187,7 +3205,7 @@ mod tests {
 
         let (mut handler, _rx) = kitty_handler();
 
-        let cursor_before = handler.buffer.get_cursor().pos;
+        let cursor_before = handler.buffer.cursor().pos;
 
         let rgba_data: Vec<u8> = vec![255; 16]; // 2x2 RGBA
         let cmd = KittyGraphicsCommand {
@@ -3204,7 +3222,7 @@ mod tests {
         };
         handler.handle_kitty_graphics(cmd);
 
-        let cursor_after = handler.buffer.get_cursor().pos;
+        let cursor_after = handler.buffer.cursor().pos;
         assert_eq!(
             cursor_before, cursor_after,
             "Cursor should not move with C=1 on TransmitAndDisplay"

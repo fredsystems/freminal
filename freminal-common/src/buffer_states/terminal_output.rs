@@ -12,6 +12,42 @@ use crate::{
     sgr::SelectGraphicRendition,
 };
 
+/// Tab Clear mode (`CSI Ps g`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabClearMode {
+    /// Ps=0 — clear tab stop at current column (default).
+    CurrentColumn,
+    /// Ps=1 — clear line tab stop at current line (no-op: line tabulation unsupported).
+    CurrentLine,
+    /// Ps=2 — same as Ps=1 semantically (no-op).
+    CurrentLineAlt,
+    /// Ps=3 — clear all character tab stops.
+    AllCharacter,
+    /// Ps=4 — clear all line tab stops (no-op: line tabulation unsupported).
+    AllLine,
+    /// Ps=5 — clear all tab stops (equivalent to Ps=3).
+    All,
+}
+
+/// Error returned when a `CSI Ps g` param is not one of 0–5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownTabClearMode(pub usize);
+
+impl TryFrom<usize> for TabClearMode {
+    type Error = UnknownTabClearMode;
+    fn try_from(v: usize) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::CurrentColumn),
+            1 => Ok(Self::CurrentLine),
+            2 => Ok(Self::CurrentLineAlt),
+            3 => Ok(Self::AllCharacter),
+            4 => Ok(Self::AllLine),
+            5 => Ok(Self::All),
+            other => Err(UnknownTabClearMode(other)),
+        }
+    }
+}
+
 /// High-level actions produced by the ANSI/OSC parser.
 ///
 /// This enum represents normalized terminal effects (cursor movement,
@@ -134,7 +170,7 @@ pub enum TerminalOutput {
     /// ESC H — HTS (Horizontal Tab Set): set a tab stop at the current cursor column
     HorizontalTabSet,
     /// CSI Ps g — TBC (Tab Clear): Ps=0 clear at current column, Ps=3 clear all
-    TabClear(usize),
+    TabClear(TabClearMode),
     /// CSI Ps I — CHT (Cursor Forward Tabulation): advance cursor by Ps tab stops
     CursorForwardTab(usize),
     /// CSI Ps Z — CBT (Cursor Backward Tabulation): move cursor back by Ps tab stops
@@ -305,7 +341,7 @@ impl std::fmt::Display for TerminalOutput {
             Self::ReverseIndex => write!(f, "ReverseIndex"),
             Self::NextLine => write!(f, "NextLine"),
             Self::HorizontalTabSet => write!(f, "HorizontalTabSet"),
-            Self::TabClear(n) => write!(f, "TabClear({n})"),
+            Self::TabClear(mode) => write!(f, "TabClear({mode:?})"),
             Self::CursorForwardTab(n) => write!(f, "CursorForwardTab({n})"),
             Self::CursorBackwardTab(n) => write!(f, "CursorBackwardTab({n})"),
             Self::RepeatCharacter(n) => write!(f, "RepeatCharacter({n})"),

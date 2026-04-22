@@ -25,8 +25,8 @@ fn insert_simple_text_in_buffer() {
 
     buf.insert_text(&[ascii('H'), ascii('e'), ascii('l'), ascii('l'), ascii('o')]);
 
-    assert_eq!(buf.get_cursor().pos.x, 5);
-    assert_eq!(buf.get_cursor().pos.y, 0);
+    assert_eq!(buf.cursor().pos.x, 5);
+    assert_eq!(buf.cursor().pos.y, 0);
 }
 
 #[test]
@@ -36,8 +36,8 @@ fn insert_wraps_into_next_row() {
     buf.insert_text(&[ascii('H'), ascii('e'), ascii('l'), ascii('l'), ascii('o')]); // col=5 -> wrap
     buf.insert_text(&[ascii('!')]);
 
-    assert_eq!(buf.get_cursor().pos.y, 1);
-    assert_eq!(buf.get_cursor().pos.x, 1);
+    assert_eq!(buf.cursor().pos.y, 1);
+    assert_eq!(buf.cursor().pos.x, 1);
 }
 
 #[test]
@@ -46,12 +46,12 @@ fn insert_wide_char_wrap() {
 
     buf.insert_text(&[ascii('A'), emoji("🙂")]); // A takes 1, 🙂 takes 2 → 3 total
 
-    assert_eq!(buf.get_cursor().pos.x, 3);
+    assert_eq!(buf.cursor().pos.x, 3);
 
     buf.insert_text(&[emoji("🙂")]); // does NOT fit at col 3 → wraps
 
-    assert_eq!(buf.get_cursor().pos.y, 1);
-    assert_eq!(buf.get_cursor().pos.x, 2);
+    assert_eq!(buf.cursor().pos.y, 1);
+    assert_eq!(buf.cursor().pos.x, 2);
 }
 
 #[test]
@@ -60,8 +60,8 @@ fn insert_multiple_wraps() {
 
     buf.insert_text(&[ascii('A'), ascii('B'), ascii('C'), ascii('D'), ascii('E')]);
 
-    assert_eq!(buf.get_cursor().pos.y, 1);
-    assert_eq!(buf.get_cursor().pos.x, 2);
+    assert_eq!(buf.cursor().pos.y, 1);
+    assert_eq!(buf.cursor().pos.x, 2);
 }
 
 #[test]
@@ -73,8 +73,8 @@ fn multi_row_mixed_width_insertion() {
     // Row 0: A 🙂 B → col=4 (wrap)
     // Row 1: 🙂     → col=2
 
-    assert_eq!(buf.get_cursor().pos.y, 1);
-    assert_eq!(buf.get_cursor().pos.x, 2);
+    assert_eq!(buf.cursor().pos.y, 1);
+    assert_eq!(buf.cursor().pos.x, 2);
 }
 
 //
@@ -104,7 +104,7 @@ fn bce_erase_line_to_end_fills_with_current_bg() {
     // Erase from cursor to end of line
     buf.erase_line_to_end();
 
-    let row = &buf.get_rows()[0];
+    let row = &buf.rows()[0];
     // Cols 0-1 should still be A, B
     assert_eq!(row.resolve_cell(0).tchar(), &ascii('A'));
     assert_eq!(row.resolve_cell(1).tchar(), &ascii('B'));
@@ -133,7 +133,7 @@ fn bce_erase_line_fills_with_current_bg() {
     buf.set_format(red_bg_tag());
     buf.erase_line();
 
-    let row = &buf.get_rows()[0];
+    let row = &buf.rows()[0];
     for col in 0..10 {
         let cell = row.resolve_cell(col);
         assert_eq!(
@@ -158,7 +158,7 @@ fn bce_erase_display_fills_with_current_bg() {
     buf.erase_display();
 
     // All rows should have blank cells with the red-bg tag
-    let rows = buf.get_rows();
+    let rows = buf.rows();
     for (ridx, row) in rows.iter().enumerate() {
         for col in 0..5 {
             let cell = row.resolve_cell(col);
@@ -194,7 +194,7 @@ fn bce_scroll_does_not_fill_new_row_with_current_bg() {
     // The bottom row (row 2) should be blank with DEFAULT background — scroll
     // operations do not apply BCE.  Only explicit erase operations (ED, EL)
     // fill with the current background color.
-    let rows = buf.get_rows();
+    let rows = buf.rows();
     let last_visible_idx = rows.len() - 1;
     let last_row = &rows[last_visible_idx];
     for col in 0..5 {
@@ -221,7 +221,7 @@ fn bce_erase_chars_fills_with_current_bg() {
     buf.set_format(red_bg_tag());
     buf.erase_chars(2);
 
-    let row = &buf.get_rows()[0];
+    let row = &buf.rows()[0];
     // Col 0 untouched
     assert_eq!(row.resolve_cell(0).tchar(), &ascii('A'));
     // Cols 1-2 erased with BCE
@@ -248,9 +248,9 @@ fn bce_default_tag_leaves_rows_sparse() {
     buf.erase_display();
 
     // All rows should be sparse (empty cells vector)
-    for (ridx, row) in buf.get_rows().iter().enumerate() {
+    for (ridx, row) in buf.rows().iter().enumerate() {
         assert!(
-            row.get_characters().is_empty(),
+            row.characters().is_empty(),
             "row {ridx}: should be sparse after erase with default tag"
         );
     }

@@ -16,8 +16,6 @@
 //! - [`row::Row`] — a single row of terminal cells with wrapping metadata
 //! - [`cell::Cell`] — the smallest addressable unit; always valid (empty cells are
 //!   explicit)
-//! - [`terminal_handler::TerminalHandler`] — processes parsed terminal output and drives
-//!   buffer mutations
 
 #![deny(
     clippy::pedantic,
@@ -30,7 +28,16 @@
     clippy::complexity,
     clippy::perf,
     clippy::unwrap_used,
-    clippy::expect_used
+    clippy::expect_used,
+    // Task 70.H tripwires: explicit deny for the three cast lints that guard
+    // against silent truncation/sign-loss/wrap in numeric conversions. These
+    // are already part of `clippy::pedantic` above, but naming them directly
+    // documents the contract and survives any future reorganization of the
+    // pedantic group. All remaining `as` casts must be covered by a local
+    // `#[allow(...)]` with a justification comment per agents.md.
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
 )]
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
@@ -40,4 +47,3 @@ pub mod cell;
 pub mod image_store;
 pub mod response;
 pub mod row;
-pub mod terminal_handler;

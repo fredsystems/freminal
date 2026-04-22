@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use anyhow::{Error, Result};
+use std::convert::Infallible;
 use std::str::FromStr;
 
 use crate::buffer_states::{ftcs::FtcsMarker, pointer_shape::PointerShape, url::Url};
@@ -381,9 +381,9 @@ pub enum AnsiOscToken {
 }
 
 impl FromStr for AnsiOscToken {
-    type Err = Error;
+    type Err = Infallible;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, Infallible> {
         s.parse::<u16>().map_or_else(
             |_| Ok(Self::String(s.to_string())),
             |value| Ok(Self::OscValue(value)),

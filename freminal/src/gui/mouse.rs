@@ -16,7 +16,7 @@ use freminal_terminal_emulator::input::{
 ///
 /// Used to detect state transitions (e.g. press → release) and to suppress
 /// redundant mouse-tracking reports to the PTY when nothing has changed.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PreviousMouseState {
     pub(crate) button: PointerButton,
     pub(crate) button_pressed: bool,
@@ -29,7 +29,7 @@ impl Default for PreviousMouseState {
         Self {
             button: PointerButton::Primary,
             button_pressed: false,
-            mouse_position: FreminalMousePosition::new(0, 0, 0.0, 0.0),
+            mouse_position: FreminalMousePosition::new(0, 0),
             modifiers: Modifiers::default(),
         }
     }
@@ -78,43 +78,26 @@ pub enum MouseEvent {
     Scroll(Vec2),
 }
 
-/// Terminal mouse position expressed in both character-cell coordinates and
-/// raw pixel coordinates.
-// The `x` and `y` pixel-coordinate fields are stored for potential future use
-// (e.g. pixel-precise hover reporting) but are not currently read after
-// construction.  The allow suppresses the dead-code lint for those two fields
-// without removing the information from the struct.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+/// Terminal mouse position in character-cell coordinates.
+///
+/// Mouse tracking encodings (X11, SGR) report button and motion events in cell
+/// coordinates, not pixels, so only the column/row pair is retained. If a future
+/// feature needs pixel-precise reporting, re-derive it at the call site from the
+/// `egui::Pos2` that was originally passed to this type's constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreminalMousePosition {
     pub(crate) x_as_character_column: usize,
     pub(crate) y_as_character_row: usize,
-    pub(crate) x: f32,
-    pub(crate) y: f32,
 }
 
 impl FreminalMousePosition {
-    /// Create a new `FreminalMousePosition` from cell coordinates and raw pixel coordinates.
+    /// Create a new `FreminalMousePosition` from cell coordinates.
     #[must_use]
-    pub const fn new(
-        x_as_character_column: usize,
-        y_as_character_row: usize,
-        x: f32,
-        y: f32,
-    ) -> Self {
+    pub const fn new(x_as_character_column: usize, y_as_character_row: usize) -> Self {
         Self {
             x_as_character_column,
             y_as_character_row,
-            x,
-            y,
         }
-    }
-}
-
-impl PartialEq for FreminalMousePosition {
-    fn eq(&self, other: &Self) -> bool {
-        self.x_as_character_column == other.x_as_character_column
-            && self.y_as_character_row == other.y_as_character_row
     }
 }
 
@@ -424,7 +407,7 @@ mod tests {
 
     #[test]
     fn sgr_button_press_is_single_contiguous_sequence() {
-        let pos = FreminalMousePosition::new(4, 2, 0.0, 0.0); // col=4, row=2
+        let pos = FreminalMousePosition::new(4, 2); // col=4, row=2
         let state =
             PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
         let result = handle_pointer_button(
@@ -449,7 +432,7 @@ mod tests {
     fn sgr_button_press_wide_terminal_column_not_truncated() {
         // Column 300 would wrap to 44 if truncated to u8 (300 % 256 = 44).
         // With the fix, the decimal SGR string must contain "301" (1-based).
-        let pos = FreminalMousePosition::new(300, 10, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(300, 10);
         let state =
             PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
         let result = handle_pointer_button(
@@ -472,7 +455,7 @@ mod tests {
     fn sgr_scroll_wide_terminal_row_not_truncated() {
         // Row 260 would wrap to 4 if truncated to u8 (260 % 256 = 4).
         // With the fix, the decimal SGR string must contain "261" (1-based).
-        let pos = FreminalMousePosition::new(5, 260, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(5, 260);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -495,7 +478,7 @@ mod tests {
 
     #[test]
     fn zero_delta_scroll_returns_none_for_sgr() {
-        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(10, 10);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         // A zero-delta scroll event must produce None, not a phantom click.
@@ -513,7 +496,7 @@ mod tests {
 
     #[test]
     fn zero_delta_scroll_returns_none_for_x11() {
-        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(10, 10);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -530,7 +513,7 @@ mod tests {
 
     #[test]
     fn nonzero_delta_scroll_produces_output_for_sgr() {
-        let pos = FreminalMousePosition::new(5, 5, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(5, 5);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         // Scroll up (positive y delta) must produce a real mouse report.
@@ -554,7 +537,7 @@ mod tests {
 
     #[test]
     fn horizontal_only_scroll_returns_none_for_sgr() {
-        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(10, 10);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -571,7 +554,7 @@ mod tests {
 
     #[test]
     fn horizontal_only_scroll_returns_none_for_x11() {
-        let pos = FreminalMousePosition::new(10, 10, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(10, 10);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -590,7 +573,7 @@ mod tests {
 
     #[test]
     fn unit_scroll_up_sgr_produces_button_64() {
-        let pos = FreminalMousePosition::new(3, 7, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(3, 7);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -608,7 +591,7 @@ mod tests {
 
     #[test]
     fn unit_scroll_down_sgr_produces_button_65() {
-        let pos = FreminalMousePosition::new(3, 7, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(3, 7);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -626,7 +609,7 @@ mod tests {
 
     #[test]
     fn unit_scroll_up_x11_produces_button_64() {
-        let pos = FreminalMousePosition::new(0, 0, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(0, 0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -646,7 +629,7 @@ mod tests {
 
     #[test]
     fn unit_scroll_down_x11_produces_button_65() {
-        let pos = FreminalMousePosition::new(0, 0, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(0, 0);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -665,7 +648,7 @@ mod tests {
 
     #[test]
     fn scroll_with_no_tracking_returns_none() {
-        let pos = FreminalMousePosition::new(5, 5, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(5, 5);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -688,7 +671,7 @@ mod tests {
 
     #[test]
     fn lazygit_scenario_any_tracking_sgr_encoding_button_press() {
-        let pos = FreminalMousePosition::new(10, 5, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(10, 5);
         let state =
             PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
         let result = handle_pointer_button(
@@ -711,10 +694,10 @@ mod tests {
 
     #[test]
     fn lazygit_scenario_any_tracking_sgr_encoding_motion() {
-        let pos = FreminalMousePosition::new(12, 7, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(12, 7);
         let current =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
-        let prev_pos = FreminalMousePosition::new(11, 7, 0.0, 0.0);
+        let prev_pos = FreminalMousePosition::new(11, 7);
         let previous = PreviousMouseState::new(
             PointerButton::Primary,
             false,
@@ -742,7 +725,7 @@ mod tests {
 
     #[test]
     fn lazygit_scenario_any_tracking_sgr_encoding_scroll() {
-        let pos = FreminalMousePosition::new(10, 5, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(10, 5);
         let state =
             PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
         let result = handle_pointer_scroll(
@@ -766,7 +749,7 @@ mod tests {
 
     #[test]
     fn x11_encoding_with_any_tracking_button_press() {
-        let pos = FreminalMousePosition::new(5, 3, 0.0, 0.0);
+        let pos = FreminalMousePosition::new(5, 3);
         let state =
             PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
         let result = handle_pointer_button(

@@ -14,7 +14,7 @@ use crate::{
 };
 
 use crate::ansi_components::tracer::SequenceTracer;
-use anyhow::Result;
+use crate::error::AnsiParseError;
 use freminal_common::buffer_states::{
     line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm, modes::s8c1t::S8c1t,
     terminal_output::TerminalOutput,
@@ -52,25 +52,31 @@ pub fn extract_param(idx: usize, params: &[Option<usize>]) -> Option<usize> {
 
 /// # Errors
 /// Will return an error if the parameter is not a valid number
-pub fn split_params_into_semicolon_delimited_usize(params: &[u8]) -> Result<Vec<Option<usize>>> {
+pub fn split_params_into_semicolon_delimited_usize(
+    params: &[u8],
+) -> Result<Vec<Option<usize>>, AnsiParseError> {
     params
         .split(|b| *b == b';')
         .map(parse_param_as::<usize>)
-        .collect::<Result<Vec<Option<usize>>>>()
+        .collect::<Result<Vec<Option<usize>>, AnsiParseError>>()
 }
 
 /// # Errors
 /// Will return an error if the parameter is not a valid number
-pub fn split_params_into_colon_delimited_usize(params: &[u8]) -> Result<Vec<Option<usize>>> {
+pub fn split_params_into_colon_delimited_usize(
+    params: &[u8],
+) -> Result<Vec<Option<usize>>, AnsiParseError> {
     params
         .split(|b| *b == b':')
         .map(parse_param_as::<usize>)
-        .collect::<Result<Vec<Option<usize>>>>()
+        .collect::<Result<Vec<Option<usize>>, AnsiParseError>>()
 }
 
 /// # Errors
 /// Will return an error if the parameter is not a valid number
-pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option<T>> {
+pub fn parse_param_as<T: std::str::FromStr>(
+    param_bytes: &[u8],
+) -> Result<Option<T>, AnsiParseError> {
     let param_str = std::str::from_utf8(param_bytes)?;
 
     if param_str.is_empty() {
@@ -84,7 +90,10 @@ pub fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option
                 param_bytes,
                 std::any::type_name::<T>()
             );
-            Err(anyhow::anyhow!("Failed to parse parameter"))
+            Err(AnsiParseError::ParseFailed {
+                bytes: param_bytes.to_vec(),
+                type_name: std::any::type_name::<T>(),
+            })
         },
         |value| Ok(Some(value)),
     )

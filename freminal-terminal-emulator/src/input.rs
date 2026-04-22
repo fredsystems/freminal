@@ -108,6 +108,9 @@ fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
 /// Returns `None` for bytes outside the printable ASCII range or that have
 /// no distinct shifted form.
 const fn us_qwerty_shifted(c: u8) -> Option<u32> {
+    // `u8 -> u32` is guaranteed lossless by the type system. `u32::from` is
+    // not yet const-stable (see rust-lang/rust#143874), so `as` is used here
+    // per the workspace policy exception for trivially-lossless casts.
     match c {
         b'a'..=b'z' => Some((c - 32) as u32), // lowercase → uppercase
         b'1' => Some(b'!' as u32),
@@ -137,7 +140,7 @@ const fn us_qwerty_shifted(c: u8) -> Option<u32> {
 
 /// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
 #[must_use]
-pub fn collect_text(text: &String) -> Cow<'static, [TerminalInput]> {
+pub fn collect_text(text: &str) -> Cow<'static, [TerminalInput]> {
     text.as_bytes()
         .iter()
         .map(|c| TerminalInput::Ascii(*c))
@@ -506,10 +509,11 @@ impl TerminalInput {
         // Build the codepoint field: `codepoint[:shifted[:base]]`
         let codepoint_field = if report_alt {
             // Only ASCII codepoints have meaningful shifted forms in US QWERTY.
+            // The `u8::try_from` is guaranteed to succeed under `codepoint <= 127`;
+            // the `ok()` + `and_then` pattern avoids any `unwrap`/`expect` in
+            // production code per the workspace policy.
             let shifted = if codepoint <= 127 {
-                #[allow(clippy::cast_possible_truncation)]
-                let byte = codepoint as u8;
-                us_qwerty_shifted(byte)
+                u8::try_from(codepoint).ok().and_then(us_qwerty_shifted)
             } else {
                 None
             };
@@ -528,7 +532,7 @@ impl TerminalInput {
                 if t.is_empty() {
                     None
                 } else {
-                    let cps: Vec<String> = t.chars().map(|ch| (ch as u32).to_string()).collect();
+                    let cps: Vec<String> = t.chars().map(|ch| u32::from(ch).to_string()).collect();
                     Some(cps.join(":"))
                 }
             })
@@ -2357,5 +2361,62 @@ mod tests {
     fn kkp_f_unknown() {
         let p = to_payload_kkp(&TerminalInput::FunctionKey(99, KeyModifiers::NONE), 1);
         assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    // ── 70.A.1 regression: non-ASCII character encoding ─────────────────────
+
+    /// `collect_text` must produce the raw UTF-8 byte sequence for non-ASCII
+    /// characters, not a truncated single byte.  For example, 'é' (U+00E9) is
+    /// encoded as the two-byte sequence [0xC3, 0xA9] in UTF-8.
+    #[test]
+    fn collect_text_non_ascii_utf8_encoding() {
+        // 'é' = U+00E9, UTF-8: [0xC3, 0xA9]
+        let inputs = collect_text("é");
+        let bytes: Vec<u8> = inputs
+            .iter()
+            .filter_map(|i| {
+                if let TerminalInput::Ascii(b) = i {
+                    Some(*b)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(bytes, "é".as_bytes(), "é must encode as its UTF-8 bytes");
+    }
+
+    /// `collect_text` must handle multi-codepoint strings correctly.
+    #[test]
+    fn collect_text_mixed_ascii_and_non_ascii() {
+        // "aé" = 'a' (0x61) + 'é' (0xC3 0xA9) = 3 bytes total
+        let inputs = collect_text("aé");
+        let bytes: Vec<u8> = inputs
+            .iter()
+            .filter_map(|i| {
+                if let TerminalInput::Ascii(b) = i {
+                    Some(*b)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            bytes,
+            "aé".as_bytes(),
+            "mixed ASCII+non-ASCII must encode as UTF-8"
+        );
+    }
+
+    /// The `u8::try_from(codepoint)` conversion inside `build_csi_u` is only
+    /// reached when `codepoint <= 127`, so it is guaranteed to succeed.  This
+    /// test verifies that the `us_qwerty_shifted` helper handles the ASCII
+    /// boundary without panicking.
+    #[test]
+    fn build_csi_u_report_alt_ascii_boundary() {
+        let meta = KeyEventMeta::PRESS;
+        // codepoint 127 (DEL) is the highest ASCII value — must not panic.
+        let p = TerminalInput::build_csi_u(127, None, 4, &meta);
+        // We just verify it produces some Owned payload without panic.
+        assert!(matches!(p, TerminalInputPayload::Owned(_)));
     }
 }

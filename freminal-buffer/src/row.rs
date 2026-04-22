@@ -228,7 +228,7 @@ impl Row {
 
     /// How many cells are currently occupied.
     #[must_use]
-    pub fn get_row_width(&self) -> usize {
+    pub fn row_width(&self) -> usize {
         let mut cols = 0;
         let mut idx = 0;
 
@@ -249,7 +249,7 @@ impl Row {
 
     /// Returns the cell at the given column index, or `None` if out of bounds.
     #[must_use]
-    pub fn get_char_at(&self, idx: usize) -> Option<&Cell> {
+    pub fn char_at(&self, idx: usize) -> Option<&Cell> {
         self.cells.get(idx)
     }
 
@@ -268,7 +268,7 @@ impl Row {
     /// Prefer [`Row::cells`] for slice access. This method is retained for
     /// callers that need a `&Vec<Cell>` specifically.
     #[must_use]
-    pub const fn get_characters(&self) -> &Vec<Cell> {
+    pub const fn characters(&self) -> &Vec<Cell> {
         &self.cells
     }
 
@@ -965,12 +965,12 @@ mod tests {
         let mut row = Row::new(10);
         let text: Vec<TChar> = b"abcdefghij".iter().map(|b| TChar::Ascii(*b)).collect();
         row.insert_text(0, &text, &FormatTag::default());
-        assert_eq!(row.get_characters().len(), 10);
+        assert_eq!(row.characters().len(), 10);
 
         row.set_max_width(5);
         row.truncate_cells_to_width(5);
 
-        assert_eq!(row.get_characters().len(), 5);
+        assert_eq!(row.characters().len(), 5);
         assert_eq!(row.max_width(), 5);
     }
 
@@ -979,12 +979,12 @@ mod tests {
         let mut row = Row::new(10);
         let text: Vec<TChar> = b"abc".iter().map(|b| TChar::Ascii(*b)).collect();
         row.insert_text(0, &text, &FormatTag::default());
-        let before = row.get_characters().len();
+        let before = row.characters().len();
 
         // new_width >= cells.len() — nothing to truncate
         row.truncate_cells_to_width(20);
 
-        assert_eq!(row.get_characters().len(), before);
+        assert_eq!(row.characters().len(), before);
     }
 
     #[test]
@@ -1002,16 +1002,16 @@ mod tests {
         for _ in 4..10 {
             row.cells_mut_push(Cell::blank_with_tag(FormatTag::default()));
         }
-        assert!(row.get_characters()[1].is_head());
-        assert!(row.get_characters()[2].is_continuation());
+        assert!(row.characters()[1].is_head());
+        assert!(row.characters()[2].is_continuation());
 
         // Truncate to 2 cols: the continuation at col 2 is cut, so the head
         // at col 1 must become a blank.
         row.truncate_cells_to_width(2);
 
-        assert_eq!(row.get_characters().len(), 2);
-        assert!(!row.get_characters()[1].is_head());
-        assert!(!row.get_characters()[1].is_continuation());
+        assert_eq!(row.characters().len(), 2);
+        assert!(!row.characters()[1].is_head());
+        assert!(!row.characters()[1].is_continuation());
     }
 
     #[test]
@@ -1116,13 +1116,13 @@ mod tests {
         let text: Vec<TChar> = b"hello".iter().map(|&b| TChar::Ascii(b)).collect();
         row.insert_text(0, &text, &tag);
         // No wide glyphs → get_row_width() returns 0
-        assert_eq!(row.get_row_width(), 0);
+        assert_eq!(row.row_width(), 0);
     }
 
     #[test]
     fn get_row_width_empty_row() {
         let row = Row::new(80);
-        assert_eq!(row.get_row_width(), 0);
+        assert_eq!(row.row_width(), 0);
     }
 
     #[test]
@@ -1134,7 +1134,7 @@ mod tests {
         assert_eq!(wide.display_width(), 2);
         row.insert_text(0, &[wide], &tag);
         // One wide glyph head contributes 2 columns
-        assert_eq!(row.get_row_width(), 2);
+        assert_eq!(row.row_width(), 2);
     }
 
     #[test]
@@ -1144,7 +1144,7 @@ mod tests {
         // Two wide chars → 2 * 2 = 4
         let text = vec![TChar::from('あ'), TChar::from('い')];
         row.insert_text(0, &text, &tag);
-        assert_eq!(row.get_row_width(), 4);
+        assert_eq!(row.row_width(), 4);
     }
 
     #[test]
@@ -1155,7 +1155,7 @@ mod tests {
         let text = vec![TChar::Ascii(b'A'), TChar::from('あ'), TChar::Ascii(b'B')];
         row.insert_text(0, &text, &tag);
         // Only 'あ' is a wide head → get_row_width() = 2
-        assert_eq!(row.get_row_width(), 2);
+        assert_eq!(row.row_width(), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -1169,15 +1169,15 @@ mod tests {
         // Insert a wide char at col 0 → head at 0, continuation at 1
         let wide = TChar::from('あ');
         row.insert_text(0, &[wide], &tag);
-        assert!(row.get_char_at(0).unwrap().is_head());
-        assert!(row.get_char_at(1).unwrap().is_continuation());
+        assert!(row.char_at(0).unwrap().is_head());
+        assert!(row.char_at(1).unwrap().is_continuation());
 
         // Now insert a normal char at col 1 (the continuation position)
         // This should trigger cleanup_wide_overwrite, clearing the head at col 0
         row.insert_text(1, &[TChar::Ascii(b'X')], &tag);
 
         // The cell at col 0 should no longer be a head (it was blanked)
-        let cell_0 = row.get_char_at(0).unwrap();
+        let cell_0 = row.char_at(0).unwrap();
         assert!(!cell_0.is_head(), "head cell should have been blanked");
         assert!(
             !cell_0.is_continuation(),
@@ -1185,7 +1185,7 @@ mod tests {
         );
 
         // The cell at col 1 should be 'X'
-        let cell_1 = row.get_char_at(1).unwrap();
+        let cell_1 = row.char_at(1).unwrap();
         assert_eq!(cell_1.tchar(), &TChar::Ascii(b'X'));
     }
 
@@ -1197,14 +1197,14 @@ mod tests {
         let text = vec![TChar::Ascii(b'A'), TChar::Ascii(b'B'), TChar::from('あ')];
         row.insert_text(0, &text, &tag);
         // col 2 = head, col 3 = continuation
-        assert!(row.get_char_at(2).unwrap().is_head());
-        assert!(row.get_char_at(3).unwrap().is_continuation());
+        assert!(row.char_at(2).unwrap().is_head());
+        assert!(row.char_at(3).unwrap().is_continuation());
 
         // Overwrite the head at col 2 with a normal char
         row.insert_text(2, &[TChar::Ascii(b'Y')], &tag);
 
         // The continuation at col 3 should have been cleared (made into a space)
-        let cell_3 = row.get_char_at(3).unwrap();
+        let cell_3 = row.char_at(3).unwrap();
         assert!(
             !cell_3.is_continuation(),
             "continuation should have been cleared"
@@ -1306,11 +1306,11 @@ mod tests {
         // Insert 2 spaces at col 1 → 'A' stays at 0, two spaces at 1,2, 'B' shifts to 3, 'C' to 4
         row.insert_spaces_at(1, 2, &tag);
 
-        assert_eq!(row.get_char_at(0).unwrap().tchar(), &TChar::Ascii(b'A'));
-        assert_eq!(row.get_char_at(1).unwrap().tchar(), &TChar::Space);
-        assert_eq!(row.get_char_at(2).unwrap().tchar(), &TChar::Space);
-        assert_eq!(row.get_char_at(3).unwrap().tchar(), &TChar::Ascii(b'B'));
-        assert_eq!(row.get_char_at(4).unwrap().tchar(), &TChar::Ascii(b'C'));
+        assert_eq!(row.char_at(0).unwrap().tchar(), &TChar::Ascii(b'A'));
+        assert_eq!(row.char_at(1).unwrap().tchar(), &TChar::Space);
+        assert_eq!(row.char_at(2).unwrap().tchar(), &TChar::Space);
+        assert_eq!(row.char_at(3).unwrap().tchar(), &TChar::Ascii(b'B'));
+        assert_eq!(row.char_at(4).unwrap().tchar(), &TChar::Ascii(b'C'));
     }
 
     // -----------------------------------------------------------------------
@@ -1330,7 +1330,7 @@ mod tests {
         // After clearing, cells before col 3 should be blank (sparse representation:
         // trailing default blanks may be trimmed, but non-trailing ones persist)
         // The remaining chars at col 3+ should still be there
-        let cell_3 = row.get_char_at(3);
+        let cell_3 = row.char_at(3);
         assert!(
             cell_3.is_none() || cell_3.unwrap().tchar() == &TChar::Ascii(b'l'),
             "cell at 3 should be 'l' or absent if sparse"
@@ -1355,7 +1355,7 @@ mod tests {
 
         // Cells 0,1,2 should now be explicit blanks with the colored tag
         for i in 0..3 {
-            let cell = row.get_char_at(i).unwrap();
+            let cell = row.char_at(i).unwrap();
             assert_eq!(cell.tchar(), &TChar::Space, "cell {i} should be blank");
         }
     }
@@ -1423,8 +1423,8 @@ mod tests {
         row.insert_text(0, &text, &tag);
 
         // Sanity check: col 2 is a wide head, col 3 is continuation
-        assert!(row.get_char_at(2).unwrap().is_head());
-        assert!(row.get_char_at(3).unwrap().is_continuation());
+        assert!(row.char_at(2).unwrap().is_head());
+        assert!(row.char_at(3).unwrap().is_continuation());
 
         // Erase cols 2..3 (n=1 starting at col 2) — this hits only the head,
         // but the continuation at col 3 should also be cleared.
@@ -1491,7 +1491,7 @@ mod tests {
         row.set_image_cell(0, make_image_placement(image_id), FormatTag::default());
 
         assert!(
-            row.get_char_at(0).unwrap().has_image(),
+            row.char_at(0).unwrap().has_image(),
             "col 0 should be an image cell"
         );
         assert_eq!(row.count_image_cells(), 1);
@@ -1702,8 +1702,8 @@ mod tests {
         // Col 0 should be blank
         assert_eq!(row.resolve_cell(0).tchar(), &TChar::Space);
         // Col 1 should still be the wide head
-        assert!(row.get_char_at(1).unwrap().is_head());
-        assert!(row.get_char_at(2).unwrap().is_continuation());
+        assert!(row.char_at(1).unwrap().is_head());
+        assert!(row.char_at(2).unwrap().is_continuation());
         assert_eq!(row.resolve_cell(3).tchar(), &TChar::Ascii(b'B'));
     }
 
@@ -2002,7 +2002,7 @@ mod tests {
         // Row is empty, set image at col 3 — should extend to col 4
         row.set_image_cell(3, make_image_placement(image_id), FormatTag::default());
         assert!(row.cells().len() >= 4);
-        assert!(row.get_char_at(3).unwrap().has_image());
+        assert!(row.char_at(3).unwrap().has_image());
     }
 
     // -----------------------------------------------------------------------

@@ -14,6 +14,7 @@ use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::colors::TerminalColor;
 use freminal_common::config::BellMode;
 use freminal_common::pty_write::PtyWrite;
+use freminal_common::send_or_log;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::io::WindowCommand;
 
@@ -61,9 +62,11 @@ pub(super) fn update_egui_theme(ctx: &egui::Context, theme: &ThemePalette, bg_op
 /// Used by `handle_window_manipulation` to respond to Report* queries without
 /// going through the emulator.
 pub(super) fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
-    if let Err(e) = pty_write_tx.send(PtyWrite::Write(response.as_bytes().to_vec())) {
-        error!("Failed to send PTY response: {e}");
-    }
+    send_or_log!(
+        pty_write_tx,
+        PtyWrite::Write(response.as_bytes().to_vec()),
+        "Failed to send PTY response"
+    );
 }
 
 /// Read the system clipboard and return its contents as a base64-encoded string.

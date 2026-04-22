@@ -6,6 +6,15 @@
 use crate::themes::ThemePalette;
 use conv2::ValueInto;
 use std::fmt;
+use thiserror::Error;
+
+/// Errors produced when parsing a color from a string representation.
+#[derive(Debug, Error, Eq, PartialEq, Clone)]
+pub enum ColorParseError {
+    /// The input string did not match any recognised named color.
+    #[error("invalid color name: {0:?}")]
+    InvalidName(String),
+}
 
 /// Number of entries in the 256-color palette.
 pub const PALETTE_SIZE: usize = 256;
@@ -63,7 +72,7 @@ impl ColorPalette {
 
     /// Get the current RGB value for a palette index (override or default).
     #[must_use]
-    pub fn get_rgb(&self, index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
+    pub fn rgb(&self, index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
         if let Some((r, g, b)) = self.overrides[usize::from(index)] {
             (r, g, b)
         } else {
@@ -239,9 +248,9 @@ impl fmt::Display for TerminalColor {
 }
 
 impl std::str::FromStr for TerminalColor {
-    type Err = anyhow::Error;
+    type Err = ColorParseError;
 
-    fn from_str(s: &str) -> anyhow::Result<Self> {
+    fn from_str(s: &str) -> Result<Self, ColorParseError> {
         let ret = match s {
             "default" => Self::Default,
             "default_background" => Self::DefaultBackground,
@@ -263,7 +272,7 @@ impl std::str::FromStr for TerminalColor {
             "bright magenta" => Self::BrightMagenta,
             "bright cyan" => Self::BrightCyan,
             "bright white" => Self::BrightWhite,
-            _ => return Err(anyhow::anyhow!("Invalid color string")),
+            _ => return Err(ColorParseError::InvalidName(s.to_string())),
         };
         Ok(ret)
     }

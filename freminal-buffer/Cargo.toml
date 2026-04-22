@@ -15,11 +15,8 @@ categories.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-conv2.workspace = true
-crossbeam-channel.workspace = true
 freminal-common = { path = "../freminal-common" }
-image.workspace = true
-tracing.workspace = true
+conv2.workspace = true
 
 # dev dependencies
 [features]
@@ -29,11 +26,8 @@ bench_fixtures = []
 
 [dev-dependencies]
 criterion.workspace = true
-crossbeam-channel.workspace = true
 proptest.workspace = true
 test-log.workspace = true
-# assert_cmd.workspace = true
-# predicates.workspace = true
 
 
 [build-dependencies]

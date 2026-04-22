@@ -17,7 +17,7 @@ use freminal_common::buffer_states::{
     modes::decsdm::Decsdm, modes::private_color_registers::PrivateColorRegisters,
 };
 
-use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
 
 use super::TerminalHandler;
 
@@ -73,7 +73,7 @@ impl TerminalHandler {
             return;
         }
 
-        let (term_width, term_height) = self.get_win_size();
+        let (term_width, term_height) = self.win_size();
 
         // Compute display size in terminal cells using actual cell pixel dimensions.
         let display_cols = {
@@ -102,7 +102,7 @@ impl TerminalHandler {
         // the image.  Save the cursor position so we can restore it after
         // place_image (which always moves the cursor below the image).
         let saved_cursor = if self.sixel_display_mode == Decsdm::DisplayMode {
-            Some(self.buffer.get_cursor().pos)
+            Some(self.buffer.cursor().pos)
         } else {
             None
         };
@@ -384,7 +384,7 @@ mod tests {
 
         // Move cursor to a non-zero column so we can detect the x→0 reset.
         handler.handle_data(b"Hello");
-        let cursor_before = handler.buffer.get_cursor().pos;
+        let cursor_before = handler.buffer.cursor().pos;
         assert_eq!(
             cursor_before.x, 5,
             "cursor should be at col 5 after 'Hello'"
@@ -397,7 +397,7 @@ mod tests {
         let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
         handler.handle_device_control_string(&dcs);
 
-        let cursor_after = handler.buffer.get_cursor().pos;
+        let cursor_after = handler.buffer.cursor().pos;
         // In scrolling mode, cursor moves below the image and x resets to 0.
         assert!(
             cursor_after.y > cursor_before.y,
@@ -433,7 +433,7 @@ mod tests {
 
         // Move cursor to a non-zero position.
         handler.handle_data(b"Hello");
-        let cursor_before = handler.buffer.get_cursor().pos;
+        let cursor_before = handler.buffer.cursor().pos;
         assert_eq!(
             cursor_before.x, 5,
             "cursor should be at col 5 after 'Hello'"
@@ -444,7 +444,7 @@ mod tests {
         let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
         handler.handle_device_control_string(&dcs);
 
-        let cursor_after = handler.buffer.get_cursor().pos;
+        let cursor_after = handler.buffer.cursor().pos;
         // In display mode, cursor should be restored to its pre-image position.
         assert_eq!(
             cursor_before, cursor_after,

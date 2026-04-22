@@ -20,6 +20,7 @@ use glow::{self, HasContext};
 use tracing::error;
 
 use super::super::atlas::GlyphAtlas;
+use super::errors::{BufferAllocError, GpuInitError, ShaderCompileError, TextureUploadError};
 use super::shaders::{
     BG_IMG_FRAG_SRC, BG_IMG_VERT_SRC, BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC,
     DECO_VERT_SRC, FG_FRAG_SRC, FG_VERT_SRC, IMG_FRAG_SRC, IMG_VERT_SRC, POST_PASSTHROUGH_FRAG_SRC,
@@ -63,18 +64,6 @@ fn gl_i32_u32(val: u32) -> i32 {
     i32::value_from(val).unwrap_or_else(|_| {
         error!("gl_i32_u32: u32 {val} overflows i32");
         0
-    })
-}
-
-/// Convert a `u32` to `f32` for GPU cell-dimension math.
-/// Returns `0.0` on precision loss (u32 values fit in f32 for all sane sizes)
-/// and logs an error so the impossible is visible if it ever occurs.
-#[inline]
-#[allow(dead_code)]
-fn gl_f32_u32(val: u32) -> f32 {
-    f32::approx_from(val).unwrap_or_else(|_| {
-        error!("gl_f32_u32: u32 {val} cannot be approximated as f32");
-        0.0
     })
 }
 
@@ -249,9 +238,9 @@ impl TerminalRenderer {
     ///
     /// # Errors
     ///
-    /// Returns a human-readable error string if shader compilation/linking fails
-    /// or if any GL object creation fails.
-    pub fn init(&mut self, gl: &glow::Context) -> Result<(), String> {
+    /// Returns [`GpuInitError`] if shader compilation/linking fails or if any
+    /// GL object creation fails.
+    pub fn init(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         self.init_bg_inst_pass(gl)?;
         self.init_deco_pass(gl)?;
         self.init_fg_pass(gl)?;
@@ -265,7 +254,7 @@ impl TerminalRenderer {
 
     /// Initialise the instanced background pass (shader, VAO, unit-quad VBO,
     /// double-buffered instance VBOs).
-    fn init_bg_inst_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+    fn init_bg_inst_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_INST_VERT_SRC, BG_INST_FRAG_SRC, "bg_instanced")?;
 
         self.bg_inst_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -275,19 +264,19 @@ impl TerminalRenderer {
 
         let vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create bg_inst VAO: {e}"))?
+                .map_err(|e| BufferAllocError::new("bg_inst VAO", e))?
         };
         let unit_quad_vbo = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create bg unit-quad VBO: {e}"))?
+                .map_err(|e| BufferAllocError::new("bg unit-quad VBO", e))?
         };
         let inst_vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create bg instance VBO 0: {e}"))?
+                .map_err(|e| BufferAllocError::new("bg instance VBO 0", e))?
         };
         let inst_vbo1 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create bg instance VBO 1: {e}"))?
+                .map_err(|e| BufferAllocError::new("bg instance VBO 1", e))?
         };
 
         // Upload the static unit quad (never changes).
@@ -318,22 +307,22 @@ impl TerminalRenderer {
     }
 
     /// Initialise the decoration pass (shader, VAO, double-buffered VBOs).
-    fn init_deco_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+    fn init_deco_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let program = compile_program(gl, DECO_VERT_SRC, DECO_FRAG_SRC, "decoration")?;
 
         self.deco_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
 
         let vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create deco VAO: {e}"))?
+                .map_err(|e| BufferAllocError::new("deco VAO", e))?
         };
         let vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create deco VBO 0: {e}"))?
+                .map_err(|e| BufferAllocError::new("deco VBO 0", e))?
         };
         let vbo1 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create deco VBO 1: {e}"))?
+                .map_err(|e| BufferAllocError::new("deco VBO 1", e))?
         };
 
         unsafe {
@@ -354,7 +343,7 @@ impl TerminalRenderer {
     ///
     /// Reuses the shared unit-quad VBO from the instanced background pass
     /// (must be initialised first via [`init_bg_inst_pass`]).
-    fn init_fg_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+    fn init_fg_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
 
         self.fg_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -362,20 +351,23 @@ impl TerminalRenderer {
 
         let vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create foreground VAO: {e}"))?
+                .map_err(|e| BufferAllocError::new("foreground VAO", e))?
         };
         let vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create foreground instance VBO 0: {e}"))?
+                .map_err(|e| BufferAllocError::new("foreground instance VBO 0", e))?
         };
         let vbo1 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create foreground instance VBO 1: {e}"))?
+                .map_err(|e| BufferAllocError::new("foreground instance VBO 1", e))?
         };
 
         // The unit-quad VBO must already exist (created by init_bg_inst_pass).
         let unit_quad_vbo = self.bg_unit_quad_vbo.ok_or_else(|| {
-            "FG init: unit-quad VBO not yet created (call init_bg_inst_pass first)".to_owned()
+            BufferAllocError::new(
+                "foreground unit-quad VBO reference",
+                "FG init: unit-quad VBO not yet created (call init_bg_inst_pass first)",
+            )
         })?;
 
         unsafe {
@@ -392,10 +384,13 @@ impl TerminalRenderer {
     }
 
     /// Create and configure the glyph-atlas texture.
-    fn init_atlas_texture(&mut self, gl: &glow::Context) -> Result<(), String> {
+    fn init_atlas_texture(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let texture = unsafe {
             gl.create_texture()
-                .map_err(|e| format!("create atlas texture: {e}"))?
+                .map_err(|e| TextureUploadError::CreateTexture {
+                    label: "atlas",
+                    message: e,
+                })?
         };
 
         unsafe {
@@ -429,7 +424,7 @@ impl TerminalRenderer {
     }
 
     /// Initialise the image-pass GL resources (shader, VAO, double-buffered VBOs).
-    fn init_image_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+    fn init_image_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let img_program = compile_program(gl, IMG_VERT_SRC, IMG_FRAG_SRC, "image")?;
 
         let img_u_viewport = unsafe { gl.get_uniform_location(img_program, "u_viewport_size") };
@@ -437,15 +432,15 @@ impl TerminalRenderer {
 
         let img_vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create image VAO: {e}"))?
+                .map_err(|e| BufferAllocError::new("image VAO", e))?
         };
         let img_vbo0 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create image VBO 0: {e}"))?
+                .map_err(|e| BufferAllocError::new("image VBO 0", e))?
         };
         let img_vbo1 = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create image VBO 1: {e}"))?
+                .map_err(|e| BufferAllocError::new("image VBO 1", e))?
         };
 
         unsafe {
@@ -468,7 +463,7 @@ impl TerminalRenderer {
     ///
     /// No texture is uploaded here — images are loaded on demand via
     /// [`Self::update_background_image`].
-    fn init_bg_image_pass(&mut self, gl: &glow::Context) -> Result<(), String> {
+    fn init_bg_image_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_IMG_VERT_SRC, BG_IMG_FRAG_SRC, "bg_image")?;
 
         self.bg_img_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -477,11 +472,11 @@ impl TerminalRenderer {
 
         let vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create bg_image VAO: {e}"))?
+                .map_err(|e| BufferAllocError::new("bg_image VAO", e))?
         };
         let vbo = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create bg_image VBO: {e}"))?
+                .map_err(|e| BufferAllocError::new("bg_image VBO", e))?
         };
 
         unsafe {
@@ -1066,19 +1061,22 @@ impl TerminalRenderer {
     ///
     /// # Errors
     ///
-    /// Returns an error string if the file cannot be read or decoded, or if
+    /// Returns [`GpuInitError`] if the file cannot be read or decoded, or if
     /// a GL texture object cannot be created.
     pub fn update_background_image(
         &mut self,
         gl: &glow::Context,
         path: &std::path::Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), GpuInitError> {
         // Delete any previously-loaded texture.
         self.clear_background_image(gl);
 
         // Decode the image file.
         let img = image::open(path)
-            .map_err(|e| format!("load background image '{}': {e}", path.display()))?
+            .map_err(|e| TextureUploadError::ImageDecode {
+                path: path.to_path_buf(),
+                source: e,
+            })?
             .into_rgba8();
         let (w, h) = (img.width(), img.height());
         let pixels = img.into_raw();
@@ -1086,7 +1084,10 @@ impl TerminalRenderer {
         // Upload to GL.
         let tex = unsafe {
             gl.create_texture()
-                .map_err(|e| format!("create bg_img texture: {e}"))?
+                .map_err(|e| TextureUploadError::CreateTexture {
+                    label: "bg_img",
+                    message: e,
+                })?
         };
 
         let wi = gl_i32_u32(w);
@@ -1443,15 +1444,15 @@ fn compile_program(
     gl: &glow::Context,
     vert_src: &str,
     frag_src: &str,
-    label: &str,
-) -> Result<glow::Program, String> {
+    label: &'static str,
+) -> Result<glow::Program, ShaderCompileError> {
     unsafe {
         let vert = compile_shader(gl, glow::VERTEX_SHADER, vert_src, label)?;
         let frag = compile_shader(gl, glow::FRAGMENT_SHADER, frag_src, label)?;
 
         let program = gl
             .create_program()
-            .map_err(|e| format!("create {label} program: {e}"))?;
+            .map_err(|e| ShaderCompileError::CreateProgram { label, message: e })?;
         gl.attach_shader(program, vert);
         gl.attach_shader(program, frag);
         gl.link_program(program);
@@ -1461,7 +1462,7 @@ fn compile_program(
             gl.delete_program(program);
             gl.delete_shader(vert);
             gl.delete_shader(frag);
-            return Err(format!("link {label} program: {info}"));
+            return Err(ShaderCompileError::Link { label, info });
         }
 
         gl.delete_shader(vert);
@@ -1475,19 +1476,19 @@ unsafe fn compile_shader(
     gl: &glow::Context,
     shader_type: u32,
     src: &str,
-    label: &str,
-) -> Result<glow::Shader, String> {
+    label: &'static str,
+) -> Result<glow::Shader, ShaderCompileError> {
     unsafe {
         let shader = gl
             .create_shader(shader_type)
-            .map_err(|e| format!("create {label} shader: {e}"))?;
+            .map_err(|e| ShaderCompileError::CreateShader { label, message: e })?;
         gl.shader_source(shader, src);
         gl.compile_shader(shader);
 
         if !gl.get_shader_compile_status(shader) {
             let info = gl.get_shader_info_log(shader);
             gl.delete_shader(shader);
-            return Err(format!("compile {label} shader: {info}"));
+            return Err(ShaderCompileError::Compile { label, info });
         }
         Ok(shader)
     }
@@ -1758,8 +1759,8 @@ impl WindowPostRenderer {
     ///
     /// # Errors
     ///
-    /// Returns an error string if shader compilation or any GL object creation fails.
-    pub fn init(&mut self, gl: &glow::Context) -> Result<(), String> {
+    /// Returns [`GpuInitError`] if shader compilation or any GL object creation fails.
+    pub fn init(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
         let program = compile_program(
             gl,
             POST_VERT_SRC,
@@ -1773,11 +1774,11 @@ impl WindowPostRenderer {
 
         let vao = unsafe {
             gl.create_vertex_array()
-                .map_err(|e| format!("create wpr VAO: {e}"))?
+                .map_err(|e| BufferAllocError::new("wpr VAO", e))?
         };
         let vbo = unsafe {
             gl.create_buffer()
-                .map_err(|e| format!("create wpr VBO: {e}"))?
+                .map_err(|e| BufferAllocError::new("wpr VBO", e))?
         };
 
         // Fullscreen NDC quad: two triangles covering [-1,1]².
@@ -1918,14 +1919,14 @@ impl WindowPostRenderer {
     ///
     /// # Errors
     ///
-    /// Returns an error string if shader compilation or linking fails.
+    /// Returns [`GpuInitError`] if shader compilation or linking fails.
     pub fn update_shader(
         &mut self,
         gl: &glow::Context,
         frag_src: &str,
         vp_w: i32,
         vp_h: i32,
-    ) -> Result<(), String> {
+    ) -> Result<(), GpuInitError> {
         let new_prog = compile_program(gl, POST_VERT_SRC, frag_src, "wpr_user")?;
 
         let u_terminal = unsafe { gl.get_uniform_location(new_prog, "u_terminal") };

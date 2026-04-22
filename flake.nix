@@ -100,7 +100,7 @@
         {
           freminal = rustPlatform.buildRustPackage {
             pname = "freminal";
-            version = "0.7.0";
+            version = "0.8.0";
             src = pkgs.lib.cleanSource ./.;
 
             cargoLock.lockFile = ./Cargo.lock;
@@ -148,9 +148,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.7.0</string>
+                    <string>0.8.0</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.7.0</string>
+                    <string>0.8.0</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>

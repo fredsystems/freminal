@@ -72,7 +72,7 @@ fn shadow_handler_does_not_panic_on_basic_session() {
     state.handle_incoming_data(b"\x1b]0;My Terminal\x07");
 
     // Verify old buffer is still in a sane state.
-    let (w, h) = state.get_win_size();
+    let (w, h) = state.win_size();
     assert!(w > 0, "terminal width must be > 0 after session");
     assert!(h > 0, "terminal height must be > 0 after session");
 }
@@ -87,7 +87,7 @@ fn shadow_handler_handles_rapid_writes() {
         state.handle_incoming_data(line.as_bytes());
     }
 
-    let (w, h) = state.get_win_size();
+    let (w, h) = state.win_size();
     assert!(w > 0);
     assert!(h > 0);
 }
@@ -99,7 +99,7 @@ fn shadow_handler_handles_sgr_sequence() {
     // A rich SGR sequence: bold + italic + underline + fg + bg + reset.
     state.handle_incoming_data(b"\x1b[1;3;4;31;42mstyle\x1b[0m normal");
 
-    let (w, h) = state.get_win_size();
+    let (w, h) = state.win_size();
     assert!(w > 0);
     assert!(h > 0);
 }
@@ -115,7 +115,7 @@ fn shadow_handler_handles_resize() {
 
     state.handle_incoming_data(b"after resize\r\n");
 
-    let (w, h) = state.get_win_size();
+    let (w, h) = state.win_size();
     assert_eq!(w, 100);
     assert_eq!(h, 30);
 }
@@ -145,7 +145,7 @@ fn shadow_handler_scroll_back_and_forward_do_not_panic() {
     // Write more data — the shadow handler must not panic on new content.
     state.handle_incoming_data(b"new data after scroll\r\n");
 
-    let (w, h) = state.get_win_size();
+    let (w, h) = state.win_size();
     assert!(w > 0);
     assert!(h > 0);
 }

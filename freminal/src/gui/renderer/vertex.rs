@@ -9,7 +9,7 @@
 //! They build flat `Vec<f32>` buffers that are subsequently uploaded to the
 //! GPU by the [`super::gpu`] module.
 
-use conv2::{ApproxFrom, ConvUtil};
+use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, UnderlineStyle};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
@@ -176,6 +176,30 @@ pub struct MatchHighlight {
     pub is_current: bool,
 }
 
+/// Groups all frame-level rendering state required by [`build_background_instances`].
+///
+/// Passing a struct instead of 18 positional parameters keeps call sites
+/// readable and eliminates the need for `#[allow(clippy::too_many_arguments)]`.
+pub struct BackgroundFrame<'a> {
+    pub shaped_lines: &'a [Arc<ShapedLine>],
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub ascent: f32,
+    pub underline_offset: f32,
+    pub strikeout_offset: f32,
+    pub stroke_size: f32,
+    pub show_cursor: bool,
+    pub cursor_blink_on: bool,
+    pub cursor_pixel_pos: (f32, f32),
+    pub cursor_width_scale: f32,
+    pub cursor_visual_style: &'a CursorVisualStyle,
+    pub selection: Option<(usize, usize, usize, usize)>,
+    pub selection_is_block: bool,
+    pub match_highlights: &'a [MatchHighlight],
+    pub theme: &'a ThemePalette,
+    pub cursor_color_override: Option<(u8, u8, u8)>,
+}
+
 /// Build the two-pass background data: instanced cell BGs + decoration quads.
 ///
 /// Returns `(bg_instances, deco_verts)`:
@@ -192,28 +216,29 @@ pub struct MatchHighlight {
 /// so that cursor-only partial updates can patch just the tail.
 // All parameters are required geometric and style inputs for GPU instance data generation.
 // Inherently large: iterates all shaped lines, resolving background color for every cell.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 pub fn build_background_instances(
-    shaped_lines: &[Arc<ShapedLine>],
-    cell_width: u32,
-    cell_height: u32,
-    ascent: f32,
-    underline_offset: f32,
-    strikeout_offset: f32,
-    stroke_size: f32,
-    show_cursor: bool,
-    cursor_blink_on: bool,
-    cursor_pixel_pos: (f32, f32),
-    cursor_width_scale: f32,
-    cursor_visual_style: &CursorVisualStyle,
-    selection: Option<(usize, usize, usize, usize)>,
-    selection_is_block: bool,
-    match_highlights: &[MatchHighlight],
-    theme: &ThemePalette,
-    cursor_color_override: Option<(u8, u8, u8)>,
+    frame: &BackgroundFrame<'_>,
     instances: &mut Vec<f32>,
     deco: &mut Vec<f32>,
 ) {
+    let shaped_lines = frame.shaped_lines;
+    let cell_width = frame.cell_width;
+    let cell_height = frame.cell_height;
+    let ascent = frame.ascent;
+    let underline_offset = frame.underline_offset;
+    let strikeout_offset = frame.strikeout_offset;
+    let stroke_size = frame.stroke_size;
+    let show_cursor = frame.show_cursor;
+    let cursor_blink_on = frame.cursor_blink_on;
+    let cursor_pixel_pos = frame.cursor_pixel_pos;
+    let cursor_width_scale = frame.cursor_width_scale;
+    let cursor_visual_style = frame.cursor_visual_style;
+    let selection = frame.selection;
+    let selection_is_block = frame.selection_is_block;
+    let match_highlights = frame.match_highlights;
+    let theme = frame.theme;
+    let cursor_color_override = frame.cursor_color_override;
     // Reuse existing heap allocations — clear but keep capacity.
     instances.clear();
     deco.clear();
@@ -226,7 +251,7 @@ pub fn build_background_instances(
         // --- Per-cell background instances ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let bg_color_raw = run.colors.get_background_color();
+            let bg_color_raw = run.colors.background_color();
 
             // Skip default backgrounds (transparent — the terminal base color
             // is rendered as a panel clear, not explicit quads).
@@ -271,12 +296,12 @@ pub fn build_background_instances(
 
             if underline_style.is_active() {
                 // Use underline color if set, otherwise fall back to foreground.
-                let ul_color_raw = run.colors.get_underline_color();
+                let ul_color_raw = run.colors.underline_color();
                 let ul_color = if matches!(
                     ul_color_raw,
                     freminal_common::colors::TerminalColor::DefaultUnderlineColor
                 ) {
-                    internal_color_to_gl(run.colors.get_color(), is_faint, theme)
+                    internal_color_to_gl(run.colors.color(), is_faint, theme)
                 } else {
                     internal_color_to_gl(ul_color_raw, is_faint, theme)
                 };
@@ -303,7 +328,7 @@ pub fn build_background_instances(
             }
 
             if has_strike {
-                let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
+                let fg_color = internal_color_to_gl(run.colors.color(), is_faint, theme);
                 // strikeout_offset from OS/2 is positive (above baseline in font
                 // coords).  In top-down pixel coords, subtracting it from the
                 // baseline places the line above the baseline (middle of cell).
@@ -510,7 +535,7 @@ pub fn build_foreground_instances(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
+            let normal_fg = internal_color_to_gl(run.colors.color(), is_faint, theme);
 
             // Track the current column as we iterate glyphs within the run.
             let mut col = run.col_start;
@@ -1067,13 +1092,18 @@ pub(super) fn extract_atlas_rect(
     atlas_size: u32,
     rect: &super::super::atlas::DirtyRect,
 ) -> Vec<u8> {
-    let stride = (atlas_size as usize) * 4;
-    let row_bytes = (rect.width as usize) * 4;
-    let mut out = Vec::with_capacity((rect.height as usize) * row_bytes);
+    // `u32 -> usize` is lossless on all 64-bit targets; `value_from` degrades
+    // gracefully on hypothetical 32-bit hosts by returning an empty region
+    // rather than panicking.
+    let usize_from_u32 = |v: u32| usize::value_from(v).unwrap_or(0);
+    let stride = usize_from_u32(atlas_size).saturating_mul(4);
+    let row_bytes = usize_from_u32(rect.width).saturating_mul(4);
+    let height_usize = usize_from_u32(rect.height);
+    let mut out = Vec::with_capacity(height_usize.saturating_mul(row_bytes));
 
     for row in 0..rect.height {
-        let y = (rect.y + row) as usize;
-        let x = rect.x as usize;
+        let y = usize_from_u32(rect.y.saturating_add(row));
+        let x = usize_from_u32(rect.x);
         let offset = y * stride + x * 4;
         let end = offset + row_bytes;
         if end <= pixels.len() {
@@ -1090,6 +1120,7 @@ pub(super) fn extract_atlas_rect(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use freminal_common::buffer_states::cursor::CursorPos;
     use freminal_common::buffer_states::fonts::FontDecorationFlags;
@@ -1183,23 +1214,25 @@ mod tests {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
         build_background_instances(
-            lines,
-            cell_width,
-            cell_height,
-            14.0, // ascent (approximate for test font)
-            13.0,
-            8.0,
-            1.0,
-            show_cursor,
-            cursor_blink_on,
-            cursor_pixel_pos,
-            1.0, // cursor_width_scale (normal for tests)
-            cursor_style,
-            None,
-            false,
-            &[],
-            &themes::CATPPUCCIN_MOCHA,
-            None,
+            &BackgroundFrame {
+                shaped_lines: lines,
+                cell_width,
+                cell_height,
+                ascent: 14.0, // ascent (approximate for test font)
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                show_cursor,
+                cursor_blink_on,
+                cursor_pixel_pos,
+                cursor_width_scale: 1.0, // cursor_width_scale (normal for tests)
+                cursor_visual_style: cursor_style,
+                selection: None,
+                selection_is_block: false,
+                match_highlights: &[],
+                theme: &themes::CATPPUCCIN_MOCHA,
+                cursor_color_override: None,
+            },
             &mut instances,
             &mut deco,
         );
@@ -1528,7 +1561,7 @@ mod tests {
         build_foreground_instances(
             &[],
             &mut GlyphAtlas::default(),
-            &FontManager::new(&Config::default(), 1.0),
+            &FontManager::new(&Config::default(), 1.0).unwrap(),
             16,
             13.0,
             &FgRenderOptions::all_visible(None),
@@ -1540,7 +1573,7 @@ mod tests {
 
     #[test]
     fn fg_instances_produces_data_for_ascii_glyphs() {
-        let mut fm = FontManager::new(&Config::default(), 1.0);
+        let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
         let mut atlas = GlyphAtlas::new(256, 1024);
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;

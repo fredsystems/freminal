@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-mod pty;
+pub mod pty;
 pub use pty::{FreminalPtyInputOutput, PtySpawnConfig};
 
 // Re-export the shared PTY I/O types from freminal-common so that all crates

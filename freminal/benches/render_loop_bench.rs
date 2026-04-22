@@ -31,7 +31,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use freminal::gui::atlas::GlyphAtlas;
 use freminal::gui::font_manager::FontManager;
 use freminal::gui::renderer::{
-    FgRenderOptions, build_background_instances, build_foreground_instances,
+    BackgroundFrame, FgRenderOptions, build_background_instances, build_foreground_instances,
 };
 use freminal::gui::shaping::ShapingCache;
 use freminal_common::config::Config;
@@ -353,7 +353,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("shape_visible", label), |b| {
             b.iter_batched(
                 || {
-                    let fm = FontManager::new(&Config::default(), 1.0);
+                    let fm = FontManager::new(&Config::default(), 1.0).unwrap();
                     let cache = ShapingCache::new();
                     (fm, cache)
                 },
@@ -377,7 +377,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
 
     // Also benchmark cache hit path (second call with same data).
     group.bench_function("shape_visible_cache_hit", |b| {
-        let mut fm = FontManager::new(&Config::default(), 1.0);
+        let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
         let mut cache = ShapingCache::new();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
@@ -416,7 +416,7 @@ fn build_shaped_lines_for_size(
     FontManager,
 ) {
     let (chars, tags) = ligature_heavy_visible_chars(width, height);
-    let mut fm = FontManager::new(&Config::default(), 1.0);
+    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;
@@ -455,23 +455,25 @@ fn bench_bg_instances(c: &mut Criterion) {
                 let mut deco = Vec::new();
                 b.iter(|| {
                     build_background_instances(
-                        &lines,
-                        cell_width,
-                        cell_height,
-                        ascent,
-                        underline_offset,
-                        strikeout_offset,
-                        stroke_size,
-                        true, // show_cursor
-                        true, // cursor_blink_on
-                        cursor_pixel_pos,
-                        1.0, // cursor_width_scale
-                        &cursor_style,
-                        None,  // selection
-                        false, // selection_is_block
-                        &[],   // match_highlights
-                        &CATPPUCCIN_MOCHA,
-                        None, // cursor_color_override
+                        &BackgroundFrame {
+                            shaped_lines: &lines,
+                            cell_width,
+                            cell_height,
+                            ascent,
+                            underline_offset,
+                            strikeout_offset,
+                            stroke_size,
+                            show_cursor: true,
+                            cursor_blink_on: true,
+                            cursor_pixel_pos,
+                            cursor_width_scale: 1.0,
+                            cursor_visual_style: &cursor_style,
+                            selection: None,
+                            selection_is_block: false,
+                            match_highlights: &[],
+                            theme: &CATPPUCCIN_MOCHA,
+                            cursor_color_override: None,
+                        },
                         &mut instances,
                         &mut deco,
                     );

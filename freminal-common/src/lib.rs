@@ -31,7 +31,16 @@
     clippy::complexity,
     clippy::perf,
     clippy::unwrap_used,
-    clippy::expect_used
+    clippy::expect_used,
+    // Task 70.H tripwires: explicit deny for the three cast lints that guard
+    // against silent truncation/sign-loss/wrap in numeric conversions. These
+    // are already part of `clippy::pedantic` above, but naming them directly
+    // documents the contract and survives any future reorganization of the
+    // pedantic group. All remaining `as` casts must be covered by a local
+    // `#[allow(...)]` with a justification comment per agents.md.
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
 )]
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
@@ -52,6 +61,8 @@ pub mod cursor;
 pub mod keybindings;
 /// Layout file format types, parser, and resolver.
 pub mod layout;
+/// Cross-crate logging helpers (`send_or_log!` macro).
+pub mod logging;
 /// PTY write command types shared between the emulator and the OS PTY writer.
 pub mod pty_write;
 /// SGR (Select Graphic Rendition) parameter types.

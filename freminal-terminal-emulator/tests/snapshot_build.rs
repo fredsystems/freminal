@@ -408,7 +408,7 @@ fn scroll_offset_is_clamped_to_max() {
 fn snapshot_dimensions_reflect_terminal_size() {
     let (mut emu, _rx) = make_emulator();
     let snap = emu.build_snapshot();
-    let (w, h) = emu.get_win_size();
+    let (w, h) = emu.win_size();
     assert_eq!(
         snap.term_width, w,
         "snap.term_width must match get_win_size().0"

@@ -20,7 +20,6 @@ harness = false
 name = "buffer_benches"
 
 [dependencies]
-anyhow.workspace = true
 arc-swap.workspace = true
 conv2.workspace = true
 crossbeam-channel.workspace = true
@@ -28,6 +27,7 @@ freminal-buffer = { path = "../freminal-buffer" }
 rmp-serde.workspace = true
 serde.workspace = true
 freminal-common = { path = "../freminal-common" }
+image.workspace = true
 portable-pty = { path = "../portable-pty" }
 sys-locale.workspace = true
 tar.workspace = true

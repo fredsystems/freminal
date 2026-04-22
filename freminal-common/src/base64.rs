@@ -7,6 +7,8 @@
 //!
 //! Uses the standard alphabet (RFC 4648 §4) with optional `=` padding on decode.
 
+use conv2::ValueFrom;
+
 const ENCODE_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Decode a single base64 ASCII character to its 6-bit value.
@@ -39,17 +41,27 @@ pub fn encode(input: &[u8]) -> String {
 
         let triple = u32::from(b0) << 16 | u32::from(b1) << 8 | u32::from(b2);
 
-        out.push(char::from(ENCODE_TABLE[((triple >> 18) & 0x3F) as usize]));
-        out.push(char::from(ENCODE_TABLE[((triple >> 12) & 0x3F) as usize]));
+        // Masked 6-bit values are always 0..=63, so `value_from` never fails.
+        // `unwrap_or(0)` yields `ENCODE_TABLE[0]` ('A') in the impossible failure case.
+        out.push(char::from(
+            ENCODE_TABLE[usize::value_from((triple >> 18) & 0x3F).unwrap_or(0)],
+        ));
+        out.push(char::from(
+            ENCODE_TABLE[usize::value_from((triple >> 12) & 0x3F).unwrap_or(0)],
+        ));
 
         if chunk.len() > 1 {
-            out.push(char::from(ENCODE_TABLE[((triple >> 6) & 0x3F) as usize]));
+            out.push(char::from(
+                ENCODE_TABLE[usize::value_from((triple >> 6) & 0x3F).unwrap_or(0)],
+            ));
         } else {
             out.push('=');
         }
 
         if chunk.len() > 2 {
-            out.push(char::from(ENCODE_TABLE[(triple & 0x3F) as usize]));
+            out.push(char::from(
+                ENCODE_TABLE[usize::value_from(triple & 0x3F).unwrap_or(0)],
+            ));
         } else {
             out.push('=');
         }

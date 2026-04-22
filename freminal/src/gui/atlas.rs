@@ -19,6 +19,18 @@ use swash::zeno::Format;
 
 use super::font_manager::{FaceId, FontManager};
 
+/// Convert a `u32` to `usize` for pixel-buffer indexing.
+///
+/// Lossless on all 64-bit targets.  On hypothetical 32-bit hosts where an
+/// atlas coordinate exceeds `usize::MAX`, this returns `0`, which will cause
+/// the bounds-checked slice access in each call site to no-op silently — the
+/// atlas simply declines to blit that pixel.  A panic is never appropriate
+/// here: per the workspace policy, rendering must degrade gracefully.
+#[inline]
+fn usize_from_u32(v: u32) -> usize {
+    usize::value_from(v).unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 //  Public types
 // ---------------------------------------------------------------------------
@@ -146,7 +158,9 @@ impl GlyphAtlas {
     /// Both sizes should be powers of 2.
     #[must_use]
     pub fn new(initial_size: u32, max_size: u32) -> Self {
-        let pixel_count = (initial_size as usize) * (initial_size as usize) * 4;
+        let pixel_count = usize_from_u32(initial_size)
+            .saturating_mul(usize_from_u32(initial_size))
+            .saturating_mul(4);
         Self {
             size: initial_size,
             max_size,
@@ -493,12 +507,13 @@ impl GlyphAtlas {
 
     /// Blit glyph RGBA data into the atlas pixel buffer.
     fn blit_glyph(&mut self, dst_x: u32, dst_y: u32, width: u32, height: u32, data: &[u8]) {
-        let atlas_stride = (self.size as usize) * 4;
+        let atlas_stride = usize_from_u32(self.size).saturating_mul(4);
 
         for row in 0..height {
-            let src_offset = (row as usize) * (width as usize) * 4;
-            let dst_offset = ((dst_y + row) as usize) * atlas_stride + (dst_x as usize) * 4;
-            let row_bytes = (width as usize) * 4;
+            let src_offset = usize_from_u32(row).saturating_mul(usize_from_u32(width)) * 4;
+            let dst_offset = usize_from_u32(dst_y.saturating_add(row)) * atlas_stride
+                + usize_from_u32(dst_x) * 4;
+            let row_bytes = usize_from_u32(width).saturating_mul(4);
 
             if src_offset + row_bytes <= data.len() && dst_offset + row_bytes <= self.pixels.len() {
                 self.pixels[dst_offset..dst_offset + row_bytes]
@@ -546,9 +561,9 @@ impl GlyphAtlas {
             shelf.last_used = self.generation;
 
             // Zero out the shelf's pixel region.
-            let atlas_stride = (self.size as usize) * 4;
+            let atlas_stride = usize_from_u32(self.size).saturating_mul(4);
             for row in 0..shelf.height {
-                let y = (shelf.y_origin + row) as usize;
+                let y = usize_from_u32(shelf.y_origin.saturating_add(row));
                 let offset = y * atlas_stride;
                 let end = offset + atlas_stride;
                 if end <= self.pixels.len() {
@@ -577,15 +592,17 @@ impl GlyphAtlas {
             return false;
         }
 
-        let new_pixel_count = (new_size as usize) * (new_size as usize) * 4;
+        let new_pixel_count = usize_from_u32(new_size)
+            .saturating_mul(usize_from_u32(new_size))
+            .saturating_mul(4);
         let mut new_pixels = vec![0u8; new_pixel_count];
 
         // Copy existing pixel data row by row.
-        let old_stride = (self.size as usize) * 4;
-        let new_stride = (new_size as usize) * 4;
+        let old_stride = usize_from_u32(self.size).saturating_mul(4);
+        let new_stride = usize_from_u32(new_size).saturating_mul(4);
         for row in 0..self.size {
-            let old_offset = (row as usize) * old_stride;
-            let new_offset = (row as usize) * new_stride;
+            let old_offset = usize_from_u32(row) * old_stride;
+            let new_offset = usize_from_u32(row) * new_stride;
             new_pixels[new_offset..new_offset + old_stride]
                 .copy_from_slice(&self.pixels[old_offset..old_offset + old_stride]);
         }
@@ -622,7 +639,7 @@ mod tests {
 
     /// Helper to get a `FontManager` for tests.
     fn test_font_manager() -> FontManager {
-        FontManager::new(&Config::default(), 1.0)
+        FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
     /// Helper to create a standard glyph key.

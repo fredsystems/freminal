@@ -3,12 +3,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_buffer::terminal_handler::TerminalHandler;
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
 use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
-use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 use freminal_common::pty_write::PtyWrite;
+use freminal_terminal_emulator::ansi_components::csi_commands::ed::EraseDisplayMode;
+use freminal_terminal_emulator::ansi_components::csi_commands::el::EraseLineMode;
+use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 
 /// Helper to convert a string slice to TChar representation as bytes
 fn text_to_bytes(s: &str) -> Vec<u8> {
@@ -21,8 +23,8 @@ fn test_simple_text_insertion() {
 
     handler.handle_data(&text_to_bytes("Hello, World!"));
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 13);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 13);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 
     // Buffer grows dynamically; only the rows that have been written exist.
     let visible = handler.buffer().visible_rows(0);
@@ -41,8 +43,8 @@ fn test_multiline_output() {
     handler.handle_carriage_return(); // CR needed separately from LF
     handler.handle_data(&text_to_bytes("Line 3"));
 
-    assert_eq!(handler.buffer().get_cursor().pos.y, 2);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 6);
+    assert_eq!(handler.buffer().cursor().pos.y, 2);
+    assert_eq!(handler.buffer().cursor().pos.x, 6);
 }
 
 #[test]
@@ -56,7 +58,7 @@ fn test_clear_screen_workflow() {
     }
 
     // Clear the screen (ED 2)
-    handler.handle_erase_in_display(2);
+    handler.handle_erase_in_display(EraseDisplayMode::All);
 
     // Move cursor to home
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -64,8 +66,8 @@ fn test_clear_screen_workflow() {
     // Write new content
     handler.handle_data(&text_to_bytes("After clear"));
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 11);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 11);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 }
 
 #[test]
@@ -76,15 +78,15 @@ fn test_cursor_positioning_and_data() {
     handler.handle_cursor_pos(Some(6), Some(6));
     handler.handle_data(&text_to_bytes("Middle"));
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 11); // 5 + 6
-    assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 11); // 5 + 6
+    assert_eq!(handler.buffer().cursor().pos.y, 5);
 
     // Move to (0, 10)
     handler.handle_cursor_pos(Some(1), Some(11));
     handler.handle_data(&text_to_bytes("Lower"));
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 10);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.y, 10);
 }
 
 #[test]
@@ -95,8 +97,8 @@ fn test_line_wrapping() {
     handler.handle_data(&text_to_bytes("HelloWorld!"));
 
     // Should have wrapped to next line
-    assert_eq!(handler.buffer().get_cursor().pos.y, 1);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 1); // 11 chars - 10 = 1
+    assert_eq!(handler.buffer().cursor().pos.y, 1);
+    assert_eq!(handler.buffer().cursor().pos.x, 1); // 11 chars - 10 = 1
 }
 
 #[test]
@@ -109,10 +111,10 @@ fn test_erase_line_operations() {
     handler.handle_cursor_pos(Some(6), Some(1));
 
     // Erase to end of line (EL 0)
-    handler.handle_erase_in_line(0);
+    handler.handle_erase_in_line(EraseLineMode::CursorToEnd);
 
     // Cursor should still be at column 5 (0-indexed)
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -169,7 +171,7 @@ fn test_alternate_buffer_switching() {
 
     // Write to primary buffer
     handler.handle_data(&text_to_bytes("Primary content"));
-    let primary_cursor_x = handler.buffer().get_cursor().pos.x;
+    let primary_cursor_x = handler.buffer().cursor().pos.x;
 
     // Enter alternate buffer
     handler.handle_enter_alternate();
@@ -181,7 +183,7 @@ fn test_alternate_buffer_switching() {
     handler.handle_leave_alternate();
 
     // Should restore primary buffer state
-    assert_eq!(handler.buffer().get_cursor().pos.x, primary_cursor_x);
+    assert_eq!(handler.buffer().cursor().pos.x, primary_cursor_x);
 }
 
 #[test]
@@ -189,16 +191,16 @@ fn test_carriage_return_and_newline() {
     let mut handler = TerminalHandler::new(80, 24);
 
     handler.handle_data(&text_to_bytes("Hello"));
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     // Carriage return should move to column 0
     handler.handle_carriage_return();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 
     // Newline should advance row
     handler.handle_newline();
-    assert_eq!(handler.buffer().get_cursor().pos.y, 1);
+    assert_eq!(handler.buffer().cursor().pos.y, 1);
 }
 
 #[test]
@@ -206,18 +208,18 @@ fn test_backspace_behavior() {
     let mut handler = TerminalHandler::new(80, 24);
 
     handler.handle_data(&text_to_bytes("Hello"));
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     handler.handle_backspace();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 4);
+    assert_eq!(handler.buffer().cursor().pos.x, 4);
 
     handler.handle_backspace();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 3);
+    assert_eq!(handler.buffer().cursor().pos.x, 3);
 
     // Backspace at start of line shouldn't move to previous line
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_backspace();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 #[test]
@@ -226,24 +228,24 @@ fn test_cursor_movement_commands() {
 
     // Start at origin
     handler.handle_cursor_pos(Some(1), Some(1));
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 
     // Move down 5 lines
     handler.handle_cursor_down(5);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+    assert_eq!(handler.buffer().cursor().pos.y, 5);
 
     // Move right 10 columns
     handler.handle_cursor_forward(10);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+    assert_eq!(handler.buffer().cursor().pos.x, 10);
 
     // Move up 3 lines
     handler.handle_cursor_up(3);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 2);
+    assert_eq!(handler.buffer().cursor().pos.y, 2);
 
     // Move left 5 columns
     handler.handle_cursor_backward(5);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -274,7 +276,7 @@ fn test_insert_spaces() {
     handler.handle_insert_spaces(3);
 
     // Characters after cursor should be shifted right
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -282,7 +284,7 @@ fn test_real_world_sequence() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Simulate: clear screen, write header, write content
-    handler.handle_erase_in_display(2);
+    handler.handle_erase_in_display(EraseDisplayMode::All);
     handler.handle_cursor_pos(Some(1), Some(1));
 
     handler.handle_data(&text_to_bytes("=== Terminal Test ==="));
@@ -313,7 +315,7 @@ fn test_scrollback_erase() {
     }
 
     // Erase scrollback (ED 3)
-    handler.handle_erase_in_display(3);
+    handler.handle_erase_in_display(EraseDisplayMode::AllWithScrollback);
 
     // Scrollback should be cleared (can't directly verify without inspecting buffer internals,
     // but at least ensure it doesn't panic)
@@ -385,7 +387,7 @@ fn test_mixed_operations_workflow() {
     handler.handle_data(&text_to_bytes("$ "));
 
     // Save position before cursor movement
-    let _cursor_x_before = handler.buffer().get_cursor().pos.x;
+    let _cursor_x_before = handler.buffer().cursor().pos.x;
 
     // Move cursor back
     handler.handle_cursor_backward(5);
@@ -396,7 +398,7 @@ fn test_mixed_operations_workflow() {
 
     // Simulate entering vim (alternate screen)
     handler.handle_enter_alternate();
-    handler.handle_erase_in_display(2);
+    handler.handle_erase_in_display(EraseDisplayMode::All);
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_data(&text_to_bytes("~ VIM - Vi IMproved"));
 
@@ -407,7 +409,7 @@ fn test_mixed_operations_workflow() {
     // The cursor should be where we left it before entering alternate
     // cursor_x_before is 2 (from "$ "), move back 5 (clamped to 0), forward 5 (now at 5),
     // then "vim" (3 chars) = 8
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 }
 
 #[test]
@@ -445,8 +447,8 @@ fn test_process_outputs_api() {
     handler.process_outputs(&outputs);
 
     // Verify final cursor position
-    assert_eq!(handler.buffer().get_cursor().pos.x, 2);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 3);
+    assert_eq!(handler.buffer().cursor().pos.x, 2);
+    assert_eq!(handler.buffer().cursor().pos.y, 3);
 
     // Buffer grows dynamically; 4 rows of content were written (prompt+cmd,
     // total 48, file listing, new prompt).
@@ -483,8 +485,8 @@ fn test_process_outputs_with_cursor_positioning() {
 
     handler.process_outputs(&outputs);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 6);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 23);
+    assert_eq!(handler.buffer().cursor().pos.x, 6);
+    assert_eq!(handler.buffer().cursor().pos.y, 23);
 }
 
 #[test]
@@ -539,7 +541,7 @@ fn test_process_outputs_mixed_erase_operations() {
 
     handler.process_outputs(&outputs);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+    assert_eq!(handler.buffer().cursor().pos.x, 10);
 }
 
 #[test]
@@ -569,7 +571,7 @@ fn test_process_outputs_insert_delete_operations() {
 
     handler.process_outputs(&outputs);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 }
 
 #[test]
@@ -608,7 +610,7 @@ fn test_process_outputs_delete_lines() {
     let visible = handler.buffer().visible_rows(0);
     // Row 0 should still be "A..."
     let row0_text: String = visible[0]
-        .get_characters()
+        .characters()
         .iter()
         .map(|c| c.into_utf8())
         .collect();
@@ -616,7 +618,7 @@ fn test_process_outputs_delete_lines() {
 
     // Row 1 should now be "C..." (was row 2 before delete)
     let row1_text: String = visible[1]
-        .get_characters()
+        .characters()
         .iter()
         .map(|c| c.into_utf8())
         .collect();
@@ -650,7 +652,7 @@ fn ind_scrolls_at_bottom_margin() {
         .set_cursor_pos(Some(0), Some(bottom_row));
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         bottom_row,
         "cursor should be at bottom margin before IND"
     );
@@ -659,7 +661,7 @@ fn ind_scrolls_at_bottom_margin() {
     handler.process_outputs(&[TerminalOutput::Index]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         bottom_row,
         "IND at bottom margin must keep cursor at bottom margin row"
     );
@@ -693,14 +695,14 @@ fn ri_scrolls_at_top_margin() {
 
     // Move cursor to row 0 (top of scroll region).
     handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
-    let cursor_row_before = handler.buffer().get_cursor().pos.y;
+    let cursor_row_before = handler.buffer().cursor().pos.y;
 
     handler.process_outputs(&[TerminalOutput::ReverseIndex]);
 
     // Cursor must remain at the top margin row (or scroll inserted a blank above,
     // keeping cursor at the same screen row).
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         cursor_row_before,
         "RI at top margin must keep cursor at top margin row"
     );
@@ -715,21 +717,21 @@ fn nel_moves_to_col_zero_of_next_line() {
 
     // Write some text so cursor is mid-row.
     handler.process_outputs(&[TerminalOutput::Data(b"Hello".to_vec())]);
-    let row_before = handler.buffer().get_cursor().pos.y;
+    let row_before = handler.buffer().cursor().pos.y;
     assert!(
-        handler.buffer().get_cursor().pos.x > 0,
+        handler.buffer().cursor().pos.x > 0,
         "cursor should be past col 0 after inserting text"
     );
 
     handler.process_outputs(&[TerminalOutput::NextLine]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         0,
         "NEL must reset cursor to column 0"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         row_before + 1,
         "NEL must advance cursor to next row"
     );
@@ -765,7 +767,7 @@ fn alternate_enter_clears_screen() {
     // Alternate screen must show only blank rows.
     let alt_rows = handler.buffer().visible_rows(0);
     for row in alt_rows {
-        for cell in row.get_characters() {
+        for cell in row.characters() {
             assert!(
                 !cell.is_head(),
                 "alternate screen should have no wide-head content cells"
@@ -804,7 +806,7 @@ fn alternate_leave_restores_content() {
     let rows = handler.buffer().visible_rows(0);
     let first_row = &rows[0];
     let content: String = first_row
-        .get_characters()
+        .characters()
         .iter()
         .filter_map(|c| match c.tchar() {
             freminal_common::buffer_states::tchar::TChar::Ascii(b) => Some(*b as char),
@@ -837,7 +839,7 @@ fn unknown_mode_does_not_panic() {
     )))]);
 
     // If we reach here, no panic occurred.
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 #[test]
@@ -852,8 +854,8 @@ fn save_restore_position() {
         x: Some(6), // 1-indexed → col 5
         y: Some(4), // 1-indexed → row 3
     }]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 3);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.y, 3);
 
     // Save cursor.
     handler.process_outputs(&[TerminalOutput::SaveCursor]);
@@ -863,19 +865,19 @@ fn save_restore_position() {
         x: Some(1),
         y: Some(1),
     }]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 
     // Restore cursor.
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         5,
         "cursor x must be restored to saved value"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         3,
         "cursor y must be restored to saved value"
     );
@@ -894,19 +896,19 @@ fn restore_without_save_is_noop() {
         x: Some(4),
         y: Some(3),
     }]);
-    let x_before = handler.buffer().get_cursor().pos.x;
-    let y_before = handler.buffer().get_cursor().pos.y;
+    let x_before = handler.buffer().cursor().pos.x;
+    let y_before = handler.buffer().cursor().pos.y;
 
     // Restore without a prior save — must be a no-op.
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         x_before,
         "x must not change on restore without save"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         y_before,
         "y must not change on restore without save"
     );
@@ -948,12 +950,12 @@ fn save_survives_alternate_roundtrip() {
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         7,
         "cursor x must be restored to primary-saved value after alt roundtrip"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         4,
         "cursor y must be restored to primary-saved value after alt roundtrip"
     );
@@ -971,13 +973,13 @@ fn wrap_enabled_default() {
 
     // Cursor must have wrapped to row 1.
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         1,
         "cursor must be on row 1 after wrapping 85 chars into 80-col buffer"
     );
     // Cursor column should be 5 (the 5 overflow chars).
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         5,
         "cursor x must be 5 after the 5-char overflow"
     );
@@ -1014,13 +1016,13 @@ fn wrap_disabled_clamps() {
 
     // Must still be on row 0.
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         0,
         "cursor must remain on row 0 when wrap is disabled"
     );
     // Cursor must be clamped to the last column.
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         79,
         "cursor x must be clamped to 79 (last column) when wrap is disabled"
     );
@@ -1044,7 +1046,7 @@ fn wrap_re_enable() {
     )))]);
     handler.handle_data(&b"A".repeat(85));
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         0,
         "cursor should stay on row 0 while wrap is disabled"
     );
@@ -1064,7 +1066,7 @@ fn wrap_re_enable() {
     handler.handle_data(&b"B".repeat(10));
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         1,
         "cursor must be on row 1 after re-enabling wrap and writing overflow"
     );
@@ -1131,7 +1133,7 @@ fn osc_url_sets_format() {
     // Cells 0-4 ("click") must have a URL tag.
     for col in 0..5 {
         let cell = row
-            .get_char_at(col)
+            .char_at(col)
             .unwrap_or_else(|| panic!("cell {col} must exist"));
         assert!(
             cell.tag().url.is_some(),
@@ -1147,7 +1149,7 @@ fn osc_url_sets_format() {
     // Cells 5-9 ("plain") must have no URL tag.
     for col in 5..10 {
         let cell = row
-            .get_char_at(col)
+            .char_at(col)
             .unwrap_or_else(|| panic!("cell {col} must exist"));
         assert!(
             cell.tag().url.is_none(),
@@ -1171,8 +1173,8 @@ fn osc_noop_does_not_panic() {
         "NoOp must not queue any window commands"
     );
     // Cursor unmoved.
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 }
 
 #[test]
@@ -1392,7 +1394,7 @@ fn no_write_tx_does_not_panic() {
     handler.process_outputs(&[TerminalOutput::RequestDeviceAttributes]);
 
     // If we reach here, no panic occurred.
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 #[test]
@@ -1411,7 +1413,7 @@ fn dec_special_replace_lower_right_corner() {
 
     let visible_rows = handler.buffer().visible_rows(0);
     let cell = visible_rows[0]
-        .get_char_at(0)
+        .char_at(0)
         .expect("cell 0 must exist after writing");
     assert_eq!(
         cell.tchar(),
@@ -1429,7 +1431,7 @@ fn dec_special_dont_replace_passthrough() {
 
     let visible_rows = handler.buffer().visible_rows(0);
     let cell = visible_rows[0]
-        .get_char_at(0)
+        .char_at(0)
         .expect("cell 0 must exist after writing");
     assert_eq!(
         cell.tchar(),
@@ -1462,8 +1464,8 @@ fn dec_special_toggle() {
     handler.handle_data(&[0x6a]);
 
     let visible_rows = handler.buffer().visible_rows(0);
-    let cell0 = visible_rows[0].get_char_at(0).expect("cell 0 must exist");
-    let cell1 = visible_rows[0].get_char_at(1).expect("cell 1 must exist");
+    let cell0 = visible_rows[0].char_at(0).expect("cell 0 must exist");
+    let cell1 = visible_rows[0].char_at(1).expect("cell 1 must exist");
 
     assert_eq!(
         cell0.tchar(),
@@ -1494,7 +1496,7 @@ fn dec_special_all_passthrough_above_7e() {
     handler.handle_data(&[0x41]);
 
     let visible_rows = handler.buffer().visible_rows(0);
-    let cell = visible_rows[0].get_char_at(0).expect("cell 0 must exist");
+    let cell = visible_rows[0].char_at(0).expect("cell 0 must exist");
     assert_eq!(
         cell.tchar(),
         &freminal_common::buffer_states::tchar::TChar::Ascii(0x41),
@@ -1640,19 +1642,19 @@ fn lnm_off_lf_does_not_reset_x() {
     let mut handler = TerminalHandler::new(80, 24);
 
     handler.handle_data(&text_to_bytes("hello"));
-    let x_before = handler.buffer().get_cursor().pos.x;
-    let y_before = handler.buffer().get_cursor().pos.y;
+    let x_before = handler.buffer().cursor().pos.x;
+    let y_before = handler.buffer().cursor().pos.y;
     assert!(x_before > 0, "cursor x must be past 0 after writing text");
 
     handler.process_outputs(&[TerminalOutput::Newline]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         x_before,
         "LNM off: LF must not reset cursor X"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         y_before + 1,
         "LNM off: LF must advance cursor Y by 1"
     );
@@ -1674,21 +1676,21 @@ fn lnm_on_lf_resets_x() {
     )))]);
 
     handler.handle_data(&text_to_bytes("hello"));
-    let y_before = handler.buffer().get_cursor().pos.y;
+    let y_before = handler.buffer().cursor().pos.y;
     assert!(
-        handler.buffer().get_cursor().pos.x > 0,
+        handler.buffer().cursor().pos.x > 0,
         "cursor x must be past 0 after writing text"
     );
 
     handler.process_outputs(&[TerminalOutput::Newline]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         0,
         "LNM on: LF must reset cursor X to 0"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         y_before + 1,
         "LNM on: LF must still advance cursor Y by 1"
     );
@@ -1726,7 +1728,7 @@ fn lnm_toggle() {
     handler.handle_data(&text_to_bytes("hello"));
     handler.process_outputs(&[TerminalOutput::Newline]);
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         0,
         "LNM on: LF must reset X to 0"
     );
@@ -1743,16 +1745,16 @@ fn lnm_toggle() {
 
     // Verify LF no longer resets X.
     handler.handle_data(&text_to_bytes("world"));
-    let x_after_write = handler.buffer().get_cursor().pos.x;
-    let y_after_write = handler.buffer().get_cursor().pos.y;
+    let x_after_write = handler.buffer().cursor().pos.x;
+    let y_after_write = handler.buffer().cursor().pos.y;
     handler.process_outputs(&[TerminalOutput::Newline]);
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         x_after_write,
         "LNM off: LF must not reset X"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         y_after_write + 1,
         "LNM off: LF must still advance Y"
     );
@@ -2088,7 +2090,7 @@ fn test_cpl_with_explicit_count() {
 
 /// Helper: extract the text content from a row, trimming trailing spaces.
 fn row_text(row: &freminal_buffer::row::Row) -> String {
-    let s: String = row.get_characters().iter().map(|c| c.into_utf8()).collect();
+    let s: String = row.characters().iter().map(|c| c.into_utf8()).collect();
     s.trim_end().to_string()
 }
 
@@ -2684,7 +2686,7 @@ fn test_hts_sets_tab_stop_at_cursor() {
     // Tab from col 0 should hit col 5 (custom stop) before col 8
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -2694,12 +2696,12 @@ fn test_tbc_clears_tab_stop_at_cursor() {
     // Default tab stops are at every 8th column: 0, 8, 16, 24, ...
     // Move to column 8 and clear the tab stop there
     handler.handle_cursor_pos(Some(9), Some(1)); // col 8
-    handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentColumn)]);
 
     // Tab from col 0 should now skip col 8 and land on col 16
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 }
 
 #[test]
@@ -2707,12 +2709,12 @@ fn test_tbc_clear_all_tab_stops() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Clear ALL tab stops
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Tab from col 0 should go to the last column (no stops to land on)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
 }
 
 #[test]
@@ -2724,7 +2726,7 @@ fn test_cht_cursor_forward_tabulation() {
 
     // CHT 2 = advance 2 tab stops → col 16
     handler.process_outputs(&[TerminalOutput::CursorForwardTab(2)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 }
 
 #[test]
@@ -2735,7 +2737,7 @@ fn test_cht_default_one() {
 
     // CHT 1 = advance 1 tab stop → col 8
     handler.process_outputs(&[TerminalOutput::CursorForwardTab(1)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 }
 
 #[test]
@@ -2747,7 +2749,7 @@ fn test_cbt_cursor_backward_tabulation() {
 
     // CBT 1 = back 1 tab stop → col 16
     handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 }
 
 #[test]
@@ -2761,7 +2763,7 @@ fn test_cbt_multiple_stops() {
     // Default tabs at 0, 8, 16, 24, 32, ...
     // From col 25: 1st back → 24, 2nd back → 16
     handler.process_outputs(&[TerminalOutput::CursorBackwardTab(2)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 }
 
 #[test]
@@ -2772,7 +2774,7 @@ fn test_cbt_at_start_stays_at_zero() {
 
     // CBT when already at col 0 should stay at 0
     handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 // ── 7.21a — Tab Stop Preservation Across Resize ─────────────────────
@@ -2795,27 +2797,27 @@ fn test_tab_stops_preserved_on_width_increase() {
     // Verify custom stops are preserved: tab from col 0 should hit col 5
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     // Tab again should hit col 8 (default stop, not removed)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 
     // Tab again should hit col 15 (custom stop preserved)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+    assert_eq!(handler.buffer().cursor().pos.x, 15);
 
     // Tab again should hit col 16 (default stop)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 
     // Tab again should hit col 24 (default stop)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+    assert_eq!(handler.buffer().cursor().pos.x, 24);
 
     // Tab again should hit col 25 (custom stop preserved)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 25);
+    assert_eq!(handler.buffer().cursor().pos.x, 25);
 }
 
 #[test]
@@ -2836,27 +2838,27 @@ fn test_tab_stops_preserved_on_width_decrease() {
     // Tab from col 0 should hit col 5 (custom stop within range)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     // Tab again should hit col 8 (default stop)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 
     // Tab again should hit col 15 (custom stop)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+    assert_eq!(handler.buffer().cursor().pos.x, 15);
 
     // Tab again should hit col 16 (default stop)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 
     // Tab again should hit col 24 (default stop)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+    assert_eq!(handler.buffer().cursor().pos.x, 24);
 
     // Tab again should hit col 25 (custom stop preserved)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 25);
+    assert_eq!(handler.buffer().cursor().pos.x, 25);
 }
 
 #[test]
@@ -2880,32 +2882,32 @@ fn test_tab_stops_narrow_then_widen_preserves_in_range() {
     // Tab from col 0 → 5 (custom, preserved)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     // Tab → 8 (default)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 
     // Tab → 15 (custom, preserved)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+    assert_eq!(handler.buffer().cursor().pos.x, 15);
 
     // Tab → 16 (default)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 
     // Tab → 24 (default)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+    assert_eq!(handler.buffer().cursor().pos.x, 24);
 
     // Tab → 32 (default — in newly added range from resize back to 80)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 32);
+    assert_eq!(handler.buffer().cursor().pos.x, 32);
 
     // Col 50 should NOT be a stop anymore — tab from 48 should skip past 50 to 56
     handler.handle_cursor_pos(Some(49), Some(1)); // col 48
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 56);
+    assert_eq!(handler.buffer().cursor().pos.x, 56);
 }
 
 #[test]
@@ -2919,17 +2921,17 @@ fn test_new_columns_get_default_stops_after_resize() {
     // Column 80 is a default stop (8 * 10) in the newly extended range
     handler.handle_cursor_pos(Some(73), Some(1)); // col 72
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 80);
+    assert_eq!(handler.buffer().cursor().pos.x, 80);
 
     // Continue: 80 → 88 → 96 → 104 → 112
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 88);
+    assert_eq!(handler.buffer().cursor().pos.x, 88);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 96);
+    assert_eq!(handler.buffer().cursor().pos.x, 96);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 104);
+    assert_eq!(handler.buffer().cursor().pos.x, 104);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 112);
+    assert_eq!(handler.buffer().cursor().pos.x, 112);
 }
 
 // ── 7.21b — Comprehensive Tab Stop Test Suite (Subtask 21.6) ─────────
@@ -2939,21 +2941,21 @@ fn test_tab_at_last_column_does_not_advance_past_width() {
     let mut handler = TerminalHandler::new(80, 24);
     // Move cursor to last column (79 in 0-indexed)
     handler.handle_cursor_pos(Some(80), Some(1)); // 1-based → col 79
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
     handler.handle_tab();
     // Should not advance past width
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
 }
 
 #[test]
 fn test_tab_with_no_stops_set_goes_to_last_column() {
     let mut handler = TerminalHandler::new(80, 24);
     // Clear all tab stops
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
     // Tab from col 0 should go to last column (no stops to land on)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
 }
 
 #[test]
@@ -2971,7 +2973,7 @@ fn test_cht_with_count_skips_stops() {
     // From col 0, CHT with Ps=2 skips first stop (col 8) and lands on second (col 10)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.process_outputs(&[TerminalOutput::CursorForwardTab(2)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+    assert_eq!(handler.buffer().cursor().pos.x, 10);
 }
 
 #[test]
@@ -2979,7 +2981,7 @@ fn test_cbt_at_column_0_stays() {
     let mut handler = TerminalHandler::new(80, 24);
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 #[test]
@@ -2988,7 +2990,7 @@ fn test_cbt_past_all_stops_goes_to_zero() {
     // Default stops are at 8, 16, 24, ... Cursor at col 5 with CBT → col 0
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
     handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 #[test]
@@ -3002,16 +3004,16 @@ fn test_hts_then_tbc_round_trip() {
     // Verify it works: tab from col 0 → 5
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     // Clear the stop at col 5 (TBC Ps=0 with cursor at col 5)
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
-    handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentColumn)]);
 
     // Verify it's gone: tab from col 0 → 8 (next default stop)
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
 }
 
 #[test]
@@ -3019,11 +3021,11 @@ fn test_default_stops_after_full_reset() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Clear all tab stops
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
     // Verify they're gone
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
 
     // Full reset
     handler.full_reset();
@@ -3031,11 +3033,11 @@ fn test_default_stops_after_full_reset() {
     // Default 8-column stops should be restored
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+    assert_eq!(handler.buffer().cursor().pos.x, 24);
 }
 
 #[test]
@@ -3043,7 +3045,7 @@ fn test_hts_at_column_0() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Clear all stops first
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Set a stop at col 0
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -3056,7 +3058,7 @@ fn test_hts_at_column_0() {
     // Tab from col 0 should find the next stop at col 10 (col 0 is current, not "next")
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
+    assert_eq!(handler.buffer().cursor().pos.x, 10);
 }
 
 #[test]
@@ -3066,18 +3068,18 @@ fn test_default_stops_in_wide_terminal() {
     // Tab through all default stops
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 
     // Jump near end: tab from col 184 → 192
     handler.handle_cursor_pos(Some(185), Some(1)); // col 184
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 192);
+    assert_eq!(handler.buffer().cursor().pos.x, 192);
 
     // Tab from 192 → 199 (last column, no more stops)
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 199);
+    assert_eq!(handler.buffer().cursor().pos.x, 199);
 }
 
 #[test]
@@ -3090,12 +3092,12 @@ fn test_tbc_ps1_does_not_affect_character_stops() {
 
     // TBC Ps=1 (line tab stop at cursor) — should be no-op for character stops
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
-    handler.process_outputs(&[TerminalOutput::TabClear(1)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentLine)]);
 
     // Verify custom stop at col 5 is still present
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -3109,12 +3111,12 @@ fn test_tbc_ps2_is_noop_for_character_stops() {
     // TBC Ps=2 — clears line tab stop at current line, NOT character tab stops.
     // This should be a no-op; the character stop at col 5 must remain.
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
-    handler.process_outputs(&[TerminalOutput::TabClear(2)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentLineAlt)]);
 
     // Tab from col 0 should still hit the custom stop at col 5
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -3122,14 +3124,14 @@ fn test_tbc_ps4_does_not_affect_character_stops() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Default stops present. TBC Ps=4 (clear all line stops) should be no-op
-    handler.process_outputs(&[TerminalOutput::TabClear(4)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllLine)]);
 
     // Verify default stops are still intact
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+    assert_eq!(handler.buffer().cursor().pos.x, 8);
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+    assert_eq!(handler.buffer().cursor().pos.x, 16);
 }
 
 #[test]
@@ -3141,12 +3143,12 @@ fn test_tbc_ps5_clears_all_stops() {
     handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
 
     // TBC Ps=5 — clears all tab stops (equiv to Ps=3)
-    handler.process_outputs(&[TerminalOutput::TabClear(5)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::All)]);
 
     // Tab from col 0 should go to last column (all stops cleared)
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
 }
 
 #[test]
@@ -3163,7 +3165,7 @@ fn test_tab_stops_shared_across_alternate_screen() {
     // Verify the custom stop is visible in alternate screen
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 }
 
 #[test]
@@ -3174,7 +3176,7 @@ fn test_tab_stop_changes_in_alternate_persist_to_primary() {
     handler.handle_enter_alternate();
 
     // Clear all tab stops while in alternate
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Leave alternate — return to primary
     handler.handle_leave_alternate();
@@ -3182,7 +3184,7 @@ fn test_tab_stop_changes_in_alternate_persist_to_primary() {
     // Tab stops should be cleared in primary too (shared, not per-buffer)
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
-    assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+    assert_eq!(handler.buffer().cursor().pos.x, 79);
 }
 
 // ── 7.24 — CSI s / CSI u (Save / Restore Cursor) ────────────────────
@@ -3193,21 +3195,21 @@ fn test_save_restore_cursor_via_process_outputs() {
 
     // Move cursor to (10, 5)
     handler.handle_cursor_pos(Some(11), Some(6)); // col 10, row 5
-    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 10);
+    assert_eq!(handler.buffer().cursor().pos.y, 5);
 
     // Save cursor
     handler.process_outputs(&[TerminalOutput::SaveCursor]);
 
     // Move cursor somewhere else
     handler.handle_cursor_pos(Some(1), Some(1));
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 
     // Restore cursor
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 10);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 10);
+    assert_eq!(handler.buffer().cursor().pos.y, 5);
 }
 
 #[test]
@@ -3220,8 +3222,8 @@ fn test_save_restore_cursor_direct() {
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_restore_cursor();
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 15);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 7);
+    assert_eq!(handler.buffer().cursor().pos.x, 15);
+    assert_eq!(handler.buffer().cursor().pos.y, 7);
 }
 
 // ── 7.25 — REP (CSI b) — Repeat Preceding Graphic Character ─────────
@@ -3235,7 +3237,7 @@ fn test_rep_repeats_last_graphic_char() {
     handler.process_outputs(&[TerminalOutput::RepeatCharacter(4)]);
 
     // Cursor should be at column 5 (1 original + 4 repeated)
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     let rows = handler.buffer().visible_rows(0);
     let text = row_text(&rows[0]);
@@ -3249,7 +3251,7 @@ fn test_rep_with_no_preceding_char_is_noop() {
     // No data written yet — REP should be a no-op
     handler.process_outputs(&[TerminalOutput::RepeatCharacter(5)]);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
 }
 
 #[test]
@@ -3260,7 +3262,7 @@ fn test_rep_repeats_last_char_of_string() {
     // Last graphic char is 'Y'
     handler.process_outputs(&[TerminalOutput::RepeatCharacter(3)]);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5); // 2 + 3
+    assert_eq!(handler.buffer().cursor().pos.x, 5); // 2 + 3
     let rows = handler.buffer().visible_rows(0);
     let text = row_text(&rows[0]);
     assert_eq!(text, "XYYYY");
@@ -3273,7 +3275,7 @@ fn test_rep_default_count_one() {
     handler.handle_data(&text_to_bytes("Z"));
     handler.process_outputs(&[TerminalOutput::RepeatCharacter(1)]);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 2);
+    assert_eq!(handler.buffer().cursor().pos.x, 2);
     let rows = handler.buffer().visible_rows(0);
     let text = row_text(&rows[0]);
     assert_eq!(text, "ZZ");
@@ -3287,14 +3289,14 @@ fn test_hpa_via_process_outputs() {
     let mut handler = TerminalHandler::new(80, 24);
 
     handler.handle_data(&text_to_bytes("Hello"));
-    assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+    assert_eq!(handler.buffer().cursor().pos.x, 5);
 
     // CHA/HPA to column 3 (1-indexed)
     handler.process_outputs(&[TerminalOutput::SetCursorPos {
         x: Some(3),
         y: None,
     }]);
-    assert_eq!(handler.buffer().get_cursor().pos.x, 2); // 0-indexed
+    assert_eq!(handler.buffer().cursor().pos.x, 2); // 0-indexed
 }
 
 // ── 7.28 — DECALN (ESC # 8) — Screen Alignment Test ─────────────────
@@ -3328,8 +3330,8 @@ fn test_screen_alignment_homes_cursor() {
     handler.handle_cursor_pos(Some(5), Some(3)); // somewhere away from home
     handler.process_outputs(&[TerminalOutput::ScreenAlignmentTest]);
 
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 }
 
 #[test]
@@ -3449,8 +3451,8 @@ fn save_cursor_1048_saves_and_restores() {
 
     // Move cursor to (7, 4).
     handler.handle_cursor_pos(Some(8), Some(5)); // 1-based
-    assert_eq!(handler.buffer().get_cursor().pos.x, 7);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+    assert_eq!(handler.buffer().cursor().pos.x, 7);
+    assert_eq!(handler.buffer().cursor().pos.y, 4);
 
     // Save via ?1048 set.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
@@ -3459,8 +3461,8 @@ fn save_cursor_1048_saves_and_restores() {
 
     // Move cursor somewhere else.
     handler.handle_cursor_pos(Some(1), Some(1));
-    assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-    assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+    assert_eq!(handler.buffer().cursor().pos.x, 0);
+    assert_eq!(handler.buffer().cursor().pos.y, 0);
 
     // Restore via ?1048 reset.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::SaveCursor1048(
@@ -3468,12 +3470,12 @@ fn save_cursor_1048_saves_and_restores() {
     ))]);
 
     assert_eq!(
-        handler.buffer().get_cursor().pos.x,
+        handler.buffer().cursor().pos.x,
         7,
         "?1048 restore must bring cursor back to saved x"
     );
     assert_eq!(
-        handler.buffer().get_cursor().pos.y,
+        handler.buffer().cursor().pos.y,
         4,
         "?1048 restore must bring cursor back to saved y"
     );
@@ -3701,7 +3703,7 @@ fn decrpm_lnm_default_is_line_feed() {
 /// enough newlines.  This ensures `visible_window_start(0) == 0` for simple
 /// position math in tests.
 fn fill_buffer(handler: &mut TerminalHandler) {
-    let (_, h) = handler.get_win_size();
+    let (_, h) = handler.win_size();
     for _ in 0..h {
         handler.handle_newline();
     }
@@ -3769,18 +3771,18 @@ fn decom_enable_homes_cursor_to_region_top() {
 
     // Move cursor somewhere random.
     handler.handle_cursor_pos(Some(10), Some(15));
-    assert_ne!(handler.buffer().get_cursor().pos.x, 0);
+    assert_ne!(handler.buffer().cursor().pos.x, 0);
 
     // Enable DECOM — cursor should home to (0, region_top) in buffer coords.
     handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::new(
         &SetMode::DecSet,
     )))]);
 
-    let cursor = handler.buffer().get_cursor().pos;
+    let cursor = handler.buffer().cursor().pos;
     // In DECOM mode, set_cursor_pos(0,0) offsets y by scroll_region_top (4).
     // After fill_buffer, visible_window_start(0) is a known offset; cursor.pos.y
     // relative to the start of the visible window should equal scroll_region_top.
-    let rows_len = handler.buffer().get_rows().len();
+    let rows_len = handler.buffer().rows().len();
     let vis_start = rows_len.saturating_sub(24);
     assert_eq!(cursor.x, 0, "DECOM enable must home x to 0");
     assert_eq!(
@@ -3813,8 +3815,8 @@ fn decom_cursor_pos_is_relative_to_scroll_region() {
     // handle_cursor_pos(x=col, y=row)
     handler.handle_cursor_pos(Some(5), Some(3));
 
-    let cursor = handler.buffer().get_cursor().pos;
-    let rows_len = handler.buffer().get_rows().len();
+    let cursor = handler.buffer().cursor().pos;
+    let rows_len = handler.buffer().rows().len();
     let vis_start = rows_len.saturating_sub(24);
     // handle_cursor_pos converts 1-based to 0-based, then set_cursor_pos adds
     // scroll_region_top (4).
@@ -3851,8 +3853,8 @@ fn decom_cursor_clamped_to_scroll_region() {
     // handle_cursor_pos(x=col, y=row)
     handler.handle_cursor_pos(Some(1), Some(100));
 
-    let cursor = handler.buffer().get_cursor().pos;
-    let rows_len = handler.buffer().get_rows().len();
+    let cursor = handler.buffer().cursor().pos;
+    let rows_len = handler.buffer().rows().len();
     let vis_start = rows_len.saturating_sub(24);
     // Region height = bottom - top = 9 - 4 = 5 rows (rows 4..=9).
     // Clamped row = min(99, 5) = 5 → screen row = 4 + 5 = 9.
@@ -3885,8 +3887,8 @@ fn decom_disable_homes_cursor_to_screen_top() {
         &SetMode::DecRst,
     )))]);
 
-    let cursor = handler.buffer().get_cursor().pos;
-    let rows_len = handler.buffer().get_rows().len();
+    let cursor = handler.buffer().cursor().pos;
+    let rows_len = handler.buffer().rows().len();
     let vis_start = rows_len.saturating_sub(24);
     assert_eq!(cursor.x, 0, "DECOM disable must home x to 0");
     assert_eq!(
@@ -3959,8 +3961,8 @@ fn deccolm_set_switches_to_132_columns() {
         "DECCOLM set → 132 cols"
     );
     // Cursor should be at home (0, 0 screen-relative).
-    let cursor = handler.buffer().get_cursor().pos;
-    let vis_start = handler.buffer().get_rows().len().saturating_sub(24);
+    let cursor = handler.buffer().cursor().pos;
+    let vis_start = handler.buffer().rows().len().saturating_sub(24);
     assert_eq!(cursor.x, 0, "DECCOLM set → cursor x = 0");
     assert_eq!(cursor.y, vis_start, "DECCOLM set → cursor y = vis_start");
 }
@@ -3993,8 +3995,8 @@ fn deccolm_reset_switches_to_80_columns() {
         80,
         "DECCOLM reset → 80 cols"
     );
-    let cursor = handler.buffer().get_cursor().pos;
-    let vis_start = handler.buffer().get_rows().len().saturating_sub(24);
+    let cursor = handler.buffer().cursor().pos;
+    let vis_start = handler.buffer().rows().len().saturating_sub(24);
     assert_eq!(cursor.x, 0, "DECCOLM reset → cursor x = 0");
     assert_eq!(cursor.y, vis_start, "DECCOLM reset → cursor y = vis_start");
 }
@@ -4262,7 +4264,7 @@ fn decstbm_homes_cursor_to_screen_origin() {
     }]);
 
     // Cursor must be at screen row 0, col 0
-    let screen_pos = handler.buffer().get_cursor_screen_pos();
+    let screen_pos = handler.buffer().cursor_screen_pos();
     assert_eq!(screen_pos.y, 0, "DECSTBM must home cursor to screen row 0");
     assert_eq!(screen_pos.x, 0, "DECSTBM must home cursor to column 0");
 }
@@ -4290,7 +4292,7 @@ fn ri_at_screen_top_full_region_scrolls_down() {
     let lengths: Vec<usize> = buf
         .visible_rows(0)
         .iter()
-        .map(|r| r.get_characters().len())
+        .map(|r| r.characters().len())
         .collect();
     assert_eq!(lengths, vec![1, 2, 3, 4, 5]);
 
@@ -4303,7 +4305,7 @@ fn ri_at_screen_top_full_region_scrolls_down() {
     let lengths_after: Vec<usize> = buf
         .visible_rows(0)
         .iter()
-        .map(|r| r.get_characters().len())
+        .map(|r| r.characters().len())
         .collect();
 
     // Row 0 should be blank (scrolled in), rows shift down, row 4 (length 5) falls off
@@ -4342,7 +4344,7 @@ fn scroll_region_works_during_early_buffer_fill() {
 
     // Verify buffer is sane
     assert!(
-        buf.get_rows().len() >= 8,
+        buf.rows().len() >= 8,
         "Buffer should have grown to accommodate scroll region"
     );
 }
@@ -4366,13 +4368,13 @@ fn alt_buffer_resize_shrink_maintains_row_count_invariant() {
     let mut buf = Buffer::new(80, 24);
     buf.enter_alternate(0);
 
-    assert_eq!(buf.get_rows().len(), 24, "pre-condition");
+    assert_eq!(buf.rows().len(), 24, "pre-condition");
 
     // Shrink from 24 → 20
     let _ = buf.set_size(80, 20, 0);
 
     assert_eq!(
-        buf.get_rows().len(),
+        buf.rows().len(),
         20,
         "alternate buffer must have exactly `height` rows after shrink"
     );
@@ -4386,13 +4388,13 @@ fn alt_buffer_resize_grow_maintains_row_count_invariant() {
     let mut buf = Buffer::new(80, 24);
     buf.enter_alternate(0);
 
-    assert_eq!(buf.get_rows().len(), 24, "pre-condition");
+    assert_eq!(buf.rows().len(), 24, "pre-condition");
 
     // Grow from 24 → 30
     let _ = buf.set_size(80, 30, 0);
 
     assert_eq!(
-        buf.get_rows().len(),
+        buf.rows().len(),
         30,
         "alternate buffer must have exactly `height` rows after grow"
     );
@@ -4430,12 +4432,12 @@ fn alt_buffer_lf_scrolls_after_resize_shrink() {
     // LF at scroll_region_bottom should scroll the region up.
     // Before the fix, this was a no-op because cursor.pos.y (e.g. 23)
     // was > scroll_region_bottom (19), so the scroll_region check failed.
-    let bottom_tchar_before = *buf.get_rows()[19].resolve_cell(0).tchar();
+    let bottom_tchar_before = *buf.rows()[19].resolve_cell(0).tchar();
 
     buf.handle_lf();
 
     // The old bottom row should have been replaced with a blank row
-    let bottom_tchar_after = *buf.get_rows()[19].resolve_cell(0).tchar();
+    let bottom_tchar_after = *buf.rows()[19].resolve_cell(0).tchar();
 
     assert_ne!(
         bottom_tchar_before, bottom_tchar_after,
@@ -4475,13 +4477,13 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
     buf.set_cursor_pos(Some(0), Some(5));
 
     // Read the character at row 6 before DL
-    let row_6_tchar_before = *buf.get_rows()[6].resolve_cell(0).tchar();
+    let row_6_tchar_before = *buf.rows()[6].resolve_cell(0).tchar();
 
     // Delete 1 line at cursor position
     buf.delete_lines(1);
 
     // Row 6's content should now be at row 5 (shifted up by DL)
-    let row_5_tchar_after = *buf.get_rows()[5].resolve_cell(0).tchar();
+    let row_5_tchar_after = *buf.rows()[5].resolve_cell(0).tchar();
 
     assert_eq!(
         row_5_tchar_after, row_6_tchar_before,
@@ -4489,7 +4491,7 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
     );
 
     // Bottom of scroll region should be blank after DL
-    let bottom_tchar = *buf.get_rows()[19].resolve_cell(0).tchar();
+    let bottom_tchar = *buf.rows()[19].resolve_cell(0).tchar();
     assert_eq!(
         bottom_tchar,
         TChar::Space,
@@ -4522,20 +4524,20 @@ fn alt_buffer_insert_lines_works_after_resize_shrink() {
     buf.set_cursor_pos(Some(0), Some(5));
 
     // Read the character at row 5 before IL
-    let row_5_tchar_before = *buf.get_rows()[5].resolve_cell(0).tchar();
+    let row_5_tchar_before = *buf.rows()[5].resolve_cell(0).tchar();
 
     // Insert 1 line at cursor position
     buf.insert_lines(1);
 
     // Row 5's content should have shifted down to row 6
-    let row_6_tchar_after = *buf.get_rows()[6].resolve_cell(0).tchar();
+    let row_6_tchar_after = *buf.rows()[6].resolve_cell(0).tchar();
     assert_eq!(
         row_6_tchar_after, row_5_tchar_before,
         "IL should shift row 5 content down to row 6"
     );
 
     // Row 5 itself should now be blank (the inserted line)
-    let row_5_tchar_after = *buf.get_rows()[5].resolve_cell(0).tchar();
+    let row_5_tchar_after = *buf.rows()[5].resolve_cell(0).tchar();
     assert_eq!(
         row_5_tchar_after,
         TChar::Space,
@@ -4568,20 +4570,20 @@ fn alt_buffer_ri_scrolls_after_resize_shrink() {
     buf.set_cursor_pos(Some(0), Some(0));
 
     // Read the character at row 0 before RI
-    let row_0_tchar_before = *buf.get_rows()[0].resolve_cell(0).tchar();
+    let row_0_tchar_before = *buf.rows()[0].resolve_cell(0).tchar();
 
     // RI at scroll_region_top should scroll the region down
     buf.handle_ri();
 
     // Row 0's content should have moved to row 1
-    let row_1_tchar_after = *buf.get_rows()[1].resolve_cell(0).tchar();
+    let row_1_tchar_after = *buf.rows()[1].resolve_cell(0).tchar();
     assert_eq!(
         row_1_tchar_after, row_0_tchar_before,
         "RI should shift row 0 content down to row 1"
     );
 
     // Row 0 should now be blank
-    let row_0_tchar_after = *buf.get_rows()[0].resolve_cell(0).tchar();
+    let row_0_tchar_after = *buf.rows()[0].resolve_cell(0).tchar();
     assert_eq!(
         row_0_tchar_after,
         TChar::Space,
@@ -4601,7 +4603,7 @@ fn alt_buffer_resize_multiple_cycles_maintain_invariant() {
     for &new_height in &[20_usize, 30, 15, 24] {
         let _ = buf.set_size(80, new_height, 0);
         assert_eq!(
-            buf.get_rows().len(),
+            buf.rows().len(),
             new_height,
             "alternate buffer rows.len() must equal height={new_height} after resize"
         );
@@ -4640,7 +4642,7 @@ fn alt_buffer_tmux_resize_scenario() {
     // Now resize the window from 24 → 18 rows
     let _ = buf.set_size(80, 18, 0);
 
-    assert_eq!(buf.get_rows().len(), 18, "post-resize row count");
+    assert_eq!(buf.rows().len(), 18, "post-resize row count");
 
     // After resize, scroll region is clamped/reset.
     // tmux would re-send DECSTBM for the new size (1-based inclusive):
@@ -4659,13 +4661,13 @@ fn alt_buffer_tmux_resize_scenario() {
 
     // Cursor should still be at row 16 (bottom of region, after scroll)
     assert_eq!(
-        buf.get_cursor().pos.y,
+        buf.cursor().pos.y,
         16,
         "cursor should stay at scroll region bottom after LF-triggered scroll"
     );
 
     // The new bottom row (16) should be blank (LF scrolled the region)
-    let bottom_tchar = *buf.get_rows()[16].resolve_cell(0).tchar();
+    let bottom_tchar = *buf.rows()[16].resolve_cell(0).tchar();
     assert_eq!(
         bottom_tchar,
         TChar::Space,
@@ -4708,7 +4710,7 @@ fn alt_buffer_width_shrink_maintains_row_count_invariant() {
     let _ = buf.set_size(40, 24, 0);
 
     assert_eq!(
-        buf.get_rows().len(),
+        buf.rows().len(),
         24,
         "alternate buffer must still have exactly `height` rows after width shrink"
     );
@@ -4735,7 +4737,7 @@ fn alt_buffer_width_grow_maintains_row_count_invariant() {
     let _ = buf.set_size(120, 24, 0);
 
     assert_eq!(
-        buf.get_rows().len(),
+        buf.rows().len(),
         24,
         "alternate buffer must still have exactly `height` rows after width grow"
     );
@@ -4764,7 +4766,7 @@ fn alt_buffer_width_and_height_shrink_maintains_invariant() {
     let _ = buf.set_size(40, 18, 0);
 
     assert_eq!(
-        buf.get_rows().len(),
+        buf.rows().len(),
         18,
         "alternate buffer must have exactly `new_height` rows after combined shrink"
     );
@@ -4793,12 +4795,12 @@ fn alt_buffer_lf_works_after_width_shrink() {
 
     // Cursor at bottom of screen
     buf.set_cursor_pos(Some(0), Some(23));
-    let bottom_before = *buf.get_rows()[23].resolve_cell(0).tchar();
+    let bottom_before = *buf.rows()[23].resolve_cell(0).tchar();
 
     buf.handle_lf();
 
     // Bottom row should be blank (scroll happened)
-    let bottom_after = *buf.get_rows()[23].resolve_cell(0).tchar();
+    let bottom_after = *buf.rows()[23].resolve_cell(0).tchar();
     assert_ne!(
         bottom_before, bottom_after,
         "LF at bottom must scroll after width-only shrink"

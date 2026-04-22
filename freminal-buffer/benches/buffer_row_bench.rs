@@ -541,6 +541,39 @@ fn bench_erase_display_bce(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: move_cursor_relative — stress the CUU/CUD/CUF/CUB hot path.
+// This is the path that clamped_offset() runs on; it exercises the
+// usize<->i32 conversions used by relative cursor motion.
+// ---------------------------------------------------------------
+fn bench_move_cursor_relative(c: &mut Criterion) {
+    const ITERS: usize = 10_000;
+
+    let mut group = c.benchmark_group("bench_move_cursor_relative");
+    group.throughput(Throughput::Elements(ITERS as u64));
+
+    group.bench_function("alternating_dx_dy_80x24", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(80, 24);
+                buf.set_cursor_pos(Some(40), Some(12));
+                buf
+            },
+            |mut buf| {
+                // Alternate between +1/-1 in x and y; clamping kicks in at edges.
+                for i in 0..ITERS {
+                    let dx = if i % 2 == 0 { 1 } else { -1 };
+                    let dy = if i % 4 < 2 { 1 } else { -1 };
+                    buf.move_cursor_relative(dx, dy);
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -555,6 +588,7 @@ criterion_group!(
         bench_scrollback_flatten,
         bench_insert_with_color_changes,
         bench_cursor_ops,
+        bench_move_cursor_relative,
         bench_lf_heavy,
         bench_erase_display,
         bench_scrollback_render,

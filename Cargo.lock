@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "freminal"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1505,22 +1505,19 @@ dependencies = [
 
 [[package]]
 name = "freminal-buffer"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "conv2",
  "criterion",
- "crossbeam-channel",
  "freminal-common",
- "image",
  "proptest",
  "test-log",
- "tracing",
  "vergen",
 ]
 
 [[package]]
 name = "freminal-common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1541,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "freminal-terminal-emulator"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1550,6 +1547,7 @@ dependencies = [
  "crossbeam-channel",
  "freminal-buffer",
  "freminal-common",
+ "image",
  "nix",
  "portable-pty",
  "proptest",
@@ -1566,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "freminal-windowing"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "conv2",
  "egui",
@@ -5031,9 +5029,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
+checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
 ]

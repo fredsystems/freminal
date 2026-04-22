@@ -6,7 +6,6 @@
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::{PtyRead, PtyWrite};
-use anyhow::Result;
 use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
@@ -28,12 +27,12 @@ use thiserror::Error;
 ///
 /// # Errors
 /// Returns an error if any dimension value exceeds `u16::MAX`.
-fn pty_size_from_terminal_size(value: &FreminalTerminalSize) -> Result<PtySize> {
+fn pty_size_from_terminal_size(value: &FreminalTerminalSize) -> Result<PtySize, PtyInitError> {
     Ok(PtySize {
-        rows: u16::value_from(value.height)?,
-        cols: u16::value_from(value.width)?,
-        pixel_width: u16::value_from(value.pixel_width)?,
-        pixel_height: u16::value_from(value.pixel_height)?,
+        rows: u16::value_from(value.height).map_err(PtyInitError::SizeConversion)?,
+        cols: u16::value_from(value.width).map_err(PtyInitError::SizeConversion)?,
+        pixel_width: u16::value_from(value.pixel_width).map_err(PtyInitError::SizeConversion)?,
+        pixel_height: u16::value_from(value.pixel_height).map_err(PtyInitError::SizeConversion)?,
     })
 }
 
@@ -128,6 +127,32 @@ enum ExtractTerminfoError {
     },
 }
 
+/// Errors produced while initializing a PTY (opening the pty, spawning the
+/// child, installing terminfo, cloning reader handles, etc.).
+///
+/// `portable_pty` surfaces its own errors as `anyhow::Error`. To keep
+/// `freminal-terminal-emulator` free of `anyhow` we eagerly stringify those
+/// errors into the [`PtyInitError::Spawn`] variant. Typed variants are used
+/// for categories we can act on programmatically.
+#[derive(Error, Debug)]
+pub enum PtyInitError {
+    /// A PTY dimension (rows, cols, `pixel_width`, `pixel_height`) exceeded
+    /// `u16::MAX` during conversion to [`portable_pty::PtySize`].
+    #[error("PTY dimension exceeded u16::MAX")]
+    SizeConversion(#[source] conv2::PosOverflow<usize>),
+    /// `portable_pty` failed to open the pty, spawn the child, or clone the
+    /// reader. The wrapped string is the upstream error's `Display`.
+    #[error("portable_pty error: {0}")]
+    Spawn(String),
+    /// An I/O error occurred while configuring the PTY (e.g. writing
+    /// recording preambles, creating directories).
+    #[error("I/O error during PTY setup")]
+    Io(#[from] std::io::Error),
+    /// Extracting the embedded terminfo tarball failed.
+    #[error("failed to extract embedded terminfo")]
+    ExtractTerminfo(String),
+}
+
 /// The result of [`run_terminal`], bundling all values that the caller
 /// needs after the PTY threads are launched.
 pub struct RunTerminalResult {
@@ -189,6 +214,17 @@ pub struct PtySpawnConfig<'a> {
     pub extra_env: Option<&'a HashMap<String, String>>,
 }
 
+/// Spawn the child process on a new PTY and run the PTY thread event loop.
+///
+/// Integrates the PTY reader, GUI input channel, and window-command dispatch
+/// until the child exits or the input channel is closed.
+///
+/// # Errors
+///
+/// Returns a [`PtyInitError`] if the initial PTY size cannot be represented as
+/// [`portable_pty::PtySize`], if `portable_pty` fails to open the PTY or spawn
+/// the child, if the embedded terminfo tarball cannot be extracted, or if any
+/// I/O error occurs during PTY setup.
 // Inherently large: the PTY thread event loop integrating the PTY reader, input channel, and
 // window-command dispatch. Splitting would produce artificial sub-functions with no clear
 // independent responsibility.
@@ -199,7 +235,8 @@ pub fn run_terminal(
     spawn_cfg: PtySpawnConfig<'_>,
     termcaps: Option<&Path>,
     initial_size: &FreminalTerminalSize,
-) -> Result<RunTerminalResult> {
+    pane_id: u32,
+) -> Result<RunTerminalResult, PtyInitError> {
     let PtySpawnConfig {
         command,
         shell,
@@ -219,12 +256,13 @@ pub fn run_terminal(
         )
         .map_err(|e| {
             error!("Failed to open pty: {e}");
-            e
+            PtyInitError::Spawn(e.to_string())
         })?;
 
     let mut cmd = if let Some((prog, args)) = command {
         let mut c = CommandBuilder::new(prog);
-        c.args(args)?;
+        c.args(args)
+            .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
         c
     } else {
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
@@ -328,7 +366,10 @@ pub fn run_terminal(
         }
     }
 
-    let mut child = pair.slave.spawn_command(cmd)?;
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
     let child_pid = child.process_id();
 
     // Release any handles owned by the slave: we don't need it now
@@ -341,54 +382,63 @@ pub fn run_terminal(
     // reader blocks indefinitely.  This watcher provides a reliable
     // cross-platform "child exited" signal.
     let (child_exit_tx, child_exit_rx) = crossbeam_channel::bounded::<()>(1);
-    std::thread::spawn(move || {
-        // `child.wait()` blocks until the child process exits.
-        match child.wait() {
-            Ok(status) => {
-                info!("Child process exited with status: {status:?}");
+    std::thread::Builder::new()
+        .name(format!("freminal-child-watcher-{pane_id}"))
+        .spawn(move || {
+            // `child.wait()` blocks until the child process exits.
+            match child.wait() {
+                Ok(status) => {
+                    info!("Child process exited with status: {status:?}");
+                }
+                Err(e) => {
+                    error!("Failed to wait on child process: {e}");
+                }
             }
-            Err(e) => {
-                error!("Failed to wait on child process: {e}");
-            }
-        }
-        let _ = child_exit_tx.send(());
-    });
+            let _ = child_exit_tx.send(());
+        })
+        .map_err(|e| PtyInitError::Spawn(format!("spawn child-watcher thread: {e}")))?;
 
     // Read the output in another thread.
     // This is important because it is easy to encounter a situation
     // where read/write buffers fill and block either your process
     // or the spawned process.
-    let mut reader = pair.master.try_clone_reader()?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
 
-    std::thread::spawn(move || {
-        let buf = &mut [0u8; 4096];
+    std::thread::Builder::new()
+        .name(format!("freminal-pty-read-{pane_id}"))
+        .spawn(move || {
+            let buf = &mut [0u8; 4096];
 
-        // Consume the output from the child.
-        //
-        // When the PTY is closed (amount_read == 0, i.e. the shell exited),
-        // we simply `return` instead of calling `process::exit()`.  Returning
-        // drops `send_tx`, which closes the `pty_read_rx` channel in the PTY
-        // consumer thread — that thread then signals the GUI to close cleanly.
-        //
-        // Calling `process::exit()` from a worker thread is dangerous: it
-        // runs C exit handlers (`__eglFini`, etc.) while the GUI main thread
-        // may be mid-`eglSwapBuffers`, causing heap corruption → SIGSEGV.
-        while let Ok(amount_read) = reader.read(buf) {
-            if amount_read == 0 {
-                info!("PTY closed (read returned 0 bytes); reader thread exiting");
-                return;
+            // Consume the output from the child.
+            //
+            // When the PTY is closed (amount_read == 0, i.e. the shell exited),
+            // we simply `return` instead of calling `process::exit()`.  Returning
+            // drops `send_tx`, which closes the `pty_read_rx` channel in the PTY
+            // consumer thread — that thread then signals the GUI to close cleanly.
+            //
+            // Calling `process::exit()` from a worker thread is dangerous: it
+            // runs C exit handlers (`__eglFini`, etc.) while the GUI main thread
+            // may be mid-`eglSwapBuffers`, causing heap corruption → SIGSEGV.
+            while let Ok(amount_read) = reader.read(buf) {
+                if amount_read == 0 {
+                    info!("PTY closed (read returned 0 bytes); reader thread exiting");
+                    return;
+                }
+                let data = buf[..amount_read].to_vec();
+
+                if let Err(e) = send_tx.send(PtyRead {
+                    buf: data,
+                    read_amount: amount_read,
+                }) {
+                    error!("Failed to send data to terminal: {e}");
+                    return;
+                }
             }
-            let data = buf[..amount_read].to_vec();
-
-            if let Err(e) = send_tx.send(PtyRead {
-                buf: data,
-                read_amount: amount_read,
-            }) {
-                error!("Failed to send data to terminal: {e}");
-                return;
-            }
-        }
-    });
+        })
+        .map_err(|e| PtyInitError::Spawn(format!("spawn pty-read thread: {e}")))?;
 
     // Shared atomic flag updated by the writer thread after each PTY event.
     // The PTY consumer thread reads this via `FreminalPtyInputOutput::is_echo_off()`
@@ -399,94 +449,99 @@ pub fn run_terminal(
     let echo_off_writer = std::sync::Arc::clone(&echo_off);
 
     {
-        std::thread::spawn(move || {
-            // Poll interval for checking slave termios echo state.
-            // Used with `recv_timeout` so we detect password prompts
-            // even when no keystrokes are arriving.
-            const ECHO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        std::thread::Builder::new()
+            .name(format!("freminal-pty-write-{pane_id}"))
+            .spawn(move || {
+                // Poll interval for checking slave termios echo state.
+                // Used with `recv_timeout` so we detect password prompts
+                // even when no keystrokes are arriving.
+                const ECHO_POLL_INTERVAL: std::time::Duration =
+                    std::time::Duration::from_millis(100);
 
-            if cfg!(target_os = "macos") {
-                // macOS quirk: the child and reader must be started and
-                // allowed a brief grace period to run before we allow
-                // the writer to drop. Otherwise, the data we send to
-                // the kernel to trigger EOF is interleaved with the
-                // data read by the reader! WTF!?
-                // This appears to be a race condition for very short
-                // lived processes on macOS.
-                // I'd love to find a more deterministic solution to
-                // this than sleeping.
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-
-            let mut writer = match pair.master.take_writer() {
-                Ok(writer) => writer,
-                Err(e) => {
-                    error!("Failed to take writer: {e}");
-                    return;
+                if cfg!(target_os = "macos") {
+                    // macOS quirk: the child and reader must be started and
+                    // allowed a brief grace period to run before we allow
+                    // the writer to drop. Otherwise, the data we send to
+                    // the kernel to trigger EOF is interleaved with the
+                    // data read by the reader! WTF!?
+                    // This appears to be a race condition for very short
+                    // lived processes on macOS.
+                    // I'd love to find a more deterministic solution to
+                    // this than sleeping.
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-            };
 
-            // Use `recv_timeout` so we also poll the slave termios
-            // periodically even when no keystrokes arrive.  This lets the
-            // lock icon appear as soon as a password prompt disables ECHO,
-            // without waiting for user input.
-            //
-            // Termios is polled only on timeout (no pending writes), not
-            // after every keystroke — this avoids ioctl overhead during
-            // rapid typing.
+                let mut writer = match pair.master.take_writer() {
+                    Ok(writer) => writer,
+                    Err(e) => {
+                        error!("Failed to take writer: {e}");
+                        return;
+                    }
+                };
 
-            loop {
-                match write_rx.recv_timeout(ECHO_POLL_INTERVAL) {
-                    Ok(stuff_to_write) => {
-                        process_pty_write(&mut writer, &*pair.master, &stuff_to_write);
+                // Use `recv_timeout` so we also poll the slave termios
+                // periodically even when no keystrokes arrive.  This lets the
+                // lock icon appear as soon as a password prompt disables ECHO,
+                // without waiting for user input.
+                //
+                // Termios is polled only on timeout (no pending writes), not
+                // after every keystroke — this avoids ioctl overhead during
+                // rapid typing.
 
-                        // Drain any queued writes before polling termios.
-                        while let Ok(more) = write_rx.try_recv() {
-                            process_pty_write(&mut writer, &*pair.master, &more);
+                loop {
+                    match write_rx.recv_timeout(ECHO_POLL_INTERVAL) {
+                        Ok(stuff_to_write) => {
+                            process_pty_write(&mut writer, &*pair.master, &stuff_to_write);
+
+                            // Drain any queued writes before polling termios.
+                            while let Ok(more) = write_rx.try_recv() {
+                                process_pty_write(&mut writer, &*pair.master, &more);
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                            // No input — fall through to poll termios below.
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    }
+
+                    // Poll the slave termios after draining all pending writes
+                    // or on timeout.  The writer thread is the natural place for
+                    // this because it already owns `pair.master`.  When `ECHO` is
+                    // absent and `ICANON` is present, the foreground process
+                    // (e.g. `sudo`) has set up a canonical-mode password prompt.
+                    // Shell line editors (zsh ZLE, bash readline) also disable
+                    // `ECHO` but additionally disable `ICANON`, so checking both
+                    // flags avoids false positives during normal interactive
+                    // editing.
+                    //
+                    // This block is compiled only on Unix; on Windows (ConPTY)
+                    // there is no termios API, so the atomic stays at its
+                    // default `false`.
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::termios::LocalFlags;
+                        // Password prompts (sudo, ssh, getpass) disable ECHO but
+                        // keep ICANON (canonical/line-buffered mode).  Shell line
+                        // editors (zsh ZLE, bash readline) also disable ECHO but
+                        // additionally disable ICANON (raw/char-at-a-time mode)
+                        // because they handle input character by character.
+                        //
+                        // Checking `!ECHO && ICANON` filters out the shell's
+                        // normal interactive editing and only triggers for genuine
+                        // password prompts.
+                        let is_off = pair.master.get_termios().is_some_and(|t| {
+                            !t.local_flags.contains(LocalFlags::ECHO)
+                                && t.local_flags.contains(LocalFlags::ICANON)
+                        });
+                        let old =
+                            echo_off_writer.swap(is_off, std::sync::atomic::Ordering::Relaxed);
+                        if old != is_off {
+                            debug!("echo_off changed: {old} -> {is_off}");
                         }
                     }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        // No input — fall through to poll termios below.
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
-
-                // Poll the slave termios after draining all pending writes
-                // or on timeout.  The writer thread is the natural place for
-                // this because it already owns `pair.master`.  When `ECHO` is
-                // absent and `ICANON` is present, the foreground process
-                // (e.g. `sudo`) has set up a canonical-mode password prompt.
-                // Shell line editors (zsh ZLE, bash readline) also disable
-                // `ECHO` but additionally disable `ICANON`, so checking both
-                // flags avoids false positives during normal interactive
-                // editing.
-                //
-                // This block is compiled only on Unix; on Windows (ConPTY)
-                // there is no termios API, so the atomic stays at its
-                // default `false`.
-                #[cfg(unix)]
-                {
-                    use nix::sys::termios::LocalFlags;
-                    // Password prompts (sudo, ssh, getpass) disable ECHO but
-                    // keep ICANON (canonical/line-buffered mode).  Shell line
-                    // editors (zsh ZLE, bash readline) also disable ECHO but
-                    // additionally disable ICANON (raw/char-at-a-time mode)
-                    // because they handle input character by character.
-                    //
-                    // Checking `!ECHO && ICANON` filters out the shell's
-                    // normal interactive editing and only triggers for genuine
-                    // password prompts.
-                    let is_off = pair.master.get_termios().is_some_and(|t| {
-                        !t.local_flags.contains(LocalFlags::ECHO)
-                            && t.local_flags.contains(LocalFlags::ICANON)
-                    });
-                    let old = echo_off_writer.swap(is_off, std::sync::atomic::Ordering::Relaxed);
-                    if old != is_off {
-                        debug!("echo_off changed: {old} -> {is_off}");
-                    }
-                }
-            }
-        });
+            })
+            .map_err(|e| PtyInitError::Spawn(format!("spawn pty-write thread: {e}")))?;
     }
 
     Ok(RunTerminalResult {
@@ -506,7 +561,8 @@ impl FreminalPtyInputOutput {
         send_tx: Sender<PtyRead>,
         spawn_cfg: PtySpawnConfig<'_>,
         initial_size: &FreminalTerminalSize,
-    ) -> Result<Self> {
+        pane_id: u32,
+    ) -> Result<Self, PtyInitError> {
         // don't use it.  Skip extraction entirely on Windows to avoid issues
         // with symlinks in the tarball requiring elevated privileges.
         let termcaps = if cfg!(target_os = "windows") {
@@ -514,7 +570,7 @@ impl FreminalPtyInputOutput {
         } else {
             Some(extract_terminfo().map_err(|e| {
                 error!("Failed to extract terminfo: {e}");
-                e
+                PtyInitError::ExtractTerminfo(e.to_string())
             })?)
         };
 
@@ -524,6 +580,7 @@ impl FreminalPtyInputOutput {
             spawn_cfg,
             termcaps.as_ref().map(TempDir::path),
             initial_size,
+            pane_id,
         )?;
         Ok(Self {
             _termcaps: termcaps,

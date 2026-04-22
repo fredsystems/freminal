@@ -188,7 +188,8 @@ fn parse_all_valid_and_invalid_colors() {
 
     // Invalid input hits Err branch
     let err = TerminalColor::from_str("unknown_color").unwrap_err();
-    assert!(err.to_string().contains("Invalid color string"));
+    assert!(err.to_string().contains("invalid color name"));
+    assert!(err.to_string().contains("unknown_color"));
 }
 
 #[test]
@@ -284,7 +285,7 @@ fn palette_get_rgb_returns_override_when_set() {
     let t = theme();
     let mut palette = ColorPalette::default();
     palette.set(42, 0xFF, 0x00, 0x80);
-    assert_eq!(palette.get_rgb(42, t), (0xFF, 0x00, 0x80));
+    assert_eq!(palette.rgb(42, t), (0xFF, 0x00, 0x80));
 }
 
 #[test]
@@ -292,7 +293,7 @@ fn palette_get_rgb_returns_default_when_not_set() {
     let t = theme();
     let palette = ColorPalette::default();
     // Index 0 should return the Catppuccin Mocha Black RGB
-    assert_eq!(palette.get_rgb(0, t), (0x45, 0x47, 0x5a));
+    assert_eq!(palette.rgb(0, t), (0x45, 0x47, 0x5a));
 }
 
 #[test]

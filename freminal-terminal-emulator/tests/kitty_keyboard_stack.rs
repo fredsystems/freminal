@@ -6,10 +6,10 @@
 //! Integration tests for the Kitty Keyboard Protocol mode stack in
 //! `TerminalHandler`.
 
-use freminal_buffer::terminal_handler::TerminalHandler;
 use freminal_common::buffer_states::modes::kitty_keyboard::KittyKeyboardFlags;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::pty_write::PtyWrite;
+use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 
 /// Create a handler with a write channel and return `(handler, receiver)`.
 fn handler_with_pty() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {

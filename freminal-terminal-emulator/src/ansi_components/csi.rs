@@ -181,7 +181,9 @@ impl AnsiCsiParser {
                 ParserOutcome::Invalid("Invalid CSI sequence".to_string())
             }
             AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished => {
-                unreachable!();
+                // Guarded by the caller, but surface explicitly as an invalid
+                // outcome rather than panicking if the invariant ever breaks.
+                ParserOutcome::Invalid("CSI parser received byte after termination".to_string())
             }
         }
     }

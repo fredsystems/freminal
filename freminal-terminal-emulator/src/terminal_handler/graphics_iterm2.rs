@@ -17,7 +17,7 @@
 use conv2::ValueFrom;
 use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
 
-use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
 
 use super::{MultipartImageState, TerminalHandler};
 
@@ -50,7 +50,7 @@ impl TerminalHandler {
             return;
         }
 
-        let (term_width, term_height) = self.get_win_size();
+        let (term_width, term_height) = self.win_size();
 
         // Compute the display size in cells from the iTerm2 dimension specs.
         let display_cols = Self::resolve_image_dimension(
@@ -103,7 +103,7 @@ impl TerminalHandler {
         // Save cursor position if doNotMoveCursor is set — iTerm2 protocol
         // specifies that the cursor should remain at its pre-image position.
         let saved_cursor = if data.do_not_move_cursor {
-            Some(self.buffer.get_cursor().pos)
+            Some(self.buffer.cursor().pos)
         } else {
             None
         };

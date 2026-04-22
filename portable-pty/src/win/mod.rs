@@ -197,12 +197,25 @@ impl std::future::Future for WinChild {
                     let handle = PassRawHandleToWaiterThread(proc.as_raw_handle());
 
                     let waker = cx.waker().clone();
-                    std::thread::spawn(move || {
-                        unsafe {
-                            WaitForSingleObject(handle.0 as _, INFINITE);
+                    match std::thread::Builder::new()
+                        .name("freminal-win-proc-waiter".to_string())
+                        .spawn(move || {
+                            unsafe {
+                                WaitForSingleObject(handle.0 as _, INFINITE);
+                            }
+                            waker.wake();
+                        }) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // Reset the flag so a subsequent poll can retry.
+                            // Leaving it `true` would cause the future to hang
+                            // forever because no waker would ever fire.
+                            self.waiter_spawned.store(false, Ordering::SeqCst);
+                            log::error!("Failed to spawn Windows process-exit waiter: {e}");
+                            return Poll::Ready(Err(anyhow::Error::from(e)
+                                .context("Failed to spawn Windows process-exit waiter thread")));
                         }
-                        waker.wake();
-                    });
+                    }
                 }
                 Poll::Pending
             }

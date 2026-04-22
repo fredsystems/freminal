@@ -15,6 +15,7 @@ use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{pointer_shape::PointerShape, tchar::TChar, url::Url},
     config::Config,
+    send_or_log,
     themes::ThemePalette,
 };
 use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
@@ -26,7 +27,7 @@ use super::{
         atlas::GlyphAtlas,
         font_manager::FontManager,
         renderer::{
-            CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, TerminalRenderer,
+            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, TerminalRenderer,
             WindowPostRenderer, build_background_instances, build_cursor_verts_only,
             build_foreground_instances, build_image_verts,
         },
@@ -44,6 +45,7 @@ use egui_glow::CallbackFn;
 use glow::HasContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tracing::error;
 
 ///
 /// The scrollbar is shown when the user is actively scrolled back
@@ -486,11 +488,16 @@ fn dispatch_context_menu_action(
         }
         ContextMenuAction::OpenUrl(url) => {
             let url_str = url;
-            std::thread::spawn(move || {
-                if let Err(e) = open::that(&url_str) {
-                    error!("Failed to open URL {url_str}: {e}");
-                }
-            });
+            if let Err(e) = std::thread::Builder::new()
+                .name("freminal-open-url".to_string())
+                .spawn(move || {
+                    if let Err(e) = open::that(&url_str) {
+                        error!("Failed to open URL {url_str}: {e}");
+                    }
+                })
+            {
+                error!("Failed to spawn URL-open thread: {e}");
+            }
         }
         ContextMenuAction::NewTerminal => {
             deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
@@ -517,9 +524,23 @@ pub(super) enum PendingGpuOp<T> {
 /// GPU resources shared between the main thread (vertex building) and the
 /// egui `PaintCallback` closure (draw calls).
 ///
-/// Wrapped in `Arc<Mutex<…>>` so that the pre-built vertex data can be
-/// written on the main thread and consumed inside the `PaintCallback`,
-/// which requires `Send + Sync + 'static` captures.
+/// ## Threading invariant
+///
+/// Despite the `Arc<Mutex<…>>` wrapper, `RenderState` is **GUI-thread-only**.
+/// It is never accessed from the PTY processing thread, the OS PTY reader
+/// thread, or any other background thread. The `Mutex` is not here to
+/// coordinate between threads — it exists purely for **interior mutability**:
+///
+/// - egui's `PaintCallback` requires captures to be `Send + Sync + 'static`,
+///   which forces ownership via `Arc`.
+/// - The vertex-building code (before the callback fires) and the draw code
+///   (inside the callback) both need `&mut` access to the same buffers.
+/// - Rust cannot prove the two accesses are disjoint through an `Arc`, so
+///   the `Mutex` provides the runtime `&mut` path.
+///
+/// In practice the lock is always uncontended: both the vertex builder and
+/// the paint callback run sequentially on the GUI thread within a single
+/// frame. If a second thread ever tries to lock this `Mutex`, that is a bug.
 pub struct RenderState {
     pub(super) renderer: TerminalRenderer,
     pub(super) atlas: GlyphAtlas,
@@ -552,6 +573,11 @@ pub struct RenderState {
     /// When a user GLSL shader is active, this pane's `PaintCallback` renders its
     /// terminal content into the window FBO.  A window-level `PaintCallback` registered
     /// after the pane loop applies the post pass to egui's framebuffer.
+    ///
+    /// As with [`RenderState`], the `Arc<Mutex<…>>` here provides interior
+    /// mutability for `PaintCallback` captures — not cross-thread
+    /// synchronisation. `WindowPostRenderer` is only ever touched on the
+    /// GUI thread.
     pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
     /// Pending background image load/clear to apply on the next `PaintCallback`.
     ///
@@ -779,8 +805,17 @@ pub struct FreminalTerminalWidget {
 impl FreminalTerminalWidget {
     /// Create a new `FreminalTerminalWidget`, loading fonts and initialising
     /// shared rendering resources from the provided config.
-    #[must_use]
-    pub fn new(ctx: &Context, config: &Config) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`crate::gui::font_manager::FontManagerError`] from
+    /// [`FontManager::new`].  Such errors indicate build-time packaging or
+    /// memory corruption issues and should be treated as fatal by the binary
+    /// (e.g. log and exit from `main()`).
+    pub fn new(
+        ctx: &Context,
+        config: &Config,
+    ) -> Result<Self, crate::gui::font_manager::FontManagerError> {
         let font_config = FontConfig {
             size: config.font.size,
             user_font: config.font.family.clone(),
@@ -790,8 +825,8 @@ impl FreminalTerminalWidget {
 
         let pixels_per_point = ctx.pixels_per_point();
 
-        Self {
-            font_manager: FontManager::new(config, pixels_per_point),
+        Ok(Self {
+            font_manager: FontManager::new(config, pixels_per_point)?,
             ligatures: config.font.ligatures,
             cursor_trail: config.cursor.trail,
             cursor_trail_duration: Duration::from_millis(u64::from(
@@ -799,7 +834,7 @@ impl FreminalTerminalWidget {
             )),
             base_font_defs,
             egui_fonts_dirty: false,
-        }
+        })
     }
 
     /// Returns the authoritative cell size in integer pixels `(width, height)`.
@@ -859,7 +894,12 @@ impl FreminalTerminalWidget {
     /// **Must be called before [`Self::cell_size`] each frame** so that resize
     /// calculations in `FreminalGui::ui()` use up-to-date metrics.
     pub fn sync_pixels_per_point(&mut self, ppp: f32) -> bool {
-        self.font_manager.update_pixels_per_point(ppp)
+        self.font_manager
+            .update_pixels_per_point(ppp)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager could not recompute metrics for pixels_per_point change: {e}");
+                std::process::exit(1);
+            })
     }
 
     /// Render the terminal for one egui frame and process all pending input.
@@ -1419,23 +1459,25 @@ impl FreminalTerminalWidget {
                 let rs_ref: &mut RenderState = &mut rs;
 
                 build_background_instances(
-                    &shaped_lines,
-                    cell_w,
-                    cell_h,
-                    self.font_manager.ascent(),
-                    self.font_manager.underline_offset(),
-                    self.font_manager.strikeout_offset(),
-                    self.font_manager.stroke_size(),
-                    effective_show_cursor,
-                    cursor_blink_on,
-                    cursor_pixel_pos,
-                    cursor_x_scale,
-                    &snap.cursor_visual_style,
-                    screen_selection,
-                    view_state.selection.is_block,
-                    &search_highlights,
-                    snap.theme,
-                    snap.cursor_color_override,
+                    &BackgroundFrame {
+                        shaped_lines: &shaped_lines,
+                        cell_width: cell_w,
+                        cell_height: cell_h,
+                        ascent: self.font_manager.ascent(),
+                        underline_offset: self.font_manager.underline_offset(),
+                        strikeout_offset: self.font_manager.strikeout_offset(),
+                        stroke_size: self.font_manager.stroke_size(),
+                        show_cursor: effective_show_cursor,
+                        cursor_blink_on,
+                        cursor_pixel_pos,
+                        cursor_width_scale: cursor_x_scale,
+                        cursor_visual_style: &snap.cursor_visual_style,
+                        selection: screen_selection,
+                        selection_is_block: view_state.selection.is_block,
+                        match_highlights: &search_highlights,
+                        theme: snap.theme,
+                        cursor_color_override: snap.cursor_color_override,
+                    },
                     &mut rs_ref.bg_instances,
                     &mut rs_ref.deco_verts,
                 );
@@ -1747,7 +1789,10 @@ impl FreminalTerminalWidget {
 
                 let cell = (col, row);
                 let cell_changed = cache.previous_hover_cell != Some(cell);
-                let snap_ptr = Arc::as_ptr(&snap.visible_chars) as usize;
+                // Pointer identity comparison for the snapshot's char buffer.
+                // `.addr()` is the explicit, non-`as`-cast form for extracting
+                // the pointer's address as a `usize` (stable since Rust 1.84).
+                let snap_ptr = Arc::as_ptr(&snap.visible_chars).addr();
                 let content_changed_under_mouse = snap_ptr != cache.hover_snap_ptr;
                 cache.previous_hover_cell = Some(cell);
                 cache.hover_snap_ptr = snap_ptr;
@@ -1790,11 +1835,16 @@ impl FreminalTerminalWidget {
                     });
                     if clicked {
                         let url_str = url.url.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = open::that(&url_str) {
-                                error!("Failed to open URL {url_str}: {e}");
-                            }
-                        });
+                        if let Err(e) = std::thread::Builder::new()
+                            .name("freminal-open-url".to_string())
+                            .spawn(move || {
+                                if let Err(e) = open::that(&url_str) {
+                                    error!("Failed to open URL {url_str}: {e}");
+                                }
+                            })
+                        {
+                            error!("Failed to spawn URL-open thread: {e}");
+                        }
                     }
                 }
             } else {
@@ -1852,7 +1902,13 @@ impl FreminalTerminalWidget {
         new_config: &Config,
     ) -> bool {
         let pixels_per_point = ctx.pixels_per_point();
-        let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
+        let rebuild_result = self
+            .font_manager
+            .rebuild(new_config, pixels_per_point)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager rebuild failed during config apply: {e}");
+                std::process::exit(1);
+            });
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
         self.ligatures = new_config.font.ligatures;
@@ -1889,7 +1945,13 @@ impl FreminalTerminalWidget {
         new_config: &Config,
     ) -> bool {
         let pixels_per_point = self.font_manager.pixels_per_point();
-        let rebuild_result = self.font_manager.rebuild(new_config, pixels_per_point);
+        let rebuild_result = self
+            .font_manager
+            .rebuild(new_config, pixels_per_point)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager rebuild failed during config apply (no-ctx): {e}");
+                std::process::exit(1);
+            });
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
         self.ligatures = new_config.font.ligatures;
@@ -1919,7 +1981,12 @@ impl FreminalTerminalWidget {
     /// resize-detection logic in the render loop (it compares
     /// `available_pixels / cell_size` against `view_state.last_sent_size`).
     pub fn apply_font_zoom(&mut self, effective_size: f32) -> bool {
-        self.font_manager.set_font_size(effective_size)
+        self.font_manager
+            .set_font_size(effective_size)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager could not apply font zoom: {e}");
+                std::process::exit(1);
+            })
     }
 }
 
@@ -2017,9 +2084,11 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
         }
         if !payload.is_empty() {
             payload.push(' ');
-            if let Err(e) = input_tx.send(InputEvent::Key(payload.into_bytes())) {
-                error!("Failed to send dropped file paths to PTY: {e}");
-            }
+            send_or_log!(
+                input_tx,
+                InputEvent::Key(payload.into_bytes()),
+                "Failed to send dropped file paths to PTY"
+            );
         }
     }
 
@@ -2076,7 +2145,7 @@ mod subtask_1_7_tests {
     #[test]
     fn cell_size_from_font_manager_is_nonzero() {
         let config = freminal_common::config::Config::default();
-        let fm = FontManager::new(&config, 1.0);
+        let fm = FontManager::new(&config, 1.0).unwrap();
         let (w, h) = fm.cell_size();
         assert!(w > 0, "cell_width must be non-zero, got {w}");
         assert!(h > 0, "cell_height must be non-zero, got {h}");
