@@ -140,7 +140,7 @@ const fn us_qwerty_shifted(c: u8) -> Option<u32> {
 
 /// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
 #[must_use]
-pub fn collect_text(text: &String) -> Cow<'static, [TerminalInput]> {
+pub fn collect_text(text: &str) -> Cow<'static, [TerminalInput]> {
     text.as_bytes()
         .iter()
         .map(|c| TerminalInput::Ascii(*c))
@@ -2371,7 +2371,7 @@ mod tests {
     #[test]
     fn collect_text_non_ascii_utf8_encoding() {
         // 'é' = U+00E9, UTF-8: [0xC3, 0xA9]
-        let inputs = collect_text(&"é".to_string());
+        let inputs = collect_text("é");
         let bytes: Vec<u8> = inputs
             .iter()
             .filter_map(|i| {
@@ -2389,7 +2389,7 @@ mod tests {
     #[test]
     fn collect_text_mixed_ascii_and_non_ascii() {
         // "aé" = 'a' (0x61) + 'é' (0xC3 0xA9) = 3 bytes total
-        let inputs = collect_text(&"aé".to_string());
+        let inputs = collect_text("aé");
         let bytes: Vec<u8> = inputs
             .iter()
             .filter_map(|i| {
