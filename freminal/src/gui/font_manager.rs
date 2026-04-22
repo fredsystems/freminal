@@ -1100,7 +1100,8 @@ fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
 
             if let fontdb::Source::File(path) = &face.source
                 && let Ok(bytes) = std::fs::read(path)
-                && let Some(loaded) = LoadedFace::from_owned(bytes, face.index as usize)
+                && let Some(loaded) =
+                    LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
             {
                 return Some(loaded);
             }
@@ -1115,7 +1116,8 @@ fn find_system_face_for_char(font_db: &Database, c: char) -> Option<LoadedFace> 
     for face in font_db.faces() {
         if let fontdb::Source::File(path) = &face.source
             && let Ok(bytes) = std::fs::read(path)
-            && let Some(loaded) = LoadedFace::from_owned(bytes, face.index as usize)
+            && let Some(loaded) =
+                LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
             && loaded.has_glyph(c)
         {
             return Some(loaded);

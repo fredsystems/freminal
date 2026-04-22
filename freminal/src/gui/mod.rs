@@ -2238,10 +2238,11 @@ impl freminal_windowing::App for FreminalGui {
                 Ok(_closed) => {
                     // Emit PaneClose recording event.
                     if let Some(ref h) = self.recording_handle {
-                        #[allow(clippy::cast_possible_truncation)]
+                        // Saturating `u64 -> u32`: pane IDs are monotonic from
+                        // 0 and will never realistically exceed u32::MAX.
                         h.emit(
                             freminal_terminal_emulator::recording::EventPayload::PaneClose {
-                                pane_id: pane_id.raw() as u32,
+                                pane_id: u32::try_from(pane_id.raw()).unwrap_or(u32::MAX),
                             },
                         );
                     }
@@ -2766,8 +2767,9 @@ impl freminal_windowing::App for FreminalGui {
                     freminal_terminal_emulator::recording::RecordingContext {
                         handle: h,
                         window_id: rec_window_id,
-                        #[allow(clippy::cast_possible_truncation)]
-                        pane_id: pane_id.raw() as u32,
+                        // Saturating `u64 -> u32` for recording: pane IDs are
+                        // monotonic from 0 and never approach u32::MAX.
+                        pane_id: u32::try_from(pane_id.raw()).unwrap_or(u32::MAX),
                     }
                 });
 

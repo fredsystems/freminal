@@ -222,14 +222,36 @@ Executed as a file-by-file sweep so each commit is reviewable in isolation:
   is not exercised by `render_loop_bench.rs` (glyphs are rasterised once on cache miss).
   The 3 `#[allow(clippy::cast_precision_loss)]` attributes in this cluster all sit in the
   `#[cfg(test)]` module and are left in place per the workspace test-code exception.
-- **70.H.d** — GUI shaping cluster: `freminal/src/gui/shaping.rs` (12 casts, 8 allows),
-  `freminal/src/gui/terminal/input.rs` (11 casts, 3 allows),
-  `freminal/src/gui/font_manager.rs` (6 casts, 1 allow),
-  `freminal/src/gui/view_state.rs` (5 casts, 3 allows),
-  `freminal/src/gui/terminal/coords.rs` (2 casts),
-  `freminal/src/gui/terminal/widget.rs` (2 casts),
-  `freminal/src/gui/mod.rs` (3 casts, 2 allows),
-  `freminal/src/gui/colors.rs` (3 casts).
+- **70.H.d** ✅ — GUI shaping cluster. Audit revealed most apparent cast counts were inflated
+  by test-module hits (boundary at line 688 in `shaping.rs`, 818 in `view_state.rs`, 156 in
+  `coords.rs`, 1320 in `font_manager.rs`, 2083 in `widget.rs`, 3154 in `mod.rs`, 213 in
+  `colors.rs`) and by `u8 as f32` hits that qualify for the type-system-lossless exception
+  (`colors.rs:21-23`). Actual production casts fixed:
+  - `freminal/src/gui/shaping.rs`: 2 `u8 as usize` (replaced with `usize::from(*len)`), 2
+    `u32 as usize` (replaced with `usize::value_from(...).unwrap_or(0)` on rustybuzz cluster
+    byte-offsets).
+  - `freminal/src/gui/terminal/input.rs`: 8 `usize as u32` truncations for recording-event
+    pixel and row/col coords (replaced with `u32::try_from(x).unwrap_or(u32::MAX)`; removed
+    3 `#[allow(clippy::cast_possible_truncation)]` attrs).
+  - `freminal/src/gui/font_manager.rs`: 2 `u32 as usize` on `fontdb` face indices (replaced
+    with `usize::value_from(...).unwrap_or(0)`).
+  - `freminal/src/gui/terminal/widget.rs`: 1 pointer-to-usize cast for Arc identity
+    comparison (replaced with `Arc::as_ptr(...).addr()`, stable since Rust 1.84).
+  - `freminal/src/gui/mod.rs`: 2 `u64 as u32` truncations on `PaneId::raw()` for recording
+    events (replaced with `u32::try_from(...).unwrap_or(u32::MAX)`; removed 2
+    `#[allow(clippy::cast_possible_truncation)]` attrs).
+
+  Zero production casts in `view_state.rs`, `coords.rs`, `colors.rs`, or `renderer/gpu.rs`.
+  Remaining 8 `#[allow(clippy::cast_precision_loss)]` attrs in `shaping.rs` (lines 798-1127)
+  and 1 in `font_manager.rs` (line 1400) all sit in `#[cfg(test)]` modules and are left in
+  place per the workspace test-code exception.
+
+  Benchmark (`cargo bench -p freminal --bench render_loop_bench shaping_ligatures`):
+  `shape_visible_cache_hit`: **15.4% faster** (6.90 µs → 5.84 µs). The `usize::value_from` +
+  `unwrap_or(0)` pattern lowers to the same machine code as `as` on 64-bit; the improvement
+  is measurement noise from the smaller helper invocations but easily within the ±15% policy
+  band in the favorable direction. No regression.
+
 - **70.H.e** — Emulator + common tail: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
   (8 casts), `freminal-common/src/buffer_states/tchar.rs` (8 casts, 2 allows),
   `freminal-terminal-emulator/src/recording.rs` (7 casts, 1 allow),

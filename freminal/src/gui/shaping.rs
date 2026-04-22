@@ -275,7 +275,7 @@ fn hash_line(line_chars: &[TChar], tags: &[FormatTag], global_offset: usize) -> 
             }
             TChar::Utf8(buf, len) => {
                 1u8.hash(&mut hasher);
-                buf[..*len as usize].hash(&mut hasher);
+                buf[..usize::from(*len)].hash(&mut hasher);
             }
             TChar::Space => 2u8.hash(&mut hasher),
             TChar::NewLine => 3u8.hash(&mut hasher),
@@ -455,7 +455,7 @@ fn tchar_to_char(tch: &TChar) -> char {
         TChar::Space => ' ',
         TChar::NewLine => '\n',
         TChar::Utf8(buf, len) => {
-            std::str::from_utf8(&buf[..*len as usize])
+            std::str::from_utf8(&buf[..usize::from(*len)])
                 .ok()
                 .and_then(|s| s.chars().next())
                 .unwrap_or('\u{FFFD}') // replacement character
@@ -604,7 +604,10 @@ fn build_shaped_glyphs(
     };
 
     for (glyph_idx, info) in infos.iter().enumerate() {
-        let cluster_byte = info.cluster as usize;
+        // `u32 -> usize` for byte-offset indexing; lossless on all 64-bit
+        // targets. On hypothetical 32-bit hosts, falls back to 0, which is a
+        // safe sentinel that the `resolve_cluster` binary-search handles.
+        let cluster_byte = usize::value_from(info.cluster).unwrap_or(0);
 
         // Map byte offset → char index.  Fallback: glyph index clamped to
         // range (should only trigger on malformed shaper output).
@@ -615,7 +618,7 @@ fn build_shaped_glyphs(
         // (but not including) the char index of the next glyph.  The last
         // glyph owns through the end of the run.
         let next_char_idx = if glyph_idx + 1 < infos.len() {
-            let next_cluster_byte = infos[glyph_idx + 1].cluster as usize;
+            let next_cluster_byte = usize::value_from(infos[glyph_idx + 1].cluster).unwrap_or(0);
             resolve_cluster(next_cluster_byte, (glyph_idx + 1).min(num_chars))
         } else {
             num_chars

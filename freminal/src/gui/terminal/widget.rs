@@ -1767,7 +1767,10 @@ impl FreminalTerminalWidget {
 
                 let cell = (col, row);
                 let cell_changed = cache.previous_hover_cell != Some(cell);
-                let snap_ptr = Arc::as_ptr(&snap.visible_chars) as usize;
+                // Pointer identity comparison for the snapshot's char buffer.
+                // `.addr()` is the explicit, non-`as`-cast form for extracting
+                // the pointer's address as a `usize` (stable since Rust 1.84).
+                let snap_ptr = Arc::as_ptr(&snap.visible_chars).addr();
                 let content_changed_under_mouse = snap_ptr != cache.hover_snap_ptr;
                 cache.previous_hover_cell = Some(cell);
                 cache.hover_snap_ptr = snap_ptr;

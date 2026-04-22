@@ -1223,12 +1223,13 @@ pub(super) fn write_input_to_terminal(
 
                 // Record mouse move event (every move — debouncing is a future optimization).
                 if let Some(ctx) = recording_ctx {
-                    #[allow(clippy::cast_possible_truncation)]
+                    // Saturating `usize -> u32` for recording coords: any
+                    // realistic window size fits in u32; clamp on overflow.
                     ctx.handle.emit(EventPayload::MouseMove {
                         window_id: ctx.window_id,
                         pane_id: ctx.pane_id,
-                        x: x as u32,
-                        y: y as u32,
+                        x: u32::try_from(x).unwrap_or(u32::MAX),
+                        y: u32::try_from(y).unwrap_or(u32::MAX),
                         coalesced_count: 1,
                     });
                 }
@@ -1329,14 +1330,14 @@ pub(super) fn write_input_to_terminal(
 
                 // Record mouse button event.
                 if let Some(ctx) = recording_ctx {
-                    #[allow(clippy::cast_possible_truncation)]
+                    // Saturating `usize -> u32` for recording coords.
                     ctx.handle.emit(EventPayload::MouseButton {
                         window_id: ctx.window_id,
                         pane_id: ctx.pane_id,
                         button: pointer_button_to_u8(*button),
                         pressed: *pressed,
-                        x: x as u32,
-                        y: y as u32,
+                        x: u32::try_from(x).unwrap_or(u32::MAX),
+                        y: u32::try_from(y).unwrap_or(u32::MAX),
                     });
                 }
 
@@ -1437,13 +1438,14 @@ pub(super) fn write_input_to_terminal(
                                 && let Some(anchor) = view_state.selection.anchor
                                 && anchor != end_coord
                             {
-                                #[allow(clippy::cast_possible_truncation)]
+                                // Saturating `usize -> u32` for recording
+                                // row/col — any realistic terminal fits in u32.
                                 ctx.handle.emit(EventPayload::SelectionEvent {
                                     pane_id: ctx.pane_id,
-                                    start_row: anchor.row as u32,
-                                    start_col: anchor.col as u32,
-                                    end_row: end_coord.row as u32,
-                                    end_col: end_coord.col as u32,
+                                    start_row: u32::try_from(anchor.row).unwrap_or(u32::MAX),
+                                    start_col: u32::try_from(anchor.col).unwrap_or(u32::MAX),
+                                    end_row: u32::try_from(end_coord.row).unwrap_or(u32::MAX),
+                                    end_col: u32::try_from(end_coord.col).unwrap_or(u32::MAX),
                                     is_block: view_state.selection.is_block,
                                 });
                             }
