@@ -252,20 +252,47 @@ Executed as a file-by-file sweep so each commit is reviewable in isolation:
   is measurement noise from the smaller helper invocations but easily within the ±15% policy
   band in the favorable direction. No regression.
 
-- **70.H.e** — Emulator + common tail: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
-  (8 casts), `freminal-common/src/buffer_states/tchar.rs` (8 casts, 2 allows),
-  `freminal-terminal-emulator/src/recording.rs` (7 casts, 1 allow),
-  `freminal-terminal-emulator/src/terminal_handler/mod.rs` (6 casts, 1 allow),
-  `freminal-common/src/base64.rs` (4 casts),
-  `freminal-common/src/buffer_states/sixel.rs` (2 casts, 2 allows),
-  `freminal-common/src/buffer_states/fonts.rs` (2 casts),
-  `freminal-windowing/src/egui_integration.rs` (1 cast).
+- **70.H.e** ✅ — Emulator + common tail. Audit of 8 files (same distinguish-prod-vs-test
+  pattern as 70.H.d) showed most cast counts were partially inflated by test-module sites.
+  Actual production casts touched: `graphics_kitty.rs` (8), `tchar.rs` (8), `recording.rs` (2;
+  the other two already have documented `#[allow]` for u128→u64 Duration micros and
+  `#[repr(u8)]` enum discriminant), `terminal_handler/mod.rs` (4 production; the 2 in test
+  module were skipped, and one at line 2165 was the `u32→usize` for `KittyKeyboardPop`),
+  `base64.rs` (4), `fonts.rs` (2), `egui_integration.rs` (1). `sixel.rs` had 2 allows in
+  `const fn` helpers (documented policy exceptions) — left as-is.
+  Conversion patterns used: `usize::from(u8)` for `*len as usize` (lossless by type),
+  `u8::try_from(...).unwrap_or(0)` where a runtime invariant bounds the range,
+  `char::from(u8)` for `*c as char`, `usize::value_from(u32).unwrap_or(0)` for u32→usize
+  reads, `saturating_mul` for Kitty image `w * h * N` on 32-bit wrap protection, and
+  `approx_as::<f32>().unwrap_or(1.0)` for the `f64→f32` scale factor.
+  Benchmarks (baseline captured via git-stash of this subtask's changes):
+
+  | Benchmark                                      | Before    | After     | Change  |
+  | ---------------------------------------------- | --------- | --------- | ------- |
+  | bench_handle_incoming_data                     | 138.52 µs | 137.04 µs | −0.67%  |
+  | bench_parse_bursty                             | 24.03 µs  | 23.42 µs  | −3.31%  |
+  | bench_build_snapshot/clean                     | 96.62 ns  | 97.63 ns  | +0.70%  |
+  | bench_build_snapshot_with_scrollback/10k_clean | 1.346 ms  | 1.154 ms  | −13.57% |
+  | bench_build_snapshot/dirty                     | 99.23 ns  | 97.24 ns  | −2.83%  |
+  | buffer_insert_large_line/insert_full/500000    | 19.01 ms  | 19.85 ms  | +4.24%  |
+  | bench_visible_flatten/visible_200x50           | 2.31 µs   | 2.30 µs   | −0.54%  |
+
+  All within the 15% regression threshold; `u8 as usize` and `usize::from(u8)` produce
+  identical codegen on amd64, so the deltas are measurement noise.
+
 - **70.H.2** — Delete every `#[allow(clippy::cast_*)]` attribute whose underlying cast has
   been replaced. Document any remaining allow with a `// SAFETY:` comment explaining why the
   conversion is lossless in context. Performed as part of each file cluster.
-- **70.H.3** — Re-enable workspace-level `#![deny(clippy::cast_possible_truncation,
-clippy::cast_sign_loss, clippy::cast_possible_wrap)]` in the three library crates (run
-  last, after all clusters are done).
+- **70.H.3** ✅ — Explicitly denied `clippy::cast_possible_truncation`,
+  `clippy::cast_sign_loss`, and `clippy::cast_possible_wrap` at the crate root of all three
+  library crates (`freminal-common`, `freminal-buffer`, `freminal-terminal-emulator`). These
+  lints were already part of the `clippy::pedantic` group already denied in each lib.rs, but
+  naming them directly documents the Task 70.H contract and survives future pedantic
+  reorganization. All remaining `as` casts in library code are either inside test modules or
+  covered by a local `#[allow(...)]` with a justification comment. The `freminal` binary
+  crate relies on `clippy::pedantic` only (not explicit denies) because its rendering/GUI
+  layer interacts with egui/winit APIs that frequently require fallible conversions guarded
+  by local allows.
 
 #### 70.I — MEDIUM: Complete Bool-to-Enum (Task 26 re-open)
 
