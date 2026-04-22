@@ -9,8 +9,8 @@ use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
         format_tag::FormatTag,
-        ftcs::{FtcsMarker, FtcsState},
-        kitty_graphics::{KittyControlData, KittyParseError, parse_kitty_graphics},
+        ftcs::FtcsState,
+        kitty_graphics::KittyControlData,
         line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode},
         modes::ReportMode,
@@ -36,7 +36,7 @@ use freminal_common::{
         modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
-        osc::{AnsiOscType, ITerm2InlineImageData, UrlResponse},
+        osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
         tchar::TChar,
         terminal_output::TerminalOutput,
@@ -45,29 +45,33 @@ use freminal_common::{
             VirtualPlacement, color_to_image_id, color_to_placement_id, is_placeholder,
             parse_placeholder_diacritics,
         },
-        url::Url,
         window_manipulation::WindowManipulation,
     },
     colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
-    pty_write::{FreminalTerminalSize, PtyWrite},
+    pty_write::PtyWrite,
     themes::ThemePalette,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use freminal_buffer::buffer::Buffer;
 use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
 
+mod cursor_ops;
 mod dcs;
+mod edit_ops;
 mod graphics_iterm2;
 mod graphics_kitty;
 mod graphics_sixel;
+mod osc;
 mod osc_colors;
 mod pty_writer;
+mod reports;
+mod scroll_ops;
 mod sgr;
 mod shell_integration;
+mod window_ops;
 
 /// In-progress state for an iTerm2 multipart file transfer.
 ///
@@ -718,306 +722,16 @@ impl TerminalHandler {
         }
     }
 
-    /// Handle REP (CSI Ps b) — repeat the last graphic character Ps times.
-    fn handle_repeat_character(&mut self, count: usize) {
-        if let Some(ref ch) = self.last_graphic_char {
-            let repeated = vec![*ch; count];
-            self.buffer.insert_text(&repeated);
-        }
-    }
-
-    /// Handle LF (Line Feed) — advance cursor to the next line, scrolling if needed.
-    pub fn handle_newline(&mut self) {
-        self.buffer.handle_lf();
-    }
-
-    /// Handle CR (Carriage Return) — move cursor to column 0 of the current row.
-    pub const fn handle_carriage_return(&mut self) {
-        self.buffer.handle_cr();
-    }
-
-    /// Handle BS (Backspace) — move cursor one column to the left, respecting reverse-wrap modes.
-    pub fn handle_backspace(&mut self) {
-        self.buffer
-            .handle_backspace(self.reverse_wrap, self.xt_rev_wrap2);
-    }
-
-    /// Handle HT (Horizontal Tab) — advance cursor to the next tab stop.
-    pub fn handle_tab(&mut self) {
-        self.buffer.advance_to_next_tab_stop();
-    }
-
-    /// Handle cursor position (CUP, HVP).
-    ///
-    /// `x` and `y` are 1-indexed (from the parser).  `None` means "leave this
-    /// axis unchanged" (e.g. CHA supplies only `x`).
-    ///
-    /// **VT52 out-of-bounds row rule** — When the terminal is in VT52
-    /// compatibility mode (`Decanm::Vt52`) and the supplied row index exceeds
-    /// the screen height, the row coordinate is silently ignored and only the
-    /// column is updated.  This matches the behaviour documented in the vttest
-    /// source (`vt52.c`, lines 94-107): `vt52cup(max_lines+3, i-1)` is used
-    /// deliberately to update only the column.
-    pub fn handle_cursor_pos(&mut self, x: Option<usize>, y: Option<usize>) {
-        // In VT52 mode, out-of-bounds coordinates are ignored (the axis is
-        // left unchanged) rather than clamped.  This matches VT100-emulating-
-        // VT52 behaviour and is relied upon by vttest's box-drawing test.
-        let (x_zero, y_zero) = if self.vt52_mode == Decanm::Vt52 {
-            let x_z = x.and_then(|col_1indexed| {
-                if col_1indexed > self.buffer.terminal_width() {
-                    None // out-of-bounds — ignore column, keep current position
-                } else {
-                    Some(col_1indexed.saturating_sub(1))
-                }
-            });
-            let y_z = y.and_then(|row_1indexed| {
-                if row_1indexed > self.buffer.terminal_height() {
-                    None // out-of-bounds — ignore row, keep current position
-                } else {
-                    Some(row_1indexed.saturating_sub(1))
-                }
-            });
-            (x_z, y_z)
-        } else {
-            (
-                x.map(|v| v.saturating_sub(1)),
-                y.map(|v| v.saturating_sub(1)),
-            )
-        };
-
-        self.buffer.set_cursor_pos(x_zero, y_zero);
-    }
-
-    /// Move the cursor by `(dx, dy)` cells relative to its current position.
-    pub fn handle_cursor_relative(&mut self, dx: i32, dy: i32) {
-        self.buffer.move_cursor_relative(dx, dy);
-    }
-
-    /// Handle CUU (Cursor Up) — move cursor up `n` rows.
-    pub fn handle_cursor_up(&mut self, n: usize) {
-        let dy = i32::value_from(n).unwrap_or(i32::MAX);
-        self.buffer.move_cursor_relative(0, -dy);
-    }
-
-    /// Handle CUD (Cursor Down) — move cursor down `n` rows.
-    pub fn handle_cursor_down(&mut self, n: usize) {
-        let dy = i32::value_from(n).unwrap_or(i32::MAX);
-        self.buffer.move_cursor_relative(0, dy);
-    }
-
-    /// Handle CUF (Cursor Forward) — move cursor forward `n` columns.
-    pub fn handle_cursor_forward(&mut self, n: usize) {
-        let dx = i32::value_from(n).unwrap_or(i32::MAX);
-        self.buffer.move_cursor_relative(dx, 0);
-    }
-
-    /// Handle CUB (Cursor Backward) — move cursor backward `n` columns.
-    pub fn handle_cursor_backward(&mut self, n: usize) {
-        let dx = i32::value_from(n).unwrap_or(i32::MAX);
-        self.buffer.move_cursor_relative(-dx, 0);
-    }
-
-    /// Handle erase in display (ED)
-    pub fn handle_erase_in_display(&mut self, mode: usize) {
-        match mode {
-            0 => self.buffer.erase_to_end_of_display(),
-            1 => self.buffer.erase_to_beginning_of_display(),
-            2 => self.buffer.erase_display(),
-            3 => self.buffer.erase_scrollback(),
-            _ => {} // Unknown mode, ignore
-        }
-    }
-
-    /// Handle erase in line (EL)
-    pub fn handle_erase_in_line(&mut self, mode: usize) {
-        match mode {
-            0 => self.buffer.erase_line_to_end(),
-            1 => self.buffer.erase_line_to_beginning(),
-            2 => self.buffer.erase_line(),
-            _ => {} // Unknown mode, ignore
-        }
-    }
-
-    /// Handle IL — insert `n` blank lines at the cursor row, pushing existing lines down (Insert Lines).
-    pub fn handle_insert_lines(&mut self, n: usize) {
-        self.buffer.insert_lines(n);
-    }
-
-    /// Handle DL — delete `n` lines starting at the cursor row, pulling lines below up (Delete Lines).
-    pub fn handle_delete_lines(&mut self, n: usize) {
-        self.buffer.delete_lines(n);
-    }
-
-    /// Handle ECH (Erase Characters) — erase `n` characters starting at the cursor column.
-    pub fn handle_erase_chars(&mut self, n: usize) {
-        self.buffer.erase_chars(n);
-    }
-
-    /// Handle DCH (Delete Characters) — delete `n` characters at the cursor column, shifting remaining characters left.
-    pub fn handle_delete_chars(&mut self, n: usize) {
-        self.buffer.delete_chars(n);
-    }
-
-    /// Handle DECSC — save the current cursor position, SGR state, and character set.
-    pub fn handle_save_cursor(&mut self) {
-        self.buffer.save_cursor();
-        self.saved_character_replace = Some(self.character_replace.clone());
-    }
-
-    /// Handle DECRC — restore the cursor position, SGR state, and character set saved by the most recent DECSC.
-    pub fn handle_restore_cursor(&mut self) {
-        self.buffer.restore_cursor();
-        if let Some(saved) = &self.saved_character_replace {
-            self.character_replace = saved.clone();
-        }
-    }
-
-    /// Handle ICH (Insert Characters) — insert `n` blank spaces at the cursor column, shifting existing characters right.
-    pub fn handle_insert_spaces(&mut self, n: usize) {
-        self.buffer.insert_spaces(n);
-    }
-
-    /// Handle set top and bottom margins (DECSTBM)
-    ///
-    /// `top` and `bottom` are **1-based inclusive** row numbers, exactly as the
-    /// ANSI parser delivers them.  `Buffer::set_scroll_region` already converts
-    /// 1-based → 0-based internally, so we must NOT subtract here.
-    pub fn handle_set_scroll_region(&mut self, top: usize, bottom: usize) {
-        self.buffer.set_scroll_region(top, bottom);
-    }
-
-    /// Set DECSLRM left/right margins.
-    ///
-    /// `left` and `right` are **1-based inclusive** column numbers as delivered
-    /// by the parser.  Only effective when DECLRMM (`?69`) is active.
-    pub fn handle_set_left_right_margins(&mut self, left: usize, right: usize) {
-        if self.buffer.is_declrmm_enabled() == Declrmm::Enabled {
-            self.buffer.set_left_right_margins(left, right);
-        }
-    }
-
-    /// Handle IND — Index: move cursor down one row, scrolling the scroll region up if at the bottom margin.
-    pub fn handle_index(&mut self) {
-        self.buffer.handle_ind();
-    }
-
-    /// Handle RI — Reverse Index: move cursor up one row, scrolling the scroll region down if at the top margin.
-    pub fn handle_reverse_index(&mut self) {
-        self.buffer.handle_ri();
-    }
-
-    /// Handle NEL — Next Line: perform a carriage return followed by an index (move to start of next line).
-    pub fn handle_next_line(&mut self) {
-        self.buffer.handle_nel();
-    }
-
-    /// Handle SU — Scroll Up `n` lines within the scroll region.
-    /// Content moves up; blank lines appear at the bottom of the region.
-    pub fn handle_scroll_up(&mut self, n: usize) {
-        self.buffer.scroll_region_up_n(n);
-    }
-
-    /// Handle SD — Scroll Down `n` lines within the scroll region.
-    /// Content moves down; blank lines appear at the top of the region.
-    pub fn handle_scroll_down(&mut self, n: usize) {
-        self.buffer.scroll_region_down_n(n);
-    }
-
     /// Update format tag directly
     pub fn set_format(&mut self, format: FormatTag) {
         self.current_format = format.clone();
         self.buffer.set_format(format);
     }
 
-    /// Handle entering alternate screen
-    pub fn handle_enter_alternate(&mut self) {
-        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
-        // always passes 0 when entering the alternate screen.
-        self.buffer.enter_alternate(0);
-        // Save and reset the KKP stack — the spec requires main and alternate
-        // screens to maintain independent keyboard mode stacks.
-        self.saved_kitty_keyboard_stack = Some(std::mem::take(&mut self.kitty_keyboard_stack));
-    }
-
-    /// Handle leaving alternate screen
-    pub fn handle_leave_alternate(&mut self) {
-        // Returns the saved scroll_offset from the primary screen; discarded here
-        // because scroll_offset is owned by ViewState on the GUI side.
-        let _restored_offset = self.buffer.leave_alternate();
-        // Restore the main-screen KKP stack.
-        if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
-            self.kitty_keyboard_stack = saved;
-        }
-    }
-
-    /// Handle DECAWM — enable or disable soft-wrapping.
-    pub const fn handle_set_wrap(&mut self, mode: Decawm) {
-        self.buffer.set_wrap(mode);
-    }
-
-    /// Return `true` when the cursor should be painted.
-    #[must_use]
-    pub const fn show_cursor(&self) -> bool {
-        matches!(self.show_cursor, Dectcem::Show)
-    }
-
-    /// Return the current cursor shape / blink style.
-    #[must_use]
-    pub fn cursor_visual_style(&self) -> CursorVisualStyle {
-        self.cursor_visual_style.clone()
-    }
-
-    /// Apply an `XtCBlink` blink-mode change to the current `cursor_visual_style`.
-    ///
-    /// Flips between the blinking and steady variants of whichever shape is active,
-    /// matching the behaviour of the old buffer's `set_mode` handler.
-    fn apply_xtcblink(&mut self, blink: &XtCBlink) {
-        match blink {
-            XtCBlink::Blinking => {
-                self.cursor_visual_style = match self.cursor_visual_style {
-                    CursorVisualStyle::BlockCursorSteady => CursorVisualStyle::BlockCursorBlink,
-                    CursorVisualStyle::UnderlineCursorSteady => {
-                        CursorVisualStyle::UnderlineCursorBlink
-                    }
-                    CursorVisualStyle::VerticalLineCursorSteady => {
-                        CursorVisualStyle::VerticalLineCursorBlink
-                    }
-                    // Already blinking — leave unchanged.
-                    ref other => other.clone(),
-                };
-            }
-            XtCBlink::Steady => {
-                self.cursor_visual_style = match self.cursor_visual_style {
-                    CursorVisualStyle::BlockCursorBlink => CursorVisualStyle::BlockCursorSteady,
-                    CursorVisualStyle::UnderlineCursorBlink => {
-                        CursorVisualStyle::UnderlineCursorSteady
-                    }
-                    CursorVisualStyle::VerticalLineCursorBlink => {
-                        CursorVisualStyle::VerticalLineCursorSteady
-                    }
-                    // Already steady — leave unchanged.
-                    ref other => other.clone(),
-                };
-            }
-            // Query is handled at the Mode dispatch level, not here.
-            XtCBlink::Query => {}
-        }
-    }
-
-    /// Handle LNM — enable or disable Line Feed Mode.
-    pub const fn handle_set_lnm(&mut self, mode: Lnm) {
-        self.buffer.set_lnm(mode);
-    }
-
     /// Set the PTY write channel.  Once set, responses such as CPR and DA1
     /// will be sent through this channel rather than silently discarded.
     pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
         self.write_tx = Some(tx);
-    }
-
-    /// Drain and return all queued `WindowManipulation` commands.
-    pub fn take_window_commands(&mut self) -> Vec<WindowManipulation> {
-        std::mem::take(&mut self.window_commands)
     }
 
     /// Drain and return all queued raw-byte sequences from tmux passthrough
@@ -1062,387 +776,6 @@ impl TerminalHandler {
     #[must_use]
     pub fn kitty_keyboard_flags(&self) -> u32 {
         self.kitty_keyboard_stack.last().copied().unwrap_or(0)
-    }
-
-    /// Notify the PTY of a column-mode resize (DECCOLM).
-    ///
-    /// Sends a `PtyWrite::Resize` with the new width and the current height.
-    /// Pixel dimensions are set to 0 — the PTY thread will use the character
-    /// dimensions to compute the actual pixel size.
-    fn send_pty_resize(&self, new_width: usize) {
-        let height = self.buffer.terminal_height();
-        if let Some(tx) = &self.write_tx {
-            let size = FreminalTerminalSize {
-                width: new_width,
-                height,
-                pixel_width: 0,
-                pixel_height: 0,
-            };
-            if let Err(e) = tx.send(PtyWrite::Resize(size)) {
-                tracing::error!("Failed to send PTY resize: {e}");
-            }
-        }
-    }
-
-    /// Handle DA2 — Secondary Device Attributes.
-    /// Responds with `ESC [ > 65 ; 0 ; 0 c` (VT525, firmware 0, ROM 0).
-    pub fn handle_secondary_device_attributes(&mut self) {
-        tracing::debug!("DA2 query received");
-        self.write_csi_response(">65;0;0c");
-    }
-
-    /// Handle DA3 — Tertiary Device Attributes.
-    /// Responds with `DCS ! | 00000000 ST`.
-    /// This identifies Freminal with a fixed 8-digit hexadecimal unit ID.
-    pub fn handle_tertiary_device_attributes(&mut self) {
-        self.write_dcs_response("!|00000000");
-    }
-
-    /// Handle DECREQTPARM — Request Terminal Parameters.
-    ///
-    /// Sends `CSI <code> ; 1 ; 1 ; 120 ; 120 ; 1 ; 0 x` where `<code>` is
-    /// `2` for Ps=0 and `3` for Ps=1. Values chosen to represent:
-    /// - Parity: 1 (NONE)
-    /// - Bits: 1 (8-bit)
-    /// - Transmit speed: 120 (38400 baud)
-    /// - Receive speed: 120 (38400 baud)
-    /// - Clock multiplier: 1
-    /// - Flags: 0
-    pub fn handle_request_terminal_parameters(&mut self, ps: u8) {
-        // DECREQTPARM only defines Ps=0 and Ps=1.  The parser should have
-        // already validated this, but we defend against unexpected values.
-        let code = match ps {
-            0 => 2u8,
-            1 => 3u8,
-            _ => return,
-        };
-        self.write_csi_response(&format!("{code};1;1;120;120;1;0x"));
-    }
-
-    /// Handle `RequestDeviceNameAndVersion` — respond with Freminal's name and version.
-    ///
-    /// Responds with `DCS >|XTerm(Freminal <version>) ST` (7-bit) or the 8-bit
-    /// equivalent when S8C1T is active.
-    ///
-    /// The `XTerm(` prefix is intentional: tmux's XDA handler
-    /// (`tty_keys_extended_device_attributes` in `tty-keys.c`) matches the
-    /// payload against a small set of known prefixes to decide which terminal
-    /// feature sets to enable.  Without a recognised prefix tmux skips
-    /// `extkeys`, which means `modifyOtherKeys` (`\033[>4;2m`) is never sent
-    /// to Freminal and extended key sequences are not forwarded to programs
-    /// running inside tmux.  Prefixing with `XTerm(` causes tmux to apply the
-    /// `XTerm` feature set (which includes `extkeys`), fixing the issue.
-    pub fn handle_device_name_and_version(&mut self) {
-        let version = env!("CARGO_PKG_VERSION");
-        self.write_dcs_response(&format!(">|XTerm(Freminal {version})"));
-    }
-
-    /// Handle an APC (Application Program Command) sequence.
-    ///
-    /// Attempts to parse the data as a Kitty graphics command (`_G...`).
-    /// If it is not a Kitty graphics command, logs and ignores.
-    pub fn handle_application_program_command(&mut self, apc: &[u8]) {
-        match parse_kitty_graphics(apc) {
-            Ok(cmd) => self.handle_kitty_graphics(cmd),
-            Err(KittyParseError::NotKittyGraphics) => {
-                tracing::warn!(
-                    "APC received (not Kitty graphics, ignored): {}",
-                    String::from_utf8_lossy(apc)
-                );
-            }
-            Err(e) => {
-                tracing::warn!("Kitty graphics parse error: {e}");
-            }
-        }
-    }
-
-    /// Handle CPR — Cursor Position Report.
-    /// Responds with `CSI <row> ; <col> R` (1-indexed).
-    ///
-    /// Per DEC VT510: when DECOM is enabled, the reported row is relative to the
-    /// scroll region top margin.  When DECOM is disabled, it is relative to the
-    /// screen origin.
-    pub fn handle_cursor_report(&mut self) {
-        let screen_pos = self.buffer.get_cursor_screen_pos();
-        let x = screen_pos.x + 1;
-        let y = if self.buffer.is_decom_enabled() == Decom::OriginMode {
-            let (region_top, _) = self.buffer.scroll_region();
-            screen_pos.y.saturating_sub(region_top) + 1
-        } else {
-            screen_pos.y + 1
-        };
-        let body = format!("{y};{x}R");
-        self.write_csi_response(&body);
-    }
-
-    /// Handle DSR — Device Status Report (Ps=5).
-    /// Responds with `CSI 0 n` (device OK).
-    pub fn handle_device_status_report(&mut self) {
-        self.write_csi_response("0n");
-    }
-
-    /// Handle DSR ?996 — Color Theme Report.
-    /// Responds with `CSI ? 997 ; Ps n` where Ps = 1 (light) or 2 (dark).
-    /// Freminal's default background is dark (#45475a), so we report dark (2).
-    pub fn handle_color_theme_report(&mut self) {
-        // 1 = light, 2 = dark
-        self.write_csi_response("?997;2n");
-    }
-
-    /// Handle DA1 — Primary Device Attributes.
-    /// Responds with the capability string used by the old buffer (iTerm2 DA set).
-    pub fn handle_request_device_attributes(&mut self) {
-        tracing::debug!("DA1 query received");
-        if self.vt52_mode == Decanm::Vt52 {
-            // VT52 identify response: ESC / Z — not affected by S8C1T
-            self.write_to_pty("\x1b/Z");
-        } else {
-            self.write_csi_response("?65;1;2;4;6;17;18;22c");
-        }
-    }
-
-    /// Handle a `WindowManipulation` command.
-    ///
-    /// Report variants that can be answered from terminal state are handled
-    /// synchronously here via `write_to_pty` so the response reaches the PTY
-    /// in the same processing batch as DA1 and other inline responses.  This
-    /// is critical for applications (e.g. yazi) that use DA1 as a "fence" to
-    /// detect when all prior query responses have arrived.
-    ///
-    /// Variants that require GUI-side data (viewport position, window title,
-    /// clipboard, etc.) are deferred to `self.window_commands` for the GUI
-    /// thread to handle asynchronously.
-    fn handle_window_manipulation(&mut self, wm: &WindowManipulation) {
-        match wm {
-            WindowManipulation::ReportCharacterSizeInPixels => {
-                let w = self.cell_pixel_width;
-                let h = self.cell_pixel_height;
-                self.write_csi_response(&format!("6;{h};{w}t"));
-            }
-            WindowManipulation::ReportTerminalSizeInCharacters => {
-                let (width, height) = self.get_win_size();
-                self.write_csi_response(&format!("8;{height};{width}t"));
-            }
-            WindowManipulation::ReportRootWindowSizeInCharacters => {
-                let (width, height) = self.get_win_size();
-                self.write_csi_response(&format!("9;{height};{width}t"));
-            }
-            other => {
-                self.window_commands.push(other.clone());
-            }
-        }
-    }
-
-    /// Handle an OSC (Operating System Command) sequence.
-    ///
-    /// Ports the logic from `TerminalState::osc_response` in the old buffer.
-    pub fn handle_osc(&mut self, osc: &AnsiOscType) {
-        match osc {
-            // Hyperlink: OSC 8 ; params ; url ST  (start) / OSC 8 ; ; ST  (end)
-            AnsiOscType::Url(UrlResponse::Url(url)) => {
-                self.current_format.url = Some(Arc::new(Url {
-                    id: url.id.clone(),
-                    url: url.url.clone(),
-                }));
-                self.buffer.set_format(self.current_format.clone());
-            }
-            AnsiOscType::Url(UrlResponse::End) => {
-                self.current_format.url = None;
-                self.buffer.set_format(self.current_format.clone());
-            }
-
-            // Window title
-            AnsiOscType::SetTitleBar(title) => {
-                self.window_commands
-                    .push(WindowManipulation::SetTitleBarText(title.clone()));
-            }
-
-            // OSC 10/11/12 foreground/background/cursor color query, set, and reset.
-            AnsiOscType::RequestColorQueryBackground(_)
-            | AnsiOscType::RequestColorQueryForeground(_)
-            | AnsiOscType::RequestColorQueryCursor(_)
-            | AnsiOscType::ResetForegroundColor
-            | AnsiOscType::ResetBackgroundColor
-            | AnsiOscType::ResetCursorColor => {
-                self.handle_osc_fg_bg_color(osc);
-            }
-
-            // Remote host / CWD: OSC 7 ; file://hostname/path ST
-            AnsiOscType::RemoteHost(value) => {
-                self.current_working_directory = shell_integration::parse_osc7_uri(value);
-                if self.current_working_directory.is_none() {
-                    tracing::warn!("OSC 7: failed to parse URI: {value}");
-                } else {
-                    tracing::debug!("OSC 7: CWD set to {:?}", self.current_working_directory);
-                }
-            }
-            AnsiOscType::Ftcs(marker) => {
-                self.handle_osc_ftcs(marker);
-            }
-            AnsiOscType::ITerm2FileInline(data) => {
-                self.handle_iterm2_inline_image(data);
-            }
-            AnsiOscType::ITerm2MultipartBegin(data) => {
-                self.handle_iterm2_multipart_begin(data);
-            }
-            AnsiOscType::ITerm2FilePart(bytes) => {
-                self.handle_iterm2_file_part(bytes);
-            }
-            AnsiOscType::ITerm2FileEnd => {
-                self.handle_iterm2_file_end();
-            }
-            AnsiOscType::ITerm2Unknown => {
-                tracing::warn!("OSC 1337: unrecognised sub-command (ignored)");
-            }
-
-            // Clipboard: forward to GUI via window_commands
-            AnsiOscType::SetClipboard(sel, content) => {
-                self.window_commands.push(WindowManipulation::SetClipboard(
-                    sel.clone(),
-                    content.clone(),
-                ));
-            }
-            AnsiOscType::QueryClipboard(sel) => {
-                self.window_commands
-                    .push(WindowManipulation::QueryClipboard(sel.clone()));
-            }
-
-            // Palette manipulation: OSC 4 (set/query) and OSC 104 (reset)
-            AnsiOscType::SetPaletteColor(idx, r, g, b) => {
-                self.palette.set(*idx, *r, *g, *b);
-            }
-            AnsiOscType::QueryPaletteColor(idx) => {
-                let (r, g, b) = self.palette.get_rgb(*idx, self.theme);
-                let body = format!(
-                    "4;{idx};rgb:{:04x}/{:04x}/{:04x}",
-                    u16::from(r) * 257,
-                    u16::from(g) * 257,
-                    u16::from(b) * 257,
-                );
-                self.write_osc_response(&body);
-            }
-            AnsiOscType::ResetPaletteColor(Some(idx)) => {
-                self.palette.reset(*idx);
-            }
-            AnsiOscType::ResetPaletteColor(None) => {
-                self.palette.reset_all();
-            }
-
-            // OSC 22 — set pointer (mouse cursor) shape.
-            AnsiOscType::SetPointerShape(shape) => {
-                self.pointer_shape = *shape;
-            }
-
-            AnsiOscType::NoOp => {}
-        }
-    }
-
-    /// Handle an OSC 133 (FTCS) shell integration marker.
-    fn handle_osc_ftcs(&mut self, marker: &FtcsMarker) {
-        tracing::debug!("OSC 133 FTCS marker: {marker}");
-        match marker {
-            FtcsMarker::PromptStart => {
-                self.ftcs_state = FtcsState::InPrompt;
-                self.buffer.mark_prompt_row();
-            }
-            FtcsMarker::CommandStart => {
-                self.ftcs_state = FtcsState::InCommand;
-            }
-            FtcsMarker::OutputStart => {
-                self.ftcs_state = FtcsState::InOutput;
-            }
-            FtcsMarker::CommandFinished(exit_code) => {
-                self.last_exit_code = *exit_code;
-                self.ftcs_state = FtcsState::None;
-            }
-            FtcsMarker::PromptProperty(_kind) => {
-                // Prompt property is informational metadata — it annotates
-                // the type of the next prompt (initial, continuation, right)
-                // but does not change the FTCS state machine.
-            }
-        }
-    }
-
-    /// Resize the terminal grid to `width` × `height` characters.
-    ///
-    /// Also updates the stored pixel-per-cell dimensions used for building
-    /// `PtyWrite::Resize` payloads.  Zero values for the pixel dimensions are
-    /// ignored (the stored value is not overwritten).
-    ///
-    /// `scroll_offset` is **always `0`** here — it is owned by `ViewState` on
-    /// the GUI side.  The PTY thread never holds a scroll offset.  `set_size`
-    /// returns the post-reflow offset (which may differ when scrollback rows
-    /// are removed), but we discard it because the GUI's `ViewState` will
-    /// clamp its own offset the next time it sends a snapshot request.
-    ///
-    /// The underlying `Buffer::set_size` call triggers `reflow_to_width` when
-    /// the column count changes, and adjusts the row count by appending blank
-    /// rows or truncating from the live bottom when the height changes.
-    pub fn handle_resize(
-        &mut self,
-        width: usize,
-        height: usize,
-        cell_pixel_width: u32,
-        cell_pixel_height: u32,
-    ) {
-        let (old_width, old_height) = self.get_win_size();
-
-        if cell_pixel_width > 0 {
-            self.cell_pixel_width = cell_pixel_width;
-        }
-        if cell_pixel_height > 0 {
-            self.cell_pixel_height = cell_pixel_height;
-        }
-        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
-        // always passes 0 when resizing.
-        let _new_offset = self.buffer.set_size(width, height, 0);
-
-        if self.in_band_resize_enabled == InBandResizeMode::Set
-            && (old_width != width || old_height != height)
-        {
-            self.send_in_band_resize();
-        }
-    }
-
-    /// Send an in-band resize notification to the PTY.
-    /// Format: `CSI 48 ; height_chars ; width_chars ; height_pixels ; width_pixels t`
-    fn send_in_band_resize(&self) {
-        let (width, height) = self.get_win_size();
-        let Ok(width_u32) = u32::value_from(width) else {
-            return;
-        };
-        let Ok(height_u32) = u32::value_from(height) else {
-            return;
-        };
-        let px_w = width_u32 * self.cell_pixel_width;
-        let px_h = height_u32 * self.cell_pixel_height;
-        self.write_csi_response(&format!("48;{height_u32};{width_u32};{px_h};{px_w}t"));
-    }
-
-    /// Compute new `scroll_offset` after scrolling back by `lines`.
-    ///
-    /// The caller must pass the current offset and store the returned value
-    /// into `ViewState::scroll_offset`.
-    #[must_use]
-    pub fn handle_scroll_back(&self, scroll_offset: usize, lines: usize) -> usize {
-        self.buffer.scroll_back(scroll_offset, lines)
-    }
-
-    /// Compute new `scroll_offset` after scrolling forward by `lines`.
-    ///
-    /// The caller must pass the current offset and store the returned value
-    /// into `ViewState::scroll_offset`.
-    #[must_use]
-    pub fn handle_scroll_forward(&self, scroll_offset: usize, lines: usize) -> usize {
-        self.buffer.scroll_forward(scroll_offset, lines)
-    }
-
-    /// Returns 0 — the scroll offset for the live bottom view.
-    ///
-    /// The caller should store this into `ViewState::scroll_offset`.
-    #[must_use]
-    pub const fn handle_scroll_to_bottom() -> usize {
-        Buffer::scroll_to_bottom()
     }
 
     /// Return the complete GUI data set: visible and scrollback content as
@@ -2277,7 +1610,9 @@ mod tests {
     use freminal_common::{
         buffer_states::{
             fonts::{BlinkState, FontWeight},
+            osc::{AnsiOscType, UrlResponse},
             terminal_output::TerminalOutput,
+            url::Url,
         },
         colors::TerminalColor,
         sgr::SelectGraphicRendition,
