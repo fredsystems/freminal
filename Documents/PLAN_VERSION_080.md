@@ -148,18 +148,40 @@ with 22 `.map_err(|e| format!(...))` call sites.
   and the PTY consumer doc at `gui/pty.rs` 181–190). No additional
   documentation was required.
 
-#### 70.G — HIGH: Bounded Channels
+#### 70.G — DEFERRED: Bounded Channels
 
-Unbounded `crossbeam_channel` endpoints allow producers to exhaust memory before any
-backpressure is applied. Affected: `InputEvent` channel, recording writer channel, and any
-others discovered during audit.
+**Status:** deferred out of v0.8.0. The original framing of this subtask
+assumed unbounded channels were an unqualified memory-safety risk.
+A per-channel audit during 70.F showed the picture is more nuanced:
 
-- **70.G.1** — Replace unbounded channels with `bounded(N)` per endpoint. Size chosen per
-  channel's traffic profile (input: small ~64; recording: larger ~4096).
-- **70.G.2** — Choose a policy per channel: block briefly (input), or drop-with-counter and
-  log a throttled warning (recording). Expose drop counters via a debug overlay or logs.
-- **70.G.3** — Add a stress test that saturates each channel and confirms the drop / block
-  policy behaves as designed.
+- `pty_read_rx` is the only high-volume channel, and it is already
+  backpressured by the OS PTY pipe buffer. Bounding it with `block`
+  duplicates kernel behavior; bounding it with `drop` would corrupt
+  terminal output (lost bytes mid escape sequence). Neither is
+  desirable.
+- `input_rx` and `window_cmd_rx` are low-volume GUI→PTY and PTY→GUI
+  channels. Bounding is safe but the realistic queue depth is in the
+  single digits; the correctness and perf risk of a bad bound outweighs
+  the speculative memory benefit.
+- The recording writer channel is the only place where drop-on-overflow
+  is semantically acceptable (recording is diagnostic). This is worth
+  bounding eventually but is not a v0.8.0 correctness gate.
+
+Before taking action we want real measurements of channel high-water
+depths across a fast Linux box, a constrained laptop, macOS, and
+Windows, under realistic workloads (`cat large_file`, `yes`,
+`find /`, recording on/off). Without that data any chosen bound is a
+guess.
+
+**Re-open criteria:** observed OOM or unbounded growth in production,
+OR the measurement pass above is completed and shows a real need.
+Until then, the existing unbounded channels are correct.
+
+Original subtasks preserved for reference (not to be executed now):
+
+- ~~70.G.1 — Replace unbounded channels with `bounded(N)` per endpoint.~~
+- ~~70.G.2 — Choose block vs drop-with-counter per channel.~~
+- ~~70.G.3 — Saturation stress test.~~
 
 #### 70.H — MEDIUM: Complete Cast Audit (Task 30 re-open)
 
