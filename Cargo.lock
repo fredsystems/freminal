@@ -1507,14 +1507,10 @@ dependencies = [
 name = "freminal-buffer"
 version = "0.8.0"
 dependencies = [
- "conv2",
  "criterion",
- "crossbeam-channel",
  "freminal-common",
- "image",
  "proptest",
  "test-log",
- "tracing",
  "vergen",
 ]
 
@@ -1550,6 +1546,7 @@ dependencies = [
  "crossbeam-channel",
  "freminal-buffer",
  "freminal-common",
+ "image",
  "nix",
  "portable-pty",
  "proptest",

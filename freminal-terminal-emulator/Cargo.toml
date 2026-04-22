@@ -27,6 +27,7 @@ freminal-buffer = { path = "../freminal-buffer" }
 rmp-serde.workspace = true
 serde.workspace = true
 freminal-common = { path = "../freminal-common" }
+image.workspace = true
 portable-pty = { path = "../portable-pty" }
 sys-locale.workspace = true
 tar.workspace = true

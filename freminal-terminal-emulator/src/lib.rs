@@ -49,6 +49,7 @@ pub mod io;
 pub mod recording;
 pub mod snapshot;
 pub mod state;
+pub mod terminal_handler;
 
 #[macro_use]
 extern crate tracing;

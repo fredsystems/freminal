@@ -17,7 +17,7 @@ use freminal_common::buffer_states::{
     modes::decsdm::Decsdm, modes::private_color_registers::PrivateColorRegisters,
 };
 
-use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
 
 use super::TerminalHandler;
 

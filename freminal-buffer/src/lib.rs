@@ -16,8 +16,6 @@
 //! - [`row::Row`] — a single row of terminal cells with wrapping metadata
 //! - [`cell::Cell`] — the smallest addressable unit; always valid (empty cells are
 //!   explicit)
-//! - [`terminal_handler::TerminalHandler`] — processes parsed terminal output and drives
-//!   buffer mutations
 
 #![deny(
     clippy::pedantic,
@@ -40,4 +38,3 @@ pub mod cell;
 pub mod image_store;
 pub mod response;
 pub mod row;
-pub mod terminal_handler;

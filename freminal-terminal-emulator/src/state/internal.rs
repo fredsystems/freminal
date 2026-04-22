@@ -41,7 +41,7 @@ use crate::{
     io::PtyWrite,
 };
 
-use freminal_buffer::terminal_handler::TerminalHandler as NewHandler;
+use crate::terminal_handler::TerminalHandler as NewHandler;
 
 /// Format the first `max_bytes` of `data` as a hex string for trace logging.
 ///

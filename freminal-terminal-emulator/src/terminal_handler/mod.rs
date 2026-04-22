@@ -57,8 +57,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::buffer::Buffer;
-use crate::image_store::{ImagePlacement, ImageProtocol};
+use freminal_buffer::buffer::Buffer;
+use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
 
 mod dcs;
 mod graphics_iterm2;
@@ -1522,7 +1522,7 @@ impl TerminalHandler {
     pub fn visible_image_placements(
         &self,
         scroll_offset: usize,
-    ) -> Vec<Option<crate::image_store::ImagePlacement>> {
+    ) -> Vec<Option<freminal_buffer::image_store::ImagePlacement>> {
         self.buffer.visible_image_placements(scroll_offset)
     }
 
@@ -2067,19 +2067,19 @@ impl TerminalHandler {
             }
             TerminalOutput::DoubleLineHeightTop => {
                 self.buffer
-                    .set_cursor_line_width(crate::row::LineWidth::DoubleHeightTop);
+                    .set_cursor_line_width(freminal_buffer::row::LineWidth::DoubleHeightTop);
             }
             TerminalOutput::DoubleLineHeightBottom => {
                 self.buffer
-                    .set_cursor_line_width(crate::row::LineWidth::DoubleHeightBottom);
+                    .set_cursor_line_width(freminal_buffer::row::LineWidth::DoubleHeightBottom);
             }
             TerminalOutput::SingleWidthLine => {
                 self.buffer
-                    .set_cursor_line_width(crate::row::LineWidth::Normal);
+                    .set_cursor_line_width(freminal_buffer::row::LineWidth::Normal);
             }
             TerminalOutput::DoubleWidthLine => {
                 self.buffer
-                    .set_cursor_line_width(crate::row::LineWidth::DoubleWidth);
+                    .set_cursor_line_width(freminal_buffer::row::LineWidth::DoubleWidth);
             }
             TerminalOutput::ScreenAlignmentTest => {
                 self.buffer.screen_alignment_test();
@@ -5034,7 +5034,7 @@ mod tests {
         );
 
         // Store an image in the image store so the placeholder can reference it
-        let img = crate::image_store::InlineImage {
+        let img = freminal_buffer::image_store::InlineImage {
             id: 1,
             pixels: std::sync::Arc::new(vec![0; 4]),
             width_px: 1,

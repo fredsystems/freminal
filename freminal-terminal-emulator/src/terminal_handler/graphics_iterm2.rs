@@ -17,7 +17,7 @@
 use conv2::ValueFrom;
 use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
 
-use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
 
 use super::{MultipartImageState, TerminalHandler};
 

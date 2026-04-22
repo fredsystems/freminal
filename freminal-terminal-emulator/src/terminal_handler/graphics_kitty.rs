@@ -25,7 +25,7 @@ use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, format_kitty_response,
 };
 
-use crate::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
 
 use super::KittyImageState;
 use super::TerminalHandler;
@@ -1138,11 +1138,11 @@ mod tests {
         );
 
         // No image cells should remain.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().get_rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(!has_image, "Delete all should clear image cells");
     }
 
@@ -1229,7 +1229,7 @@ mod tests {
         let row0_has_image = handler.buffer().get_rows()[0]
             .cells()
             .iter()
-            .any(crate::cell::Cell::has_image);
+            .any(freminal_buffer::cell::Cell::has_image);
         assert!(!row0_has_image, "AtCursor delete should clear row 0 images");
     }
 
@@ -1260,11 +1260,11 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         // All rows from cursor onward should have no image cells.
-        let any_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let any_image = handler.buffer().get_rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !any_image,
             "AtCursorAndAfter should clear all image cells from cursor onward"
@@ -1491,11 +1491,11 @@ mod tests {
         );
 
         // But NO image cells should be placed in the buffer.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().get_rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !has_image,
             "Virtual placement should NOT place image cells directly"
@@ -2167,11 +2167,11 @@ mod tests {
         handler.handle_kitty_graphics(put_cmd);
 
         // No image cells should be placed.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().get_rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !has_image,
             "Put for nonexistent image should not place cells"
@@ -2243,11 +2243,11 @@ mod tests {
         assert!(handler.buffer().image_store().get(42).is_some());
 
         // Should NOT be placed.
-        let has_image = handler
-            .buffer()
-            .get_rows()
-            .iter()
-            .any(|row| row.cells().iter().any(crate::cell::Cell::has_image));
+        let has_image = handler.buffer().get_rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
         assert!(
             !has_image,
             "Default action (None → Transmit) should not place image cells"
