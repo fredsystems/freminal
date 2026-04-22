@@ -35,20 +35,36 @@ impl FreminalGui {
                         )
                     {
                         for tab in win.tabs.iter() {
-                            if let Ok(panes) = tab.pane_tree.iter_panes() {
-                                for pane in panes {
-                                    send_or_log!(
-                                        pane.input_tx,
-                                        InputEvent::ThemeChange(theme),
-                                        "Failed to send ThemeChange to PTY thread"
+                            match tab.pane_tree.iter_panes() {
+                                Ok(panes) => {
+                                    for pane in panes {
+                                        send_or_log!(
+                                            pane.input_tx,
+                                            InputEvent::ThemeChange(theme),
+                                            "Failed to send ThemeChange to PTY thread"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "iter_panes() failed on tab during theme apply: {e}; \
+                                         skipping theme broadcast for this tab"
                                     );
                                 }
                             }
                         }
                         for tab in win.tabs.iter_mut() {
-                            if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
-                                for pane in panes {
-                                    pane.render_cache.invalidate_theme_cache();
+                            match tab.pane_tree.iter_panes_mut() {
+                                Ok(panes) => {
+                                    for pane in panes {
+                                        pane.render_cache.invalidate_theme_cache();
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "iter_panes_mut() failed on tab during theme \
+                                         cache invalidation: {e}; skipping this tab"
+                                    );
                                 }
                             }
                         }
@@ -77,11 +93,19 @@ impl FreminalGui {
                 let new_bg_path = self.config.ui.background_image.clone();
                 for win in self.windows.values() {
                     for tab in win.tabs.iter() {
-                        if let Ok(panes) = tab.pane_tree.iter_panes() {
-                            for pane in panes {
-                                if let Ok(mut rs) = pane.render_state.lock() {
-                                    rs.set_pending_bg_image(new_bg_path.clone());
+                        match tab.pane_tree.iter_panes() {
+                            Ok(panes) => {
+                                for pane in panes {
+                                    if let Ok(mut rs) = pane.render_state.lock() {
+                                        rs.set_pending_bg_image(new_bg_path.clone());
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "iter_panes() failed on tab during background \
+                                     image apply: {e}; skipping this tab"
+                                );
                             }
                         }
                     }
@@ -116,15 +140,23 @@ impl FreminalGui {
                 // Notify all panes of theme mode update.
                 for win in self.windows.values() {
                     for tab in win.tabs.iter() {
-                        if let Ok(panes) = tab.pane_tree.iter_panes() {
-                            for pane in panes {
-                                send_or_log!(
-                                    pane.input_tx,
-                                    InputEvent::ThemeModeUpdate(
-                                        self.config.theme.mode,
-                                        win.os_dark_mode,
-                                    ),
-                                    "Failed to send ThemeModeUpdate after settings apply"
+                        match tab.pane_tree.iter_panes() {
+                            Ok(panes) => {
+                                for pane in panes {
+                                    send_or_log!(
+                                        pane.input_tx,
+                                        InputEvent::ThemeModeUpdate(
+                                            self.config.theme.mode,
+                                            win.os_dark_mode,
+                                        ),
+                                        "Failed to send ThemeModeUpdate after settings apply"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "iter_panes() failed on tab during theme-mode \
+                                     broadcast: {e}; skipping this tab"
                                 );
                             }
                         }
@@ -148,12 +180,20 @@ impl FreminalGui {
                 // Send theme preview to all panes in all windows.
                 for win in self.windows.values() {
                     for tab in win.tabs.iter() {
-                        if let Ok(panes) = tab.pane_tree.iter_panes() {
-                            for pane in panes {
-                                send_or_log!(
-                                    pane.input_tx,
-                                    InputEvent::ThemeChange(theme),
-                                    "Failed to send theme preview to PTY thread"
+                        match tab.pane_tree.iter_panes() {
+                            Ok(panes) => {
+                                for pane in panes {
+                                    send_or_log!(
+                                        pane.input_tx,
+                                        InputEvent::ThemeChange(theme),
+                                        "Failed to send theme preview to PTY thread"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "iter_panes() failed on tab during theme \
+                                     preview: {e}; skipping this tab"
                                 );
                             }
                         }
@@ -168,12 +208,20 @@ impl FreminalGui {
             {
                 for win in self.windows.values() {
                     for tab in win.tabs.iter() {
-                        if let Ok(panes) = tab.pane_tree.iter_panes() {
-                            for pane in panes {
-                                send_or_log!(
-                                    pane.input_tx,
-                                    InputEvent::ThemeChange(theme),
-                                    "Failed to send theme revert to PTY thread"
+                        match tab.pane_tree.iter_panes() {
+                            Ok(panes) => {
+                                for pane in panes {
+                                    send_or_log!(
+                                        pane.input_tx,
+                                        InputEvent::ThemeChange(theme),
+                                        "Failed to send theme revert to PTY thread"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "iter_panes() failed on tab during theme \
+                                     revert: {e}; skipping this tab"
                                 );
                             }
                         }
