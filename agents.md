@@ -583,6 +583,31 @@ working around it.
 - Propose documentation changes before creating files
 - Avoid duplicating information already present
 
+### Escape Sequence Documentation
+
+Any change to the parser, terminal handler, or renderer that adds, removes, or alters support
+for an escape sequence (C0/C1, ESC, CSI, OSC, DCS, APC, DEC mode, standard mode, charset, or
+renderer-side consumption of a sequence) MUST update both:
+
+- `Documents/ESCAPE_SEQUENCE_COVERAGE.md` — the authoritative coverage table
+- `Documents/ESCAPE_SEQUENCE_GAPS.md` — the gap/roadmap document
+
+Checklist for every escape-sequence change:
+
+1. Update the relevant row in `ESCAPE_SEQUENCE_COVERAGE.md` (status icon, notes, task reference).
+2. Add or remove the corresponding row in `ESCAPE_SEQUENCE_GAPS.md`. If newly implemented,
+   remove the gap entry entirely. If newly discovered as unsupported, add it with an
+   Importance, Type, and Planned column entry.
+3. Populate the `Planned` column in `ESCAPE_SEQUENCE_GAPS.md` with the version/task that will
+   close the gap (e.g. `v0.9.0 Task 72`) or `—` if unscheduled.
+4. Update the "Last updated" header line in both files with the current date and a brief note
+   on which task(s) prompted the update.
+5. If the change affects the Specification Coverage Summary table in `ESCAPE_SEQUENCE_COVERAGE.md`,
+   update that row as well.
+
+These two documents are the source of truth for outside contributors judging terminal
+compatibility. Letting them drift is a correctness bug in the documentation itself.
+
 ---
 
 ## When to Stop
