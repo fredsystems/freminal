@@ -173,6 +173,11 @@ pub struct Pane {
     ///
     /// Each pane owns an independent `RenderState` so that panes can maintain
     /// their own GL state (VAOs, VBOs, atlas texture) without conflicts.
+    ///
+    /// The `Arc<Mutex<…>>` provides interior mutability for egui
+    /// `PaintCallback` captures — not cross-thread synchronisation. See
+    /// [`RenderState`](crate::gui::terminal::widget::RenderState) for
+    /// the full threading rationale.
     pub(crate) render_state: Arc<Mutex<RenderState>>,
 
     /// OS process ID of the PTY child shell for this pane.

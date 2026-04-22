@@ -59,6 +59,11 @@ pub(super) struct PerWindowState {
     ///
     /// Each window owns its own `WindowPostRenderer` so that pane
     /// `PaintCallback`s write into this window's FBO — not another window's.
+    ///
+    /// The `Arc<Mutex<…>>` wrapper is for GUI-thread interior mutability
+    /// inside `PaintCallback` captures, not cross-thread synchronisation —
+    /// this is only accessed on the GUI thread. See [`RenderState`]
+    /// (in `gui::terminal::widget`) for the full rationale.
     pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
 
     /// Shared repaint handle for this window's PTY threads.

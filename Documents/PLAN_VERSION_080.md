@@ -403,11 +403,17 @@ Task 29 is marked complete, but three files are still oversized:
 - **70.O.3** ✅ — `collect_text` now takes `&str` instead of `&String`; deref
   coercion makes this transparent at all non-test call sites. Two test sites
   updated to pass string literals directly.
-- **70.O.4** — Refactor `build_background_instances` to take a `BackgroundFrame` struct
-  rather than 20 positional parameters.
-- **70.O.5** — Add clarifying doc comments to the `Arc<Mutex<WindowPostRenderer>>` and
-  `Arc<Mutex<RenderState>>` sites explaining that these are GUI-thread-only and the `Mutex`
-  exists solely for interior mutability inside the `PaintCallback` Arc-sharing mechanism.
+- **70.O.4** ✅ — Refactored `build_background_instances` to take a
+  `BackgroundFrame<'a>` struct (17 fields grouped) instead of 18 positional
+  parameters. All 3 call sites updated; `clippy::too_many_arguments` allow
+  removed from the function.
+- **70.O.5** ✅ — Expanded doc comments on `RenderState` (authoritative site),
+  the pane `render_state` field in `gui::panes::Pane`, the window
+  `window_post` field in `gui::window::Window`, and the pane
+  `window_post` field in `RenderState`. Each now explicitly states that
+  the `Arc<Mutex<…>>` wrapper provides interior mutability for egui
+  `PaintCallback` captures rather than cross-thread synchronisation, and
+  that these types are GUI-thread-only in practice.
 
 ### 70 Verification
 

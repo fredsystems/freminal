@@ -524,9 +524,23 @@ pub(super) enum PendingGpuOp<T> {
 /// GPU resources shared between the main thread (vertex building) and the
 /// egui `PaintCallback` closure (draw calls).
 ///
-/// Wrapped in `Arc<Mutex<…>>` so that the pre-built vertex data can be
-/// written on the main thread and consumed inside the `PaintCallback`,
-/// which requires `Send + Sync + 'static` captures.
+/// ## Threading invariant
+///
+/// Despite the `Arc<Mutex<…>>` wrapper, `RenderState` is **GUI-thread-only**.
+/// It is never accessed from the PTY processing thread, the OS PTY reader
+/// thread, or any other background thread. The `Mutex` is not here to
+/// coordinate between threads — it exists purely for **interior mutability**:
+///
+/// - egui's `PaintCallback` requires captures to be `Send + Sync + 'static`,
+///   which forces ownership via `Arc`.
+/// - The vertex-building code (before the callback fires) and the draw code
+///   (inside the callback) both need `&mut` access to the same buffers.
+/// - Rust cannot prove the two accesses are disjoint through an `Arc`, so
+///   the `Mutex` provides the runtime `&mut` path.
+///
+/// In practice the lock is always uncontended: both the vertex builder and
+/// the paint callback run sequentially on the GUI thread within a single
+/// frame. If a second thread ever tries to lock this `Mutex`, that is a bug.
 pub struct RenderState {
     pub(super) renderer: TerminalRenderer,
     pub(super) atlas: GlyphAtlas,
@@ -559,6 +573,11 @@ pub struct RenderState {
     /// When a user GLSL shader is active, this pane's `PaintCallback` renders its
     /// terminal content into the window FBO.  A window-level `PaintCallback` registered
     /// after the pane loop applies the post pass to egui's framebuffer.
+    ///
+    /// As with [`RenderState`], the `Arc<Mutex<…>>` here provides interior
+    /// mutability for `PaintCallback` captures — not cross-thread
+    /// synchronisation. `WindowPostRenderer` is only ever touched on the
+    /// GUI thread.
     pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
     /// Pending background image load/clear to apply on the next `PaintCallback`.
     ///
