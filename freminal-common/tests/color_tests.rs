@@ -188,7 +188,8 @@ fn parse_all_valid_and_invalid_colors() {
 
     // Invalid input hits Err branch
     let err = TerminalColor::from_str("unknown_color").unwrap_err();
-    assert!(err.to_string().contains("Invalid color string"));
+    assert!(err.to_string().contains("invalid color name"));
+    assert!(err.to_string().contains("unknown_color"));
 }
 
 #[test]

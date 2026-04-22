@@ -6,7 +6,6 @@
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::{PtyRead, PtyWrite};
-use anyhow::Result;
 use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
@@ -28,12 +27,12 @@ use thiserror::Error;
 ///
 /// # Errors
 /// Returns an error if any dimension value exceeds `u16::MAX`.
-fn pty_size_from_terminal_size(value: &FreminalTerminalSize) -> Result<PtySize> {
+fn pty_size_from_terminal_size(value: &FreminalTerminalSize) -> Result<PtySize, PtyInitError> {
     Ok(PtySize {
-        rows: u16::value_from(value.height)?,
-        cols: u16::value_from(value.width)?,
-        pixel_width: u16::value_from(value.pixel_width)?,
-        pixel_height: u16::value_from(value.pixel_height)?,
+        rows: u16::value_from(value.height).map_err(PtyInitError::SizeConversion)?,
+        cols: u16::value_from(value.width).map_err(PtyInitError::SizeConversion)?,
+        pixel_width: u16::value_from(value.pixel_width).map_err(PtyInitError::SizeConversion)?,
+        pixel_height: u16::value_from(value.pixel_height).map_err(PtyInitError::SizeConversion)?,
     })
 }
 
@@ -236,7 +235,7 @@ pub fn run_terminal(
     spawn_cfg: PtySpawnConfig<'_>,
     termcaps: Option<&Path>,
     initial_size: &FreminalTerminalSize,
-) -> Result<RunTerminalResult> {
+) -> Result<RunTerminalResult, PtyInitError> {
     let PtySpawnConfig {
         command,
         shell,
@@ -256,12 +255,13 @@ pub fn run_terminal(
         )
         .map_err(|e| {
             error!("Failed to open pty: {e}");
-            e
+            PtyInitError::Spawn(e.to_string())
         })?;
 
     let mut cmd = if let Some((prog, args)) = command {
         let mut c = CommandBuilder::new(prog);
-        c.args(args)?;
+        c.args(args)
+            .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
         c
     } else {
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
@@ -365,7 +365,10 @@ pub fn run_terminal(
         }
     }
 
-    let mut child = pair.slave.spawn_command(cmd)?;
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
     let child_pid = child.process_id();
 
     // Release any handles owned by the slave: we don't need it now
@@ -395,7 +398,10 @@ pub fn run_terminal(
     // This is important because it is easy to encounter a situation
     // where read/write buffers fill and block either your process
     // or the spawned process.
-    let mut reader = pair.master.try_clone_reader()?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
 
     std::thread::spawn(move || {
         let buf = &mut [0u8; 4096];
@@ -543,7 +549,7 @@ impl FreminalPtyInputOutput {
         send_tx: Sender<PtyRead>,
         spawn_cfg: PtySpawnConfig<'_>,
         initial_size: &FreminalTerminalSize,
-    ) -> Result<Self> {
+    ) -> Result<Self, PtyInitError> {
         // don't use it.  Skip extraction entirely on Windows to avoid issues
         // with symlinks in the tarball requiring elevated privileges.
         let termcaps = if cfg!(target_os = "windows") {
@@ -551,7 +557,7 @@ impl FreminalPtyInputOutput {
         } else {
             Some(extract_terminfo().map_err(|e| {
                 error!("Failed to extract terminfo: {e}");
-                e
+                PtyInitError::ExtractTerminfo(e.to_string())
             })?)
         };
 

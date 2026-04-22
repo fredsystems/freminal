@@ -6,7 +6,6 @@
 use core::fmt;
 
 use crate::buffer_states::error::TCharError;
-use anyhow::Result;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum byte length of a UTF-8 grapheme that `TChar` can store inline.
@@ -77,12 +76,12 @@ impl TChar {
     /// # Errors
     /// Returns an error if the slice is empty or longer than
     /// [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn new_from_many_chars(v: &[u8]) -> Result<Self> {
+    pub fn new_from_many_chars(v: &[u8]) -> Result<Self, TCharError> {
         if v.is_empty() {
-            return Err(TCharError::EmptyTChar.into());
+            return Err(TCharError::EmptyTChar);
         }
         if v.len() > TCHAR_MAX_UTF8_LEN {
-            return Err(TCharError::TooLong(v.len()).into());
+            return Err(TCharError::TooLong(v.len()));
         }
         let mut buf = [0u8; TCHAR_MAX_UTF8_LEN];
         buf[..v.len()].copy_from_slice(v);
@@ -104,7 +103,7 @@ impl TChar {
     /// # Errors
     /// Returns an error if the slice is not valid UTF-8, or if any grapheme
     /// cluster exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn from_vec(v: &[u8]) -> Result<Vec<Self>> {
+    pub fn from_vec(v: &[u8]) -> Result<Vec<Self>, TCharError> {
         // Fast path: if every byte is ASCII (< 0x80), each byte is its own
         // grapheme cluster and we can skip unicode_segmentation entirely.
         if v.iter().all(|&b| b < 0x80) {
@@ -121,7 +120,7 @@ impl TChar {
     ///
     /// # Errors
     /// Returns an error if any grapheme exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn from_vec_of_graphemes(v: &[&str]) -> Result<Vec<Self>> {
+    pub fn from_vec_of_graphemes(v: &[&str]) -> Result<Vec<Self>, TCharError> {
         v.iter()
             .map(|s| {
                 Ok(if s.len() == 1 {
@@ -130,7 +129,7 @@ impl TChar {
                     Self::new_from_many_chars(s.as_bytes())?
                 })
             })
-            .collect::<Result<Vec<Self>>>()
+            .collect::<Result<Vec<Self>, TCharError>>()
     }
 
     /// Convert a string to a vector of `TChar` by splitting on grapheme
@@ -138,7 +137,7 @@ impl TChar {
     ///
     /// # Errors
     /// Returns an error if any grapheme exceeds [`TCHAR_MAX_UTF8_LEN`] bytes.
-    pub fn from_string(s: &str) -> Result<Vec<Self>> {
+    pub fn from_string(s: &str) -> Result<Vec<Self>, TCharError> {
         // Fast path: if the string is pure ASCII, each byte is one grapheme.
         if s.is_ascii() {
             return Ok(s.bytes().map(Self::new_from_single_char).collect());
@@ -155,7 +154,7 @@ impl TChar {
                     Self::new_from_many_chars(s.as_bytes())?
                 })
             })
-            .collect::<Result<Vec<Self>>>()
+            .collect::<Result<Vec<Self>, TCharError>>()
     }
 }
 
@@ -183,9 +182,9 @@ impl From<char> for TChar {
 }
 
 impl TryFrom<&[u8]> for TChar {
-    type Error = anyhow::Error;
+    type Error = TCharError;
 
-    fn try_from(v: &[u8]) -> Result<Self> {
+    fn try_from(v: &[u8]) -> Result<Self, TCharError> {
         Self::new_from_many_chars(v)
     }
 }

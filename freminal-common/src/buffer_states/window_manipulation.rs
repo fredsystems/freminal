@@ -3,7 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use anyhow::Result;
 use thiserror::Error;
 
 /// Errors produced when converting a raw `(Ps1, Ps2, Ps3)` XTWINOPS parameter
@@ -102,9 +101,11 @@ pub enum WindowManipulation {
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {
-    type Error = anyhow::Error;
+    type Error = WindowManipulationError;
 
-    fn try_from((command, param_ps2, param_ps3): (usize, usize, usize)) -> Result<Self> {
+    fn try_from(
+        (command, param_ps2, param_ps3): (usize, usize, usize),
+    ) -> Result<Self, WindowManipulationError> {
         match (command, param_ps2, param_ps3) {
             (1, _, _) => Ok(Self::DeIconifyWindow),
             (2, _, _) => Ok(Self::MinimizeWindow),
@@ -133,7 +134,11 @@ impl TryFrom<(usize, usize, usize)> for WindowManipulation {
             (22, 0..=2, _) => Ok(Self::SaveWindowTitleToStack),
             (23, 0..=2, _) => Ok(Self::RestoreWindowTitleFromStack),
             (24, 0..=2, _) => Ok(Self::SetTitleBarText(String::new())),
-            _ => Err(anyhow::anyhow!("Invalid WindowManipulation")),
+            _ => Err(WindowManipulationError::UnrecognizedCommand {
+                command,
+                param_ps2,
+                param_ps3,
+            }),
         }
     }
 }

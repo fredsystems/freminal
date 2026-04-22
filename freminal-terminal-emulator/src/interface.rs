@@ -50,11 +50,11 @@ pub use crate::input::{
 
 use conv2::ValueFrom;
 
+use crate::error::InterfaceError;
 use crate::io::{FreminalPtyInputOutput, PtySpawnConfig};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
-use anyhow::Result;
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
@@ -245,7 +245,7 @@ impl TerminalEmulator {
         cwd: Option<&Path>,
         extra_env: Option<&std::collections::HashMap<String, String>>,
         shell_override: Option<&str>,
-    ) -> Result<(Self, Receiver<PtyRead>)> {
+    ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
 
@@ -380,7 +380,7 @@ impl TerminalEmulator {
         height_chars: usize,
         font_pixel_width: usize,
         font_pixel_height: usize,
-    ) -> Result<()> {
+    ) -> Result<(), InterfaceError> {
         let (old_width, old_height) = self.internal.get_win_size();
         self.internal.set_win_size(
             width_chars,
@@ -391,12 +391,14 @@ impl TerminalEmulator {
 
         if old_width != width_chars || old_height != height_chars {
             // TIOCGWINSZ expects total window pixel dimensions, not per-cell.
-            self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
-                width: width_chars,
-                height: height_chars,
-                pixel_width: font_pixel_width.saturating_mul(width_chars),
-                pixel_height: font_pixel_height.saturating_mul(height_chars),
-            }))?;
+            self.write_tx
+                .send(PtyWrite::Resize(FreminalTerminalSize {
+                    width: width_chars,
+                    height: height_chars,
+                    pixel_width: font_pixel_width.saturating_mul(width_chars),
+                    pixel_height: font_pixel_height.saturating_mul(height_chars),
+                }))
+                .map_err(|e| InterfaceError::PtySendFailed(e.to_string()))?;
         }
 
         Ok(())
@@ -461,8 +463,10 @@ impl TerminalEmulator {
     ///
     /// # Errors
     /// Will error if the terminal cannot be locked
-    pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
-        self.internal.write(to_write)
+    pub fn write(&self, to_write: &TerminalInput) -> Result<(), InterfaceError> {
+        self.internal
+            .write(to_write)
+            .map_err(|e| InterfaceError::PtySendFailed(e.to_string()))
     }
 
     /// Write raw bytes directly to the PTY write channel.
@@ -473,10 +477,10 @@ impl TerminalEmulator {
     ///
     /// # Errors
     /// Returns an error if the send to the PTY write channel fails.
-    pub fn write_raw_bytes(&self, bytes: &[u8]) -> Result<()> {
+    pub fn write_raw_bytes(&self, bytes: &[u8]) -> Result<(), InterfaceError> {
         self.write_tx
             .send(PtyWrite::Write(bytes.to_vec()))
-            .map_err(|e| anyhow::anyhow!("Failed to send raw bytes to PTY: {e}"))
+            .map_err(|e| InterfaceError::PtySendFailed(format!("write_raw_bytes: {e}")))
     }
 
     /// Return a shared handle to the atomic flag that tracks whether the PTY

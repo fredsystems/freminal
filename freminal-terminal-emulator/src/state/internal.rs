@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use anyhow::Result;
+use crate::error::InternalStateError;
 use freminal_common::{
     buffer_states::{
         cursor::CursorPos,
@@ -647,7 +647,7 @@ impl TerminalState {
     ///
     /// # Errors
     /// Will return an error if the write fails
-    pub fn write(&self, to_write: &TerminalInput) -> Result<()> {
+    pub fn write(&self, to_write: &TerminalInput) -> Result<(), InternalStateError> {
         let decckm = self.get_cursor_key_mode();
         let keypad_app = self.modes.keypad_mode;
         let modify_other_keys = self.handler.modify_other_keys_level();
@@ -666,13 +666,19 @@ impl TerminalState {
             &KeyEventMeta::PRESS,
         ) {
             TerminalInputPayload::Single(c) => {
-                self.write_tx.send(PtyWrite::Write(vec![c]))?;
+                self.write_tx
+                    .send(PtyWrite::Write(vec![c]))
+                    .map_err(|e| InternalStateError::PtySendFailed(e.to_string()))?;
             }
             TerminalInputPayload::Many(to_write) => {
-                self.write_tx.send(PtyWrite::Write(to_write.to_vec()))?;
+                self.write_tx
+                    .send(PtyWrite::Write(to_write.to_vec()))
+                    .map_err(|e| InternalStateError::PtySendFailed(e.to_string()))?;
             }
             TerminalInputPayload::Owned(bytes) => {
-                self.write_tx.send(PtyWrite::Write(bytes))?;
+                self.write_tx
+                    .send(PtyWrite::Write(bytes))
+                    .map_err(|e| InternalStateError::PtySendFailed(e.to_string()))?;
             }
         }
 
