@@ -487,11 +487,16 @@ fn dispatch_context_menu_action(
         }
         ContextMenuAction::OpenUrl(url) => {
             let url_str = url;
-            std::thread::spawn(move || {
-                if let Err(e) = open::that(&url_str) {
-                    error!("Failed to open URL {url_str}: {e}");
-                }
-            });
+            if let Err(e) = std::thread::Builder::new()
+                .name("freminal-open-url".to_string())
+                .spawn(move || {
+                    if let Err(e) = open::that(&url_str) {
+                        error!("Failed to open URL {url_str}: {e}");
+                    }
+                })
+            {
+                error!("Failed to spawn URL-open thread: {e}");
+            }
         }
         ContextMenuAction::NewTerminal => {
             deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
@@ -1805,11 +1810,16 @@ impl FreminalTerminalWidget {
                     });
                     if clicked {
                         let url_str = url.url.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = open::that(&url_str) {
-                                error!("Failed to open URL {url_str}: {e}");
-                            }
-                        });
+                        if let Err(e) = std::thread::Builder::new()
+                            .name("freminal-open-url".to_string())
+                            .spawn(move || {
+                                if let Err(e) = open::that(&url_str) {
+                                    error!("Failed to open URL {url_str}: {e}");
+                                }
+                            })
+                        {
+                            error!("Failed to spawn URL-open thread: {e}");
+                        }
                     }
                 }
             } else {

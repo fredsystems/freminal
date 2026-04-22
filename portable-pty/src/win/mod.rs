@@ -197,12 +197,17 @@ impl std::future::Future for WinChild {
                     let handle = PassRawHandleToWaiterThread(proc.as_raw_handle());
 
                     let waker = cx.waker().clone();
-                    std::thread::spawn(move || {
-                        unsafe {
-                            WaitForSingleObject(handle.0 as _, INFINITE);
-                        }
-                        waker.wake();
-                    });
+                    if let Err(e) = std::thread::Builder::new()
+                        .name("freminal-win-proc-waiter".to_string())
+                        .spawn(move || {
+                            unsafe {
+                                WaitForSingleObject(handle.0 as _, INFINITE);
+                            }
+                            waker.wake();
+                        })
+                    {
+                        log::error!("Failed to spawn Windows process-exit waiter: {e}");
+                    }
                 }
                 Poll::Pending
             }

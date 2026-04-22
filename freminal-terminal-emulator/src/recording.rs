@@ -786,7 +786,7 @@ pub fn start_recording(
     };
 
     let join_handle = std::thread::Builder::new()
-        .name("frec-writer".to_string())
+        .name("freminal-recording-writer".to_string())
         .spawn(move || thread.run(&metadata))
         .map_err(|e| RecordingError::Io(std::io::Error::other(e)))?;
 

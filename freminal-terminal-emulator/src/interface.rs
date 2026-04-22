@@ -245,6 +245,7 @@ impl TerminalEmulator {
         cwd: Option<&Path>,
         extra_env: Option<&std::collections::HashMap<String, String>>,
         shell_override: Option<&str>,
+        pane_id: u32,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
@@ -280,6 +281,7 @@ impl TerminalEmulator {
                 extra_env,
             },
             &initial_size,
+            pane_id,
         )?;
 
         if let Err(e) = write_tx.send(PtyWrite::Resize(initial_size)) {

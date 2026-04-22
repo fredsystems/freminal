@@ -125,6 +125,7 @@ pub fn spawn_pty_tab(
         tab_cfg.cwd,
         tab_cfg.extra_env,
         tab_cfg.shell_override,
+        tab_cfg.recording_pane_id,
     )?;
 
     // Apply the configured theme so all snapshots carry the correct palette.
@@ -205,132 +206,161 @@ fn spawn_pty_consumer_thread(
     recording_handle: Option<RecordingHandle>,
     recording_pane_id: u32,
 ) {
-    std::thread::spawn(move || {
-        let mut emulator = terminal;
+    let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
+    if let Err(e) = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let mut emulator = terminal;
 
-        let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
+            let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
-        // Helper closure: drain window commands, publish snapshot, request repaint.
-        let post_event =
-            |emulator: &mut TerminalEmulator,
-             window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
-             arc_swap: &ArcSwap<TerminalSnapshot>,
-             repaint_handle: &OnceLock<(RepaintProxy, WindowId)>| {
-                let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
-                for cmd in cmds {
-                    let wc = match &cmd {
-                        WindowManipulation::ReportWindowState
-                        | WindowManipulation::ReportWindowPositionWholeWindow
-                        | WindowManipulation::ReportWindowPositionTextArea
-                        | WindowManipulation::ReportWindowSizeInPixels
-                        | WindowManipulation::ReportWindowTextAreaSizeInPixels
-                        | WindowManipulation::ReportRootWindowSizeInPixels
-                        | WindowManipulation::ReportIconLabel
-                        | WindowManipulation::ReportTitle
-                        | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
-                        _ => WindowCommand::Viewport(cmd),
-                    };
-                    if let Err(e) = window_cmd_tx.send(wc) {
-                        error!("Failed to send window command to GUI: {e}");
-                    }
-                }
-
-                let snap = emulator.build_snapshot();
-                arc_swap.store(Arc::new(snap));
-
-                if let Some((proxy, wid)) = repaint_handle.get() {
-                    proxy.request_repaint_after(*wid, std::time::Duration::from_millis(8));
-                }
-            };
-
-        // Helper closure: process a single InputEvent.
-        let handle_input = |emulator: &mut TerminalEmulator,
-                            msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
-                            clipboard_tx: &crossbeam_channel::Sender<String>,
-                            search_buffer_tx: &crossbeam_channel::Sender<(usize, Vec<TChar>)>|
-         -> bool {
-            match msg {
-                Ok(InputEvent::Resize(w, h, pw, ph)) => {
-                    if let Some(ref rec) = recording_handle {
-                        rec.emit(EventPayload::PaneResize {
-                            pane_id: recording_pane_id,
-                            cols: w.try_into().unwrap_or(u32::MAX),
-                            rows: h.try_into().unwrap_or(u32::MAX),
-                        });
-                    }
-                    emulator.handle_resize_event(w, h, pw, ph);
-                }
-                Ok(InputEvent::Key(bytes)) => {
-                    if let Err(e) = emulator.write_raw_bytes(&bytes) {
-                        error!("Failed to forward key bytes to PTY: {e}");
-                    }
-                    if let Some(ref rec) = recording_handle {
-                        rec.emit(EventPayload::PtyInput {
-                            pane_id: recording_pane_id,
-                            data: bytes,
-                        });
-                    }
-                }
-                Ok(InputEvent::FocusChange(focused)) => {
-                    emulator.internal.send_focus_event(focused);
-                }
-                Ok(InputEvent::ScrollOffset(offset)) => {
-                    emulator.set_gui_scroll_offset(offset);
-                }
-                Ok(InputEvent::ThemeChange(theme)) => {
-                    emulator.internal.handler.set_theme(theme);
-                }
-                Ok(InputEvent::ThemeModeUpdate(theme_mode, os_is_dark)) => {
-                    emulator.internal.modes.theme_mode = theme_mode;
-                    // Sync the live theming state to match the OS preference
-                    // so that ?2031 queries reflect reality immediately.
-                    if os_is_dark {
-                        emulator.internal.modes.theming = Theming::Dark;
-                    } else {
-                        emulator.internal.modes.theming = Theming::Light;
-                    }
-                }
-                Ok(InputEvent::ExtractSelection {
-                    start_row,
-                    start_col,
-                    end_row,
-                    end_col,
-                    is_block,
-                }) => {
-                    let text = emulator
-                        .extract_selection_text(start_row, start_col, end_row, end_col, is_block);
-                    let _ = clipboard_tx.send(text);
-                }
-                Ok(InputEvent::RequestSearchBuffer) => {
-                    let (chars, _tags) = emulator.internal.handler.data_and_format_data_for_gui(0);
-                    let mut combined = chars.scrollback;
-                    combined.extend(chars.visible);
-                    let total_rows = emulator.internal.handler.buffer().get_rows().len();
-                    let _ = search_buffer_tx.send((total_rows, combined));
-                }
-                Err(_) => {
-                    info!("Input channel closed; consumer thread exiting");
-                    return false;
-                }
-            }
-            true
-        };
-
-        // Primary loop: service PTY reads, GUI input events, and child-exit signals.
-        loop {
-            crossbeam_channel::select! {
-                recv(pty_read_rx) -> msg => {
-                    if let Ok(read) = msg {
-                        let data = &read.buf[0..read.read_amount];
-                        if let Some(ref rec) = recording_handle {
-                            rec.emit(EventPayload::PtyOutput {
-                                pane_id: recording_pane_id,
-                                data: data.to_vec(),
-                            });
+            // Helper closure: drain window commands, publish snapshot, request repaint.
+            let post_event =
+                |emulator: &mut TerminalEmulator,
+                 window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
+                 arc_swap: &ArcSwap<TerminalSnapshot>,
+                 repaint_handle: &OnceLock<(RepaintProxy, WindowId)>| {
+                    let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
+                    for cmd in cmds {
+                        let wc = match &cmd {
+                            WindowManipulation::ReportWindowState
+                            | WindowManipulation::ReportWindowPositionWholeWindow
+                            | WindowManipulation::ReportWindowPositionTextArea
+                            | WindowManipulation::ReportWindowSizeInPixels
+                            | WindowManipulation::ReportWindowTextAreaSizeInPixels
+                            | WindowManipulation::ReportRootWindowSizeInPixels
+                            | WindowManipulation::ReportIconLabel
+                            | WindowManipulation::ReportTitle
+                            | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
+                            _ => WindowCommand::Viewport(cmd),
+                        };
+                        if let Err(e) = window_cmd_tx.send(wc) {
+                            error!("Failed to send window command to GUI: {e}");
                         }
-                        emulator.handle_incoming_data(data);
-                    } else {
-                        info!("PTY read channel closed; signaling tab death");
+                    }
+
+                    let snap = emulator.build_snapshot();
+                    arc_swap.store(Arc::new(snap));
+
+                    if let Some((proxy, wid)) = repaint_handle.get() {
+                        proxy.request_repaint_after(*wid, std::time::Duration::from_millis(8));
+                    }
+                };
+
+            // Helper closure: process a single InputEvent.
+            let handle_input =
+                |emulator: &mut TerminalEmulator,
+                 msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
+                 clipboard_tx: &crossbeam_channel::Sender<String>,
+                 search_buffer_tx: &crossbeam_channel::Sender<(usize, Vec<TChar>)>|
+                 -> bool {
+                    match msg {
+                        Ok(InputEvent::Resize(w, h, pw, ph)) => {
+                            if let Some(ref rec) = recording_handle {
+                                rec.emit(EventPayload::PaneResize {
+                                    pane_id: recording_pane_id,
+                                    cols: w.try_into().unwrap_or(u32::MAX),
+                                    rows: h.try_into().unwrap_or(u32::MAX),
+                                });
+                            }
+                            emulator.handle_resize_event(w, h, pw, ph);
+                        }
+                        Ok(InputEvent::Key(bytes)) => {
+                            if let Err(e) = emulator.write_raw_bytes(&bytes) {
+                                error!("Failed to forward key bytes to PTY: {e}");
+                            }
+                            if let Some(ref rec) = recording_handle {
+                                rec.emit(EventPayload::PtyInput {
+                                    pane_id: recording_pane_id,
+                                    data: bytes,
+                                });
+                            }
+                        }
+                        Ok(InputEvent::FocusChange(focused)) => {
+                            emulator.internal.send_focus_event(focused);
+                        }
+                        Ok(InputEvent::ScrollOffset(offset)) => {
+                            emulator.set_gui_scroll_offset(offset);
+                        }
+                        Ok(InputEvent::ThemeChange(theme)) => {
+                            emulator.internal.handler.set_theme(theme);
+                        }
+                        Ok(InputEvent::ThemeModeUpdate(theme_mode, os_is_dark)) => {
+                            emulator.internal.modes.theme_mode = theme_mode;
+                            // Sync the live theming state to match the OS preference
+                            // so that ?2031 queries reflect reality immediately.
+                            if os_is_dark {
+                                emulator.internal.modes.theming = Theming::Dark;
+                            } else {
+                                emulator.internal.modes.theming = Theming::Light;
+                            }
+                        }
+                        Ok(InputEvent::ExtractSelection {
+                            start_row,
+                            start_col,
+                            end_row,
+                            end_col,
+                            is_block,
+                        }) => {
+                            let text = emulator.extract_selection_text(
+                                start_row, start_col, end_row, end_col, is_block,
+                            );
+                            let _ = clipboard_tx.send(text);
+                        }
+                        Ok(InputEvent::RequestSearchBuffer) => {
+                            let (chars, _tags) =
+                                emulator.internal.handler.data_and_format_data_for_gui(0);
+                            let mut combined = chars.scrollback;
+                            combined.extend(chars.visible);
+                            let total_rows = emulator.internal.handler.buffer().get_rows().len();
+                            let _ = search_buffer_tx.send((total_rows, combined));
+                        }
+                        Err(_) => {
+                            info!("Input channel closed; consumer thread exiting");
+                            return false;
+                        }
+                    }
+                    true
+                };
+
+            // Primary loop: service PTY reads, GUI input events, and child-exit signals.
+            loop {
+                crossbeam_channel::select! {
+                    recv(pty_read_rx) -> msg => {
+                        if let Ok(read) = msg {
+                            let data = &read.buf[0..read.read_amount];
+                            if let Some(ref rec) = recording_handle {
+                                rec.emit(EventPayload::PtyOutput {
+                                    pane_id: recording_pane_id,
+                                    data: data.to_vec(),
+                                });
+                            }
+                            emulator.handle_incoming_data(data);
+                        } else {
+                            info!("PTY read channel closed; signaling tab death");
+                            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
+                            let _ = pty_dead_tx.send(());
+                            if let Some((proxy, wid)) = repaint_handle.get() {
+                                proxy.request_repaint(*wid);
+                            }
+                            return;
+                        }
+                    }
+                    recv(input_rx) -> msg => {
+                        if !handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
+                            return;
+                        }
+                    }
+                    recv(child_exit) -> _ => {
+                        info!("Child process exited; draining remaining PTY output");
+                        let drain_deadline = std::time::Duration::from_millis(200);
+                        while let Ok(read) = pty_read_rx.recv_timeout(drain_deadline) {
+                            emulator.handle_incoming_data(
+                                &read.buf[0..read.read_amount],
+                            );
+                        }
+
+                        info!("PTY drain complete; signaling tab death");
                         post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
                         let _ = pty_dead_tx.send(());
                         if let Some((proxy, wid)) = repaint_handle.get() {
@@ -339,31 +369,11 @@ fn spawn_pty_consumer_thread(
                         return;
                     }
                 }
-                recv(input_rx) -> msg => {
-                    if !handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
-                        return;
-                    }
-                }
-                recv(child_exit) -> _ => {
-                    info!("Child process exited; draining remaining PTY output");
-                    let drain_deadline = std::time::Duration::from_millis(200);
-                    while let Ok(read) = pty_read_rx.recv_timeout(drain_deadline) {
-                        emulator.handle_incoming_data(
-                            &read.buf[0..read.read_amount],
-                        );
-                    }
 
-                    info!("PTY drain complete; signaling tab death");
-                    post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
-                    let _ = pty_dead_tx.send(());
-                    if let Some((proxy, wid)) = repaint_handle.get() {
-                        proxy.request_repaint(*wid);
-                    }
-                    return;
-                }
+                post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
             }
-
-            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
-        }
-    });
+        })
+    {
+        error!("Failed to spawn PTY consumer thread: {e}");
+    }
 }

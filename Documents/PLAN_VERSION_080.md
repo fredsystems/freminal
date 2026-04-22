@@ -118,17 +118,35 @@ with 22 `.map_err(|e| format!(...))` call sites.
 - **70.E.3** — Surface shader compile errors to the user (see Task 71 item 4) — deferred
   to Task 71.
 
-#### 70.F — HIGH: Thread Hygiene
+#### 70.F — HIGH: Thread Hygiene ✅
 
-- **70.F.1** — Name every spawned thread with
-  `std::thread::Builder::new().name("freminal-...")`. Convention:
-  - `freminal-pty-read-<tab_id>-<pane_id>`
-  - `freminal-pty-write-<tab_id>-<pane_id>`
-  - `freminal-input-pump-<window_id>`
-  - `freminal-recording-writer`
-  - `freminal-emulator-<window_id>`
-  - any other worker threads discovered during the audit.
-- **70.F.2** — Audit and document each thread's ownership of state and its channel endpoints.
+- **70.F.1** ✅ — Every spawned thread now uses
+  `std::thread::Builder::new().name(...)`. Conventions adopted:
+  - `freminal-pty-read-<pane_id>` (was raw `thread::spawn`)
+  - `freminal-pty-write-<pane_id>` (was raw `thread::spawn`)
+  - `freminal-child-watcher-<pane_id>` (new; previously raw spawn)
+  - `freminal-pty-consumer-<pane_id>` (was raw `thread::spawn` in `gui/pty.rs`)
+  - `freminal-recording-writer` (renamed from `frec-writer`)
+  - `freminal-open-url` (two sites in `widget.rs`, was raw `thread::spawn`)
+  - `freminal-win-proc-waiter` (Windows-only waiter in `portable-pty`)
+
+  **Deviation from original plan:** the plan called for
+  `<tab_id>-<pane_id>` pairs, but `tab_id` is not reachable from the
+  terminal emulator crate (which owns the PTY threads) — only `pane_id`
+  is. Since `pane_id` is already globally unique across the process
+  (assigned by the recording subsystem), we use `pane_id` alone. The
+  `input-pump-<window_id>` and `emulator-<window_id>` conventions from
+  the plan sketch did not correspond to actual threads in the current
+  codebase. `PtyInitError::Spawn(String)` is used to propagate
+  `thread::Builder::spawn` failures where the caller can handle them;
+  fire-and-forget spawns (open-url, PTY consumer, Windows waiter) log
+  the failure and continue.
+
+- **70.F.2** ✅ — Existing doc-comments above each spawn already describe
+  thread ownership and channel endpoints (see `pty.rs` child-watcher
+  block at 379–383, reader block at 401–424, writer block at 443–446,
+  and the PTY consumer doc at `gui/pty.rs` 181–190). No additional
+  documentation was required.
 
 #### 70.G — HIGH: Bounded Channels
 
