@@ -320,14 +320,36 @@ Task 29 is marked complete, but three files are still oversized:
   `freminal-terminal-emulator/src/terminal_handler/mod.rs` after 70.C)
 - `freminal/src/gui/mod.rs` — 3,212 lines
 
-- **70.J.1** — Split `buffer.rs` along natural seams: `buffer/cells.rs`, `buffer/cursor.rs`,
-  `buffer/scrollback.rs`, `buffer/resize.rs`, `buffer/wrapping.rs`. `mod.rs` becomes a facade.
-- **70.J.2** — Split `terminal_handler/mod.rs` along mode / response / dispatch seams. Do
-  this after 70.C so it happens in the correct crate.
-- **70.J.3** — Split `gui/mod.rs` along menu / settings dispatch / window lifecycle / input
-  routing seams.
-- **70.J.4** — Each split must leave `cargo test --all` passing at every commit. Run
-  full benchmark suite after all three splits to confirm no regression.
+- **70.J.1** ✅ — Split `buffer.rs` (11,024 lines) along natural seams into
+  `buffer/{cursor,erase,flatten,images,lifecycle,lines,resize_and_alt,scroll,tabs}.rs`.
+  `mod.rs` became a facade at 7,483 lines (still carries struct defs, insertion core,
+  free helpers, and test modules). Committed in three stages: `70.J.1.a` (facade
+  setup + git rename), `70.J.1.b` (tabs extraction as pattern template), `70.J.1.c`
+  (eight remaining impl groups). Buffer fields changed to `pub(in crate::buffer)` —
+  minimum privilege for sibling-module visibility.
+- **70.J.2** ✅ — Split `terminal_handler/mod.rs` (5,193 lines) into six new sibling
+  files: `cursor_ops.rs`, `edit_ops.rs`, `scroll_ops.rs`, `reports.rs`, `window_ops.rs`,
+  `osc.rs`. `mod.rs` reduced to 4,528 lines (struct def, `new`/`with_scrollback_limit`/
+  `full_reset`, core data-feeding pipeline, `set_format` + accessors, `apply_dec_special`
+  free function, test modules). Handler fields changed to `pub(super)`.
+- **70.J.3** ✅ — Split `gui/mod.rs` (3,244 lines) into six new sibling files:
+  `tab_spawning.rs` (375), `layout_ops.rs` (604), `settings_dispatch.rs` (197),
+  `session.rs` (141), `app_impl.rs` (1,547 — entire `impl App for FreminalGui`),
+  `run.rs` (81, re-exported via `pub use run::run;`). `mod.rs` reduced to 410
+  lines (type defs, `new`, `recording_window_id`, `compute_initial_size`, test
+  module). No visibility changes needed — `FreminalGui` is already private to
+  the `gui` module. Two module-level free helpers (`layout_dir_to_pane_dir`,
+  `extract_root_leaf`) promoted to `pub(super)`.
+- **70.J.4** ✅ — All three splits left `cargo test --all` passing at every commit.
+  Benchmarks run post-split (within-session comparison to rule out measurement
+  bias) showed only noise-level variation: worst case ~11% on `bench_lf_heavy`
+  and `bench_insert_with_color_changes`, most under 3%, with roughly equal
+  improvements and regressions — consistent with CPU/thermal/scheduler jitter
+  on the same commit. The first run's wild deltas (+15000%, −94%) compared
+  against a 17-day-old `base/` directory dated Apr 5, capturing the cumulative
+  effect of Tasks 59, 61, 68, 69, 70.A–70.I, and 70.J.1/70.J.2, not the splits
+  themselves. Pure module moves do not affect Rust codegen (LLVM inlines freely
+  across module boundaries within a crate), so this result is expected.
 
 #### 70.K — MEDIUM: Typed CSI Mode Discriminants
 
