@@ -1193,7 +1193,7 @@ pub(super) fn write_input_to_terminal(
                     terminal_origin,
                 );
 
-                let position = FreminalMousePosition::new(x, y, pos.x, pos.y);
+                let position = FreminalMousePosition::new(x, y);
                 let (previous, current) =
                     if let Some(last_mouse_position) = &mut last_reported_mouse_pos {
                         (
@@ -1302,7 +1302,7 @@ pub(super) fn write_input_to_terminal(
                     (character_size_x, character_size_y),
                     terminal_origin,
                 );
-                let mouse_pos = FreminalMousePosition::new(x, y, pos.x, pos.y);
+                let mouse_pos = FreminalMousePosition::new(x, y);
                 let new_mouse_position =
                     PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
 
@@ -1526,7 +1526,7 @@ pub(super) fn write_input_to_terminal(
                         (character_size_x, character_size_y),
                         terminal_origin,
                     );
-                    let position = FreminalMousePosition::new(x, y, hover.x, hover.y);
+                    let position = FreminalMousePosition::new(x, y);
                     last_reported_mouse_pos = Some(PreviousMouseState::new(
                         PointerButton::Primary,
                         false,

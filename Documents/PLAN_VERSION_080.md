@@ -351,13 +351,17 @@ Task 29 is marked complete, but three files are still oversized:
   themselves. Pure module moves do not affect Rust codegen (LLVM inlines freely
   across module boundaries within a crate), so this result is expected.
 
-#### 70.K — MEDIUM: Typed CSI Mode Discriminants
+#### 70.K — MEDIUM: Typed CSI Mode Discriminants ✅
 
-- **70.K.1** — Replace `handle_erase_in_display(mode: usize)` and
-  `handle_erase_in_line(mode: usize)` with typed `EraseDisplayMode` and `EraseLineMode`
-  enums. Provide `TryFrom<u16>` impls that surface an error for unknown modes.
-- **70.K.2** — Audit the rest of `ansi_components/csi_commands/` for other `mode: usize`
-  parameters and typify each.
+- **70.K.1** ✅ — Added `EraseDisplayMode` (4 variants) and `EraseLineMode` (3 variants)
+  enums in `ed.rs` / `el.rs` with `TryFrom<usize>` impls and typed error variants.
+  Changed `handle_erase_in_display` / `handle_erase_in_line` to accept the enums;
+  removed now-unreachable fallthrough match arms.
+- **70.K.2** ✅ — Audited remaining `mode: usize` parameters. Typified
+  `TerminalOutput::TabClear(usize)` → `TabClear(TabClearMode)` (6 variants) in
+  `freminal-common`. Two remaining `usize` payloads (`SGR param`,
+  `RequestSecondaryDeviceAttributes::param`) intentionally left as-is — both
+  represent legitimately open-ended numeric namespaces, not a closed mode set.
 
 #### 70.L — MEDIUM: Dead Code Attribute Cleanup
 

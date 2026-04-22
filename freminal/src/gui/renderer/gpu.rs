@@ -67,18 +67,6 @@ fn gl_i32_u32(val: u32) -> i32 {
     })
 }
 
-/// Convert a `u32` to `f32` for GPU cell-dimension math.
-/// Returns `0.0` on precision loss (u32 values fit in f32 for all sane sizes)
-/// and logs an error so the impossible is visible if it ever occurs.
-#[inline]
-#[allow(dead_code)]
-fn gl_f32_u32(val: u32) -> f32 {
-    f32::approx_from(val).unwrap_or_else(|_| {
-        error!("gl_f32_u32: u32 {val} cannot be approximated as f32");
-        0.0
-    })
-}
-
 /// Convert an `i32` to `f32` for GPU viewport uniforms.
 /// Returns `0.0` on precision loss (viewport sizes are always small)
 /// and logs an error so the impossible is visible if it ever occurs.
