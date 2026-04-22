@@ -258,7 +258,7 @@ pub struct TerminalHandler {
     /// When set, the terminal sends `CSI 48 ; height ; width t` upon window
     /// resize, allowing the application to receive resize events in the input
     /// stream instead of relying on `SIGWINCH`.
-    in_band_resize_enabled: bool,
+    in_band_resize_enabled: InBandResizeMode,
     /// Whether Sixel Display Mode (DECSDM `?80`) is active.
     ///
     /// When set (`CSI ? 80 h`), Sixel images are placed at the cursor position
@@ -359,7 +359,7 @@ impl TerminalHandler {
             in_tmux_passthrough: false,
             modify_other_keys_level: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
-            in_band_resize_enabled: false,
+            in_band_resize_enabled: InBandResizeMode::Reset,
             sixel_display_mode: Decsdm::ScrollingMode,
             private_color_registers: PrivateColorRegisters::Private,
             nrc_mode: Decnrcm::NrcDisabled,
@@ -1397,7 +1397,9 @@ impl TerminalHandler {
         // always passes 0 when resizing.
         let _new_offset = self.buffer.set_size(width, height, 0);
 
-        if self.in_band_resize_enabled && (old_width != width || old_height != height) {
+        if self.in_band_resize_enabled == InBandResizeMode::Set
+            && (old_width != width || old_height != height)
+        {
             self.send_in_band_resize();
         }
     }
@@ -1992,15 +1994,15 @@ impl TerminalHandler {
 
                 // ── In-Band Resize Notifications (?2048) ──────────────
                 Mode::InBandResizeMode(InBandResizeMode::Set) => {
-                    self.in_band_resize_enabled = true;
+                    self.in_band_resize_enabled = InBandResizeMode::Set;
                     // Send an immediate resize notification per the specification
                     self.send_in_band_resize();
                 }
                 Mode::InBandResizeMode(InBandResizeMode::Reset) => {
-                    self.in_band_resize_enabled = false;
+                    self.in_band_resize_enabled = InBandResizeMode::Reset;
                 }
                 Mode::InBandResizeMode(InBandResizeMode::Query) => {
-                    let mode = if self.in_band_resize_enabled {
+                    let mode = if self.in_band_resize_enabled == InBandResizeMode::Set {
                         SetMode::DecSet
                     } else {
                         SetMode::DecRst
@@ -4878,7 +4880,7 @@ mod tests {
     #[test]
     fn send_in_band_resize_dispatched() {
         let (mut handler, rx) = handler_with_pty();
-        handler.in_band_resize_enabled = true;
+        handler.in_band_resize_enabled = InBandResizeMode::Set;
         // Trigger a resize that changes dimensions to fire send_in_band_resize
         handler.handle_resize(100, 30, 8, 16);
         // Should have sent an in-band resize notification

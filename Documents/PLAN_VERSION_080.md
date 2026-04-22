@@ -298,9 +298,18 @@ Executed as a file-by-file sweep so each commit is reviewable in isolation:
 
 Task 26 missed one field.
 
-- **70.I.1** — Replace `TerminalHandler::in_band_resize_enabled: bool` with
-  `InBandResizeMode` from `freminal-common/src/buffer_states/modes/`. Update all call sites
-  (`to_payload`, snapshot building, `send_terminal_inputs` if applicable).
+- **70.I.1** ✅ — Replaced `TerminalHandler::in_band_resize_enabled: bool` with
+  `InBandResizeMode` (from `freminal-common/src/buffer_states/modes/`). The field stores
+  only `Set` / `Reset` (the `Query` variant is a transient dispatch state used only at the
+  `DECRQM ?2048` parse site). Default is `InBandResizeMode::Reset`. Call sites updated:
+  the field assignment in both arms of the DECSET/DECRST handler, the `== Set` check at the
+  resize-notification guard (`handle_resize`), the query-response ternary, and the test
+  helper at `send_in_band_resize_dispatched`. No `to_payload`, snapshot, or
+  `send_terminal_inputs` change was required — this field is local to the handler and never
+  crossed the thread boundary. Verification: `cargo test --all` 4913+ green,
+  `cargo clippy --all-targets --all-features -- -D warnings` clean, `cargo machete` clean.
+  No hot-path code changed (simple field type swap, `bool` and `enum` with no payload have
+  identical codegen), so no benchmark run was required.
 
 #### 70.J — MEDIUM: Split Remaining God Files (Task 29 re-open)
 
