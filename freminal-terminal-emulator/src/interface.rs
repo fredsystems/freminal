@@ -65,7 +65,7 @@ use freminal_common::buffer_states::modes::{
     mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 
-use freminal_common::{args::Args, buffer_states::tchar::TChar};
+use freminal_common::{args::Args, buffer_states::tchar::TChar, send_or_log};
 
 /// Mode-related fields extracted from the emulator state for a snapshot.
 ///
@@ -284,9 +284,11 @@ impl TerminalEmulator {
             pane_id,
         )?;
 
-        if let Err(e) = write_tx.send(PtyWrite::Resize(initial_size)) {
-            error!("Failed to send resize to pty: {e}");
-        }
+        send_or_log!(
+            write_tx,
+            PtyWrite::Resize(initial_size),
+            "Failed to send resize to pty"
+        );
 
         let ret = Self {
             internal: TerminalState::new(write_tx.clone(), scrollback_limit),
@@ -435,14 +437,16 @@ impl TerminalEmulator {
         // (ws_xpixel, ws_ypixel), not per-cell sizes.  Applications like nvim
         // compute cell size as ws_xpixel/ws_col, so passing per-cell values here
         // would give them a near-zero cell width.
-        if let Err(e) = self.write_tx.send(PtyWrite::Resize(FreminalTerminalSize {
-            width: width_chars,
-            height: height_chars,
-            pixel_width: font_pixel_width.saturating_mul(width_chars),
-            pixel_height: font_pixel_height.saturating_mul(height_chars),
-        })) {
-            error!("Failed to send resize to PTY: {e}");
-        }
+        send_or_log!(
+            self.write_tx,
+            PtyWrite::Resize(FreminalTerminalSize {
+                width: width_chars,
+                height: height_chars,
+                pixel_width: font_pixel_width.saturating_mul(width_chars),
+                pixel_height: font_pixel_height.saturating_mul(height_chars),
+            }),
+            "Failed to send resize to PTY"
+        );
     }
 
     /// Update the GUI-requested scroll offset.

@@ -9,6 +9,7 @@ use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
 use freminal_common::config::ThemeMode;
+use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::WindowId;
 use glow::HasContext;
@@ -81,14 +82,16 @@ impl freminal_windowing::App for FreminalGui {
             let cell_pixel_h = cell_h.value_as::<usize>().unwrap_or(0);
             if let Ok(panes) = initial.tab.pane_tree.iter_panes() {
                 for pane in panes {
-                    if let Err(e) = pane.input_tx.send(InputEvent::Resize(
-                        computed_size.width,
-                        computed_size.height,
-                        cell_pixel_w,
-                        cell_pixel_h,
-                    )) {
-                        error!("Failed to send initial resize to pre-spawned pane: {e}");
-                    }
+                    send_or_log!(
+                        pane.input_tx,
+                        InputEvent::Resize(
+                            computed_size.width,
+                            computed_size.height,
+                            cell_pixel_w,
+                            cell_pixel_h,
+                        ),
+                        "Failed to send initial resize to pre-spawned pane"
+                    );
                 }
             }
 
@@ -100,15 +103,16 @@ impl freminal_windowing::App for FreminalGui {
                 && let Ok(panes) = initial.tab.pane_tree.iter_panes()
             {
                 for pane in panes {
-                    if let Err(e) = pane.input_tx.send(InputEvent::ThemeChange(theme)) {
-                        error!("Failed to send corrective ThemeChange: {e}");
-                    }
-                    if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
-                        self.config.theme.mode,
-                        os_dark_mode,
-                    )) {
-                        error!("Failed to send ThemeModeUpdate: {e}");
-                    }
+                    send_or_log!(
+                        pane.input_tx,
+                        InputEvent::ThemeChange(theme),
+                        "Failed to send corrective ThemeChange"
+                    );
+                    send_or_log!(
+                        pane.input_tx,
+                        InputEvent::ThemeModeUpdate(self.config.theme.mode, os_dark_mode,),
+                        "Failed to send ThemeModeUpdate"
+                    );
                 }
             }
 
@@ -579,12 +583,11 @@ impl freminal_windowing::App for FreminalGui {
             for tab in win.tabs.iter() {
                 if let Ok(panes) = tab.pane_tree.iter_panes() {
                     for pane in panes {
-                        if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
-                            self.config.theme.mode,
-                            win.os_dark_mode,
-                        )) {
-                            error!("Failed to send ThemeModeUpdate on OS change to pane: {e}");
-                        }
+                        send_or_log!(
+                            pane.input_tx,
+                            InputEvent::ThemeModeUpdate(self.config.theme.mode, win.os_dark_mode,),
+                            "Failed to send ThemeModeUpdate on OS change to pane"
+                        );
                     }
                 }
             }
@@ -596,11 +599,11 @@ impl freminal_windowing::App for FreminalGui {
                     for tab in win.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
-                                if let Err(e) = pane.input_tx.send(
+                                send_or_log!(
+                                    pane.input_tx,
                                     freminal_terminal_emulator::io::InputEvent::ThemeChange(theme),
-                                ) {
-                                    error!("Failed to send auto ThemeChange to pane: {e}");
-                                }
+                                    "Failed to send auto ThemeChange to pane"
+                                );
                             }
                         }
                     }

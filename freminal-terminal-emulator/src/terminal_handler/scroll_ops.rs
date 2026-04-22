@@ -14,6 +14,7 @@ use freminal_common::{
         decawm::Decawm, declrmm::Declrmm, in_band_resize_mode::InBandResizeMode, lnm::Lnm,
     },
     pty_write::{FreminalTerminalSize, PtyWrite},
+    send_or_log,
 };
 
 use freminal_buffer::buffer::Buffer;
@@ -215,9 +216,7 @@ impl TerminalHandler {
                 pixel_width: 0,
                 pixel_height: 0,
             };
-            if let Err(e) = tx.send(PtyWrite::Resize(size)) {
-                tracing::error!("Failed to send PTY resize: {e}");
-            }
+            send_or_log!(tx, PtyWrite::Resize(size), "Failed to send PTY resize");
         }
     }
 }

@@ -15,6 +15,7 @@ use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{pointer_shape::PointerShape, tchar::TChar, url::Url},
     config::Config,
+    send_or_log,
     themes::ThemePalette,
 };
 use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
@@ -2062,9 +2063,11 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
         }
         if !payload.is_empty() {
             payload.push(' ');
-            if let Err(e) = input_tx.send(InputEvent::Key(payload.into_bytes())) {
-                error!("Failed to send dropped file paths to PTY: {e}");
-            }
+            send_or_log!(
+                input_tx,
+                InputEvent::Key(payload.into_bytes()),
+                "Failed to send dropped file paths to PTY"
+            );
         }
     }
 

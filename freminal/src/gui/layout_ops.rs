@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{RepaintProxy, WindowId};
 use tracing::{debug, error};
@@ -87,12 +88,11 @@ impl FreminalGui {
                 if let Some(ref cmd) = leaf.command {
                     commands.push((id, cmd.clone()));
                 }
-                if let Err(e) = pane
-                    .input_tx
-                    .send(InputEvent::ThemeModeUpdate(self.config.theme.mode, false))
-                {
-                    error!("layout: failed to send ThemeModeUpdate: {e}");
-                }
+                send_or_log!(
+                    pane.input_tx,
+                    InputEvent::ThemeModeUpdate(self.config.theme.mode, false),
+                    "layout: failed to send ThemeModeUpdate"
+                );
                 if let Err(e) = tab.pane_tree.split_with_id(target_id, direction, pane) {
                     error!("layout: failed to split pane: {e}");
                     return None;
@@ -175,12 +175,11 @@ impl FreminalGui {
         if let Some(ref cmd) = root_leaf.command {
             commands.push((root_id, cmd.clone()));
         }
-        if let Err(e) = root_spawned
-            .input_tx
-            .send(InputEvent::ThemeModeUpdate(self.config.theme.mode, false))
-        {
-            error!("layout: failed to send ThemeModeUpdate: {e}");
-        }
+        send_or_log!(
+            root_spawned.input_tx,
+            InputEvent::ThemeModeUpdate(self.config.theme.mode, false),
+            "layout: failed to send ThemeModeUpdate"
+        );
 
         // Build the tab with the root pane.
         let mut tab = tabs::Tab::new(tab_id, root_spawned);

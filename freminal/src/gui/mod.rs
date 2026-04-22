@@ -11,6 +11,7 @@ use egui;
 use freminal_common::args::Args;
 use freminal_common::config::Config;
 use freminal_common::pty_write::FreminalTerminalSize;
+use freminal_common::send_or_log;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{RepaintProxy, WindowId};
@@ -202,12 +203,11 @@ impl FreminalGui {
         // OS dark mode is not yet known (no egui context). Assume light mode initially.
         let os_dark_mode = false;
         if let Some(pane) = initial_tab.active_pane() {
-            if let Err(e) = pane
-                .input_tx
-                .send(InputEvent::ThemeModeUpdate(config.theme.mode, os_dark_mode))
-            {
-                error!("Failed to send initial ThemeModeUpdate to tab: {e}");
-            }
+            send_or_log!(
+                pane.input_tx,
+                InputEvent::ThemeModeUpdate(config.theme.mode, os_dark_mode),
+                "Failed to send initial ThemeModeUpdate to tab"
+            );
         } else {
             warn!("initial tab has no active pane when sending ThemeModeUpdate");
         }

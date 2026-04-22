@@ -21,6 +21,7 @@ use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
+use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::recording::{EventPayload, RecordingHandle};
@@ -234,9 +235,7 @@ fn spawn_pty_consumer_thread(
                             | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
                             _ => WindowCommand::Viewport(cmd),
                         };
-                        if let Err(e) = window_cmd_tx.send(wc) {
-                            error!("Failed to send window command to GUI: {e}");
-                        }
+                        send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
                     }
 
                     let snap = emulator.build_snapshot();

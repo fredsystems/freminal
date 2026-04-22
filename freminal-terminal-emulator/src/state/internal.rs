@@ -30,6 +30,7 @@ use freminal_common::{
     },
     config::ThemeMode,
     cursor::CursorVisualStyle,
+    send_or_log,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
 
@@ -690,12 +691,11 @@ impl TerminalState {
     /// This bypasses the `TerminalInput` encoding path — the response is an
     /// escape sequence that must be sent verbatim.
     fn send_decrpm(&self, response: &str) {
-        if let Err(e) = self
-            .write_tx
-            .send(PtyWrite::Write(response.as_bytes().to_vec()))
-        {
-            error!("Failed to send DECRPM response: {e}");
-        }
+        send_or_log!(
+            self.write_tx,
+            PtyWrite::Write(response.as_bytes().to_vec()),
+            "Failed to send DECRPM response"
+        );
     }
 }
 

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use conv2::ConvUtil as _;
 use freminal_common::pty_write::FreminalTerminalSize;
+use freminal_common::send_or_log;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{RepaintProxy, WindowId};
@@ -268,12 +269,11 @@ impl FreminalGui {
 
             // Notify the new pane of the current theme mode so DECRPM ?2031
             // responses are correct from the start.
-            if let Err(e) = new_pane.input_tx.send(InputEvent::ThemeModeUpdate(
-                self.config.theme.mode,
-                win.os_dark_mode,
-            )) {
-                error!("Failed to send ThemeModeUpdate to split pane: {e}");
-            }
+            send_or_log!(
+                new_pane.input_tx,
+                InputEvent::ThemeModeUpdate(self.config.theme.mode, win.os_dark_mode,),
+                "Failed to send ThemeModeUpdate to split pane"
+            );
 
             // Propagate any active background image to the new pane.
             let new_bg_path = self.config.ui.background_image.clone();

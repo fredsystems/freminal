@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
 
@@ -36,11 +37,11 @@ impl FreminalGui {
                         for tab in win.tabs.iter() {
                             if let Ok(panes) = tab.pane_tree.iter_panes() {
                                 for pane in panes {
-                                    if let Err(e) =
-                                        pane.input_tx.send(InputEvent::ThemeChange(theme))
-                                    {
-                                        error!("Failed to send ThemeChange to PTY thread: {e}");
-                                    }
+                                    send_or_log!(
+                                        pane.input_tx,
+                                        InputEvent::ThemeChange(theme),
+                                        "Failed to send ThemeChange to PTY thread"
+                                    );
                                 }
                             }
                         }
@@ -117,14 +118,14 @@ impl FreminalGui {
                     for tab in win.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
-                                if let Err(e) = pane.input_tx.send(InputEvent::ThemeModeUpdate(
-                                    self.config.theme.mode,
-                                    win.os_dark_mode,
-                                )) {
-                                    error!(
-                                        "Failed to send ThemeModeUpdate after settings apply: {e}"
-                                    );
-                                }
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::ThemeModeUpdate(
+                                        self.config.theme.mode,
+                                        win.os_dark_mode,
+                                    ),
+                                    "Failed to send ThemeModeUpdate after settings apply"
+                                );
                             }
                         }
                     }
@@ -149,9 +150,11 @@ impl FreminalGui {
                     for tab in win.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
-                                if let Err(e) = pane.input_tx.send(InputEvent::ThemeChange(theme)) {
-                                    error!("Failed to send theme preview to PTY thread: {e}");
-                                }
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::ThemeChange(theme),
+                                    "Failed to send theme preview to PTY thread"
+                                );
                             }
                         }
                     }
@@ -167,9 +170,11 @@ impl FreminalGui {
                     for tab in win.tabs.iter() {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
-                                if let Err(e) = pane.input_tx.send(InputEvent::ThemeChange(theme)) {
-                                    error!("Failed to send theme revert to PTY thread: {e}");
-                                }
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::ThemeChange(theme),
+                                    "Failed to send theme revert to PTY thread"
+                                );
                             }
                         }
                     }

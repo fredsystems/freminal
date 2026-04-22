@@ -61,6 +61,8 @@ pub mod cursor;
 pub mod keybindings;
 /// Layout file format types, parser, and resolver.
 pub mod layout;
+/// Cross-crate logging helpers (`send_or_log!` macro).
+pub mod logging;
 /// PTY write command types shared between the emulator and the OS PTY writer.
 pub mod pty_write;
 /// SGR (Select Graphic Rendition) parameter types.

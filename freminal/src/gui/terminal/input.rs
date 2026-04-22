@@ -21,6 +21,7 @@ use freminal_common::buffer_states::modes::{
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
+use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
     input::{
         KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
@@ -190,6 +191,13 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
 ///
 /// **All bound keys are consumed** — they are never forwarded to the PTY,
 /// regardless of whether the action is handled here or deferred.
+// Clippy `too_many_lines` fires at 106 lines after Task 70.N expanded the
+// in-body `if let Err` blocks to `send_or_log!` macro calls (which rustfmt
+// formats on multiple lines). The function is a flat `match` over
+// `KeyAction` variants — splitting it would just move the match into helper
+// functions that each forward one variant, which adds indirection without
+// clarity. Suppressing for this specific function.
+#[allow(clippy::too_many_lines)]
 pub(super) fn dispatch_binding_action(
     action: KeyAction,
     view_state: &mut ViewState,
@@ -210,9 +218,11 @@ pub(super) fn dispatch_binding_action(
                     } else {
                         text
                     };
-                    if let Err(e) = input_tx.send(InputEvent::Key(payload.into_bytes())) {
-                        error!("Failed to send paste to PTY consumer: {e}");
-                    }
+                    send_or_log!(
+                        input_tx,
+                        InputEvent::Key(payload.into_bytes()),
+                        "Failed to send paste to PTY consumer"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -240,34 +250,42 @@ pub(super) fn dispatch_binding_action(
                 .min(snap.max_scroll_offset);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollPageDown => {
             let new_offset = view_state.scroll_offset.saturating_sub(snap.term_height);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollToTop => {
             let new_offset = snap.max_scroll_offset;
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollToBottom if view_state.scroll_offset != 0 => {
             view_state.scroll_offset = 0;
-            if let Err(e) = input_tx.send(InputEvent::ScrollOffset(0)) {
-                error!("Failed to send scroll offset to PTY consumer: {e}");
-            }
+            send_or_log!(
+                input_tx,
+                InputEvent::ScrollOffset(0),
+                "Failed to send scroll offset to PTY consumer"
+            );
         }
         KeyAction::ScrollLineUp => {
             let new_offset = view_state
@@ -276,18 +294,22 @@ pub(super) fn dispatch_binding_action(
                 .min(snap.max_scroll_offset);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         KeyAction::ScrollLineDown => {
             let new_offset = view_state.scroll_offset.saturating_sub(1);
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
-                if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                    error!("Failed to send scroll offset to PTY consumer: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::ScrollOffset(new_offset),
+                    "Failed to send scroll offset to PTY consumer"
+                );
             }
         }
         // All other actions (zoom, settings, tabs, etc.) require GUI state
@@ -489,9 +511,11 @@ pub(super) fn send_terminal_inputs(
     if bytes.is_empty() {
         return;
     }
-    if let Err(e) = input_tx.send(InputEvent::Key(bytes)) {
-        error!("Failed to send key input to PTY consumer: {e}");
-    }
+    send_or_log!(
+        input_tx,
+        InputEvent::Key(bytes),
+        "Failed to send key input to PTY consumer"
+    );
 }
 
 /// Handle mouse scroll when mouse tracking is off.
@@ -559,9 +583,11 @@ pub(super) fn handle_scroll_fallback(
 
         if new_offset != view_state.scroll_offset {
             view_state.scroll_offset = new_offset;
-            if let Err(e) = input_tx.send(InputEvent::ScrollOffset(new_offset)) {
-                error!("Failed to send scroll offset to PTY consumer: {e}");
-            }
+            send_or_log!(
+                input_tx,
+                InputEvent::ScrollOffset(new_offset),
+                "Failed to send scroll offset to PTY consumer"
+            );
         }
     }
 }
@@ -1166,9 +1192,11 @@ pub(super) fn write_input_to_terminal(
                 view_state.window_focused = *focused;
                 // Forward focus change to the PTY consumer thread so it can
                 // send the focus-reporting escape sequence if enabled.
-                if let Err(e) = input_tx.send(InputEvent::FocusChange(*focused)) {
-                    error!("Failed to send focus change event: {e}");
-                }
+                send_or_log!(
+                    input_tx,
+                    InputEvent::FocusChange(*focused),
+                    "Failed to send focus change event"
+                );
 
                 if !*focused {
                     view_state.mouse_position = None;
