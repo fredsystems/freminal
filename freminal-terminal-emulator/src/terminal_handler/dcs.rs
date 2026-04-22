@@ -18,6 +18,8 @@ use conv2::ValueFrom;
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, cursor::CursorVisualStyle};
 
 use super::TerminalHandler;
+use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
+use crate::ansi_components::csi_commands::el::EraseLineMode;
 
 impl TerminalHandler {
     /// Handle a DCS (Device Control String) sequence.
@@ -375,7 +377,11 @@ impl TerminalHandler {
                     .copied()
                     .unwrap_or(Some(0))
                     .unwrap_or(0);
-                self.handle_erase_in_display(mode);
+                if let Ok(m) = EraseDisplayMode::try_from(mode) {
+                    self.handle_erase_in_display(m);
+                } else {
+                    tracing::warn!("DCS tmux passthrough: unknown ED mode {mode}");
+                }
                 true
             }
             // EL — Erase in Line: ESC [ n K
@@ -385,7 +391,11 @@ impl TerminalHandler {
                     .copied()
                     .unwrap_or(Some(0))
                     .unwrap_or(0);
-                self.handle_erase_in_line(mode);
+                if let Ok(m) = EraseLineMode::try_from(mode) {
+                    self.handle_erase_in_line(m);
+                } else {
+                    tracing::warn!("DCS tmux passthrough: unknown EL mode {mode}");
+                }
                 true
             }
             // IL — Insert Lines: ESC [ n L

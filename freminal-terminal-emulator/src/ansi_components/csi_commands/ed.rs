@@ -7,6 +7,36 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
+/// Erase-in-Display mode (`CSI Ps J`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraseDisplayMode {
+    /// Ps=0 — from cursor to end of display (default).
+    CursorToEnd,
+    /// Ps=1 — from start of display to cursor.
+    StartToCursor,
+    /// Ps=2 — entire display.
+    All,
+    /// Ps=3 — entire display plus scrollback.
+    AllWithScrollback,
+}
+
+/// Error returned when a `CSI Ps J` param is not one of 0, 1, 2, or 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownEraseDisplayMode(pub usize);
+
+impl TryFrom<usize> for EraseDisplayMode {
+    type Error = UnknownEraseDisplayMode;
+    fn try_from(v: usize) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::CursorToEnd),
+            1 => Ok(Self::StartToCursor),
+            2 => Ok(Self::All),
+            3 => Ok(Self::AllWithScrollback),
+            other => Err(UnknownEraseDisplayMode(other)),
+        }
+    }
+}
+
 /// ED — Erase in Display (`CSI Ps J`)
 ///
 /// Erase part of the display:

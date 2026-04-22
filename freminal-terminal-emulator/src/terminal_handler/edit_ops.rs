@@ -9,26 +9,26 @@
 //! erase/delete characters, insert spaces, and repeat-character.
 
 use super::TerminalHandler;
+use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
+use crate::ansi_components::csi_commands::el::EraseLineMode;
 
 impl TerminalHandler {
     /// Handle erase in display (ED)
-    pub fn handle_erase_in_display(&mut self, mode: usize) {
+    pub fn handle_erase_in_display(&mut self, mode: EraseDisplayMode) {
         match mode {
-            0 => self.buffer.erase_to_end_of_display(),
-            1 => self.buffer.erase_to_beginning_of_display(),
-            2 => self.buffer.erase_display(),
-            3 => self.buffer.erase_scrollback(),
-            _ => {} // Unknown mode, ignore
+            EraseDisplayMode::CursorToEnd => self.buffer.erase_to_end_of_display(),
+            EraseDisplayMode::StartToCursor => self.buffer.erase_to_beginning_of_display(),
+            EraseDisplayMode::All => self.buffer.erase_display(),
+            EraseDisplayMode::AllWithScrollback => self.buffer.erase_scrollback(),
         }
     }
 
     /// Handle erase in line (EL)
-    pub fn handle_erase_in_line(&mut self, mode: usize) {
+    pub fn handle_erase_in_line(&mut self, mode: EraseLineMode) {
         match mode {
-            0 => self.buffer.erase_line_to_end(),
-            1 => self.buffer.erase_line_to_beginning(),
-            2 => self.buffer.erase_line(),
-            _ => {} // Unknown mode, ignore
+            EraseLineMode::CursorToEnd => self.buffer.erase_line_to_end(),
+            EraseLineMode::StartToCursor => self.buffer.erase_line_to_beginning(),
+            EraseLineMode::All => self.buffer.erase_line(),
         }
     }
 

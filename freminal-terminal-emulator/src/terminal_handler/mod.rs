@@ -3,6 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
+use crate::ansi_components::csi_commands::el::EraseLineMode;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
@@ -39,7 +41,7 @@ use freminal_common::{
         osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
         tchar::TChar,
-        terminal_output::TerminalOutput,
+        terminal_output::{TabClearMode, TerminalOutput},
         terminal_sections::TerminalSections,
         unicode_placeholder::{
             VirtualPlacement, color_to_image_id, color_to_placement_id, is_placeholder,
@@ -906,25 +908,25 @@ impl TerminalHandler {
                 self.handle_cursor_relative(dx, dy);
             }
             TerminalOutput::ClearDisplayfromCursortoEndofDisplay => {
-                self.handle_erase_in_display(0);
+                self.handle_erase_in_display(EraseDisplayMode::CursorToEnd);
             }
             TerminalOutput::ClearDisplayfromStartofDisplaytoCursor => {
-                self.handle_erase_in_display(1);
+                self.handle_erase_in_display(EraseDisplayMode::StartToCursor);
             }
             TerminalOutput::ClearDisplay => {
-                self.handle_erase_in_display(2);
+                self.handle_erase_in_display(EraseDisplayMode::All);
             }
             TerminalOutput::ClearScrollbackandDisplay => {
-                self.handle_erase_in_display(3);
+                self.handle_erase_in_display(EraseDisplayMode::AllWithScrollback);
             }
             TerminalOutput::ClearLineForwards => {
-                self.handle_erase_in_line(0);
+                self.handle_erase_in_line(EraseLineMode::CursorToEnd);
             }
             TerminalOutput::ClearLineBackwards => {
-                self.handle_erase_in_line(1);
+                self.handle_erase_in_line(EraseLineMode::StartToCursor);
             }
             TerminalOutput::ClearLine => {
-                self.handle_erase_in_line(2);
+                self.handle_erase_in_line(EraseLineMode::All);
             }
             TerminalOutput::InsertLines(n) => {
                 self.handle_insert_lines(*n);
@@ -976,16 +978,15 @@ impl TerminalHandler {
             TerminalOutput::HorizontalTabSet => {
                 self.buffer.set_tab_stop();
             }
-            TerminalOutput::TabClear(ps) => match ps {
-                0 => self.buffer.clear_tab_stop_at_cursor(),
-                3 | 5 => self.buffer.clear_all_tab_stops(),
-                1 | 2 | 4 => {
+            TerminalOutput::TabClear(mode) => match mode {
+                TabClearMode::CurrentColumn => self.buffer.clear_tab_stop_at_cursor(),
+                TabClearMode::AllCharacter | TabClearMode::All => self.buffer.clear_all_tab_stops(),
+                TabClearMode::CurrentLine
+                | TabClearMode::CurrentLineAlt
+                | TabClearMode::AllLine => {
                     // Line tab stops (Ps=1: at cursor line, Ps=2: at cursor line,
                     // Ps=4: all). No modern terminal implements line tabulation —
                     // silently accept as no-ops.
-                }
-                _ => {
-                    tracing::warn!("TBC with unsupported Ps={ps} (ignored)");
                 }
             },
             TerminalOutput::CursorForwardTab(n) => {
@@ -1721,7 +1722,7 @@ mod tests {
         handler.handle_cursor_pos(Some(1), Some(2));
 
         // Erase to end of line
-        handler.handle_erase_in_line(0);
+        handler.handle_erase_in_line(EraseLineMode::CursorToEnd);
 
         // The line should be partially cleared
         let rows = handler.buffer().visible_rows(0);
@@ -3238,7 +3239,7 @@ mod tests {
     #[test]
     fn tab_clear_at_cursor() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentColumn)]);
         // Tab stop at cursor position (0) should be cleared
         handler.handle_tab();
         // Default tab stop at col 8 was cleared at col 0 — but cursor is at 0,
@@ -3249,7 +3250,7 @@ mod tests {
     #[test]
     fn tab_clear_all() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
         handler.handle_tab();
         // All tab stops cleared — should go to last column
         assert_eq!(handler.buffer().get_cursor().pos.x, 79);
@@ -3258,7 +3259,7 @@ mod tests {
     #[test]
     fn tab_clear_ps5_same_as_all() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.process_outputs(&[TerminalOutput::TabClear(5)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::All)]);
         handler.handle_tab();
         assert_eq!(handler.buffer().get_cursor().pos.x, 79);
     }
@@ -3267,9 +3268,9 @@ mod tests {
     fn tab_clear_line_tab_noop() {
         let mut handler = TerminalHandler::new(80, 24);
         // Ps=1,2,4 are line tab stops — should be no-ops
-        handler.process_outputs(&[TerminalOutput::TabClear(1)]);
-        handler.process_outputs(&[TerminalOutput::TabClear(2)]);
-        handler.process_outputs(&[TerminalOutput::TabClear(4)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentLine)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentLineAlt)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllLine)]);
         handler.handle_tab();
         assert_eq!(
             handler.buffer().get_cursor().pos.x,
@@ -3282,7 +3283,7 @@ mod tests {
     fn horizontal_tab_set() {
         let mut handler = TerminalHandler::new(80, 24);
         // Clear all, set a custom tab stop at col 5, tab to it
-        handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+        handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
         handler.handle_cursor_pos(Some(6), Some(1)); // col 5 (0-indexed)
         handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
         handler.handle_cursor_pos(Some(1), Some(1)); // back to col 0
@@ -3985,25 +3986,27 @@ mod tests {
             handler.handle_data(b"line of text");
             handler.handle_newline();
         }
-        handler.handle_erase_in_display(3);
+        handler.handle_erase_in_display(EraseDisplayMode::AllWithScrollback);
         // After erase scrollback, max_scroll_offset should be 0
         assert_eq!(handler.buffer.max_scroll_offset(), 0);
     }
 
     #[test]
     fn handle_erase_in_display_unknown_mode_is_noop() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"hello");
-        handler.handle_erase_in_display(99);
-        // No crash, data still present
+        // Unknown modes are now rejected at parse time via TryFrom; verify the error path.
+        assert_eq!(
+            EraseDisplayMode::try_from(99),
+            Err(crate::ansi_components::csi_commands::ed::UnknownEraseDisplayMode(99))
+        );
     }
 
     #[test]
     fn handle_erase_in_line_unknown_mode_is_noop() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"hello");
-        handler.handle_erase_in_line(99);
-        // No crash
+        // Unknown modes are now rejected at parse time via TryFrom; verify the error path.
+        assert_eq!(
+            EraseLineMode::try_from(99),
+            Err(crate::ansi_components::csi_commands::el::UnknownEraseLineMode(99))
+        );
     }
 
     #[test]
@@ -4067,10 +4070,11 @@ mod tests {
 
     #[test]
     fn process_output_tbc_unsupported_ps() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Ps=99 is unsupported, should be ignored
-        handler.process_outputs(&[TerminalOutput::TabClear(99)]);
-        // No crash
+        // Ps=99 is unsupported — verify the TryFrom error path.
+        assert_eq!(
+            TabClearMode::try_from(99),
+            Err(freminal_common::buffer_states::terminal_output::UnknownTabClearMode(99))
+        );
     }
 
     #[test]

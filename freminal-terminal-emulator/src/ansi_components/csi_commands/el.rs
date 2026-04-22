@@ -7,6 +7,33 @@ use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
+/// Erase-in-Line mode (`CSI Ps K`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraseLineMode {
+    /// Ps=0 — from cursor to end of line (default).
+    CursorToEnd,
+    /// Ps=1 — from start of line to cursor.
+    StartToCursor,
+    /// Ps=2 — entire line.
+    All,
+}
+
+/// Error returned when a `CSI Ps K` param is not one of 0, 1, or 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownEraseLineMode(pub usize);
+
+impl TryFrom<usize> for EraseLineMode {
+    type Error = UnknownEraseLineMode;
+    fn try_from(v: usize) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::CursorToEnd),
+            1 => Ok(Self::StartToCursor),
+            2 => Ok(Self::All),
+            other => Err(UnknownEraseLineMode(other)),
+        }
+    }
+}
+
 /// EL — Erase in Line (`CSI Ps K`)
 ///
 /// Erase part of the current line:

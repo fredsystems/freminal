@@ -6,8 +6,10 @@
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
 use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
-use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 use freminal_common::pty_write::PtyWrite;
+use freminal_terminal_emulator::ansi_components::csi_commands::ed::EraseDisplayMode;
+use freminal_terminal_emulator::ansi_components::csi_commands::el::EraseLineMode;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 
 /// Helper to convert a string slice to TChar representation as bytes
@@ -56,7 +58,7 @@ fn test_clear_screen_workflow() {
     }
 
     // Clear the screen (ED 2)
-    handler.handle_erase_in_display(2);
+    handler.handle_erase_in_display(EraseDisplayMode::All);
 
     // Move cursor to home
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -109,7 +111,7 @@ fn test_erase_line_operations() {
     handler.handle_cursor_pos(Some(6), Some(1));
 
     // Erase to end of line (EL 0)
-    handler.handle_erase_in_line(0);
+    handler.handle_erase_in_line(EraseLineMode::CursorToEnd);
 
     // Cursor should still be at column 5 (0-indexed)
     assert_eq!(handler.buffer().get_cursor().pos.x, 5);
@@ -282,7 +284,7 @@ fn test_real_world_sequence() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Simulate: clear screen, write header, write content
-    handler.handle_erase_in_display(2);
+    handler.handle_erase_in_display(EraseDisplayMode::All);
     handler.handle_cursor_pos(Some(1), Some(1));
 
     handler.handle_data(&text_to_bytes("=== Terminal Test ==="));
@@ -313,7 +315,7 @@ fn test_scrollback_erase() {
     }
 
     // Erase scrollback (ED 3)
-    handler.handle_erase_in_display(3);
+    handler.handle_erase_in_display(EraseDisplayMode::AllWithScrollback);
 
     // Scrollback should be cleared (can't directly verify without inspecting buffer internals,
     // but at least ensure it doesn't panic)
@@ -396,7 +398,7 @@ fn test_mixed_operations_workflow() {
 
     // Simulate entering vim (alternate screen)
     handler.handle_enter_alternate();
-    handler.handle_erase_in_display(2);
+    handler.handle_erase_in_display(EraseDisplayMode::All);
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_data(&text_to_bytes("~ VIM - Vi IMproved"));
 
@@ -2694,7 +2696,7 @@ fn test_tbc_clears_tab_stop_at_cursor() {
     // Default tab stops are at every 8th column: 0, 8, 16, 24, ...
     // Move to column 8 and clear the tab stop there
     handler.handle_cursor_pos(Some(9), Some(1)); // col 8
-    handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentColumn)]);
 
     // Tab from col 0 should now skip col 8 and land on col 16
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -2707,7 +2709,7 @@ fn test_tbc_clear_all_tab_stops() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Clear ALL tab stops
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Tab from col 0 should go to the last column (no stops to land on)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -2949,7 +2951,7 @@ fn test_tab_at_last_column_does_not_advance_past_width() {
 fn test_tab_with_no_stops_set_goes_to_last_column() {
     let mut handler = TerminalHandler::new(80, 24);
     // Clear all tab stops
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
     // Tab from col 0 should go to last column (no stops to land on)
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
     handler.handle_tab();
@@ -3006,7 +3008,7 @@ fn test_hts_then_tbc_round_trip() {
 
     // Clear the stop at col 5 (TBC Ps=0 with cursor at col 5)
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
-    handler.process_outputs(&[TerminalOutput::TabClear(0)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentColumn)]);
 
     // Verify it's gone: tab from col 0 → 8 (next default stop)
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -3019,7 +3021,7 @@ fn test_default_stops_after_full_reset() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Clear all tab stops
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
     // Verify they're gone
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_tab();
@@ -3043,7 +3045,7 @@ fn test_hts_at_column_0() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Clear all stops first
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Set a stop at col 0
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -3090,7 +3092,7 @@ fn test_tbc_ps1_does_not_affect_character_stops() {
 
     // TBC Ps=1 (line tab stop at cursor) — should be no-op for character stops
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
-    handler.process_outputs(&[TerminalOutput::TabClear(1)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentLine)]);
 
     // Verify custom stop at col 5 is still present
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -3109,7 +3111,7 @@ fn test_tbc_ps2_is_noop_for_character_stops() {
     // TBC Ps=2 — clears line tab stop at current line, NOT character tab stops.
     // This should be a no-op; the character stop at col 5 must remain.
     handler.handle_cursor_pos(Some(6), Some(1)); // col 5
-    handler.process_outputs(&[TerminalOutput::TabClear(2)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::CurrentLineAlt)]);
 
     // Tab from col 0 should still hit the custom stop at col 5
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -3122,7 +3124,7 @@ fn test_tbc_ps4_does_not_affect_character_stops() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Default stops present. TBC Ps=4 (clear all line stops) should be no-op
-    handler.process_outputs(&[TerminalOutput::TabClear(4)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllLine)]);
 
     // Verify default stops are still intact
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -3141,7 +3143,7 @@ fn test_tbc_ps5_clears_all_stops() {
     handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
 
     // TBC Ps=5 — clears all tab stops (equiv to Ps=3)
-    handler.process_outputs(&[TerminalOutput::TabClear(5)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::All)]);
 
     // Tab from col 0 should go to last column (all stops cleared)
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -3174,7 +3176,7 @@ fn test_tab_stop_changes_in_alternate_persist_to_primary() {
     handler.handle_enter_alternate();
 
     // Clear all tab stops while in alternate
-    handler.process_outputs(&[TerminalOutput::TabClear(3)]);
+    handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Leave alternate — return to primary
     handler.handle_leave_alternate();
