@@ -46,7 +46,7 @@ impl TChar {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Ascii(c) => core::slice::from_ref(c),
-            Self::Utf8(buf, len) => &buf[..*len as usize],
+            Self::Utf8(buf, len) => &buf[..usize::from(*len)],
             Self::Space => b" ",
             Self::NewLine => b"\n",
         }
@@ -61,7 +61,7 @@ impl TChar {
             Self::NewLine => 0,
 
             Self::Utf8(buf, len) => {
-                let bytes = &buf[..*len as usize];
+                let bytes = &buf[..usize::from(*len)];
                 // Try to interpret as UTF-8; fallback to width 1 for invalid sequences
                 std::str::from_utf8(bytes).map_or(1, unicode_width::UnicodeWidthStr::width)
             }
@@ -85,8 +85,10 @@ impl TChar {
         }
         let mut buf = [0u8; TCHAR_MAX_UTF8_LEN];
         buf[..v.len()].copy_from_slice(v);
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(Self::Utf8(buf, v.len() as u8))
+        // Length already bounded by the `v.len() > TCHAR_MAX_UTF8_LEN` check above
+        // (TCHAR_MAX_UTF8_LEN = 16), so `u8::try_from` always succeeds.
+        let len_u8 = u8::try_from(v.len()).unwrap_or(0);
+        Ok(Self::Utf8(buf, len_u8))
     }
 
     #[must_use]
@@ -167,16 +169,17 @@ impl From<u8> for TChar {
 impl From<char> for TChar {
     fn from(c: char) -> Self {
         if c.is_ascii() {
-            // single-byte fast path
-            Self::new_from_single_char(c as u8)
+            // single-byte fast path; `is_ascii()` guarantees `c as u32 <= 127`
+            // so `u8::try_from` always succeeds.
+            Self::new_from_single_char(u8::try_from(u32::from(c)).unwrap_or(0))
         } else {
             // non-ASCII: encode as UTF-8 scalar into the inline buffer
             let mut buf = [0u8; TCHAR_MAX_UTF8_LEN];
             let s = c.encode_utf8(&mut buf[..4]); // max 4 bytes for a single scalar
             let len = s.len();
-            // Zero-fill the rest (already zero from array init)
-            #[allow(clippy::cast_possible_truncation)]
-            Self::Utf8(buf, len as u8)
+            // `len` is at most 4 (UTF-8 scalar), so `u8::try_from` always succeeds.
+            let len_u8 = u8::try_from(len).unwrap_or(0);
+            Self::Utf8(buf, len_u8)
         }
     }
 }
@@ -203,7 +206,7 @@ impl PartialEq<u8> for TChar {
 impl PartialEq<Vec<u8>> for TChar {
     fn eq(&self, other: &Vec<u8>) -> bool {
         match self {
-            Self::Utf8(buf, len) => &buf[..*len as usize] == other.as_slice(),
+            Self::Utf8(buf, len) => &buf[..usize::from(*len)] == other.as_slice(),
             _ => false,
         }
     }
@@ -218,7 +221,7 @@ impl PartialEq<Self> for TChar {
             },
             Self::Utf8(buf, len) => match other {
                 Self::Utf8(obuf, olen) => {
-                    len == olen && buf[..*len as usize] == obuf[..*len as usize]
+                    len == olen && buf[..usize::from(*len)] == obuf[..usize::from(*len)]
                 }
                 _ => false,
             },
@@ -233,10 +236,10 @@ impl fmt::Display for TChar {
         match self {
             Self::Ascii(c) => match c {
                 0x00..=0x1F => write!(f, "0x{c:02X}"),
-                _ => write!(f, "{}", *c as char),
+                _ => write!(f, "{}", char::from(*c)),
             },
             Self::Utf8(buf, len) => {
-                let bytes = &buf[..*len as usize];
+                let bytes = &buf[..usize::from(*len)];
                 write!(f, "{}", std::str::from_utf8(bytes).unwrap_or(""))
             }
             Self::Space => write!(f, " "),

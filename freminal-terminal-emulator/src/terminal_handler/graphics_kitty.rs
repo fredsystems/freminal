@@ -128,7 +128,7 @@ impl TerminalHandler {
             );
         }
 
-        let capacity = cmd.control.data_size.unwrap_or(0) as usize;
+        let capacity = usize::value_from(cmd.control.data_size.unwrap_or(0)).unwrap_or(0);
         let mut accumulated_data = Vec::with_capacity(capacity);
         accumulated_data.extend_from_slice(&cmd.payload);
 
@@ -358,7 +358,11 @@ impl TerminalHandler {
         match format {
             KittyFormat::Rgba => {
                 let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
-                let expected = (w as usize) * (h as usize) * 4;
+                // `w` and `h` are `u32`; on 32-bit platforms the multiplication
+                // could overflow, so use saturating arithmetic to avoid wrap.
+                let w_us = usize::value_from(w).unwrap_or(0);
+                let h_us = usize::value_from(h).unwrap_or(0);
+                let expected = w_us.saturating_mul(h_us).saturating_mul(4);
                 if image_data.len() != expected {
                     tracing::warn!(
                         "Kitty RGBA: expected {expected} bytes, got {}",
@@ -371,7 +375,9 @@ impl TerminalHandler {
             }
             KittyFormat::Rgb => {
                 let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
-                let expected = (w as usize) * (h as usize) * 3;
+                let w_us = usize::value_from(w).unwrap_or(0);
+                let h_us = usize::value_from(h).unwrap_or(0);
+                let expected = w_us.saturating_mul(h_us).saturating_mul(3);
                 if image_data.len() != expected {
                     tracing::warn!(
                         "Kitty RGB: expected {expected} bytes, got {}",
@@ -380,8 +386,8 @@ impl TerminalHandler {
                     self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
                     return None;
                 }
-                let pixel_count = (w as usize) * (h as usize);
-                let mut rgba = Vec::with_capacity(pixel_count * 4);
+                let pixel_count = w_us.saturating_mul(h_us);
+                let mut rgba = Vec::with_capacity(pixel_count.saturating_mul(4));
                 for chunk in image_data.chunks_exact(3) {
                     rgba.extend_from_slice(chunk);
                     rgba.push(255);
@@ -697,8 +703,14 @@ impl TerminalHandler {
                 // Uses the x and y from the control data to define the cell range.
                 // Per Kitty spec, x/y default to cursor position if not specified.
                 let cursor = self.buffer.get_cursor().pos;
-                let col = cmd.control.src_x.map_or(cursor.x, |v| v as usize);
-                let row = cmd.control.src_y.map_or(cursor.y, |v| v as usize);
+                let col = cmd
+                    .control
+                    .src_x
+                    .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+                let row = cmd
+                    .control
+                    .src_y
+                    .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
                 tracing::debug!("Kitty graphics: deleting images at cell ({row},{col})");
                 // For the "and after" variant, clear from that position onward.
                 if matches!(target, KittyDeleteTarget::AtCellRangeAndAfter) {
@@ -711,14 +723,20 @@ impl TerminalHandler {
             KittyDeleteTarget::InColumnRange | KittyDeleteTarget::InColumnRangeAndAfter => {
                 // Delete images that intersect the specified column.
                 let cursor = self.buffer.get_cursor().pos;
-                let col = cmd.control.src_x.map_or(cursor.x, |v| v as usize);
+                let col = cmd
+                    .control
+                    .src_x
+                    .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
                 tracing::debug!("Kitty graphics: deleting images in column {col}");
                 self.buffer.clear_image_placements_in_column(col);
             }
             KittyDeleteTarget::InRowRange | KittyDeleteTarget::InRowRangeAndAfter => {
                 // Delete images that intersect the specified row.
                 let cursor = self.buffer.get_cursor().pos;
-                let row = cmd.control.src_y.map_or(cursor.y, |v| v as usize);
+                let row = cmd
+                    .control
+                    .src_y
+                    .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
                 tracing::debug!("Kitty graphics: deleting images in row {row}");
                 self.buffer.clear_image_placements_in_row(row);
             }

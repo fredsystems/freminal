@@ -524,7 +524,7 @@ impl TerminalHandler {
 
         for (i, tch) in text.iter().enumerate() {
             let is_ph =
-                matches!(tch, TChar::Utf8(buf, len) if is_placeholder(&buf[..*len as usize]));
+                matches!(tch, TChar::Utf8(buf, len) if is_placeholder(&buf[..usize::from(*len)]));
 
             if is_ph {
                 // Flush any pending normal text batch.
@@ -540,7 +540,7 @@ impl TerminalHandler {
 
                 // Process the placeholder character.
                 if let TChar::Utf8(buf, len) = tch {
-                    self.handle_placeholder_char(&buf[..*len as usize]);
+                    self.handle_placeholder_char(&buf[..usize::from(*len)]);
                 }
             }
         }
@@ -2162,7 +2162,10 @@ impl TerminalHandler {
                 self.kitty_keyboard_stack.push(*flags);
             }
             TerminalOutput::KittyKeyboardPop(n) => {
-                let n = (*n as usize).min(self.kitty_keyboard_stack.len());
+                // u32 → usize is lossless on 32/64-bit Freminal targets.
+                let n = usize::value_from(*n)
+                    .unwrap_or(0)
+                    .min(self.kitty_keyboard_stack.len());
                 let new_len = self.kitty_keyboard_stack.len() - n;
                 self.kitty_keyboard_stack.truncate(new_len);
             }
@@ -2661,7 +2664,7 @@ mod tests {
                 freminal_common::buffer_states::tchar::TChar::Space => " ".to_string(),
                 freminal_common::buffer_states::tchar::TChar::NewLine => "\n".to_string(),
                 freminal_common::buffer_states::tchar::TChar::Utf8(buf, len) => {
-                    String::from_utf8_lossy(&buf[..*len as usize]).to_string()
+                    String::from_utf8_lossy(&buf[..usize::from(*len)]).to_string()
                 }
             })
             .collect();

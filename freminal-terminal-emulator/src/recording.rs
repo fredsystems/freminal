@@ -878,7 +878,7 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     // Flags (reserved).
     pos += 4;
 
-    let meta_len = read_u32_le(data, pos) as usize;
+    let meta_len = usize::value_from(read_u32_le(data, pos)).unwrap_or(0);
     pos += 4;
 
     if pos + meta_len > data.len() {
@@ -910,7 +910,7 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
         }
         let timestamp_us = read_u64_le(data, event_pos);
         // Skip event_type byte (we deserialize payload which includes the variant).
-        let payload_len = read_u32_le(data, event_pos + 9) as usize;
+        let payload_len = usize::value_from(read_u32_le(data, event_pos + 9)).unwrap_or(0);
         event_pos += EVENT_HEADER_SIZE;
 
         if event_pos + payload_len > data.len() {

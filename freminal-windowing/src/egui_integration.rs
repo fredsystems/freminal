@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use conv2::ConvUtil;
 use winit::window::Window;
 
 use crate::error::Error;
@@ -31,7 +32,9 @@ impl EguiState {
             ctx.clone(),
             egui::ViewportId::ROOT,
             window,
-            Some(window.scale_factor() as f32),
+            // Scale factor is inherently a float; `approx_as` is the lossy but
+            // well-defined conversion. `1.0` fallback matches the default DPI.
+            Some(window.scale_factor().approx_as::<f32>().unwrap_or(1.0)),
             None,
             None,
         );
