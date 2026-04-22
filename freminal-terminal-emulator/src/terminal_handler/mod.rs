@@ -637,12 +637,12 @@ impl TerminalHandler {
             z_index: 0,
         };
 
-        let cursor_pos = self.buffer.get_cursor().pos;
+        let cursor_pos = self.buffer.cursor().pos;
         let row_idx = cursor_pos.y;
         let col_idx = cursor_pos.x;
 
         // Ensure the row exists.
-        while row_idx >= self.buffer.get_rows().len() {
+        while row_idx >= self.buffer.rows().len() {
             self.buffer.handle_lf();
         }
 
@@ -819,12 +819,12 @@ impl TerminalHandler {
     /// the GUI painter can use them directly without any offset adjustment.
     #[must_use]
     pub fn cursor_pos(&self) -> CursorPos {
-        self.buffer.get_cursor_screen_pos()
+        self.buffer.cursor_screen_pos()
     }
 
     /// Return the current terminal dimensions as `(width, height)`.
     #[must_use]
-    pub const fn get_win_size(&self) -> (usize, usize) {
+    pub const fn win_size(&self) -> (usize, usize) {
         (self.buffer.terminal_width(), self.buffer.terminal_height())
     }
 
@@ -1667,8 +1667,8 @@ mod tests {
     #[test]
     fn test_handler_creation() {
         let handler = TerminalHandler::new(80, 24);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+        assert_eq!(handler.buffer().cursor().pos.x, 0);
+        assert_eq!(handler.buffer().cursor().pos.y, 0);
     }
 
     #[test]
@@ -1676,8 +1676,8 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_data(b"Hello");
 
-        assert_eq!(handler.buffer().get_cursor().pos.x, 5);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+        assert_eq!(handler.buffer().cursor().pos.x, 5);
+        assert_eq!(handler.buffer().cursor().pos.y, 0);
     }
 
     #[test]
@@ -1686,7 +1686,7 @@ mod tests {
         handler.handle_data(b"Hello");
         handler.handle_newline();
 
-        assert_eq!(handler.buffer().get_cursor().pos.y, 1);
+        assert_eq!(handler.buffer().cursor().pos.y, 1);
     }
 
     #[test]
@@ -1695,16 +1695,16 @@ mod tests {
 
         // Move to position (10, 5) - parser sends 1-indexed
         handler.handle_cursor_pos(Some(11), Some(6));
-        assert_eq!(handler.buffer().get_cursor().pos.x, 10);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+        assert_eq!(handler.buffer().cursor().pos.x, 10);
+        assert_eq!(handler.buffer().cursor().pos.y, 5);
 
         // Move right 5
         handler.handle_cursor_forward(5);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 15);
+        assert_eq!(handler.buffer().cursor().pos.x, 15);
 
         // Move up 2
         handler.handle_cursor_up(2);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 3);
+        assert_eq!(handler.buffer().cursor().pos.y, 3);
     }
 
     #[test]
@@ -1822,10 +1822,10 @@ mod tests {
     fn test_tab_from_column_0() {
         let mut handler = TerminalHandler::new(80, 24);
         // Cursor starts at col 0
-        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+        assert_eq!(handler.buffer().cursor().pos.x, 0);
         handler.handle_tab();
         // Should advance to column 8 (first default tab stop)
-        assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+        assert_eq!(handler.buffer().cursor().pos.x, 8);
     }
 
     #[test]
@@ -1834,7 +1834,7 @@ mod tests {
         handler.handle_data(b"1234567"); // 7 chars → cursor at col 7
         handler.handle_tab();
         // Column 7 → next tab stop is column 8
-        assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+        assert_eq!(handler.buffer().cursor().pos.x, 8);
     }
 
     #[test]
@@ -1843,7 +1843,7 @@ mod tests {
         handler.handle_data(b"12345678"); // 8 chars → cursor at col 8
         handler.handle_tab();
         // Column 8 is a tab stop → next is column 16
-        assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+        assert_eq!(handler.buffer().cursor().pos.x, 16);
     }
 
     #[test]
@@ -1852,7 +1852,7 @@ mod tests {
         handler.handle_tab(); // 0 → 8
         handler.handle_tab(); // 8 → 16
         handler.handle_tab(); // 16 → 24
-        assert_eq!(handler.buffer().get_cursor().pos.x, 24);
+        assert_eq!(handler.buffer().cursor().pos.x, 24);
     }
 
     #[test]
@@ -1863,18 +1863,18 @@ mod tests {
         handler.handle_tab();
         // Last tab stop in 80-col terminal is col 72 (8*9=72).
         // At col 75, no more tab stops → goes to col 79 (rightmost)
-        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+        assert_eq!(handler.buffer().cursor().pos.x, 79);
     }
 
     #[test]
     fn test_tab_does_not_wrap() {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_cursor_pos(Some(80), Some(1)); // 1-based → col 79
-        let y_before = handler.buffer().get_cursor().pos.y;
+        let y_before = handler.buffer().cursor().pos.y;
         handler.handle_tab();
         // Should stay at col 79, not wrap
-        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
-        assert_eq!(handler.buffer().get_cursor().pos.y, y_before);
+        assert_eq!(handler.buffer().cursor().pos.x, 79);
+        assert_eq!(handler.buffer().cursor().pos.y, y_before);
     }
 
     #[test]
@@ -1897,10 +1897,10 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         handler.handle_data(b"Hello");
-        assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+        assert_eq!(handler.buffer().cursor().pos.x, 5);
 
         handler.handle_backspace();
-        assert_eq!(handler.buffer().get_cursor().pos.x, 4);
+        assert_eq!(handler.buffer().cursor().pos.x, 4);
     }
 
     #[test]
@@ -1918,8 +1918,8 @@ mod tests {
 
         handler.process_outputs(&outputs);
 
-        assert_eq!(handler.buffer().get_cursor().pos.y, 1);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 5);
+        assert_eq!(handler.buffer().cursor().pos.y, 1);
+        assert_eq!(handler.buffer().cursor().pos.x, 5);
     }
 
     #[test]
@@ -1938,8 +1938,8 @@ mod tests {
 
         handler.process_outputs(&outputs);
 
-        assert_eq!(handler.buffer().get_cursor().pos.x, 14); // 10 + 4
-        assert_eq!(handler.buffer().get_cursor().pos.y, 5); // 5 (0-indexed)
+        assert_eq!(handler.buffer().cursor().pos.x, 14); // 10 + 4
+        assert_eq!(handler.buffer().cursor().pos.y, 5); // 5 (0-indexed)
     }
 
     #[test]
@@ -1965,7 +1965,7 @@ mod tests {
         // Both rows must be empty after the clear.
         for row in visible {
             assert!(
-                row.get_characters().is_empty(),
+                row.characters().is_empty(),
                 "all visible rows must be empty after ClearDisplay"
             );
         }
@@ -2068,7 +2068,7 @@ mod tests {
     fn win_size_accessor() {
         let handler = TerminalHandler::new(132, 48);
 
-        let (w, h) = handler.get_win_size();
+        let (w, h) = handler.win_size();
         assert_eq!(w, 132, "width must match constructor argument");
         assert_eq!(h, 48, "height must match constructor argument");
     }
@@ -2162,7 +2162,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xAA, 0xBB, 0xCC));
 
-        let (r, g, b) = handler.palette().get_rgb(42, handler.theme());
+        let (r, g, b) = handler.palette().rgb(42, handler.theme());
         assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
     }
 
@@ -2215,7 +2215,7 @@ mod tests {
         // Set index 5 to a custom value.
         handler.handle_osc(&AnsiOscType::SetPaletteColor(5, 0x11, 0x22, 0x33));
         assert_eq!(
-            handler.palette().get_rgb(5, handler.theme()),
+            handler.palette().rgb(5, handler.theme()),
             (0x11, 0x22, 0x33)
         );
 
@@ -2224,7 +2224,7 @@ mod tests {
 
         // Should revert to the default for index 5.
         let default_rgb = freminal_common::colors::default_index_to_rgb(5, handler.theme());
-        assert_eq!(handler.palette().get_rgb(5, handler.theme()), default_rgb);
+        assert_eq!(handler.palette().rgb(5, handler.theme()), default_rgb);
     }
 
     #[test]
@@ -2725,7 +2725,7 @@ mod tests {
         handler.process_outputs(&[TerminalOutput::Mode(Mode::Irm(Irm::Insert))]);
         handler.handle_data(b"AB");
         // In insert mode, characters shift existing content right
-        assert_eq!(handler.buffer().get_cursor().pos.x, 2);
+        assert_eq!(handler.buffer().cursor().pos.x, 2);
     }
 
     #[test]
@@ -2799,8 +2799,8 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
         handler.handle_cursor_pos(Some(10), Some(5)); // 1-indexed
-        assert_eq!(handler.buffer().get_cursor().pos.x, 9);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+        assert_eq!(handler.buffer().cursor().pos.x, 9);
+        assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
     #[test]
@@ -2813,7 +2813,7 @@ mod tests {
         // Row should be unchanged (2, from previous), col should also be unchanged
         // because the VT52 handler ignores both axes independently
         assert_eq!(
-            handler.buffer().get_cursor().pos.y,
+            handler.buffer().cursor().pos.y,
             2,
             "row should be unchanged"
         );
@@ -2827,7 +2827,7 @@ mod tests {
         // Out-of-bounds column
         handler.handle_cursor_pos(Some(200), Some(3));
         assert_eq!(
-            handler.buffer().get_cursor().pos.x,
+            handler.buffer().cursor().pos.x,
             4,
             "col should be unchanged"
         );
@@ -3112,7 +3112,7 @@ mod tests {
         handler.handle_data(b"A");
         handler.process_outputs(&[TerminalOutput::RepeatCharacter(5)]);
         // Should have 'A' + 5 repeats = 6 chars total
-        assert_eq!(handler.buffer().get_cursor().pos.x, 6);
+        assert_eq!(handler.buffer().cursor().pos.x, 6);
     }
 
     #[test]
@@ -3120,7 +3120,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         // No previous graphic char — REP should be a no-op
         handler.process_outputs(&[TerminalOutput::RepeatCharacter(5)]);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
+        assert_eq!(handler.buffer().cursor().pos.x, 0);
     }
 
     // ------------------------------------------------------------------
@@ -3244,7 +3244,7 @@ mod tests {
         handler.handle_tab();
         // Default tab stop at col 8 was cleared at col 0 — but cursor is at 0,
         // so clearing col 0 doesn't affect col 8. Tab should still go to 8.
-        assert_eq!(handler.buffer().get_cursor().pos.x, 8);
+        assert_eq!(handler.buffer().cursor().pos.x, 8);
     }
 
     #[test]
@@ -3253,7 +3253,7 @@ mod tests {
         handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
         handler.handle_tab();
         // All tab stops cleared — should go to last column
-        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+        assert_eq!(handler.buffer().cursor().pos.x, 79);
     }
 
     #[test]
@@ -3261,7 +3261,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::All)]);
         handler.handle_tab();
-        assert_eq!(handler.buffer().get_cursor().pos.x, 79);
+        assert_eq!(handler.buffer().cursor().pos.x, 79);
     }
 
     #[test]
@@ -3273,7 +3273,7 @@ mod tests {
         handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllLine)]);
         handler.handle_tab();
         assert_eq!(
-            handler.buffer().get_cursor().pos.x,
+            handler.buffer().cursor().pos.x,
             8,
             "Line tab clears should be no-ops"
         );
@@ -3289,7 +3289,7 @@ mod tests {
         handler.handle_cursor_pos(Some(1), Some(1)); // back to col 0
         handler.handle_tab();
         assert_eq!(
-            handler.buffer().get_cursor().pos.x,
+            handler.buffer().cursor().pos.x,
             5,
             "Should tab to custom stop at 5"
         );
@@ -3300,7 +3300,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.process_outputs(&[TerminalOutput::CursorForwardTab(2)]);
         // 2 tabs forward: 0→8→16
-        assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+        assert_eq!(handler.buffer().cursor().pos.x, 16);
     }
 
     #[test]
@@ -3309,7 +3309,7 @@ mod tests {
         handler.handle_cursor_pos(Some(21), Some(1)); // col 20
         handler.process_outputs(&[TerminalOutput::CursorBackwardTab(1)]);
         // Backward 1 tab from col 20: previous stop is col 16
-        assert_eq!(handler.buffer().get_cursor().pos.x, 16);
+        assert_eq!(handler.buffer().cursor().pos.x, 16);
     }
 
     // ------------------------------------------------------------------
@@ -3324,8 +3324,8 @@ mod tests {
             x: Some(3),
             y: Some(-2),
         }]);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 12); // 9 + 3
-        assert_eq!(handler.buffer().get_cursor().pos.y, 2); // 4 - 2
+        assert_eq!(handler.buffer().cursor().pos.x, 12); // 9 + 3
+        assert_eq!(handler.buffer().cursor().pos.y, 2); // 4 - 2
     }
 
     #[test]
@@ -3334,8 +3334,8 @@ mod tests {
         handler.handle_cursor_pos(Some(10), Some(5));
         handler.process_outputs(&[TerminalOutput::SetCursorPosRel { x: None, y: None }]);
         // No change — defaults to (0, 0)
-        assert_eq!(handler.buffer().get_cursor().pos.x, 9);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+        assert_eq!(handler.buffer().cursor().pos.x, 9);
+        assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
     #[test]
@@ -3357,9 +3357,9 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_cursor_pos(Some(1), Some(5));
         handler.process_outputs(&[TerminalOutput::Index]);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 5);
+        assert_eq!(handler.buffer().cursor().pos.y, 5);
         handler.process_outputs(&[TerminalOutput::ReverseIndex]);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+        assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
     #[test]
@@ -3367,8 +3367,8 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_data(b"Hello");
         handler.process_outputs(&[TerminalOutput::NextLine]);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 0, "NEL should CR");
-        assert_eq!(handler.buffer().get_cursor().pos.y, 1, "NEL should LF");
+        assert_eq!(handler.buffer().cursor().pos.x, 0, "NEL should CR");
+        assert_eq!(handler.buffer().cursor().pos.y, 1, "NEL should LF");
     }
 
     #[test]
@@ -3403,7 +3403,7 @@ mod tests {
         // 'q' (0x71) should map to a box drawing character
         handler.handle_data(b"q");
         // Cursor should advance
-        assert_eq!(handler.buffer().get_cursor().pos.x, 1);
+        assert_eq!(handler.buffer().cursor().pos.x, 1);
     }
 
     #[test]
@@ -3443,8 +3443,8 @@ mod tests {
         handler.process_outputs(&[TerminalOutput::SaveCursor]);
         handler.handle_cursor_pos(Some(1), Some(1));
         handler.process_outputs(&[TerminalOutput::RestoreCursor]);
-        assert_eq!(handler.buffer().get_cursor().pos.x, 9);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 4);
+        assert_eq!(handler.buffer().cursor().pos.x, 9);
+        assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
     #[test]
@@ -3453,8 +3453,8 @@ mod tests {
         handler.handle_data(b"test");
         handler.process_outputs(&[TerminalOutput::ResetDevice]);
         // After full reset, cursor should be at origin
-        assert_eq!(handler.buffer().get_cursor().pos.x, 0);
-        assert_eq!(handler.buffer().get_cursor().pos.y, 0);
+        assert_eq!(handler.buffer().cursor().pos.x, 0);
+        assert_eq!(handler.buffer().cursor().pos.y, 0);
     }
 
     #[test]
@@ -3615,7 +3615,7 @@ mod tests {
         handler.process_outputs(&[TerminalOutput::Mode(Mode::Irm(Irm::Insert))]);
         handler.handle_data(b"XY");
         // After inserting "XY" at col 2 in insert mode, cursor should be at col 4
-        assert_eq!(handler.buffer().get_cursor().pos.x, 4);
+        assert_eq!(handler.buffer().cursor().pos.x, 4);
     }
 
     // ------------------------------------------------------------------
@@ -3975,7 +3975,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_data(&[]);
         // No crash, buffer unchanged
-        assert_eq!(handler.buffer.get_cursor().pos.x, 0);
+        assert_eq!(handler.buffer.cursor().pos.x, 0);
     }
 
     #[test]
@@ -4189,7 +4189,7 @@ mod tests {
         handler.insert_mode = Irm::Insert;
         handler.handle_data(b"AB");
         // Cursor should be at col 2
-        assert_eq!(handler.buffer.get_cursor().pos.x, 2);
+        assert_eq!(handler.buffer.cursor().pos.x, 2);
     }
 
     #[test]
@@ -4356,7 +4356,7 @@ mod tests {
         handler.handle_data_with_placeholders(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
 
         // Verify text was inserted
-        let row = &handler.buffer.get_rows()[0];
+        let row = &handler.buffer.rows()[0];
         assert_eq!(row.cells().len(), 2);
     }
 
@@ -4410,7 +4410,7 @@ mod tests {
 
         // Verify: "X" was inserted, then placeholder, then "Y"
         // The buffer should have cells written
-        let rows = handler.buffer.get_rows();
+        let rows = handler.buffer.rows();
         assert!(
             !rows.is_empty(),
             "buffer should have at least one row after text+placeholder"
@@ -4520,7 +4520,7 @@ mod tests {
         handler.handle_placeholder_char(&bytes);
 
         // Should have inserted a space (no matching virtual placement)
-        let rows = handler.buffer.get_rows();
+        let rows = handler.buffer.rows();
         if !rows.is_empty() && !rows[0].cells().is_empty() {
             assert_eq!(
                 rows[0].cells()[0].tchar(),

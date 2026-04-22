@@ -37,11 +37,11 @@ impl TerminalHandler {
                 self.write_csi_response(&format!("6;{h};{w}t"));
             }
             WindowManipulation::ReportTerminalSizeInCharacters => {
-                let (width, height) = self.get_win_size();
+                let (width, height) = self.win_size();
                 self.write_csi_response(&format!("8;{height};{width}t"));
             }
             WindowManipulation::ReportRootWindowSizeInCharacters => {
-                let (width, height) = self.get_win_size();
+                let (width, height) = self.win_size();
                 self.write_csi_response(&format!("9;{height};{width}t"));
             }
             other => {

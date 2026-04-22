@@ -1665,7 +1665,7 @@ mod tests {
         // CSI 5;10H → move cursor to row 5, col 10 (1-based)
         let dispatched = handler.dispatch_tmux_csi(b"5;10H");
         assert!(dispatched, "CUP should be handled directly");
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 9, "col should be 10 - 1 = 9 (0-based)");
         assert_eq!(cursor.y, 4, "row should be 5 - 1 = 4 (0-based)");
     }
@@ -1676,7 +1676,7 @@ mod tests {
         // CSI H → move cursor to row 1, col 1 (default)
         let dispatched = handler.dispatch_tmux_csi(b"H");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 0);
         assert_eq!(cursor.y, 0);
     }
@@ -1687,7 +1687,7 @@ mod tests {
         // CSI 3;7f → same as H
         let dispatched = handler.dispatch_tmux_csi(b"3;7f");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 6);
         assert_eq!(cursor.y, 2);
     }
@@ -1698,7 +1698,7 @@ mod tests {
         handler.handle_cursor_pos(Some(5), Some(10));
         let dispatched = handler.dispatch_tmux_csi(b"3A");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.y, 6, "should move up 3 from row 9 → row 6");
     }
 
@@ -1708,7 +1708,7 @@ mod tests {
         handler.handle_cursor_pos(Some(1), Some(5));
         let dispatched = handler.dispatch_tmux_csi(b"2B");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.y, 6, "should move down 2 from row 4 → row 6");
     }
 
@@ -1718,7 +1718,7 @@ mod tests {
         handler.handle_cursor_pos(Some(10), Some(1));
         let dispatched = handler.dispatch_tmux_csi(b"5C");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 14, "should move forward 5 from col 9 → col 14");
     }
 
@@ -1728,7 +1728,7 @@ mod tests {
         handler.handle_cursor_pos(Some(10), Some(1));
         let dispatched = handler.dispatch_tmux_csi(b"3D");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 6, "should move backward 3 from col 9 → col 6");
     }
 
@@ -1738,7 +1738,7 @@ mod tests {
         handler.handle_cursor_pos(Some(1), Some(5));
         let dispatched = handler.dispatch_tmux_csi(b"20G");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 19, "CHA should set col to 20 - 1 = 19");
         assert_eq!(cursor.y, 4, "CHA should not change row");
     }
@@ -1749,7 +1749,7 @@ mod tests {
         handler.handle_cursor_pos(Some(10), Some(1));
         let dispatched = handler.dispatch_tmux_csi(b"15d");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.y, 14, "VPA should set row to 15 - 1 = 14");
     }
 
@@ -1843,7 +1843,7 @@ mod tests {
         // CSI 2 E → cursor next line, move down 2 and to col 1
         let dispatched = handler.dispatch_tmux_csi(b"2E");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 0, "CNL should reset col to 0");
         assert_eq!(cursor.y, 6, "CNL should move down 2 from row 4 → row 6");
     }
@@ -1855,7 +1855,7 @@ mod tests {
         // CSI 3 F → cursor previous line, move up 3 and to col 1
         let dispatched = handler.dispatch_tmux_csi(b"3F");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 0, "CPL should reset col to 0");
         assert_eq!(cursor.y, 6, "CPL should move up 3 from row 9 → row 6");
     }
@@ -1943,7 +1943,7 @@ mod tests {
         // CSI u (no params) → restore cursor
         let dispatched = handler.dispatch_tmux_csi(b"u");
         assert!(dispatched, "SCORC should be handled directly");
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 9, "should restore col to 9");
         assert_eq!(cursor.y, 4, "should restore row to 4");
     }
@@ -1973,7 +1973,7 @@ mod tests {
         // CSI 30 ` → HPA, set col to 30
         let dispatched = handler.dispatch_tmux_csi(b"30`");
         assert!(dispatched, "HPA should be handled directly");
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 29, "HPA should set col to 30 - 1 = 29");
     }
 
@@ -2273,7 +2273,7 @@ mod tests {
             handler.tmux_reparse_queue.is_empty(),
             "CUP should be directly dispatched, not queued"
         );
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 9);
         assert_eq!(cursor.y, 4);
     }
@@ -2316,8 +2316,8 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // Start cursor at 0,0
-        assert_eq!(handler.buffer.get_cursor().pos.x, 0);
-        assert_eq!(handler.buffer.get_cursor().pos.y, 0);
+        assert_eq!(handler.buffer.cursor().pos.x, 0);
+        assert_eq!(handler.buffer.cursor().pos.y, 0);
 
         // Simulate: DCS tmux passthrough containing CSI 1;42H (CUP row 1, col 42)
         // The tmux DCS wrapper has already been stripped; the inner content is
@@ -2327,7 +2327,7 @@ mod tests {
         // with "1;42H".
         let dispatched = handler.dispatch_tmux_csi(b"1;42H");
         assert!(dispatched);
-        let cursor = handler.buffer.get_cursor().pos;
+        let cursor = handler.buffer.cursor().pos;
         assert_eq!(cursor.x, 41, "col should be 42 - 1 = 41 (0-based)");
         assert_eq!(cursor.y, 0, "row should be 1 - 1 = 0 (0-based)");
 

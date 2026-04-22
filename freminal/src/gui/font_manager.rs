@@ -510,7 +510,7 @@ impl FontManager {
     /// when no user font is active).
     #[must_use]
     pub fn face_data(&self, face_id: FaceId) -> Option<&[u8]> {
-        self.get_loaded_face(face_id).map(LoadedFace::as_bytes)
+        self.loaded_face(face_id).map(LoadedFace::as_bytes)
     }
 
     /// Get the font collection index for a given `FaceId`.
@@ -518,7 +518,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded.
     #[must_use]
     pub fn face_index(&self, face_id: FaceId) -> Option<usize> {
-        self.get_loaded_face(face_id).map(|f| f.index)
+        self.loaded_face(face_id).map(|f| f.index)
     }
 
     /// Create a `rustybuzz::Face` for the given `FaceId`.
@@ -529,7 +529,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded or the data cannot be parsed.
     #[must_use]
     pub fn rustybuzz_face(&self, face_id: FaceId) -> Option<rustybuzz::Face<'_>> {
-        let loaded = self.get_loaded_face(face_id)?;
+        let loaded = self.loaded_face(face_id)?;
         rustybuzz::Face::from_slice(
             loaded.as_bytes(),
             u32::value_from(loaded.index).unwrap_or(0),
@@ -541,7 +541,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded.
     #[must_use]
     pub fn swash_font_ref(&self, face_id: FaceId) -> Option<swash::FontRef<'_>> {
-        self.get_loaded_face(face_id)?.as_font_ref()
+        self.loaded_face(face_id)?.as_font_ref()
     }
 
     /// Get the swash `CacheKey` for a given `FaceId`.
@@ -549,7 +549,7 @@ impl FontManager {
     /// Returns `None` if the face is not loaded.
     #[must_use]
     pub fn face_cache_key(&self, face_id: FaceId) -> Option<swash::CacheKey> {
-        self.get_loaded_face(face_id).map(LoadedFace::cache_key)
+        self.loaded_face(face_id).map(LoadedFace::cache_key)
     }
 
     // -----------------------------------------------------------------------
@@ -817,7 +817,7 @@ impl FontManager {
     }
 
     /// Look up a `LoadedFace` by its `FaceId`.
-    fn get_loaded_face(&self, face_id: FaceId) -> Option<&LoadedFace> {
+    fn loaded_face(&self, face_id: FaceId) -> Option<&LoadedFace> {
         match face_id {
             FaceId::PrimaryRegular => Some(&self.primary.regular),
             FaceId::PrimaryBold => Some(&self.primary.bold),

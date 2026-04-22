@@ -288,7 +288,7 @@ impl Buffer {
                 // Flat offset = cells from preceding rows in this logical line + cursor X.
                 cursor_flat_offset = current_line
                     .iter()
-                    .map(|r| r.get_characters().len())
+                    .map(|r| r.characters().len())
                     .sum::<usize>()
                     + old_cursor_x;
             }
@@ -312,7 +312,7 @@ impl Buffer {
             // Flatten all rows in this logical line into a single Vec<Cell>
             let mut flat_cells: Vec<crate::cell::Cell> = Vec::new();
             for row in &line {
-                flat_cells.extend(row.get_characters().iter().cloned());
+                flat_cells.extend(row.characters().iter().cloned());
             }
 
             // Record where this logical line's new rows start (for cursor mapping).
@@ -428,7 +428,7 @@ impl Buffer {
                 let mut flat_col: usize = 0;
                 let mut found = false;
                 for (i, new_row) in new_rows[line_start_idx..].iter().enumerate() {
-                    let row_cells = new_row.get_characters().len();
+                    let row_cells = new_row.characters().len();
                     if flat_col + row_cells > cursor_flat_offset {
                         new_cursor_y = Some(line_start_idx + i);
                         new_cursor_x = Some(cursor_flat_offset - flat_col);
@@ -441,7 +441,7 @@ impl Buffer {
                     // Cursor is past the end of content (in blank space).
                     // Place it on the last row of this logical line.
                     let last_row_idx = new_rows.len() - 1;
-                    let last_row_len = new_rows[last_row_idx].get_characters().len();
+                    let last_row_len = new_rows[last_row_idx].characters().len();
                     new_cursor_y = Some(last_row_idx);
                     new_cursor_x = Some(cursor_flat_offset.saturating_sub(flat_col) + last_row_len);
                 }
@@ -643,7 +643,7 @@ impl Buffer {
 
     /// Get the current format tag
     #[must_use]
-    pub const fn get_format(&self) -> &FormatTag {
+    pub const fn format(&self) -> &FormatTag {
         &self.current_tag
     }
 

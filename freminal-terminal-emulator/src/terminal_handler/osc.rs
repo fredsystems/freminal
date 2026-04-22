@@ -120,7 +120,7 @@ impl TerminalHandler {
                 self.palette.set(*idx, *r, *g, *b);
             }
             AnsiOscType::QueryPaletteColor(idx) => {
-                let (r, g, b) = self.palette.get_rgb(*idx, self.theme);
+                let (r, g, b) = self.palette.rgb(*idx, self.theme);
                 let body = format!(
                     "4;{idx};rgb:{:04x}/{:04x}/{:04x}",
                     u16::from(r) * 257,

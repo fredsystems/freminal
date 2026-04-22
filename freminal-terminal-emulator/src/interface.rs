@@ -366,8 +366,8 @@ impl TerminalEmulator {
         }
     }
 
-    pub const fn get_win_size(&mut self) -> (usize, usize) {
-        self.internal.get_win_size()
+    pub const fn win_size(&mut self) -> (usize, usize) {
+        self.internal.win_size()
     }
 
     /// Set the terminal window dimensions in characters and notify the PTY of the size change.
@@ -385,7 +385,7 @@ impl TerminalEmulator {
         font_pixel_width: usize,
         font_pixel_height: usize,
     ) -> Result<(), InterfaceError> {
-        let (old_width, old_height) = self.internal.get_win_size();
+        let (old_width, old_height) = self.internal.win_size();
         self.internal.set_win_size(
             width_chars,
             height_chars,
@@ -526,7 +526,7 @@ impl TerminalEmulator {
     #[must_use]
     pub fn build_snapshot(&mut self) -> TerminalSnapshot {
         // ── Cheap immutable reads (no &mut borrow of handler needed) ────────
-        let (term_width, term_height) = self.internal.handler.get_win_size();
+        let (term_width, term_height) = self.internal.handler.win_size();
         let is_alternate_screen = self.internal.handler.is_alternate_screen();
 
         // On the alternate screen scrollback is meaningless — clamp to 0.
@@ -590,7 +590,7 @@ impl TerminalEmulator {
         // Hide the cursor when the user is scrolled back into history —
         // the live cursor line is not visible on screen.
         let show_cursor = self.internal.show_cursor() && scroll_offset == 0;
-        let cursor_visual_style = self.internal.get_cursor_visual_style();
+        let cursor_visual_style = self.internal.cursor_visual_style();
         let is_normal_display = self.internal.is_normal_display();
 
         // ── Blink detection ──────────────────────────────────────────────────
@@ -625,7 +625,7 @@ impl TerminalEmulator {
                 .visible_line_widths(scroll_offset),
         );
 
-        let total_rows = self.internal.handler.buffer().get_rows().len();
+        let total_rows = self.internal.handler.buffer().rows().len();
 
         TerminalSnapshot {
             visible_chars,
@@ -784,7 +784,7 @@ impl TerminalEmulator {
             mouse_tracking: self.internal.modes.mouse_tracking.clone(),
             mouse_encoding: self.internal.modes.mouse_encoding.clone(),
             repeat_keys: self.internal.modes.repeat_keys,
-            cursor_key_app_mode: self.internal.get_cursor_key_mode(),
+            cursor_key_app_mode: self.internal.cursor_key_mode(),
             keypad_app_mode: self.internal.modes.keypad_mode,
             skip_draw: self.internal.skip_draw_always(),
             modify_other_keys: self.internal.handler.modify_other_keys_level(),
@@ -906,7 +906,7 @@ mod tests {
         // Drain any initial messages.
         while rx.try_recv().is_ok() {}
 
-        let (w, h) = emu.internal.get_win_size();
+        let (w, h) = emu.internal.win_size();
         // Setting the same size should not enqueue a Resize message.
         emu.set_win_size(w, h, 8, 16).unwrap();
         assert!(
@@ -921,7 +921,7 @@ mod tests {
         // Drain any initial messages.
         while rx.try_recv().is_ok() {}
 
-        let (w, h) = emu.internal.get_win_size();
+        let (w, h) = emu.internal.win_size();
         let new_w = w + 10;
         let new_h = h + 5;
         emu.set_win_size(new_w, new_h, 8, 16).unwrap();
@@ -992,7 +992,7 @@ mod tests {
         let _ = emu.build_snapshot();
 
         // Resize terminal — this should invalidate the cache.
-        let (w, h) = emu.internal.get_win_size();
+        let (w, h) = emu.internal.win_size();
         emu.set_win_size(w + 10, h, 8, 16).unwrap();
         // Drain the resize message.
         while rx.try_recv().is_ok() {}
@@ -1064,7 +1064,7 @@ mod tests {
 
         emu.handle_resize_event(120, 40, 9, 18);
 
-        let (w, h) = emu.internal.get_win_size();
+        let (w, h) = emu.internal.win_size();
         assert_eq!(w, 120);
         assert_eq!(h, 40);
 
@@ -1086,7 +1086,7 @@ mod tests {
         let (mut emu, rx) = TerminalEmulator::new_headless(None);
         while rx.try_recv().is_ok() {}
 
-        let (w, h) = emu.internal.get_win_size();
+        let (w, h) = emu.internal.win_size();
         // handle_resize_event always sends, unlike set_win_size
         emu.handle_resize_event(w, h, 8, 16);
 
@@ -1255,7 +1255,7 @@ mod tests {
     #[test]
     fn get_win_size_returns_headless_defaults() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        let (w, h) = emu.get_win_size();
+        let (w, h) = emu.win_size();
         // Headless defaults are 100x100
         assert!(w > 0);
         assert!(h > 0);

@@ -311,7 +311,7 @@ fn spawn_pty_consumer_thread(
                                 emulator.internal.handler.data_and_format_data_for_gui(0);
                             let mut combined = chars.scrollback;
                             combined.extend(chars.visible);
-                            let total_rows = emulator.internal.handler.buffer().get_rows().len();
+                            let total_rows = emulator.internal.handler.buffer().rows().len();
                             let _ = search_buffer_tx.send((total_rows, combined));
                         }
                         Err(_) => {

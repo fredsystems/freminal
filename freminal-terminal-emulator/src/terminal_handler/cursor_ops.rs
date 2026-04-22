@@ -108,7 +108,7 @@ impl TerminalHandler {
     /// scroll region top margin.  When DECOM is disabled, it is relative to the
     /// screen origin.
     pub fn handle_cursor_report(&mut self) {
-        let screen_pos = self.buffer.get_cursor_screen_pos();
+        let screen_pos = self.buffer.cursor_screen_pos();
         let x = screen_pos.x + 1;
         let y = if self.buffer.is_decom_enabled() == Decom::OriginMode {
             let (region_top, _) = self.buffer.scroll_region();

@@ -226,7 +226,7 @@ pub fn build_background_instances(
         // --- Per-cell background instances ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let bg_color_raw = run.colors.get_background_color();
+            let bg_color_raw = run.colors.background_color();
 
             // Skip default backgrounds (transparent — the terminal base color
             // is rendered as a panel clear, not explicit quads).
@@ -271,12 +271,12 @@ pub fn build_background_instances(
 
             if underline_style.is_active() {
                 // Use underline color if set, otherwise fall back to foreground.
-                let ul_color_raw = run.colors.get_underline_color();
+                let ul_color_raw = run.colors.underline_color();
                 let ul_color = if matches!(
                     ul_color_raw,
                     freminal_common::colors::TerminalColor::DefaultUnderlineColor
                 ) {
-                    internal_color_to_gl(run.colors.get_color(), is_faint, theme)
+                    internal_color_to_gl(run.colors.color(), is_faint, theme)
                 } else {
                     internal_color_to_gl(ul_color_raw, is_faint, theme)
                 };
@@ -303,7 +303,7 @@ pub fn build_background_instances(
             }
 
             if has_strike {
-                let fg_color = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
+                let fg_color = internal_color_to_gl(run.colors.color(), is_faint, theme);
                 // strikeout_offset from OS/2 is positive (above baseline in font
                 // coords).  In top-down pixel coords, subtracting it from the
                 // baseline places the line above the baseline (middle of cell).
@@ -510,7 +510,7 @@ pub fn build_foreground_instances(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let normal_fg = internal_color_to_gl(run.colors.get_color(), is_faint, theme);
+            let normal_fg = internal_color_to_gl(run.colors.color(), is_faint, theme);
 
             // Track the current column as we iterate glyphs within the run.
             let mut col = run.col_start;

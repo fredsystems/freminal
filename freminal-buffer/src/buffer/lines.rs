@@ -66,7 +66,7 @@ impl Buffer {
 
         // Skip left over continuation cells of a wide glyph
         while new_x > 0 {
-            if let Some(cell) = row.get_char_at(new_x) {
+            if let Some(cell) = row.char_at(new_x) {
                 if !cell.is_continuation() {
                     break;
                 }

@@ -119,7 +119,7 @@ impl StateColors {
 
     /// Return the effective foreground color, accounting for reverse-video.
     #[must_use]
-    pub const fn get_color(&self) -> TerminalColor {
+    pub const fn color(&self) -> TerminalColor {
         match self.reverse_video {
             ReverseVideo::On => self.background_color.default_to_regular(),
             ReverseVideo::Off => self.color,
@@ -127,7 +127,7 @@ impl StateColors {
     }
 
     #[must_use]
-    pub const fn get_background_color(&self) -> TerminalColor {
+    pub const fn background_color(&self) -> TerminalColor {
         match self.reverse_video {
             ReverseVideo::On => self.color.default_to_regular(),
             ReverseVideo::Off => self.background_color,
@@ -135,7 +135,7 @@ impl StateColors {
     }
 
     #[must_use]
-    pub const fn get_underline_color(&self) -> TerminalColor {
+    pub const fn underline_color(&self) -> TerminalColor {
         match self.reverse_video {
             ReverseVideo::On => {
                 // An explicitly-set underline colour is independent of fg/bg inversion.

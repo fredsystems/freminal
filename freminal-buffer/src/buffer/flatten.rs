@@ -216,7 +216,7 @@ impl Buffer {
         let mut chars: Vec<TChar> = Vec::new();
         let mut tags: Vec<FormatTag> = Vec::new();
 
-        for cell in row.get_characters() {
+        for cell in row.characters() {
             // Skip wide-glyph continuation cells.
             if cell.is_continuation() {
                 continue;
@@ -317,7 +317,7 @@ impl Buffer {
 
         for row_idx in start_row..=end_row {
             let row = &self.rows[row_idx];
-            let cells = row.get_characters();
+            let cells = row.characters();
 
             let col_begin = if row_idx == start_row { start_col } else { 0 };
             let col_end = if row_idx == end_row {
@@ -382,7 +382,7 @@ impl Buffer {
 
         for row_idx in start_row..=end_row {
             let row = &self.rows[row_idx];
-            let cells = row.get_characters();
+            let cells = row.characters();
 
             let mut row_text = String::new();
             for col in col_min..=col_max {

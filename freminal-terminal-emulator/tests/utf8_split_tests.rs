@@ -37,7 +37,7 @@ fn make_state() -> (TerminalState, crossbeam_channel::Receiver<PtyWrite>) {
 /// with a single space so that multi-row content can be matched with a simple
 /// `contains()`.
 fn visible_text(state: &mut TerminalState) -> String {
-    let rows = state.handler.buffer().get_rows();
+    let rows = state.handler.buffer().rows();
     let mut parts: Vec<String> = Vec::new();
     for row in rows {
         let mut row_str = String::new();

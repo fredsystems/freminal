@@ -168,7 +168,7 @@ impl TerminalHandler {
         cell_pixel_width: u32,
         cell_pixel_height: u32,
     ) {
-        let (old_width, old_height) = self.get_win_size();
+        let (old_width, old_height) = self.win_size();
 
         if cell_pixel_width > 0 {
             self.cell_pixel_width = cell_pixel_width;
@@ -190,7 +190,7 @@ impl TerminalHandler {
     /// Send an in-band resize notification to the PTY.
     /// Format: `CSI 48 ; height_chars ; width_chars ; height_pixels ; width_pixels t`
     pub(super) fn send_in_band_resize(&self) {
-        let (width, height) = self.get_win_size();
+        let (width, height) = self.win_size();
         let Ok(width_u32) = u32::value_from(width) else {
             return;
         };

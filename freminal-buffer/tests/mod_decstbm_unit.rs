@@ -32,7 +32,7 @@ fn build_tagged_screen(buf: &mut Buffer, width: usize, height: usize) {
 fn visible_lengths(buf: &Buffer) -> Vec<usize> {
     buf.visible_rows(0)
         .iter()
-        .map(|row| row.get_characters().len())
+        .map(|row| row.characters().len())
         .collect()
 }
 

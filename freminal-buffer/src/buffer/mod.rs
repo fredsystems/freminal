@@ -236,13 +236,13 @@ impl Buffer {
 
     /// Returns a reference to all rows in this buffer (scrollback + visible region).
     #[must_use]
-    pub const fn get_rows(&self) -> &Vec<Row> {
+    pub const fn rows(&self) -> &Vec<Row> {
         &self.rows
     }
 
     /// Returns a reference to the current cursor state (position and attributes).
     #[must_use]
-    pub const fn get_cursor(&self) -> &CursorState {
+    pub const fn cursor(&self) -> &CursorState {
         &self.cursor
     }
 
@@ -693,8 +693,8 @@ mod basic_tests {
         buf.handle_lf();
         buf.insert_text(&[TChar::Ascii(b'B')]);
 
-        let screen_pos = buf.get_cursor_screen_pos();
-        let raw_pos = buf.get_cursor().pos;
+        let screen_pos = buf.cursor_screen_pos();
+        let raw_pos = buf.cursor().pos;
 
         // No scrollback yet — screen y must equal raw y
         assert_eq!(
@@ -731,7 +731,7 @@ mod basic_tests {
         buf.set_cursor_pos(Some(0), None); // CHA — y unchanged
         buf.move_cursor_relative(0, -(logo_lines as i32)); // CUU
         assert_eq!(
-            buf.get_cursor_screen_pos().y,
+            buf.cursor_screen_pos().y,
             0,
             "after CUU cursor must be at screen row 0"
         );
@@ -752,7 +752,7 @@ mod basic_tests {
         // --- Verify: every logo row still has its marker in col 0 ---
         let visible = buf.visible_rows(0);
         for (i, row) in visible.iter().enumerate().take(logo_lines) {
-            let chars = row.get_characters();
+            let chars = row.characters();
             assert!(
                 !chars.is_empty(),
                 "row {i} must not be empty after info pass"
@@ -780,7 +780,7 @@ mod basic_tests {
         }
 
         // Cursor is on the last visible row (screen row 2, 0-indexed)
-        let screen_pos = buf.get_cursor_screen_pos();
+        let screen_pos = buf.cursor_screen_pos();
         assert!(
             screen_pos.y < buf.terminal_height(),
             "screen y ({}) must be within terminal height ({})",
@@ -790,7 +790,7 @@ mod basic_tests {
 
         // Raw cursor y is an absolute row index — must be larger than screen y
         // when there is scrollback above the visible window.
-        let raw_y = buf.get_cursor().pos.y;
+        let raw_y = buf.cursor().pos.y;
         let visible_start = buf.visible_window_start(0);
         assert_eq!(
             screen_pos.y,
@@ -806,14 +806,14 @@ mod basic_tests {
 
         // Move cursor to row 5 (0-indexed screen coord)
         buf.set_cursor_pos(Some(0), Some(5));
-        let row_before = buf.get_cursor().pos.y;
+        let row_before = buf.cursor().pos.y;
 
         // CHA: x = Some(10), y = None → only x should change
         buf.set_cursor_pos(Some(10), None);
 
-        assert_eq!(buf.get_cursor().pos.x, 10, "x should be updated to 10");
+        assert_eq!(buf.cursor().pos.x, 10, "x should be updated to 10");
         assert_eq!(
-            buf.get_cursor().pos.y,
+            buf.cursor().pos.y,
             row_before,
             "y must not change when y=None (CHA behaviour)"
         );
@@ -826,17 +826,17 @@ mod basic_tests {
 
         // Move cursor to column 20
         buf.set_cursor_pos(Some(20), Some(0));
-        assert_eq!(buf.get_cursor().pos.x, 20);
+        assert_eq!(buf.cursor().pos.x, 20);
 
         // VPA: x = None, y = Some(3) → only y should change
         buf.set_cursor_pos(None, Some(3));
 
         assert_eq!(
-            buf.get_cursor().pos.x,
+            buf.cursor().pos.x,
             20,
             "x must not change when x=None (VPA behaviour)"
         );
-        assert_eq!(buf.get_cursor_screen_pos().y, 3, "screen y should be 3");
+        assert_eq!(buf.cursor_screen_pos().y, 3, "screen y should be 3");
     }
 
     #[test]
@@ -860,7 +860,7 @@ mod basic_tests {
         }
         // Cursor is now at the start of row `logo_lines` (0-indexed).
         assert_eq!(
-            buf.get_cursor_screen_pos().y,
+            buf.cursor_screen_pos().y,
             logo_lines,
             "after {logo_lines} LFs cursor screen-y should be {logo_lines}",
         );
@@ -868,30 +868,26 @@ mod basic_tests {
         // Step 2: CHA to column 0 — y MUST stay at logo_lines.
         buf.set_cursor_pos(Some(0), None);
         assert_eq!(
-            buf.get_cursor_screen_pos().y,
+            buf.cursor_screen_pos().y,
             logo_lines,
             "CHA (y=None) must not move cursor off row {logo_lines}",
         );
-        assert_eq!(buf.get_cursor().pos.x, 0, "CHA should set x to 0");
+        assert_eq!(buf.cursor().pos.x, 0, "CHA should set x to 0");
 
         // Step 3: CUU logo_lines → cursor should land at screen row 0.
         buf.move_cursor_relative(0, -(logo_lines as i32));
         assert_eq!(
-            buf.get_cursor_screen_pos().y,
+            buf.cursor_screen_pos().y,
             0,
             "after CUU cursor must be at screen row 0"
         );
 
         // Step 4: CUF 47 → column 47.
         buf.move_cursor_relative(47, 0);
-        assert_eq!(
-            buf.get_cursor().pos.x,
-            47,
-            "CUF should place cursor at col 47"
-        );
+        assert_eq!(buf.cursor().pos.x, 47, "CUF should place cursor at col 47");
 
         // Step 5: writing here should land on the first row, not some garbage row.
-        let screen_row_before_write = buf.get_cursor_screen_pos().y;
+        let screen_row_before_write = buf.cursor_screen_pos().y;
         buf.insert_text(&[
             TChar::Ascii(b'I'),
             TChar::Ascii(b'n'),
@@ -899,7 +895,7 @@ mod basic_tests {
             TChar::Ascii(b'o'),
         ]);
         assert_eq!(
-            buf.get_cursor_screen_pos().y,
+            buf.cursor_screen_pos().y,
             screen_row_before_write,
             "writing info text must stay on the same screen row"
         );
@@ -2391,8 +2387,8 @@ mod scrollback_wrapping_scroll_visible_tests {
 
         for (row_vis, row_exp) in visible.iter().zip(expected.iter()) {
             assert_eq!(
-                row_vis.get_characters(),
-                row_exp.get_characters(),
+                row_vis.characters(),
+                row_exp.characters(),
                 "visible row content mismatch"
             );
         }
@@ -2586,7 +2582,7 @@ mod visible_rows_boundary_tests {
 
         assert_eq!(vis.len(), 3);
         // The first visible row must be the first buffer row
-        assert_eq!(vis[0].get_characters(), b.rows[0].get_characters());
+        assert_eq!(vis[0].characters(), b.rows[0].characters());
     }
 }
 
@@ -2602,7 +2598,7 @@ mod alt_buffer_visible_rows_tests {
         let vis = b.visible_rows(0);
 
         assert_eq!(vis.len(), 4);
-        assert!(vis.iter().all(|r| r.get_characters().is_empty()));
+        assert!(vis.iter().all(|r| r.characters().is_empty()));
     }
 
     #[test]
@@ -2614,12 +2610,12 @@ mod alt_buffer_visible_rows_tests {
         }
 
         let scroll_offset = b.scroll_back(0, 2);
-        let before = b.visible_rows(scroll_offset)[0].get_characters().clone();
+        let before = b.visible_rows(scroll_offset)[0].characters().clone();
 
         b.enter_alternate(scroll_offset);
         let restored_offset = b.leave_alternate();
 
-        let after = b.visible_rows(restored_offset)[0].get_characters().clone();
+        let after = b.visible_rows(restored_offset)[0].characters().clone();
         assert_eq!(before, after);
     }
 }
@@ -2662,8 +2658,8 @@ mod cr_wrap_scrollback_tests {
 
         for (row_vis, row_exp) in visible.iter().zip(expected.iter()) {
             assert_eq!(
-                row_vis.get_characters(),
-                row_exp.get_characters(),
+                row_vis.characters(),
+                row_exp.characters(),
                 "visible row content mismatch"
             );
         }
@@ -4004,7 +4000,7 @@ mod declrmm_tests {
         buf.set_left_right_margins(2, 8); // 0-based: 1..7
         assert_eq!(buf.left_right_margins(), (1, 7));
         // Cursor homed to (0, 0).
-        assert_eq!(buf.get_cursor_screen_pos(), CursorPos { x: 0, y: 0 });
+        assert_eq!(buf.cursor_screen_pos(), CursorPos { x: 0, y: 0 });
     }
 
     #[test]
@@ -4037,14 +4033,14 @@ mod declrmm_tests {
         buf.insert_text(&text("ABCDEFG")); // 7 chars: ABCDEF + G wraps
 
         // First row: cols 2..7 should be ABCDEF.
-        let row0 = buf.get_rows()[0].cells();
+        let row0 = buf.rows()[0].cells();
         assert_eq!(row0.get(2).map(Cell::tchar), Some(&ascii('A')));
         assert_eq!(row0.get(7).map(Cell::tchar), Some(&ascii('F')));
         // Col 8 should be untouched (outside margin).
         assert!(row0.get(8).is_none_or(|c| c.tchar() == &TChar::Space));
 
         // Second row: wrap starts at col 2 (scroll_region_left).
-        let row1 = buf.get_rows()[1].cells();
+        let row1 = buf.rows()[1].cells();
         assert_eq!(row1.get(2).map(Cell::tchar), Some(&ascii('G')));
     }
 
@@ -4055,12 +4051,12 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(0), Some(0));
         buf.insert_text(&text("ABCDEFGHIJK")); // 11 chars → wraps at col 10
         // Row 0 must have all 10 chars ABCDEFGHIJ.
-        let row0 = buf.get_rows()[0].cells();
+        let row0 = buf.rows()[0].cells();
         for (i, ch) in "ABCDEFGHIJ".chars().enumerate() {
             assert_eq!(row0[i].tchar(), &ascii(ch), "col {i}");
         }
         // K wraps to row 1, col 0.
-        let row1 = buf.get_rows()[1].cells();
+        let row1 = buf.rows()[1].cells();
         assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('K')));
     }
 
@@ -4073,7 +4069,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(5), Some(0));
         buf.move_cursor_relative(10, 0);
         // Should clamp at scroll_region_right = 7.
-        assert_eq!(buf.get_cursor_screen_pos().x, 7);
+        assert_eq!(buf.cursor_screen_pos().x, 7);
     }
 
     #[test]
@@ -4083,7 +4079,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(5), Some(0));
         buf.move_cursor_relative(-10, 0);
         // Should clamp at scroll_region_left = 2.
-        assert_eq!(buf.get_cursor_screen_pos().x, 2);
+        assert_eq!(buf.cursor_screen_pos().x, 2);
     }
 
     #[test]
@@ -4093,7 +4089,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(0), Some(0));
         buf.move_cursor_relative(1, 0);
         // Outside margin: uses normal full-width clamp, not margin clamp.
-        assert_eq!(buf.get_cursor_screen_pos().x, 1);
+        assert_eq!(buf.cursor_screen_pos().x, 1);
     }
 
     // --- erase_chars clamps to right margin ---
@@ -4107,7 +4103,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(5), Some(0));
         buf.erase_chars(10);
 
-        let row = buf.get_rows()[0].cells();
+        let row = buf.rows()[0].cells();
         // Cols 5, 6, 7 should be blank.
         for col in 5..=7 {
             let cell = row.get(col);
@@ -4138,7 +4134,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(2), Some(0));
         buf.insert_spaces(2);
 
-        let row = buf.get_rows()[0].cells();
+        let row = buf.rows()[0].cells();
         // Cols 2, 3 → blank (inserted spaces).
         for col in 2..=3 {
             assert!(
@@ -4168,7 +4164,7 @@ mod declrmm_tests {
         buf.set_cursor_pos(Some(2), Some(0));
         buf.delete_chars(2);
 
-        let row = buf.get_rows()[0].cells();
+        let row = buf.rows()[0].cells();
         // Col 2 → 'C', col 3 → 'D', col 4 → 'E', col 5 → 'F'.
         assert_eq!(row[2].tchar(), &ascii('C'), "col 2");
         assert_eq!(row[3].tchar(), &ascii('D'), "col 3");
@@ -4450,7 +4446,7 @@ mod reflow_to_width_tests {
 
     fn cell_str(buf: &Buffer, row_idx: usize) -> String {
         let row = &buf.rows[row_idx];
-        row.get_characters()
+        row.characters()
             .iter()
             .filter(|c| !c.is_continuation())
             .map(|c| match c.tchar() {

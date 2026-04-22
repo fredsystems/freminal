@@ -45,7 +45,7 @@ fn insert_fits_entirely_in_row() {
     match result {
         InsertResponse::Consumed(final_col) => {
             assert_eq!(final_col, 5);
-            assert_eq!(row.get_characters().len(), 5);
+            assert_eq!(row.characters().len(), 5);
         }
         _ => panic!("expected Consumed"),
     }
@@ -61,7 +61,7 @@ fn insert_wide_character_that_fits() {
     match result {
         InsertResponse::Consumed(final_col) => {
             assert_eq!(final_col, 2);
-            assert_eq!(row.get_characters().len(), 2);
+            assert_eq!(row.characters().len(), 2);
         }
         _ => panic!("expected Consumed"),
     }
@@ -107,8 +107,8 @@ fn insert_overflows_and_returns_leftover() {
                 &text[leftover_start..],
                 &[ascii('l'), ascii('l'), ascii('o')]
             );
-            assert_eq!(row.get_characters()[3], Cell::new(ascii('H'), tag()));
-            assert_eq!(row.get_characters()[4], Cell::new(ascii('e'), tag()));
+            assert_eq!(row.characters()[3], Cell::new(ascii('H'), tag()));
+            assert_eq!(row.characters()[4], Cell::new(ascii('e'), tag()));
         }
         _ => panic!("expected Leftover"),
     }
@@ -127,7 +127,7 @@ fn overwrite_ascii_with_ascii() {
     row.insert_text(0, &[ascii('A'), ascii('B'), ascii('C')], &tag());
     row.insert_text(1, &[ascii('X')], &tag());
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert_eq!(chars[0].tchar(), &ascii('A'));
     assert_eq!(chars[1].tchar(), &ascii('X'));
     assert_eq!(chars[2].tchar(), &ascii('C'));
@@ -140,7 +140,7 @@ fn overwrite_wide_head_clears_continuation() {
     row.insert_text(0, &[emoji("🙂")], &tag());
     row.insert_text(0, &[ascii('A')], &tag());
 
-    let chars = row.get_characters();
+    let chars = row.characters();
 
     assert_eq!(chars[0].tchar(), &ascii('A'));
     assert!(!chars[1].is_continuation());
@@ -153,7 +153,7 @@ fn overwrite_wide_continuation_cleans_up_head() {
     row.insert_text(0, &[emoji("🙂")], &tag());
     row.insert_text(1, &[ascii('A')], &tag());
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert!(!chars[0].is_continuation());
     assert_eq!(chars[1].tchar(), &ascii('A'));
 }
@@ -176,7 +176,7 @@ fn insert_mixed_ascii_and_wide() {
         _ => panic!(),
     }
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert_eq!(chars.len(), 4);
 }
 
@@ -199,7 +199,7 @@ fn mixed_overflow_correct_terminal_semantics() {
         _ => panic!("expected leftover"),
     }
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert_eq!(chars[2], Cell::new(ascii('A'), tag()));
     assert!(chars[3].is_head()); // 🙂
     assert!(chars[4].is_continuation()); // 🙂
@@ -216,7 +216,7 @@ fn continuation_invariant_head_must_exist() {
     let mut row = Row::new(10);
     row.insert_text(3, &[emoji("🙂")], &tag());
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert!(chars[3].is_head());
     assert!(chars[4].is_continuation());
 }
@@ -226,8 +226,8 @@ fn continuation_invariant_no_continuation_at_col0() {
     let mut row = Row::new(10);
     row.insert_text(0, &[emoji("🙂")], &tag());
 
-    assert!(row.get_characters()[0].is_head());
-    assert!(!row.get_characters()[0].is_continuation());
+    assert!(row.characters()[0].is_head());
+    assert!(!row.characters()[0].is_continuation());
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn no_dangling_continuation_cells_after_insertion() {
     // Insert |🙂 B|
     row.insert_text(0, &[emoji("🙂"), ascii('B')], &tag());
 
-    let chars = row.get_characters();
+    let chars = row.characters();
 
     assert!(chars[0].is_head());
     assert!(chars[1].is_continuation());
@@ -279,7 +279,7 @@ fn gap_padding_uses_default_tag_not_incoming_tag() {
     // Write "^O" at col 16 with reverse-video
     row.insert_text(16, &[ascii('^'), ascii('O')], &rv);
 
-    let chars = row.get_characters();
+    let chars = row.characters();
 
     // Cells 0-1: reverse-video (the "^G" chars)
     assert_eq!(chars[0].tag(), &rv, "col 0 should have reverse-video tag");
@@ -312,7 +312,7 @@ fn gap_padding_with_default_tag_is_trimmed_as_sparse() {
     // Write "A" at col 5 with reverse-video — creates a gap at cols 0-4
     row.insert_text(5, &[ascii('A')], &rv);
 
-    let chars = row.get_characters();
+    let chars = row.characters();
 
     // Gap cells 0-4 must be default tag
     for (col, cell) in chars.iter().enumerate().take(5) {
@@ -369,7 +369,7 @@ fn nano_shortcut_bar_highlight_does_not_bleed_into_gap() {
         &def,
     );
 
-    let chars = row.get_characters();
+    let chars = row.characters();
 
     // ^G: cols 0-1 → reverse
     assert_eq!(chars[0].tag(), &rv, "^G col 0 must be reverse-video");
@@ -424,7 +424,7 @@ fn clear_with_tag_default_leaves_row_sparse() {
 
     // Row should be sparse (no explicit cells)
     assert!(
-        row.get_characters().is_empty(),
+        row.characters().is_empty(),
         "clearing with default tag should leave the row sparse"
     );
 }
@@ -437,7 +437,7 @@ fn clear_with_tag_nondefault_fills_row() {
     let bce_tag = blue_bg_tag();
     row.clear_with_tag(&bce_tag);
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert_eq!(
         chars.len(),
         10,
@@ -456,7 +456,7 @@ fn fill_with_tag_default_leaves_empty_row_sparse() {
     row.fill_with_tag(&FormatTag::default());
 
     assert!(
-        row.get_characters().is_empty(),
+        row.characters().is_empty(),
         "fill_with_tag(default) should leave row sparse"
     );
 }
@@ -465,15 +465,12 @@ fn fill_with_tag_default_leaves_empty_row_sparse() {
 fn fill_with_tag_default_clears_populated_row() {
     let mut row = Row::new(10);
     row.insert_text(0, &[ascii('X'), ascii('Y'), ascii('Z')], &tag());
-    assert!(
-        !row.get_characters().is_empty(),
-        "precondition: row has cells"
-    );
+    assert!(!row.characters().is_empty(), "precondition: row has cells");
 
     row.fill_with_tag(&FormatTag::default());
 
     assert!(
-        row.get_characters().is_empty(),
+        row.characters().is_empty(),
         "fill_with_tag(default) on a populated row should clear it to sparse"
     );
 }
@@ -485,7 +482,7 @@ fn fill_with_tag_nondefault_fills_row() {
 
     row.fill_with_tag(&bce_tag);
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     assert_eq!(chars.len(), 8, "fill should write to all columns");
     for (col, cell) in chars.iter().enumerate() {
         assert_eq!(cell.tchar(), &TChar::Space, "col {col}: expected blank");
@@ -508,7 +505,7 @@ fn erase_cells_at_with_bce_tag() {
     // Erase col 2 with BCE tag
     row.erase_cells_at(2, 1, &bce_tag);
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     // Col 2 should be a blank with the blue-bg tag
     assert_eq!(
         chars[2].tchar(),
@@ -539,7 +536,7 @@ fn delete_cells_at_bce_tag_for_wide_glyph_boundary_cleanup() {
     // boundary cleanup that replaces the partial glyph with BCE blanks.
     row.delete_cells_at(1, 2, &bce_tag);
 
-    let chars = row.get_characters();
+    let chars = row.characters();
     // Col 0 should still be 'A'
     assert_eq!(chars[0].tchar(), &ascii('A'), "col 0 should still be A");
 

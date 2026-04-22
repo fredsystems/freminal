@@ -134,7 +134,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub(crate) fn get_cursor_visual_style(&self) -> CursorVisualStyle {
+    pub(crate) fn cursor_visual_style(&self) -> CursorVisualStyle {
         self.handler.cursor_visual_style()
     }
 
@@ -159,8 +159,8 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub const fn get_win_size(&mut self) -> (usize, usize) {
-        self.handler.get_win_size()
+    pub const fn win_size(&mut self) -> (usize, usize) {
+        self.handler.win_size()
     }
 
     #[must_use]
@@ -180,7 +180,7 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub(crate) const fn get_cursor_key_mode(&self) -> Decckm {
+    pub(crate) const fn cursor_key_mode(&self) -> Decckm {
         self.modes.cursor_key
     }
 
@@ -649,7 +649,7 @@ impl TerminalState {
     /// # Errors
     /// Will return an error if the write fails
     pub fn write(&self, to_write: &TerminalInput) -> Result<(), InternalStateError> {
-        let decckm = self.get_cursor_key_mode();
+        let decckm = self.cursor_key_mode();
         let keypad_app = self.modes.keypad_mode;
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();

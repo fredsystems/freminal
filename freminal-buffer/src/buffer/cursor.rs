@@ -58,7 +58,7 @@ impl Buffer {
     /// this subtracts `visible_window_start()` so the result is always in the
     /// range `0..height` and matches what the GUI painter expects.
     #[must_use]
-    pub fn get_cursor_screen_pos(&self) -> CursorPos {
+    pub fn cursor_screen_pos(&self) -> CursorPos {
         let screen_y = self.cursor_screen_y();
         CursorPos {
             x: self.cursor.pos.x,

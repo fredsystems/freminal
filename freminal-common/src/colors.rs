@@ -72,7 +72,7 @@ impl ColorPalette {
 
     /// Get the current RGB value for a palette index (override or default).
     #[must_use]
-    pub fn get_rgb(&self, index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
+    pub fn rgb(&self, index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
         if let Some((r, g, b)) = self.overrides[usize::from(index)] {
             (r, g, b)
         } else {
