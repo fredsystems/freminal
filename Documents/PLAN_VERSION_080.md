@@ -689,6 +689,9 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   case-sensitive substring rejection, case-insensitive regex match, and case-sensitive
   regex rejection.
 - **71.9** — Tooltips on `<` / `>` / `X` buttons ("Previous match", "Next match", "Close").
+  **COMPLETE (2026-04-23).** Added `.on_hover_text(...)` to each of the three search bar
+  buttons in `freminal/src/gui/search.rs`, mirroring the existing pattern used on the `Aa`
+  case-sensitivity checkbox. Pure UI affordance — no state changes, no new tests needed.
 - **71.10** — Red-background tint on the search input when match count is zero.
 - **71.11** — Verify Task 69's search panel positioning fix landed and still behaves
   correctly under all window sizes and tab configurations.

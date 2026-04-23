@@ -463,15 +463,15 @@ pub fn show_search_bar(
                         });
 
                         // ← Prev button.
-                        if ui.button("<").clicked() {
+                        if ui.button("<").on_hover_text("Previous match").clicked() {
                             action = SearchBarAction::Prev;
                         }
                         // → Next button.
-                        if ui.button(">").clicked() {
+                        if ui.button(">").on_hover_text("Next match").clicked() {
                             action = SearchBarAction::Next;
                         }
                         // Close button.
-                        if ui.button("X").clicked() {
+                        if ui.button("X").on_hover_text("Close").clicked() {
                             action = SearchBarAction::Close;
                         }
                     });
