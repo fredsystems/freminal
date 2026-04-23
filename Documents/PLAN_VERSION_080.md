@@ -478,6 +478,15 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
 - **71.4** — Shader compile error surface. When a custom shader fails to compile, show a
   dismissible error banner naming the shader file and including the first line of the GLSL
   error. Piggybacks on `GpuInitError` types introduced in 70.E.
+  **COMPLETE (2026-04-22).** Used the toast system (71.2) instead of a banner.
+  `WindowPostRenderer` gained a `last_error: Option<String>` field written by
+  `PaintCallback` closures (which cannot access `FreminalGui` directly — they run on
+  the render thread with only `Arc<Mutex<WindowPostRenderer>>` in scope). The main
+  thread drains this field at the top of each window's `update()` call and pushes an
+  error toast. Both failure paths wired: `WindowPostRenderer::init` failure and
+  `update_shader` compile failure. The `GpuInitError`'s `Display` impl already contains
+  the shader label and GLSL error from glow's `get_shader_info_log`, so no additional
+  formatting is needed.
 
 #### 71.P1 — Discoverability
 

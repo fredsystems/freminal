@@ -224,6 +224,23 @@ impl freminal_windowing::App for FreminalGui {
                 return;
             }
 
+            // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
+            // PaintCallbacks run on the render thread and can't access `self`, so
+            // they stash compile/init errors in `WindowPostRenderer::last_error`.
+            // Surface any such error as a toast here (71.4).
+            if let Some(win) = self.windows.get(&window_id) {
+                let err = {
+                    let mut wpr = win
+                        .window_post
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    wpr.last_error.take()
+                };
+                if let Some(msg) = err {
+                    self.push_error_toast("Shader error", Some(msg));
+                }
+            }
+
             // Subsequent window — spawn a new PTY tab.
             let theme =
                 freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
@@ -1353,7 +1370,6 @@ impl freminal_windowing::App for FreminalGui {
                 let shader_active = wpr_check.is_active();
                 let pending = wpr_check.pending_shader.is_some();
                 drop(wpr_check);
-
                 if shader_active || pending {
                     let frame_dt = ui.input(|i| i.stable_dt);
                     let wpr_for_post = Arc::clone(&win.window_post);
@@ -1371,6 +1387,7 @@ impl freminal_windowing::App for FreminalGui {
                                 && let Err(e) = wpr.init(gl)
                             {
                                 error!("WindowPostRenderer init failed: {e}");
+                                wpr.last_error = Some(format!("Renderer init failed: {e}"));
                                 return;
                             }
 
@@ -1386,6 +1403,8 @@ impl freminal_windowing::App for FreminalGui {
                                         ) =>
                                     {
                                         error!("Shader compilation failed: {e}");
+                                        wpr.last_error =
+                                            Some(format!("Shader compile failed: {e}"));
                                     }
                                     Some(_) => {}
                                     None => wpr.clear_shader(gl),

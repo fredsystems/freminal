@@ -1704,6 +1704,14 @@ pub struct WindowPostRenderer {
     /// `Some(None)` → revert to passthrough and destroy the FBO.
     /// `None` → no change pending.
     pub pending_shader: Option<Option<String>>,
+
+    /// Most recent shader compile / renderer init error, to be drained by
+    /// the main thread and surfaced as a toast (see 71.4).
+    ///
+    /// Written inside `PaintCallback` closures (which cannot access
+    /// `FreminalGui` directly) and read once per frame on the main thread.
+    /// Cleared by the reader after consumption.
+    pub last_error: Option<String>,
 }
 
 impl Default for WindowPostRenderer {
@@ -1731,6 +1739,7 @@ impl WindowPostRenderer {
             fbo_size: None,
             time: 0.0,
             pending_shader: None,
+            last_error: None,
         }
     }
 
