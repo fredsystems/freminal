@@ -1833,6 +1833,30 @@ impl FreminalTerminalWidget {
                     output.cursor_icon = new_icon;
                 });
 
+                // Tooltip: show the target URL at the pointer so the user
+                // can verify before Ctrl+clicking. Suppressed while the
+                // user is actively dragging out a selection so it does
+                // not visually fight the selection rectangle.
+                if !view_state.selection.is_selecting
+                    && let Some(url) = &cache.cached_hovered_url
+                {
+                    let url_text = url.url.clone();
+                    egui::Tooltip::always_open(
+                        ui.ctx().clone(),
+                        ui.layer_id(),
+                        egui::Id::new("freminal_url_hover_tooltip"),
+                        egui::PopupAnchor::Pointer,
+                    )
+                    .show(|ui| {
+                        ui.label(&url_text);
+                        ui.weak(if cfg!(target_os = "macos") {
+                            "Cmd+click to open"
+                        } else {
+                            "Ctrl+click to open"
+                        });
+                    });
+                }
+
                 // Ctrl+click (Cmd+click on macOS) opens the URL.
                 if let Some(url) = &cache.cached_hovered_url {
                     let clicked = ui.input(|i| {

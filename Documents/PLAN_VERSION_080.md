@@ -525,7 +525,13 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
   introduced (the Help items have no shortcuts by design), so `agents.md`'s keybinding
   convention does not apply. Unit tests added for `open_to_tab` and `set_active_tab`.
 - **71.7** — URL hover tooltip. When the mouse hovers over an OSC 8 or auto-detected URL,
-  show a tooltip with the target URL and change the cursor to a pointer.
+  show a tooltip with the target URL and change the cursor to a pointer. **COMPLETE** —
+  Added an `egui::Tooltip::always_open` at the pointer in `widget.rs` (after the cursor-icon
+  update) driven by `cache.cached_hovered_url`. The tooltip displays the URL text and a
+  platform-appropriate hint ("Ctrl+click to open" / "Cmd+click to open"). Suppressed while
+  `view_state.selection.is_selecting` to avoid visually competing with an in-progress
+  selection drag. Cursor-pointer switching was already implemented; this subtask adds only
+  the tooltip.
 
 #### 71.P2 — Search Polish
 
