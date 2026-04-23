@@ -70,6 +70,8 @@ enum TabBarAction {
     CommitRename(usize, String),
     /// User pressed Escape in the rename editor — discard the edit.
     CancelRename,
+    /// User finished dragging tab `from` over tab `to` — move it.
+    Reorder { from: usize, to: usize },
 }
 
 /// Tracks an in-progress mouse drag on a pane split border.

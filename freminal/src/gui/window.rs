@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use egui;
 use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::{
@@ -111,6 +112,27 @@ pub(super) struct PerWindowState {
     /// `renaming_tab` is set, mutated by the `TextEdit`, and consumed on
     /// commit.  Cleared when rename ends.
     pub(super) rename_buffer: String,
+
+    /// Index of the tab currently being dragged, if any.
+    ///
+    /// Set when a mouse drag starts on a tab label, cleared when the drag
+    /// ends (at which point a `TabBarAction::Reorder` is emitted if the
+    /// pointer was released over a different tab).
+    pub(super) dragging_tab: Option<usize>,
+
+    /// Tab rects indexed by original tab position, used to compute the
+    /// drop slot during a drag.
+    ///
+    /// Captured at the end of each frame's `show_tab_bar`, but **frozen**
+    /// for the duration of a drag: once `dragging_tab` is set, rects are
+    /// NOT refreshed until the drag ends. Freezing is essential because
+    /// the rendered (preview) rects shift as the ghost moves between
+    /// slots — if we used those shifted rects to decide the next frame's
+    /// slot, differently-sized tabs would oscillate between orderings
+    /// (pointer crosses center → swap → new rect moves under pointer →
+    /// swap back). Freezing rects to the natural pre-drag layout gives
+    /// stable decision boundaries for the entire drag.
+    pub(super) last_tab_rects: Vec<egui::Rect>,
 
     /// `KeyAction`s triggered from menu items (Edit, Help, etc.) that must
     /// run against the active pane's `ViewState` + PTY `input_tx`.

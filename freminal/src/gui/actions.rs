@@ -230,6 +230,11 @@ impl super::FreminalGui {
                 win.renaming_tab = None;
                 win.rename_buffer.clear();
             }
+            super::TabBarAction::Reorder { from, to } => {
+                if let Err(e) = win.tabs.move_tab(from, to) {
+                    warn!("TabBarAction::Reorder: move_tab({from}, {to}) failed: {e}");
+                }
+            }
             super::TabBarAction::None => {}
         }
     }

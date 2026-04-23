@@ -422,39 +422,99 @@ impl super::FreminalGui {
     ///
     /// Returns a `TabBarAction` describing what the user did (if anything).
     pub(super) fn show_tab_bar(&self, win: &mut PerWindowState, ui: &mut egui::Ui) -> TabBarAction {
+        // Escape cancels an in-progress drag without dispatching a reorder.
+        // Checked before rendering so the dim/preview disappears on the same
+        // frame the user presses Escape.
+        if win.dragging_tab.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            win.dragging_tab = None;
+        }
+
+        // Compute the render order for this frame. When a tab is being
+        // dragged, the source tab "floats" to the slot nearest the current
+        // pointer position so the user sees a live preview of the reorder.
+        // When no drag is active, render in natural order.
+        //
+        // The preview uses last frame's tab rects (stable between frames
+        // unless the window resizes) because rects for the current frame
+        // aren't known until AFTER rendering. One frame of lag at the start
+        // of a drag is imperceptible.
+        let count = win.tabs.tab_count();
+        let preview_order: Vec<usize> = if let Some(from) = win.dragging_tab
+            && !win.last_tab_rects.is_empty()
+            && let Some(pointer) = ui.input(|i| i.pointer.latest_pos())
+        {
+            // Find the target insertion slot based on pointer.x vs each
+            // tab's center. Walk from left to right: first tab whose center
+            // is to the right of the pointer determines the slot.
+            let mut target_slot = count; // default: drop at end
+            for (i, rect) in win.last_tab_rects.iter().enumerate() {
+                if pointer.x < rect.center().x {
+                    target_slot = i;
+                    break;
+                }
+            }
+
+            // Build the preview order: original indices in order, but with
+            // `from` extracted and reinserted at `target_slot`. Clamp the
+            // slot to a valid insertion index after removal.
+            let mut order: Vec<usize> = (0..count).filter(|&i| i != from).collect();
+            let insert_at = target_slot.min(order.len());
+            order.insert(insert_at, from);
+            order
+        } else {
+            (0..count).collect()
+        };
+
+        // Render position of the dragged tab (index into `preview_order`),
+        // used on `drag_stopped` to decide whether the reorder was a no-op.
+        // Captured before rendering because `show_single_tab` clears
+        // `dragging_tab` on `drag_stopped`.
+        let drag_source: Option<usize> = win.dragging_tab;
+        let source_render_pos =
+            drag_source.and_then(|from| preview_order.iter().position(|&i| i == from));
+
         ui.horizontal(|ui| {
             let active = win.tabs.active_index();
-            let count = win.tabs.tab_count();
             let renaming = win.renaming_tab;
             let mut action = TabBarAction::None;
+            let mut current_rects: Vec<egui::Rect> = vec![egui::Rect::NOTHING; count];
+            let mut drag_ended_this_frame = false;
 
-            for (i, tab) in win.tabs.iter().enumerate() {
-                // Thin vertical separator between tabs (skip before first).
-                if i > 0 {
+            // Render tabs in the preview order. The source tab (while being
+            // dragged) renders at its preview slot, dimmed; all other tabs
+            // appear at their shifted positions so the user sees where the
+            // drop will land.
+            for (render_pos, &orig_idx) in preview_order.iter().enumerate() {
+                if render_pos > 0 {
                     ui.separator();
                 }
 
-                // Read the echo-off state directly from the live atomic flag on
-                // the Tab, not from the snapshot.  Snapshots are only published
-                // when new PTY output arrives, so they go stale when the shell
-                // is idle at a password prompt.  The atomic is updated by the
-                // writer thread every 250 ms regardless of PTY activity.
+                let Some(tab) = win.tabs.iter().nth(orig_idx) else {
+                    continue;
+                };
+
                 let is_echo_off = self.config.security.password_indicator
                     && tab
                         .active_pane()
                         .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed));
 
                 let is_renaming = renaming == Some(tab.id);
-                let tab_action = Self::show_single_tab(
+                let is_being_dragged = win.dragging_tab == Some(orig_idx);
+
+                let (tab_action, tab_rect) = Self::show_single_tab(
                     ui,
                     tab,
-                    i,
-                    i == active,
+                    orig_idx,
+                    orig_idx == active,
                     count,
                     is_echo_off,
                     is_renaming,
+                    is_being_dragged,
                     &mut win.rename_buffer,
+                    &mut win.dragging_tab,
+                    &mut drag_ended_this_frame,
                 );
+                current_rects[orig_idx] = tab_rect;
                 if !matches!(tab_action, TabBarAction::None) {
                     action = tab_action;
                 }
@@ -465,6 +525,37 @@ impl super::FreminalGui {
             // "+" button to create a new tab.
             if ui.button("+").clicked() {
                 action = TabBarAction::NewTab;
+            }
+
+            // On drag release: dispatch Reorder if the preview position
+            // differs from the source tab's original position. The source
+            // `from` was captured at top-of-frame (before `show_single_tab`
+            // cleared `dragging_tab`); `to` is the preview position we
+            // rendered the source at this frame.
+            if drag_ended_this_frame
+                && let Some(from) = drag_source
+                && let Some(to) = source_render_pos
+                && from != to
+            {
+                action = TabBarAction::Reorder { from, to };
+            }
+
+            // Stash rects for next frame's preview computation — but ONLY
+            // when this frame rendered in natural order (no drag was active
+            // at the start of the frame). During a drag, `last_tab_rects`
+            // must stay frozen at the natural pre-drag layout so
+            // slot-decision boundaries don't move under the pointer.
+            // Refreshing mid-drag causes oscillation with differently-sized
+            // tabs: the ghost shifts a rect under the pointer, which flips
+            // the decision, which shifts the rect back.
+            //
+            // We key off `drag_source` (captured at top-of-frame) rather
+            // than `win.dragging_tab` (which may have been set mid-render
+            // by `show_single_tab` on the drag-start frame). This ensures
+            // the drag-start frame's natural-order rects are captured for
+            // the drag to use.
+            if drag_source.is_none() {
+                win.last_tab_rects = current_rects;
             }
 
             action
@@ -488,7 +579,23 @@ impl super::FreminalGui {
     /// the window in a stuck-edit state.
     ///
     /// A double-click on the label returns `BeginRename(index)`.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// A mouse drag on the label sets `*dragging_tab = Some(index)`; on
+    /// release, `*drag_ended_this_frame = true` signals the caller to
+    /// dispatch the reorder action. The caller (`show_tab_bar`) owns the
+    /// preview-order logic and decides the final destination slot.
+    /// While `is_being_dragged` is true, the tab is rendered with a
+    /// distinct fill so the user can see which tab they picked up.
+    ///
+    /// Returns the tab action (if any) plus the screen rect of the label
+    /// area so the caller can hit-test drop targets.
+    // Allows:
+    // - too_many_arguments / fn_params_excessive_bools: this is a single-use
+    //   helper for `show_tab_bar`. Each bool (is_active, is_echo_off,
+    //   is_renaming, is_being_dragged) reflects an independent per-tab UI
+    //   state; folding them into an enum would require a 16-variant combo
+    //   or nested structs that add more noise than the current flat list.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub(super) fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
@@ -497,8 +604,11 @@ impl super::FreminalGui {
         count: usize,
         is_echo_off: bool,
         is_renaming: bool,
+        is_being_dragged: bool,
         rename_buffer: &mut String,
-    ) -> TabBarAction {
+        dragging_tab: &mut Option<usize>,
+        drag_ended_this_frame: &mut bool,
+    ) -> (TabBarAction, egui::Rect) {
         let mut action = TabBarAction::None;
         let pane = tab.active_pane();
         // Prefer the user-assigned tab name over the pane-derived title.
@@ -523,8 +633,16 @@ impl super::FreminalGui {
         };
 
         // Tab frame: active gets a gray fill, bell-active inactive tabs
-        // get a warm amber tint, others use a transparent frame.
-        let frame = if is_active {
+        // get a warm amber tint, others use a transparent frame. A tab
+        // that is currently being dragged renders as a translucent ghost
+        // (dimmed fill) at its preview position so the user sees where
+        // the reorder will land without committing the move.
+        let frame = if is_being_dragged {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgba_unmultiplied(120, 120, 120, 40))
+                .corner_radius(4.0)
+                .inner_margin(0.0)
+        } else if is_active {
             egui::Frame::NONE
                 .fill(egui::Color32::from_gray(100))
                 .corner_radius(4.0)
@@ -538,7 +656,7 @@ impl super::FreminalGui {
             egui::Frame::NONE
         };
 
-        frame.show(ui, |ui| {
+        let frame_response = frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 if is_renaming {
                     // Inline rename editor.  Commit on Enter, cancel on
@@ -570,11 +688,31 @@ impl super::FreminalGui {
                         egui::RichText::new(&display_label).size(13.0)
                     };
 
-                    let response = ui.selectable_label(is_active, rich_label);
+                    // Use Button::selectable with click_and_drag sense so the
+                    // tab can be picked up and dragged. `selectable_label` only
+                    // senses clicks; retrofitting a drag sense onto its
+                    // response via `.interact()` registers the drag too late
+                    // — egui's interaction state machine needs the sense at
+                    // widget allocation time, not after.
+                    let response = ui.add(
+                        egui::Button::selectable(is_active, rich_label)
+                            .sense(egui::Sense::click_and_drag()),
+                    );
                     if response.double_clicked() {
                         action = TabBarAction::BeginRename(index);
                     } else if response.clicked() && !is_active {
                         action = TabBarAction::SwitchTo(index);
+                    }
+                    if response.drag_started() {
+                        *dragging_tab = Some(index);
+                    }
+                    if response.drag_stopped() {
+                        // Signal the caller that a drag ended this frame.
+                        // The actual drop resolution (source vs. preview
+                        // position) is handled in `show_tab_bar` using the
+                        // preview-order state captured at top of frame.
+                        *drag_ended_this_frame = true;
+                        *dragging_tab = None;
                     }
 
                     // Show close button when more than one tab is open.
@@ -585,7 +723,7 @@ impl super::FreminalGui {
             });
         });
 
-        action
+        (action, frame_response.response.rect)
     }
 
     /// Show the floating "Save Layout" name-entry prompt.
