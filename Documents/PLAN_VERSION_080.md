@@ -531,7 +531,137 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
   platform-appropriate hint ("Ctrl+click to open" / "Cmd+click to open"). Suppressed while
   `view_state.selection.is_selecting` to avoid visually competing with an in-progress
   selection drag. Cursor-pointer switching was already implemented; this subtask adds only
-  the tooltip.
+  the tooltip. Auto-detected URL support is tracked separately as **71.7b** below.
+- **71.7b** — Auto-detect URLs in plain terminal output (programs that do not emit OSC 8).
+  Regex-match `http://`, `https://`, `file://`, `ftp://`, and `mailto:` URLs in cell text
+  and surface them through the same URL-rendering and hover machinery used for OSC 8 links,
+  so that lazygit, cat-ed logs, git output, etc. become clickable. Config: `ui.auto_detect_urls`
+  (bool, default `true`).
+
+  **Design — piggyback on the existing per-row flatten cache (NOT a separate PTY-side scan).**
+  An earlier design considered running detection in `TerminalHandler` after each PTY batch
+  and stamping matches onto cells via `Cell::set_url`. That design was rejected because it
+  introduces new per-batch string/byte allocations on the PTY read path, which is an
+  unacceptable performance regression during bursty output (`cat bigfile`, heavy build logs,
+  etc.). Auto-detected URLs therefore **never touch cells** and never participate in the
+  cell-level OSC 8 URL storage.
+
+  Instead, detection runs inside the existing `rows_as_tchars_and_tags_cached` pipeline in
+  `freminal-buffer/src/buffer/flatten.rs`. That pipeline is the only place that walks cells
+  to produce `(Vec<TChar>, Vec<FormatTag>)` for rendering, and it already caches the result
+  per row. Detection is amortized into that cache: a row's bytes are built exactly once per
+  dirty cycle, regex runs once per dirty cycle, and every subsequent frame reuses the cached
+  result for free.
+
+  **Row cache extension.** The per-row cache entry grows from
+  `(Vec<TChar>, Vec<FormatTag>)` to a named struct `RowCacheEntry` containing:
+  - `chars: Vec<TChar>` — unchanged.
+  - `tags: Vec<FormatTag>` — unchanged.
+  - `bytes: Vec<u8>` — UTF-8 representation of `chars`, built in the same cell-iteration
+    pass that populates `chars`. Pre-sized via `Vec::with_capacity(chars_upper_bound)`.
+    No per-cell allocations — each cell's bytes are appended via `extend_from_slice` from
+    `TChar::as_bytes()`.
+  - `byte_to_char: Vec<u32>` — dense map from `bytes` index to `chars` index, length
+    `bytes.len() + 1`. Built during the same pass. Used to translate regex byte-offset
+    matches back to flat character positions.
+  - `auto_urls: Vec<AutoUrlRange>` where
+    `AutoUrlRange { char_start: u32, char_end: u32, url: Arc<Url> }`. Populated by running
+    `freminal_terminal_emulator::url_detect::find_urls_bytes` (regex::bytes::Regex) on
+    `bytes` immediately after the byte buffer is built.
+
+  **Tag splicing in the merge step.** `rows_as_tchars_and_tags_cached`'s Step 2 currently
+  merges per-row tags with a running `global_offset`. That merge is extended to also splice
+  in `auto_urls` ranges as synthetic `FormatTag` overlays. Because `FormatTag` ranges are
+  non-overlapping by model invariant, any normal tag whose range crosses an auto-URL
+  boundary is split into up to three pieces: pre-URL (unchanged), URL-overlap (URL field
+  set, all other fields inherited from the base tag), and post-URL (unchanged). OSC 8 URLs
+  already carried on the base tag take precedence: if a base tag has `url.is_some()`, the
+  auto-URL overlay is skipped for that range. This is the "OSC 8 wins" rule from the
+  original design.
+
+  **Soft-wrap (multi-row URLs).** Single-row detection only for the first implementation.
+  A URL that soft-wraps across two rows will be detected as two partial matches (one
+  terminated by row end, one starting mid-match with no scheme) and the second half will
+  not register. A follow-up enhancement can handle this by concatenating `bytes` buffers
+  across soft-wrapped rows at merge time (cost paid per flatten call, not per dirty row).
+  Tracked as a known limitation in the initial landing.
+
+  **PTY read path invariant (hard constraint).** This design does NOT add any allocation,
+  string conversion, or per-batch work to the PTY read path (`handle_incoming_data` →
+  `process_outputs` → cell writes). All new work is in the already-allocated flatten-cache
+  rebuild path, which is called only when a consumer (GUI render, snapshot builder,
+  selection text extraction) asks for flat data, and reuses cached entries across calls.
+
+  **Subtasks.**
+  1. `UiConfig.auto_detect_urls: bool` (default `true`) in `freminal-common/src/config.rs`
+     with doc comment and `config_example.toml` entry. Plumb through to the buffer's
+     flatten path via a new `Buffer::set_auto_detect_urls(bool)` setter called from the
+     config-apply code path (and defaulted `true` at buffer construction).
+  2. `freminal-terminal-emulator/src/url_detect.rs` — new module. `pub fn
+find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with a
+     `LazyLock<Regex>` compiled once per process. Supports `http://`, `https://`,
+     `file://`, `ftp://`, `mailto:` schemes. GFM-style termination: whitespace/control
+     bytes terminate the match, then trailing `.,;:!?)]}>` is stripped, with `)` only
+     stripped when unbalanced (preserves `https://en.wikipedia.org/wiki/Foo_(bar)`).
+     Returns `Vec<UrlMatch { byte_start, byte_end, text: &str }>`. Comprehensive unit tests
+     covering all schemes, trailing punctuation, parenthesized URLs, Wikipedia-style
+     internal parens, multiple URLs in one line, percent-encoded paths (spaces preserved
+     as `%20`), bare-path non-match (no scheme), and byte-offset correctness. Add
+     `regex.workspace = true` to `freminal-terminal-emulator/Cargo.toml`.
+  3. `freminal-buffer`: introduce `RowCacheEntry` struct with fields listed above. Rename
+     `row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>` to
+     `row_cache: Vec<Option<RowCacheEntry>>` throughout `freminal-buffer/src/buffer/`
+     (mod.rs, flatten.rs, resize_and_alt.rs, lifecycle.rs — ~15 call sites). Add a
+     `SavedPrimaryState.row_cache` type migration to match.
+  4. Rewrite `Buffer::flatten_row` in `freminal-buffer/src/buffer/flatten.rs` to produce a
+     `RowCacheEntry`. The new implementation does the current cell walk once, building
+     `chars`, `tags`, `bytes`, and `byte_to_char` in the same loop. After the walk, if
+     `auto_detect_urls` is enabled, invoke `url_detect::find_urls_bytes` on `bytes` and
+     populate `auto_urls` by translating byte offsets via `byte_to_char`. Because
+     `freminal-buffer` cannot depend on `freminal-terminal-emulator` (circular), the URL
+     detector is exposed through a small trait / function-pointer injected at buffer
+     construction, or — simpler — the `url_detect` module is moved into `freminal-common`
+     or `freminal-buffer` itself. Decision: move `url_detect` into `freminal-buffer`
+     (the only caller is `flatten_row`) to avoid the dependency inversion. `regex` becomes
+     a workspace dep of `freminal-buffer`.
+  5. Rewrite the merge step in `rows_as_tchars_and_tags_cached` to splice `auto_urls`
+     into the tag sequence. Implementation: for each row's tags, walk them in order and
+     for each `AutoUrlRange` that intersects the row, split the covering tag into
+     (pre, overlap, post), setting `overlap.url = Some(Arc<Url>)` on the overlap piece.
+     Handle the case where multiple tags cover one URL range (split each separately).
+     Handle OSC 8 precedence (skip overlay if base tag's `url.is_some()`). Verify
+     `collect_url_tag_indices` (currently at `freminal-buffer/src/buffer/flatten.rs:193`)
+     picks up auto-detected URLs correctly — no change expected because `url.is_some()`
+     suffices.
+  6. Invalidation — because auto-URL results are embedded in the cache entry and the
+     cache entry is wholesale rebuilt whenever `row.dirty`, no new invalidation logic is
+     needed. Config flag changes (`auto_detect_urls` toggle) must invalidate all cache
+     entries; hook that into the setter.
+  7. Integration tests in `freminal-terminal-emulator/tests/` — feed bytes containing
+     plain URLs, assert the rendered flat tags contain URL-bearing ranges at the right
+     positions. Test: plain URL mid-text; URL followed by period (stripped); URL with
+     query + fragment; two URLs on one line; URL in a cell that also has bold/color
+     formatting (verify tag split preserves color + adds URL); OSC 8 URL not overridden
+     by auto-detect when they coincide; config flag `auto_detect_urls = false` disables
+     detection entirely.
+  8. Benchmark — extend `freminal-terminal-emulator/benches/buffer_benches.rs` and/or
+     `freminal-buffer/benches/buffer_row_bench.rs` with a `bench_flatten_url_heavy`
+     variant that seeds a buffer with 100 rows each containing a URL, then flattens.
+     Record before/after numbers. The "before" baseline is current `flatten_row` without
+     the bytes/byte_to_char/auto_urls fields, so the measured delta reflects the full
+     cost of 71.7b on dirty-row flatten. Target: regression ≤ 15% (per `agents.md`
+     regression threshold). Regressions above that must either be optimized or justified.
+  9. Update `Documents/ESCAPE_SEQUENCE_COVERAGE.md` / `GAPS.md` only if 71.7b changes
+     escape-sequence coverage (it does not — OSC 8 handling is unchanged). Skip this
+     subtask unless coverage actually moves.
+  10. Final `cargo xtask ci` run, commit on `task-71/ux-polish-sweep`, PR at end of
+      Task 71 per the existing workflow.
+
+  **Out of scope for 71.7b.** Multi-row soft-wrap URL detection (tracked as a follow-up).
+  Clickable auto-URLs (hover + click already work via the existing URL tag machinery; no
+  new click-handling code needed). URL unescaping or validation (purely syntactic match).
+  Bare path detection without scheme (`/tmp/foo`) — users must prefix `file://` for path
+  URLs, matching WezTerm/iTerm2/Kitty convention.
 
 #### 71.P2 — Search Polish
 
