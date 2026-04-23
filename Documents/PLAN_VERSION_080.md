@@ -535,7 +535,20 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
 
 #### 71.P2 — Search Polish
 
-- **71.8** — Case-sensitivity toggle in the search bar (`Aa` icon or checkbox).
+- **71.8** — Case-sensitivity toggle in the search bar (`Aa` icon or checkbox). **COMPLETE** —
+  Added `case_sensitive: bool` and `last_searched_case_sensitive: bool` to `SearchState`
+  (default `false` to preserve existing behavior). `run_search()` now takes a
+  `case_sensitive` parameter: in substring mode it skips the ASCII-lowercase fold when `true`;
+  in regex mode it prepends the `(?i)` inline flag when `false`. `needs_refresh()` and
+  `mark_fresh()` track the new flag so the search re-runs when the user toggles it.
+  `close()` resets `last_searched_case_sensitive` while preserving `case_sensitive` as a
+  user preference across open/close (matching how `regex_mode` is preserved). The search
+  bar's row 2 now has an `Aa` checkbox with an "Match case" hover tooltip next to the
+  existing Regex checkbox. Added `#[allow(clippy::struct_excessive_bools)]` on `SearchState`
+  with justification: the bools are independent, orthogonal UI flags (open-state + two live
+  toggles + two cached copies). Four new tests cover case-sensitive substring match,
+  case-sensitive substring rejection, case-insensitive regex match, and case-sensitive
+  regex rejection.
 - **71.9** — Tooltips on `<` / `>` / `X` buttons ("Previous match", "Next match", "Close").
 - **71.10** — Red-background tint on the search input when match count is zero.
 - **71.11** — Verify Task 69's search panel positioning fix landed and still behaves

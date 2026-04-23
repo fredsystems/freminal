@@ -1176,7 +1176,8 @@ impl FreminalTerminalWidget {
                 if let Some(ref buffer) = view_state.search_state.cached_full_buffer {
                     let query = view_state.search_state.query.clone();
                     let regex_mode = view_state.search_state.regex_mode;
-                    let (found, err) = run_search(&query, regex_mode, buffer);
+                    let case_sensitive = view_state.search_state.case_sensitive;
+                    let (found, err) = run_search(&query, regex_mode, case_sensitive, buffer);
                     view_state.search_state.matches = found;
                     view_state.search_state.current_match = 0;
                     view_state.search_state.mark_fresh();

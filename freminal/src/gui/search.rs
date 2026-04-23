@@ -118,6 +118,10 @@ fn byte_range_to_display_cols(
 ///
 /// When the query is empty the result is always empty.
 ///
+/// `case_sensitive` controls whether the substring match is compared
+/// verbatim (`true`) or after ASCII-lowercase folding (`false`). In
+/// regex mode, `case_sensitive = false` prepends `(?i)` to the pattern.
+///
 /// # Errors
 ///
 /// When `regex_mode` is `true` and the query is not a valid regex, returns an
@@ -126,6 +130,7 @@ fn byte_range_to_display_cols(
 pub fn run_search(
     query: &str,
     regex_mode: bool,
+    case_sensitive: bool,
     visible_chars: &[TChar],
 ) -> (Vec<MatchSpan>, Option<String>) {
     if query.is_empty() {
@@ -133,7 +138,15 @@ pub fn run_search(
     }
 
     let compiled_regex = if regex_mode {
-        match Regex::new(query) {
+        // For case-insensitive regex, prepend the `(?i)` inline flag.
+        // The regex engine's ASCII-only matching semantics still apply
+        // to the non-literal parts of the pattern.
+        let effective_pattern = if case_sensitive {
+            query.to_string()
+        } else {
+            format!("(?i){query}")
+        };
+        match Regex::new(&effective_pattern) {
             Ok(re) => Some(re),
             Err(e) => return (Vec::new(), Some(e.to_string())),
         }
@@ -141,7 +154,11 @@ pub fn run_search(
         None
     };
 
-    let needle_lower = query.to_ascii_lowercase();
+    let needle_folded = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_ascii_lowercase()
+    };
 
     let mut matches = Vec::new();
     let mut row = 0usize;
@@ -167,12 +184,20 @@ pub fn run_search(
                 }
             }
         } else {
-            // Case-insensitive substring search.
-            let haystack_lower = row_str.to_ascii_lowercase();
+            // Substring search. In case-insensitive mode both needle and
+            // haystack are ASCII-lowercased before comparison; otherwise
+            // the raw strings are compared directly.
+            let haystack_owned;
+            let haystack_ref: &str = if case_sensitive {
+                &row_str
+            } else {
+                haystack_owned = row_str.to_ascii_lowercase();
+                &haystack_owned
+            };
             let mut search_from = 0usize;
-            while let Some(byte_pos) = haystack_lower[search_from..].find(&needle_lower) {
+            while let Some(byte_pos) = haystack_ref[search_from..].find(&needle_folded) {
                 let abs_byte = search_from + byte_pos;
-                let match_byte_end = abs_byte + needle_lower.len();
+                let match_byte_end = abs_byte + needle_folded.len();
                 let (col_start, display_width) =
                     byte_range_to_display_cols(&byte_to_col, &row_str, abs_byte, match_byte_end);
                 if display_width == 0 {
@@ -185,7 +210,7 @@ pub fn run_search(
                 });
                 // Advance past this match (at least 1 byte to avoid infinite loop).
                 search_from = match_byte_end.max(abs_byte + 1);
-                if search_from > haystack_lower.len() {
+                if search_from > haystack_ref.len() {
                     break;
                 }
             }
@@ -451,9 +476,11 @@ pub fn show_search_bar(
                         }
                     });
 
-                    // ── Row 2: regex toggle + error ───────────────────────
+                    // ── Row 2: toggles + error ────────────────────────────
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut view_state.search_state.regex_mode, "Regex");
+                        ui.checkbox(&mut view_state.search_state.case_sensitive, "Aa")
+                            .on_hover_text("Match case");
                         if let Some(err) = error_msg {
                             ui.colored_label(Color32::from_rgb(255, 80, 80), err);
                         }
@@ -500,7 +527,7 @@ mod tests {
     #[test]
     fn search_empty_query_returns_no_matches() {
         let chars = make_chars(&["hello world"]);
-        let (matches, err) = run_search("", false, &chars);
+        let (matches, err) = run_search("", false, false, &chars);
         assert!(matches.is_empty());
         assert!(err.is_none());
     }
@@ -508,7 +535,7 @@ mod tests {
     #[test]
     fn search_single_match_on_first_row() {
         let chars = make_chars(&["hello world"]);
-        let (matches, err) = run_search("hello", false, &chars);
+        let (matches, err) = run_search("hello", false, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].row, 0);
@@ -519,7 +546,7 @@ mod tests {
     #[test]
     fn search_match_in_middle_of_row() {
         let chars = make_chars(&["abc foo bar"]);
-        let (matches, err) = run_search("foo", false, &chars);
+        let (matches, err) = run_search("foo", false, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 4);
@@ -529,7 +556,7 @@ mod tests {
     #[test]
     fn search_multiple_matches_same_row() {
         let chars = make_chars(&["abcabc"]);
-        let (matches, err) = run_search("abc", false, &chars);
+        let (matches, err) = run_search("abc", false, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].col_start, 0);
@@ -539,7 +566,7 @@ mod tests {
     #[test]
     fn search_matches_across_rows() {
         let chars = make_chars(&["foo bar", "baz foo"]);
-        let (matches, err) = run_search("foo", false, &chars);
+        let (matches, err) = run_search("foo", false, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].row, 0);
@@ -549,7 +576,7 @@ mod tests {
     #[test]
     fn search_case_insensitive() {
         let chars = make_chars(&["Hello WORLD"]);
-        let (matches, err) = run_search("hello", false, &chars);
+        let (matches, err) = run_search("hello", false, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_end, 4);
@@ -558,7 +585,7 @@ mod tests {
     #[test]
     fn search_no_match_returns_empty() {
         let chars = make_chars(&["hello world"]);
-        let (matches, err) = run_search("xyz", false, &chars);
+        let (matches, err) = run_search("xyz", false, false, &chars);
         assert!(err.is_none());
         assert!(matches.is_empty());
     }
@@ -568,7 +595,7 @@ mod tests {
         // U+4E16 (世) and U+754C (界) are each 2 display columns wide.
         // "世界hi" → display columns: 世=0-1, 界=2-3, h=4, i=5
         let chars = make_chars(&["世界hi"]);
-        let (matches, err) = run_search("hi", false, &chars);
+        let (matches, err) = run_search("hi", false, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 4);
@@ -580,7 +607,7 @@ mod tests {
     #[test]
     fn search_regex_basic_match() {
         let chars = make_chars(&["foo123bar"]);
-        let (matches, err) = run_search(r"\d+", true, &chars);
+        let (matches, err) = run_search(r"\d+", true, false, &chars);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 3);
@@ -590,7 +617,7 @@ mod tests {
     #[test]
     fn search_invalid_regex_returns_error() {
         let chars = make_chars(&["hello"]);
-        let (matches, err) = run_search(r"[invalid", true, &chars);
+        let (matches, err) = run_search(r"[invalid", true, false, &chars);
         assert!(matches.is_empty());
         assert!(err.is_some());
     }
@@ -598,9 +625,51 @@ mod tests {
     #[test]
     fn search_regex_no_match_returns_empty() {
         let chars = make_chars(&["hello"]);
-        let (matches, err) = run_search(r"\d+", true, &chars);
+        let (matches, err) = run_search(r"\d+", true, false, &chars);
         assert!(err.is_none());
         assert!(matches.is_empty());
+    }
+
+    // ── run_search: case sensitivity ───────────────────────────────────────
+
+    #[test]
+    fn search_case_sensitive_substring_rejects_different_case() {
+        let chars = make_chars(&["Hello WORLD"]);
+        let (matches, err) = run_search("hello", false, true, &chars);
+        assert!(err.is_none());
+        assert!(
+            matches.is_empty(),
+            "case-sensitive search for 'hello' must not match 'Hello'"
+        );
+    }
+
+    #[test]
+    fn search_case_sensitive_substring_matches_exact_case() {
+        let chars = make_chars(&["Hello hello HELLO"]);
+        let (matches, err) = run_search("hello", false, true, &chars);
+        assert!(err.is_none());
+        assert_eq!(matches.len(), 1, "exactly one case-sensitive match");
+        assert_eq!(matches[0].col_start, 6);
+    }
+
+    #[test]
+    fn search_case_insensitive_regex_matches_mixed_case() {
+        let chars = make_chars(&["FOO bar Baz"]);
+        let (matches, err) = run_search("foo", true, false, &chars);
+        assert!(err.is_none());
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 0);
+    }
+
+    #[test]
+    fn search_case_sensitive_regex_rejects_different_case() {
+        let chars = make_chars(&["FOO bar"]);
+        let (matches, err) = run_search("foo", true, true, &chars);
+        assert!(err.is_none());
+        assert!(
+            matches.is_empty(),
+            "case-sensitive regex must not match uppercase"
+        );
     }
 
     // ── SearchState navigation ─────────────────────────────────────────────
@@ -709,8 +778,10 @@ mod tests {
             }],
             current_match: 0,
             regex_mode: true,
+            case_sensitive: false,
             last_searched_query: "foo".to_string(),
             last_searched_regex: true,
+            last_searched_case_sensitive: false,
             cached_full_buffer: Some(visible),
             last_known_total_rows: 10,
             buffer_request_state: crate::gui::view_state::BufferRequestState::Idle,
@@ -721,6 +792,7 @@ mod tests {
         assert_eq!(state.current_match, 0);
         assert!(state.last_searched_query.is_empty());
         assert!(!state.last_searched_regex);
+        assert!(!state.last_searched_case_sensitive);
         assert!(state.cached_full_buffer.is_none());
         assert_eq!(state.last_known_total_rows, 0);
         assert_eq!(
