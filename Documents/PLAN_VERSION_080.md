@@ -699,6 +699,12 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   label remains as the explicit textual indicator.
 - **71.11** — Verify Task 69's search panel positioning fix landed and still behaves
   correctly under all window sizes and tab configurations.
+  **COMPLETE (2026-04-23).** Verified by code inspection that both Task 69.5 commits
+  (`37488d2` per-pane unique Area IDs, `275af03` `.pivot()` instead of `.anchor()`) are
+  still present in `freminal/src/gui/search.rs:413-416`. The search `Area` uses
+  `egui::Id::new("search_overlay").with(pane_id)` and anchors via `pivot(Align2::RIGHT_TOP)`
+  with `fixed_pos(Pos2::new(terminal_rect.right() - 4.0, terminal_rect.top() + 4.0))`,
+  which pins the bar to each pane's terminal rect rather than the window rect.
 
 #### 71.P2 — Tab & Pane UX
 
