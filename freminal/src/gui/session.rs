@@ -135,6 +135,10 @@ impl FreminalGui {
                     "restore_last_session: failed to apply {}: {e}",
                     path.display()
                 );
+                self.push_error_toast(
+                    "Failed to restore last session",
+                    Some(format!("{}: {e}", path.display())),
+                );
             }
         }
     }

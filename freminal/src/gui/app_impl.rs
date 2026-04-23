@@ -175,10 +175,18 @@ impl freminal_windowing::App for FreminalGui {
                         }
                         Err(e) => {
                             error!("Failed to resolve layout '{}': {e}", path.display());
+                            self.push_error_toast(
+                                "Failed to resolve layout",
+                                Some(format!("{}: {e}", path.display())),
+                            );
                         }
                     },
                     Err(e) => {
                         error!("Failed to load layout '{}': {e}", path.display());
+                        self.push_error_toast(
+                            "Failed to load layout",
+                            Some(format!("{}: {e}", path.display())),
+                        );
                     }
                 }
             } else {

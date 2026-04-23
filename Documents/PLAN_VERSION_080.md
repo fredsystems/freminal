@@ -467,6 +467,14 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
   7 new unit tests.
 - **71.3** — Layout load failure surface. TOML parse errors and missing-file errors currently
   log and disappear. Show a modal dialog naming the layout file and the specific error.
+  **COMPLETE (2026-04-22).** Reused the toast system from 71.2 instead of a modal dialog —
+  non-blocking toasts are less intrusive for recoverable failures. Wired all layout
+  load/save failure sites: CLI `--layout` / `startup.layout` load and resolve errors
+  (`app_impl.rs`), Layouts menu selection failures (`menu.rs`), `SaveLayout` action
+  failures including missing library dir, directory creation failure, and TOML write
+  failure (`actions.rs`), and `restore_last_session` apply failures (`session.rs`).
+  Auto-save-on-shutdown failures in `auto_save_session` are intentionally log-only since
+  the UI is already tearing down.
 - **71.4** — Shader compile error surface. When a custom shader fails to compile, show a
   dismissible error banner naming the shader file and including the first line of the GLSL
   error. Piggybacks on `GpuInitError` types introduced in 70.E.

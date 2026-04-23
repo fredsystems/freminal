@@ -470,6 +470,10 @@ impl super::FreminalGui {
                 // Determine where to write the layout file.
                 let Some(layout_dir) = freminal_common::config::layout_library_dir() else {
                     error!("SaveLayout: cannot determine layout library directory");
+                    self.push_error_toast(
+                        "Failed to save layout",
+                        Some("Cannot determine layout library directory".to_string()),
+                    );
                     return;
                 };
                 // Derive a filename from the user-supplied name, falling back
@@ -497,6 +501,10 @@ impl super::FreminalGui {
                 // Ensure the directory exists.
                 if let Err(e) = std::fs::create_dir_all(&layout_dir) {
                     error!("SaveLayout: cannot create layout library dir: {e}");
+                    self.push_error_toast(
+                        "Failed to save layout",
+                        Some(format!("Cannot create {}: {e}", layout_dir.display())),
+                    );
                     return;
                 }
                 match self.save_layout(&path, &name, Some(win)) {
@@ -508,6 +516,10 @@ impl super::FreminalGui {
                     }
                     Err(e) => {
                         error!("SaveLayout: failed to write {}: {e}", path.display());
+                        self.push_error_toast(
+                            "Failed to save layout",
+                            Some(format!("{}: {e}", path.display())),
+                        );
                     }
                 }
             }

@@ -157,6 +157,10 @@ impl super::FreminalGui {
                         }
                         Err(e) => {
                             tracing::error!("Failed to load layout '{}': {e}", summary.name);
+                            self.push_error_toast(
+                                "Failed to load layout",
+                                Some(format!("{}: {e}", summary.name)),
+                            );
                         }
                     }
                     ui.close();
