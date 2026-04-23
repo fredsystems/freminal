@@ -160,9 +160,14 @@ struct FreminalGui {
     /// so the next launch restores the user's layout.
     window_state: freminal_common::window_state::WindowState,
 
-    /// Optional recording handle for FREC v2 session recording.
-    /// When `Some`, topology and window events are emitted.
-    recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
+    /// Shared, hot-swappable FREC v2 recording handle.
+    ///
+    /// When the inner `Option<RecordingHandle>` is `Some`, topology,
+    /// window, input, and PTY events are emitted by all panes.  The GUI
+    /// can toggle recording on and off at runtime by storing a new value
+    /// into this swap; every pane observes the change on its next event
+    /// without any rewiring.
+    recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
 
     /// Maps OS `WindowId` to recording-local u32 identifiers.
     recording_window_ids: HashMap<WindowId, u32>,
@@ -229,7 +234,7 @@ impl FreminalGui {
         repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
         config_path: Option<std::path::PathBuf>,
         window_post: Arc<Mutex<WindowPostRenderer>>,
-        recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
+        recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
     ) -> Self {
         // Inform the initial tab about the configured theme mode and current OS
         // dark/light preference so DECRPM ?2031 responses are correct from the start.
@@ -296,7 +301,7 @@ impl FreminalGui {
                 .as_deref()
                 .map(freminal_common::window_state::WindowState::load_or_default)
                 .unwrap_or_default(),
-            recording_handle,
+            recording_swap,
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
             pending_layout_windows: std::collections::VecDeque::new(),

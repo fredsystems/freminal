@@ -28,7 +28,7 @@ pub fn run(
     config_path: Option<std::path::PathBuf>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     window_post: Arc<Mutex<WindowPostRenderer>>,
-    recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
+    recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
 ) -> Result<()> {
     let icon_bytes = include_bytes!("../../../assets/icon.png");
     let image = image::load_from_memory(icon_bytes)
@@ -73,7 +73,7 @@ pub fn run(
         repaint_handle,
         config_path,
         window_post,
-        recording_handle,
+        recording_swap,
     );
     app.icon = Some(icon);
 

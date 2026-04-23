@@ -591,7 +591,7 @@ impl FreminalGui {
 
         // Emit WindowCreate recording event.
         let rec_wid = self.recording_window_id(window_id);
-        if let Some(ref h) = self.recording_handle {
+        if let Some(h) = self.recording_swap.load_full() {
             h.emit(
                 freminal_terminal_emulator::recording::EventPayload::WindowCreate {
                     window_id: rec_wid,

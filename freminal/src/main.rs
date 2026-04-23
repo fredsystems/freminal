@@ -62,7 +62,7 @@ use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_common::{args::Args, config, config::load_config, themes};
 use freminal_terminal_emulator::recording::{
-    RecordingHandle, RecordingMetadata, TopologySnapshot, start_recording,
+    RecordingMetadata, RecordingSwap, TopologySnapshot, empty_recording_swap, start_recording,
 };
 use gui::pty::{PtyTabConfig, spawn_pty_tab};
 
@@ -73,8 +73,12 @@ use clap::Parser;
 /// Spawns a PTY-backed terminal tab via [`spawn_pty_tab`] and starts the
 /// GUI event loop.
 fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
+    // Shared recording swap. Populated below if --recording-path was given;
+    // the GUI can also mutate it at runtime via the ToggleRecording action.
+    let recording_swap: RecordingSwap = empty_recording_swap();
+
     // Start recording if --recording-path was specified.
-    let recording_handle: Option<RecordingHandle> = if let Some(ref path) = args.recording_path {
+    if let Some(ref path) = args.recording_path {
         let metadata = RecordingMetadata {
             freminal_version: env!("CARGO_PKG_VERSION").to_string(),
             created_at: std::time::SystemTime::now()
@@ -87,16 +91,13 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         match start_recording(path, metadata, 4096) {
             Ok((handle, _join)) => {
                 info!("Recording to {}", path.display());
-                Some(handle)
+                recording_swap.store(Some(std::sync::Arc::new(handle)));
             }
             Err(e) => {
                 error!("Failed to start recording: {e}");
-                None
             }
         }
-    } else {
-        None
-    };
+    }
 
     // Select the initial theme.  The OS dark/light preference is not yet
     // available (no egui context), so `active_slug(false)` assumes light mode
@@ -129,7 +130,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
             cwd: None,
             shell_override: None,
             extra_env: None,
-            recording_handle: recording_handle.clone(),
+            recording_swap: recording_swap.clone(),
             recording_pane_id: 0,
         },
     )?;
@@ -166,7 +167,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         config_path,
         repaint_handle,
         window_post,
-        recording_handle,
+        recording_swap,
     )
 }
 

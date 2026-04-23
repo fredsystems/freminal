@@ -24,7 +24,7 @@ use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
-use freminal_terminal_emulator::recording::{EventPayload, RecordingHandle};
+use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_windowing::{RepaintProxy, WindowId};
 
@@ -92,8 +92,10 @@ pub struct PtyTabConfig<'a> {
     pub shell_override: Option<&'a str>,
     /// Extra environment variables to set on the child process.
     pub extra_env: Option<&'a std::collections::HashMap<String, String>>,
-    /// Recording handle for FREC v2 recording (None if not recording).
-    pub recording_handle: Option<RecordingHandle>,
+    /// Shared, hot-swappable FREC v2 recording handle. The pane observes
+    /// the current `Option<RecordingHandle>` on every event; turning
+    /// recording on or off at runtime requires no rewiring.
+    pub recording_swap: RecordingSwap,
     /// Pane ID used in FREC v2 recording event payloads.
     pub recording_pane_id: u32,
 }
@@ -172,7 +174,7 @@ pub fn spawn_pty_tab(
         arc_swap,
         repaint_handle_pty,
         pty_dead_tx,
-        tab_cfg.recording_handle,
+        tab_cfg.recording_swap,
         tab_cfg.recording_pane_id,
     );
 
@@ -213,7 +215,7 @@ fn spawn_pty_consumer_thread(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     pty_dead_tx: Sender<()>,
-    recording_handle: Option<RecordingHandle>,
+    recording_swap: RecordingSwap,
     recording_pane_id: u32,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
@@ -264,7 +266,7 @@ fn spawn_pty_consumer_thread(
                  -> bool {
                     match msg {
                         Ok(InputEvent::Resize(w, h, pw, ph)) => {
-                            if let Some(ref rec) = recording_handle {
+                            if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PaneResize {
                                     pane_id: recording_pane_id,
                                     cols: w.try_into().unwrap_or(u32::MAX),
@@ -277,7 +279,7 @@ fn spawn_pty_consumer_thread(
                             if let Err(e) = emulator.write_raw_bytes(&bytes) {
                                 error!("Failed to forward key bytes to PTY: {e}");
                             }
-                            if let Some(ref rec) = recording_handle {
+                            if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PtyInput {
                                     pane_id: recording_pane_id,
                                     data: bytes,
@@ -353,7 +355,7 @@ fn spawn_pty_consumer_thread(
                     recv(pty_read_rx) -> msg => {
                         if let Ok(read) = msg {
                             let data = &read.buf[0..read.read_amount];
-                            if let Some(ref rec) = recording_handle {
+                            if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PtyOutput {
                                     pane_id: recording_pane_id,
                                     data: data.to_vec(),

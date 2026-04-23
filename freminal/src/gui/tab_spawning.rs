@@ -74,7 +74,7 @@ impl FreminalGui {
                 cwd: cwd_path,
                 shell_override: None,
                 extra_env: None,
-                recording_handle: self.recording_handle.clone(),
+                recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
             },
         ) {
@@ -213,7 +213,7 @@ impl FreminalGui {
                 cwd: cwd_path,
                 shell_override: None,
                 extra_env: None,
-                recording_handle: self.recording_handle.clone(),
+                recording_swap: self.recording_swap.clone(),
                 recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
             },
         ) {
@@ -355,7 +355,7 @@ impl FreminalGui {
                 cwd,
                 shell_override,
                 extra_env,
-                recording_handle: self.recording_handle.clone(),
+                recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
             },
         ) {

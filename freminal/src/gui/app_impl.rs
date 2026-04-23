@@ -200,7 +200,7 @@ impl freminal_windowing::App for FreminalGui {
 
             // Emit WindowCreate recording event.
             let rec_wid = self.recording_window_id(window_id);
-            if let Some(ref h) = self.recording_handle {
+            if let Some(h) = self.recording_swap.load_full() {
                 h.emit(
                     freminal_terminal_emulator::recording::EventPayload::WindowCreate {
                         window_id: rec_wid,
@@ -284,7 +284,7 @@ impl freminal_windowing::App for FreminalGui {
                     cwd: None,
                     shell_override: None,
                     extra_env: None,
-                    recording_handle: self.recording_handle.clone(),
+                    recording_swap: self.recording_swap.clone(),
                     recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
                 },
             ) {
@@ -373,7 +373,7 @@ impl freminal_windowing::App for FreminalGui {
 
                     // Emit WindowCreate recording event.
                     let rec_wid = self.recording_window_id(window_id);
-                    if let Some(ref h) = self.recording_handle {
+                    if let Some(h) = self.recording_swap.load_full() {
                         h.emit(
                             freminal_terminal_emulator::recording::EventPayload::WindowCreate {
                                 window_id: rec_wid,
@@ -449,7 +449,7 @@ impl freminal_windowing::App for FreminalGui {
 
         // Emit WindowClose recording event (only for known windows), and clean up the mapping.
         if let Some(rec_wid) = self.recording_window_ids.remove(&window_id)
-            && let Some(ref h) = self.recording_handle
+            && let Some(h) = self.recording_swap.load_full()
         {
             h.emit(
                 freminal_terminal_emulator::recording::EventPayload::WindowClose {
@@ -737,7 +737,7 @@ impl freminal_windowing::App for FreminalGui {
             match tab.pane_tree.close(pane_id) {
                 Ok(_closed) => {
                     // Emit PaneClose recording event.
-                    if let Some(ref h) = self.recording_handle {
+                    if let Some(h) = self.recording_swap.load_full() {
                         // Saturating `u64 -> u32`: pane IDs are monotonic from
                         // 0 and will never realistically exceed u32::MAX.
                         h.emit(
@@ -1320,8 +1320,11 @@ impl freminal_windowing::App for FreminalGui {
                 let is_active = pane_id == active_pane_id;
 
                 // Build a RecordingContext for this pane if recording is active.
+                // Hold the Arc locally so the borrow in `RecordingContext.handle`
+                // remains valid for the lifetime of `rec_ctx`.
                 let rec_window_id = self.recording_window_id(window_id);
-                let rec_ctx = self.recording_handle.as_ref().map(|h| {
+                let rec_handle = self.recording_swap.load_full();
+                let rec_ctx = rec_handle.as_ref().map(|h| {
                     freminal_terminal_emulator::recording::RecordingContext {
                         handle: h,
                         window_id: rec_window_id,

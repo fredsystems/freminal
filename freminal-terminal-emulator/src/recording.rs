@@ -575,6 +575,26 @@ pub struct RecordingHandle {
     start: std::time::Instant,
 }
 
+/// Shared, hot-swappable recording handle.
+///
+/// Wraps `Option<RecordingHandle>` in an [`arc_swap::ArcSwapOption`] so the
+/// GUI can turn recording on and off at runtime.  Every pane owns a clone of
+/// the same `Arc`; readers call [`arc_swap::ArcSwapOption::load_full`] to
+/// observe the current handle (or `None` if recording is off).
+///
+/// When recording is started at runtime, the GUI stores a fresh
+/// [`RecordingHandle`] in the swap — all existing and future panes begin
+/// emitting events on the next check.  When stopped, the GUI stores `None`
+/// and drops its own clone + the matching [`RecordingJoinHandle`] to let the
+/// writer thread finalize the file.
+pub type RecordingSwap = std::sync::Arc<arc_swap::ArcSwapOption<RecordingHandle>>;
+
+/// Construct an empty [`RecordingSwap`] representing "not recording".
+#[must_use]
+pub fn empty_recording_swap() -> RecordingSwap {
+    std::sync::Arc::new(arc_swap::ArcSwapOption::const_empty())
+}
+
 impl RecordingHandle {
     /// Send an event to the recording writer thread.
     ///
