@@ -51,79 +51,80 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 
 ## Task Summary
 
-| #   | Task                                     | Plan Document                                 | Status   | Dependencies         |
-| --- | ---------------------------------------- | --------------------------------------------- | -------- | -------------------- |
-| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                      | Complete | None                 |
-| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                       | Complete | None                 |
-| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                   | Complete | Task 2               |
-| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`                 | Complete | Task 2               |
-| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                   | Complete | Task 1               |
-| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                        | Complete | None                 |
-| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`                 | Complete | None                 |
-| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                       | Complete | None                 |
-| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`          | Complete | None                 |
-| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`           | Complete | None                 |
-| 11  | Theming                                  | `PLAN_11_THEMING.md`                          | Complete | Tasks 2, 3           |
-| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                         | Complete | None                 |
-| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                   | Complete | Task 1               |
-| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md`   | Complete | None                 |
-| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`          | Complete | None                 |
-| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                   | Complete | None                 |
-| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                    | Complete | None                 |
-| 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`                 | Pending  | Tasks 2, 3, 16       |
-| 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`       | Pending  | None (separate repo) |
-| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`                | Complete | None                 |
-| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                        | Complete | None                 |
-| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`               | Complete | None                 |
-| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                    | Complete | None                 |
-| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`           | Complete | None                 |
-| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                     | Complete | None                 |
-| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                     | Complete | None                 |
-| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                      | Complete | None                 |
-| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                    | Complete | None                 |
-| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`                | Complete | All other tasks      |
-| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`               | Complete | None                 |
-| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                  | Complete | None                 |
-| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`            | Complete | None                 |
-| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`         | Complete | None                 |
-| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`               | Complete | None                 |
-| 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`          | Complete | None                 |
-| 53  | Multiple Windows                         | See `DESIGN_DECISIONS.md`                     | Complete | Task 36 (Tabs)       |
-| 58  | Built-in Multiplexer (Split Panes)       | See `DESIGN_DECISIONS.md`                     | Complete | Task 36 (Tabs)       |
-| 59  | FREC v2: Recording Overhaul              | See `FREC_FORMAT.md`, `DESIGN_DECISIONS.md`   | Complete | Task 58              |
-| 61  | Saved Layouts (Session Templates)        | See `LAYOUT_FORMAT.md`, `DESIGN_DECISIONS.md` | Complete | Tasks 36, 58         |
-| 68  | Platform Performance Triage              | See `DESIGN_DECISIONS.md`                     | Complete | None                 |
-| 69  | UI Polish & Settings Completeness        | See `DESIGN_DECISIONS.md`                     | Complete | None                 |
-| 62  | freminal-windowing crate + event loop    | See `DESIGN_DECISIONS.md`                     | Complete | None                 |
-| 63  | Single-window migration                  | See `DESIGN_DECISIONS.md`                     | Complete | Task 62              |
-| 64  | Multi-window parity                      | See `DESIGN_DECISIONS.md`                     | Complete | Task 63              |
-| 65  | Frame pacing + idle optimization         | See `DESIGN_DECISIONS.md`                     | Complete | Task 63              |
-| 66  | Cleanup + eframe removal                 | See `DESIGN_DECISIONS.md`                     | Complete | Task 64              |
-| 67  | Window spawn truncation diagnostic       | See `DESIGN_DECISIONS.md`                     | Complete | Task 64              |
-| 70  | Code Correctness & Hygiene Sweep         | `PLAN_VERSION_080.md` (Task 70)               | Pending  | None                 |
-| 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)               | Pending  | None                 |
-| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Stub     | v0.8.0               |
-| 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub     | Task 72              |
-| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub     | v0.8.0, Task 58      |
-| 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub     | v0.8.0, Task 61      |
-| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Stub     | v0.8.0, Task 72      |
-| 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Stub     | v0.8.0               |
-| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)               | Stub     | v0.8.0               |
-| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)               | Stub     | v0.8.0               |
-| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_100.md` (Task 80)               | Stub     | Task 78              |
-| 81  | GPU-Accelerated Scrollback Regex Search  | `PLAN_VERSION_100.md` (Task 81)               | Stub     | v0.8.0               |
-| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_100.md` (Task 82)               | Stub     | v0.8.0               |
-| 83  | Command Palette                          | `PLAN_VERSION_100.md` (Task 83)               | Stub     | v0.8.0               |
-| 84  | Scripting Layer (Lua or WASM)            | `PLAN_VERSION_110.md` (Task 84)               | Stub     | v0.10.0              |
-| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_110.md` (Task 85)               | Stub     | Task 84 preferred    |
-| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_110.md` (Task 86)               | Stub     | v0.10.0              |
-| 87  | AI Command Assist (opt-in)               | `PLAN_VERSION_110.md` (Task 87)               | Stub     | Tasks 72, 84         |
-| 88  | IME / CJK Input Support                  | `PLAN_VERSION_120.md` (Task 88)               | Stub     | v0.8.0               |
-| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_120.md` (Task 89)               | Stub     | v0.8.0               |
-| 90  | Windows Platform Quality Pass            | `PLAN_VERSION_120.md` (Task 90)               | Stub     | v0.8.0               |
-| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)               | Stub     | Task 19              |
-| 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)               | Stub     | None                 |
-| 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)               | Stub     | None                 |
+| #   | Task                                     | Plan Document                                 | Status    | Dependencies         |
+| --- | ---------------------------------------- | --------------------------------------------- | --------- | -------------------- |
+| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                      | Complete  | None                 |
+| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                       | Complete  | None                 |
+| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                   | Complete  | Task 2               |
+| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`                 | Complete  | Task 2               |
+| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                   | Complete  | Task 1               |
+| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                        | Complete  | None                 |
+| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`                 | Complete  | None                 |
+| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                       | Complete  | None                 |
+| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`          | Complete  | None                 |
+| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`           | Complete  | None                 |
+| 11  | Theming                                  | `PLAN_11_THEMING.md`                          | Complete  | Tasks 2, 3           |
+| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                         | Complete  | None                 |
+| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                   | Complete  | Task 1               |
+| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md`   | Complete  | None                 |
+| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`          | Complete  | None                 |
+| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                   | Complete  | None                 |
+| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                    | Complete  | None                 |
+| 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`                 | Pending   | Tasks 2, 3, 16       |
+| 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`       | Pending   | None (separate repo) |
+| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`                | Complete  | None                 |
+| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                        | Complete  | None                 |
+| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`               | Complete  | None                 |
+| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                    | Complete  | None                 |
+| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`           | Complete  | None                 |
+| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                     | Complete  | None                 |
+| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                     | Complete  | None                 |
+| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                      | Complete  | None                 |
+| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                    | Complete  | None                 |
+| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`                | Complete  | All other tasks      |
+| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`               | Complete  | None                 |
+| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                  | Complete  | None                 |
+| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`            | Complete  | None                 |
+| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`         | Complete  | None                 |
+| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`               | Complete  | None                 |
+| 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`          | Complete  | None                 |
+| 53  | Multiple Windows                         | See `DESIGN_DECISIONS.md`                     | Complete  | Task 36 (Tabs)       |
+| 58  | Built-in Multiplexer (Split Panes)       | See `DESIGN_DECISIONS.md`                     | Complete  | Task 36 (Tabs)       |
+| 59  | FREC v2: Recording Overhaul              | See `FREC_FORMAT.md`, `DESIGN_DECISIONS.md`   | Complete  | Task 58              |
+| 61  | Saved Layouts (Session Templates)        | See `LAYOUT_FORMAT.md`, `DESIGN_DECISIONS.md` | Complete  | Tasks 36, 58         |
+| 68  | Platform Performance Triage              | See `DESIGN_DECISIONS.md`                     | Complete  | None                 |
+| 69  | UI Polish & Settings Completeness        | See `DESIGN_DECISIONS.md`                     | Complete  | None                 |
+| 62  | freminal-windowing crate + event loop    | See `DESIGN_DECISIONS.md`                     | Complete  | None                 |
+| 63  | Single-window migration                  | See `DESIGN_DECISIONS.md`                     | Complete  | Task 62              |
+| 64  | Multi-window parity                      | See `DESIGN_DECISIONS.md`                     | Complete  | Task 63              |
+| 65  | Frame pacing + idle optimization         | See `DESIGN_DECISIONS.md`                     | Complete  | Task 63              |
+| 66  | Cleanup + eframe removal                 | See `DESIGN_DECISIONS.md`                     | Complete  | Task 64              |
+| 67  | Window spawn truncation diagnostic       | See `DESIGN_DECISIONS.md`                     | Complete  | Task 64              |
+| 70  | Code Correctness & Hygiene Sweep         | `PLAN_VERSION_080.md` (Task 70)               | Pending   | None                 |
+| 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)               | Pending   | None                 |
+| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Stub      | v0.8.0               |
+| 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub      | Task 72              |
+| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub      | v0.8.0, Task 58      |
+| 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub      | v0.8.0, Task 61      |
+| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Stub      | v0.8.0, Task 72      |
+| 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Stub      | v0.8.0               |
+| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)               | Stub      | v0.8.0               |
+| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)               | Stub      | v0.8.0               |
+| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_100.md` (Task 80)               | Stub      | Task 78              |
+| 81  | GPU-Accelerated Scrollback Regex Search  | `PLAN_VERSION_100.md` (Task 81)               | Stub      | v0.8.0               |
+| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_100.md` (Task 82)               | Stub      | v0.8.0               |
+| 83  | Command Palette                          | `PLAN_VERSION_100.md` (Task 83)               | Stub      | v0.8.0               |
+| 83a | Expanded Auto-Detection (TENTATIVE)      | `PLAN_VERSION_100.md` (Task 83a)              | Tentative | Task 71.7b           |
+| 84  | Scripting Layer (Lua or WASM)            | `PLAN_VERSION_110.md` (Task 84)               | Stub      | v0.10.0              |
+| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_110.md` (Task 85)               | Stub      | Task 84 preferred    |
+| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_110.md` (Task 86)               | Stub      | v0.10.0              |
+| 87  | AI Command Assist (opt-in)               | `PLAN_VERSION_110.md` (Task 87)               | Stub      | Tasks 72, 84         |
+| 88  | IME / CJK Input Support                  | `PLAN_VERSION_120.md` (Task 88)               | Stub      | v0.8.0               |
+| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_120.md` (Task 89)               | Stub      | v0.8.0               |
+| 90  | Windows Platform Quality Pass            | `PLAN_VERSION_120.md` (Task 90)               | Stub      | v0.8.0               |
+| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)               | Stub      | Task 19              |
+| 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)               | Stub      | None                 |
+| 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)               | Stub      | None                 |
 
 ---
 
