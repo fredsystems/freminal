@@ -69,3 +69,12 @@ pub use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
 // Re-export `LineWidth` for the renderer to apply DECDWL / DECDHL scaling.
 pub use freminal_buffer::row::LineWidth;
+
+/// Git describe output for the current build.
+///
+/// Typical values: `v0.7.0-3-gabc1234` (commits past a tag) or `v0.7.0` (on
+/// a tag), or `unknown` when `git describe` failed at build time (e.g. a
+/// shallow clone with no tags).  Emitted by this crate's `build.rs` so the
+/// binary crate can display it in the About dialog without needing its own
+/// build script.
+pub const GIT_DESCRIBE: &str = env!("VERGEN_GIT_DESCRIBE");

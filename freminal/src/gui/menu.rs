@@ -110,6 +110,13 @@ impl super::FreminalGui {
                 any_menu_open = true;
             }
 
+            let help_resp = ui.menu_button("Help", |ui| {
+                self.show_help_menu(ui);
+            });
+            if help_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
             // Password-prompt lock indicator: shown in the menu bar (which is
             // always visible) so it works regardless of tab bar visibility.
             if self.config.security.password_indicator
@@ -210,6 +217,81 @@ impl super::FreminalGui {
         {
             win.pending_menu_actions.push(KeyAction::OpenSearch);
             ui.close();
+        }
+    }
+
+    /// Render the "Help" dropdown menu contents.
+    ///
+    /// Contains three entries:
+    /// - "About Freminal" — opens the in-app About dialog
+    /// - "Report Issue..." — opens the GitHub issue tracker in the user's
+    ///   default browser
+    /// - "Keybindings..." — opens the Settings Modal focused on the
+    ///   Keybindings tab
+    ///
+    /// None of these items have keyboard shortcuts, so they use plain
+    /// `ui.button(...)` rather than `menu_button_for`.
+    fn show_help_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("About Freminal").clicked() {
+            self.about_window_open = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Report Issue...").clicked() {
+            let url = "https://github.com/fredsystems/freminal/issues/new";
+            if let Err(e) = open::that(url) {
+                tracing::error!("Failed to open issue tracker URL '{url}': {e}");
+                self.push_error_toast("Failed to open issue tracker", Some(format!("{e}")));
+            }
+            ui.close();
+        }
+        if ui.button("Keybindings...").clicked() {
+            self.pending_open_keybindings = true;
+            ui.close();
+        }
+    }
+
+    /// Show the "About Freminal" floating dialog.
+    ///
+    /// Rendered every frame when `about_window_open` is `true`.  Displays
+    /// the package version, the git-describe string (build hash), a short
+    /// description, and a Close button.  The dialog is anchored to the
+    /// window center and is neither resizable nor collapsible.
+    pub(super) fn show_about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_window_open {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("About Freminal")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(4.0);
+                    ui.heading("Freminal");
+                    ui.add_space(2.0);
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.label(format!(
+                        "Build {}",
+                        freminal_terminal_emulator::GIT_DESCRIBE
+                    ));
+                    ui.add_space(6.0);
+                    ui.label("A modern terminal emulator written in Rust.");
+                    ui.add_space(2.0);
+                    ui.label("Licensed under the MIT License.");
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        self.about_window_open = false;
+                    }
+                });
+            });
+
+        // Honor the window's own close button (the `X` in the title bar).
+        if !open {
+            self.about_window_open = false;
         }
     }
 

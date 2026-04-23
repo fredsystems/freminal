@@ -505,9 +505,25 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
   `show()` call (mirroring the in-widget `clipboard_pending` flow). The Edit menu body
   was extracted into a `show_edit_menu` helper to keep `show_menu_bar` under clippy's
   `too_many_lines` threshold. This plumbing is reusable for 71.6 (Help menu).
-- **71.6** — Add Help menu. Contains About (version + build hash, embedded via Task 16
-  pipeline), "Report Issue…" (opens GitHub issue tracker URL), "Keybindings…" (jumps to
-  Settings Modal keybindings tab).
+- **71.6** — **COMPLETE (2026-04-22).** Added `Help` menu between `Layouts` and the lock
+  indicator with three entries: `About Freminal`, `Report Issue...`, and `Keybindings...`.
+  `About Freminal` opens an in-app floating `egui::Window` centered on the screen, showing
+  the package name, `CARGO_PKG_VERSION`, build hash (re-exported as
+  `freminal_terminal_emulator::GIT_DESCRIBE` from the `VERGEN_GIT_DESCRIBE` already emitted
+  by the emulator's `build.rs`), a short description, and a Close button. The dialog is
+  self-dismissing via its Close button or title-bar X. `Report Issue...` opens
+  `https://github.com/fredsystems/freminal/issues/new` via `open::that`, surfacing failures
+  as error toasts. `Keybindings...` sets a new `pending_open_keybindings` flag that the next
+  `update()` frame drains — mirroring the existing Settings-menu flow, it either focuses an
+  already-open settings window (and switches it to the Keybindings tab via a new
+  `SettingsModal::set_active_tab` method) or opens a new settings modal pre-focused on
+  Keybindings via a new `SettingsModal::open_to_tab` method. Two new bool fields were added
+  to `FreminalGui` (`about_window_open`, `pending_open_keybindings`), crossing the
+  `struct_excessive_bools` threshold; a targeted `#[allow]` with justification was added to
+  the struct — each bool is an independent, short-lived UI intent flag and combining them
+  into a state machine would couple unrelated concerns. No new `KeyAction` variants were
+  introduced (the Help items have no shortcuts by design), so `agents.md`'s keybinding
+  convention does not apply. Unit tests added for `open_to_tab` and `set_active_tab`.
 - **71.7** — URL hover tooltip. When the mouse hovers over an OSC 8 or auto-detected URL,
   show a tooltip with the target URL and change the cursor to a pointer.
 

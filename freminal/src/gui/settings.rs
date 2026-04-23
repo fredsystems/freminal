@@ -260,6 +260,30 @@ impl SettingsModal {
         self.is_open = true;
     }
 
+    /// Open the modal with a specific tab preselected.
+    ///
+    /// Wraps [`Self::open`] and overrides the default `SettingsTab::Font`
+    /// starting tab.  Used by the Help menu's "Keybindings..." item to jump
+    /// directly to the Keybindings tab.
+    pub fn open_to_tab(
+        &mut self,
+        live_config: &Config,
+        monospace_families: Vec<String>,
+        os_dark_mode: bool,
+        tab: SettingsTab,
+    ) {
+        self.open(live_config, monospace_families, os_dark_mode);
+        self.active_tab = tab;
+    }
+
+    /// Set the active tab on an already-open modal.
+    ///
+    /// Used by the Help menu's "Keybindings..." item when the settings
+    /// window is already open — we switch tabs instead of re-opening.
+    pub const fn set_active_tab(&mut self, tab: SettingsTab) {
+        self.active_tab = tab;
+    }
+
     /// Show the modal window. Returns the action the caller should take.
     ///
     /// When `SettingsAction::Applied` is returned, the caller should:
@@ -1681,6 +1705,27 @@ mod tests {
         assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
         assert_eq!(SettingsTab::Startup.label(), "Startup");
+    }
+
+    #[test]
+    fn open_to_tab_selects_requested_tab() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open_to_tab(&cfg, Vec::new(), false, SettingsTab::Keybindings);
+        assert!(modal.is_open);
+        assert_eq!(modal.active_tab, SettingsTab::Keybindings);
+    }
+
+    #[test]
+    fn set_active_tab_switches_without_reopening() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        assert_eq!(modal.active_tab, SettingsTab::Font);
+        modal.set_active_tab(SettingsTab::Keybindings);
+        assert_eq!(modal.active_tab, SettingsTab::Keybindings);
+        // Still open; switching tabs doesn't close the modal.
+        assert!(modal.is_open);
     }
 
     #[test]

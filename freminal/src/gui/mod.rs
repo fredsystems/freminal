@@ -99,6 +99,7 @@ struct InitialWindowState {
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
 }
 
+#[allow(clippy::struct_excessive_bools)] // Top-level app state aggregator: each bool is an independent, short-lived UI intent flag (pending window create/focus, one-frame just-opened, self-dismissing dialog visibility). Combining them into a state machine or enum would couple unrelated intents and obscure intent.
 struct FreminalGui {
     /// Per-window state keyed by OS window id.
     ///
@@ -192,6 +193,15 @@ struct FreminalGui {
     /// True only on the first frame after the save-layout prompt opens.
     /// Used to focus the text field exactly once instead of every frame.
     save_layout_prompt_just_opened: bool,
+
+    /// When `true`, the Help menu "About" dialog is visible.  Rendered as a
+    /// small floating `egui::Window` each frame while this is set.
+    about_window_open: bool,
+
+    /// When `true`, the Help menu "Keybindings..." item was clicked and the
+    /// Settings Modal should be opened (or refocused) with the Keybindings
+    /// tab selected.  Drained in `update()` next frame.
+    pending_open_keybindings: bool,
 
     /// App-level stack of user-visible transient notifications (toasts).
     ///
@@ -293,6 +303,8 @@ impl FreminalGui {
             pending_load_layout: None,
             pending_save_layout: None,
             save_layout_prompt_just_opened: false,
+            about_window_open: false,
+            pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
         }
     }

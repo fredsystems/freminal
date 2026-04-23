@@ -829,6 +829,32 @@ impl freminal_windowing::App for FreminalGui {
             self.dispatch_tab_bar_action(menu_action, &mut win);
         }
 
+        // Help menu → "Keybindings..." routes here.  Opens the Settings
+        // Modal with the Keybindings tab preselected, or focuses the
+        // existing settings window if one is already open.  Mirrors the
+        // Settings menu item in `show_menu_bar`, but jumps to the
+        // Keybindings tab instead of the default Font tab.
+        if self.pending_open_keybindings {
+            self.pending_open_keybindings = false;
+            if self.settings_window_id.is_some() {
+                self.pending_focus_settings = true;
+                self.settings_modal
+                    .set_active_tab(crate::gui::settings::SettingsTab::Keybindings);
+            } else if !self.settings_modal.is_open && !self.pending_settings_window {
+                let families = win.terminal_widget.monospace_families();
+                self.settings_modal.open_to_tab(
+                    &self.config,
+                    families,
+                    win.os_dark_mode,
+                    crate::gui::settings::SettingsTab::Keybindings,
+                );
+                self.settings_modal
+                    .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                self.settings_owner = Some(window_id);
+                self.pending_settings_window = true;
+            }
+        }
+
         // Tab bar: shown when multiple tabs are open, or when the config
         // option `tabs.show_single_tab` is enabled.
         let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
@@ -1031,6 +1057,11 @@ impl freminal_windowing::App for FreminalGui {
                 all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
             }
 
+            // Floating "About Freminal" dialog.  Shown whenever the user
+            // clicked "About Freminal" in the Help menu.  Self-dismissing
+            // via its own Close button or title-bar X.
+            self.show_about_window(ctx);
+
             // Drain pending menu actions (Edit menu clicks: Copy, Paste,
             // Select All, Find...).  These were queued during
             // `show_menu_bar` above, which does not have mutable access to
@@ -1044,7 +1075,8 @@ impl freminal_windowing::App for FreminalGui {
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
-            let ui_overlay_open = any_menu_open || self.pending_save_layout.is_some();
+            let ui_overlay_open =
+                any_menu_open || self.pending_save_layout.is_some() || self.about_window_open;
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
