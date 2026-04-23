@@ -693,6 +693,10 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   buttons in `freminal/src/gui/search.rs`, mirroring the existing pattern used on the `Aa`
   case-sensitivity checkbox. Pure UI affordance — no state changes, no new tests needed.
 - **71.10** — Red-background tint on the search input when match count is zero.
+  **COMPLETE (2026-04-23).** When the query is non-empty and `match_count == 0`, the
+  `TextEdit` gets `background_color(Color32::from_rgb(80, 20, 20))` — a muted dark red
+  that stands out on both light and dark themes without being garish. Existing "No matches"
+  label remains as the explicit textual indicator.
 - **71.11** — Verify Task 69's search panel positioning fix landed and still behaves
   correctly under all window sizes and tab configurations.
 

@@ -423,13 +423,22 @@ pub fn show_search_bar(
 
                     // ── Row 1: text input + control buttons ──────────────
                     ui.horizontal(|ui| {
-                        // Text input.
-                        let response = ui.add(
+                        // When the user has typed a query but no matches were found,
+                        // tint the text-edit background red so the empty-result state
+                        // is visible even without reading the match-count label.
+                        let no_matches =
+                            !view_state.search_state.query.is_empty() && match_count == 0;
+                        let mut text_edit =
                             egui::TextEdit::singleline(&mut view_state.search_state.query)
                                 .hint_text("Search…")
                                 .desired_width(180.0)
-                                .lock_focus(true),
-                        );
+                                .lock_focus(true);
+                        if no_matches {
+                            text_edit = text_edit.background_color(Color32::from_rgb(80, 20, 20));
+                        }
+
+                        // Text input.
+                        let response = ui.add(text_edit);
 
                         // Handle Enter / Shift+Enter inside the text field.
                         if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
