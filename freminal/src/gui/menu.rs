@@ -69,6 +69,13 @@ impl super::FreminalGui {
                 any_menu_open = true;
             }
 
+            let edit_resp = ui.menu_button("Edit", |ui| {
+                self.show_edit_menu(ui, win);
+            });
+            if edit_resp.inner.is_some() {
+                any_menu_open = true;
+            }
+
             let tab_resp = ui.menu_button("Tab", |ui| {
                 menu_action = self.show_tab_menu(ui, win);
             });
@@ -166,6 +173,43 @@ impl super::FreminalGui {
                     ui.close();
                 }
             }
+        }
+    }
+
+    /// Render the "Edit" dropdown menu contents.
+    ///
+    /// Each item enqueues a `KeyAction` onto `win.pending_menu_actions`,
+    /// which is drained in `update()` after the menu bar finishes rendering.
+    /// See `FreminalGui::dispatch_menu_action` for the receiving side.
+    fn show_edit_menu(&self, ui: &mut egui::Ui, win: &mut PerWindowState) {
+        if ui
+            .add(self.menu_button_for("Copy", KeyAction::Copy))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::Copy);
+            ui.close();
+        }
+        if ui
+            .add(self.menu_button_for("Paste", KeyAction::Paste))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::Paste);
+            ui.close();
+        }
+        if ui
+            .add(self.menu_button_for("Select All", KeyAction::SelectAll))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::SelectAll);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add(self.menu_button_for("Find...", KeyAction::OpenSearch))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::OpenSearch);
+            ui.close();
         }
     }
 

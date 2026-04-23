@@ -942,6 +942,7 @@ impl FreminalTerminalWidget {
         is_active_pane: bool,
         pane_id: crate::gui::panes::PaneId,
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
+        pending_copy: &mut bool,
     ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1098,8 +1099,13 @@ impl FreminalTerminalWidget {
             // copy_text() inside the closure would deadlock.
             //
             // If we sent an ExtractSelection request, wait briefly for the
-            // PTY thread to respond with the extracted text.
-            if clipboard_pending
+            // PTY thread to respond with the extracted text.  Either the
+            // in-widget keybinding path (`clipboard_pending`) or an external
+            // trigger such as the Edit menu (`pending_copy`) can request
+            // this round-trip.
+            let copy_requested = clipboard_pending || *pending_copy;
+            *pending_copy = false;
+            if copy_requested
                 && let Ok(text) = clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
                 && !text.is_empty()
             {

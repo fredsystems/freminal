@@ -134,6 +134,7 @@ impl freminal_windowing::App for FreminalGui {
                 last_known_position: None,
                 renaming_tab: None,
                 rename_buffer: String::new(),
+                pending_menu_actions: Vec::new(),
             };
             self.windows.insert(window_id, win);
 
@@ -296,6 +297,7 @@ impl freminal_windowing::App for FreminalGui {
                         pty_dead_rx: channels.pty_dead_rx,
                         title: "Terminal".to_owned(),
                         bell_active: false,
+                        pending_copy: false,
                         title_stack: Vec::new(),
                         view_state: view_state::ViewState::new(),
                         echo_off: channels.echo_off,
@@ -360,6 +362,7 @@ impl freminal_windowing::App for FreminalGui {
                         last_known_position: None,
                         renaming_tab: None,
                         rename_buffer: String::new(),
+                        pending_menu_actions: Vec::new(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -1028,6 +1031,16 @@ impl freminal_windowing::App for FreminalGui {
                 all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
             }
 
+            // Drain pending menu actions (Edit menu clicks: Copy, Paste,
+            // Select All, Find...).  These were queued during
+            // `show_menu_bar` above, which does not have mutable access to
+            // the active pane's ViewState / input_tx.  Menu-local actions
+            // (Copy, Paste, Select All) are applied directly to the active
+            // pane; others are routed through the deferred-action pipeline.
+            for action in std::mem::take(&mut win.pending_menu_actions) {
+                Self::dispatch_menu_action(&mut win, action, &mut all_deferred_actions);
+            }
+
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
@@ -1299,6 +1312,7 @@ impl freminal_windowing::App for FreminalGui {
                             is_active,
                             pane_id,
                             rec_ctx.as_ref(),
+                            &mut pane.pending_copy,
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;

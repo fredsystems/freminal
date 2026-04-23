@@ -151,6 +151,14 @@ pub struct Pane {
     /// Whether a bell has fired in this pane and not yet been cleared.
     pub bell_active: bool,
 
+    /// Pending "Copy to clipboard" request triggered outside the widget
+    /// (e.g. from the Edit menu).  The widget drains this flag on its next
+    /// `show()` call: if set, it waits briefly for the PTY thread to reply
+    /// on `clipboard_rx` with the extracted selection text, then copies to
+    /// the system clipboard.  This is the menu-side analogue of the
+    /// `clipboard_pending` flag used by the in-widget keybinding path.
+    pub pending_copy: bool,
+
     /// Per-pane title stack for `SaveWindowTitleToStack` /
     /// `RestoreWindowTitleFromStack` (CSI 22/23 t). Each pane maintains its
     /// own stack so that background shells pushing/popping titles do not
@@ -1274,6 +1282,7 @@ mod tests {
             pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,
+            pending_copy: false,
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),

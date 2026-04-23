@@ -111,4 +111,13 @@ pub(super) struct PerWindowState {
     /// `renaming_tab` is set, mutated by the `TextEdit`, and consumed on
     /// commit.  Cleared when rename ends.
     pub(super) rename_buffer: String,
+
+    /// `KeyAction`s triggered from menu items (Edit, Help, etc.) that must
+    /// run against the active pane's `ViewState` + PTY `input_tx`.
+    ///
+    /// The menu bar itself cannot dispatch these directly because it runs
+    /// with `&mut PerWindowState` (no pane view-state access), so it pushes
+    /// here.  Drained and dispatched at the top of the active pane's input
+    /// processing each frame.
+    pub(super) pending_menu_actions: Vec<freminal_common::keybindings::KeyAction>,
 }

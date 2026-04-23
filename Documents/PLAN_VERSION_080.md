@@ -493,6 +493,18 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
 - **71.5** — Add Edit menu. Contains Copy, Paste, Select All, Find. Each item shows its
   current keybinding from `BindingMap`. Platform-appropriate placement (macOS menubar vs.
   Linux/Windows in-window menu bar).
+  **COMPLETE (2026-04-22).** Added `Edit` menu between `Freminal` and `Tab` with Copy,
+  Paste, Select All, and Find entries. Each button uses `menu_button_for(label, action)`
+  to show the current keybinding combo from the `BindingMap`. Menu clicks push onto a new
+  `PerWindowState::pending_menu_actions: Vec<KeyAction>` queue (menu closures do not have
+  mutable access to the active pane's `ViewState` / `input_tx`). The queue is drained at
+  the top of `FreminalGui::update` via a new `dispatch_menu_action` associated function
+  that applies Copy/Paste/Select All directly to the active pane and routes the rest
+  (OpenSearch, etc.) through the existing `all_deferred_actions` pipeline. For Copy, a
+  new `Pane::pending_copy` boolean signals the widget to read `clipboard_rx` on its next
+  `show()` call (mirroring the in-widget `clipboard_pending` flow). The Edit menu body
+  was extracted into a `show_edit_menu` helper to keep `show_menu_bar` under clippy's
+  `too_many_lines` threshold. This plumbing is reusable for 71.6 (Help menu).
 - **71.6** — Add Help menu. Contains About (version + build hash, embedded via Task 16
   pipeline), "Report Issue…" (opens GitHub issue tracker URL), "Keybindings…" (jumps to
   Settings Modal keybindings tab).

@@ -234,6 +234,109 @@ impl super::FreminalGui {
         }
     }
 
+    /// Dispatch a `KeyAction` that was triggered from a menu click.
+    ///
+    /// Menu clicks happen on the GUI thread during `show_menu_bar`, which
+    /// does not have mutable access to the active pane's `ViewState` or
+    /// `input_tx`.  The menu pushes actions onto `win.pending_menu_actions`,
+    /// and this method drains that queue after the menu bar finishes
+    /// rendering, applying each action to the active pane.
+    ///
+    /// Actions that are local to the active pane (Copy, Paste, Select All)
+    /// are dispatched directly here.  Other actions (`OpenSearch`,
+    /// `SaveLayout`, etc.) are pushed onto `all_deferred_actions` and
+    /// dispatched later by `dispatch_deferred_action` with full GUI state.
+    pub(super) fn dispatch_menu_action(
+        win: &mut PerWindowState,
+        action: freminal_common::keybindings::KeyAction,
+        all_deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
+    ) {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+        use freminal_common::keybindings::KeyAction;
+
+        match action {
+            KeyAction::Copy => {
+                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+                    warn!("Menu Copy: active tab has no active pane");
+                    return;
+                };
+                let Some((start, end)) = pane.view_state.selection.normalised() else {
+                    // No selection — nothing to copy.  Silently ignore; the
+                    // menu item is always enabled but this is a benign no-op.
+                    return;
+                };
+                if let Err(e) = pane.input_tx.send(InputEvent::ExtractSelection {
+                    start_row: start.row,
+                    start_col: start.col,
+                    end_row: end.row,
+                    end_col: end.col,
+                    is_block: pane.view_state.selection.is_block,
+                }) {
+                    error!("Menu Copy: failed to send ExtractSelection to PTY: {e}");
+                } else {
+                    pane.pending_copy = true;
+                }
+            }
+            KeyAction::Paste => {
+                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+                    warn!("Menu Paste: active tab has no active pane");
+                    return;
+                };
+                let snap = pane.arc_swap.load();
+                match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                    Ok(text) if !text.is_empty() => {
+                        let text = text.replace("\r\n", "\n");
+                        let payload = if snap.bracketed_paste == RlBracket::Enabled {
+                            format!("\x1b[200~{text}\x1b[201~")
+                        } else {
+                            text
+                        };
+                        if let Err(e) = pane.input_tx.send(InputEvent::Key(payload.into_bytes())) {
+                            error!("Menu Paste: failed to send paste to PTY: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Menu Paste: clipboard read failed: {e}");
+                    }
+                }
+            }
+            KeyAction::SelectAll => {
+                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+                    warn!("Menu SelectAll: active tab has no active pane");
+                    return;
+                };
+                let snap = pane.arc_swap.load();
+                // `visible_window_start` is `pub(super)` in `gui::terminal::coords`
+                // (private module); inline the same formula here.  See
+                // `gui::terminal::coords::visible_window_start` for the canonical
+                // definition and rationale.
+                let window_start = snap
+                    .total_rows
+                    .saturating_sub(snap.term_height)
+                    .saturating_sub(snap.scroll_offset);
+                let last_row = window_start + snap.height.saturating_sub(1);
+                let last_col = crate::gui::view_state::line_boundaries(
+                    &snap.visible_chars,
+                    snap.height.saturating_sub(1),
+                )
+                .1;
+                pane.view_state.selection.anchor = Some(crate::gui::view_state::CellCoord {
+                    col: 0,
+                    row: window_start,
+                });
+                pane.view_state.selection.end = Some(crate::gui::view_state::CellCoord {
+                    col: last_col,
+                    row: last_row,
+                });
+                pane.view_state.selection.is_selecting = false;
+            }
+            // Everything else (OpenSearch, SaveLayout, etc.) needs full GUI
+            // state — route through the existing deferred-action pipeline.
+            other => all_deferred_actions.push(other),
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn dispatch_deferred_action(
         &mut self,

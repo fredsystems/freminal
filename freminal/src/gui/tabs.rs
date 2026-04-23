@@ -404,6 +404,7 @@ mod tests {
             pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,
+            pending_copy: false,
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
