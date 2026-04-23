@@ -888,6 +888,21 @@ impl SettingsModal {
             "On X11, requires a running compositor (e.g. picom).",
         );
 
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.checkbox(
+            &mut self.draft.ui.auto_detect_urls,
+            "Auto-detect URLs in terminal output",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Makes plain URLs (http, https, file, ftp, mailto) clickable even when \
+             programs do not emit OSC 8 hyperlinks.",
+        );
+
         self.show_ui_background_image(ui);
         self.show_ui_shader(ui);
     }

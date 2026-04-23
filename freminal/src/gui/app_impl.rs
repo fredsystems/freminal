@@ -275,6 +275,7 @@ impl freminal_windowing::App for FreminalGui {
                 &self.args,
                 self.config.scrollback.limit,
                 theme,
+                self.config.ui.auto_detect_urls,
                 &repaint_handle,
                 initial_size,
                 super::pty::PtyTabConfig {

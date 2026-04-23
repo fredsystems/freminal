@@ -309,6 +309,11 @@ pub struct UiConfig {
     /// Opacity of the background image (0.0–1.0). Applied on top of the
     /// image itself; `background_opacity` then layers over that. Default: `0.5`.
     pub background_image_opacity: f32,
+    /// Automatically detect plain URLs (http/https/file/ftp/mailto) in
+    /// terminal output and make them clickable, in addition to OSC 8
+    /// hyperlinks. OSC 8 links always take precedence when they overlap
+    /// with an auto-detected URL. Default: `true`.
+    pub auto_detect_urls: bool,
 }
 
 impl Default for UiConfig {
@@ -319,6 +324,7 @@ impl Default for UiConfig {
             background_image: None,
             background_image_mode: BackgroundImageMode::Cover,
             background_image_opacity: 0.5,
+            auto_detect_urls: true,
         }
     }
 }
@@ -2180,6 +2186,19 @@ trail_duration_ms = 250
     fn background_image_opacity_default_is_0_5() {
         let cfg = UiConfig::default();
         assert!((cfg.background_image_opacity - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn auto_detect_urls_default_is_true() {
+        let cfg = UiConfig::default();
+        assert!(cfg.auto_detect_urls);
+    }
+
+    #[test]
+    fn auto_detect_urls_deserialize_false() {
+        let toml = "auto_detect_urls = false";
+        let cfg: UiConfig = toml::from_str(toml).expect("parse");
+        assert!(!cfg.auto_detect_urls);
     }
 
     #[test]

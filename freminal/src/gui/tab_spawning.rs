@@ -67,6 +67,7 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
+            self.config.ui.auto_detect_urls,
             &win.repaint_handle,
             initial_size,
             pty::PtyTabConfig {
@@ -205,6 +206,7 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
+            self.config.ui.auto_detect_urls,
             &win.repaint_handle,
             initial_size,
             pty::PtyTabConfig {
@@ -346,6 +348,7 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
+            self.config.ui.auto_detect_urls,
             repaint_handle,
             initial_size,
             pty::PtyTabConfig {

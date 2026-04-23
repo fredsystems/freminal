@@ -115,6 +115,7 @@ pub fn spawn_pty_tab(
     args: &Args,
     scrollback_limit: usize,
     theme: &'static freminal_common::themes::ThemePalette,
+    auto_detect_urls: bool,
     repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
     initial_size: FreminalTerminalSize,
     tab_cfg: PtyTabConfig<'_>,
@@ -131,6 +132,14 @@ pub fn spawn_pty_tab(
 
     // Apply the configured theme so all snapshots carry the correct palette.
     terminal.internal.handler.set_theme(theme);
+
+    // Apply the auto URL detection flag so the buffer's flatten cache
+    // surfaces auto-detected URLs in `FormatTag.url` entries.
+    terminal
+        .internal
+        .handler
+        .buffer_mut()
+        .set_auto_detect_urls(auto_detect_urls);
 
     // Shared snapshot (ArcSwap).
     let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
@@ -283,6 +292,13 @@ fn spawn_pty_consumer_thread(
                         }
                         Ok(InputEvent::ThemeChange(theme)) => {
                             emulator.internal.handler.set_theme(theme);
+                        }
+                        Ok(InputEvent::AutoDetectUrls(enabled)) => {
+                            emulator
+                                .internal
+                                .handler
+                                .buffer_mut()
+                                .set_auto_detect_urls(enabled);
                         }
                         Ok(InputEvent::ThemeModeUpdate(theme_mode, os_is_dark)) => {
                             emulator.internal.modes.theme_mode = theme_mode;

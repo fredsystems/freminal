@@ -538,6 +538,15 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
   so that lazygit, cat-ed logs, git output, etc. become clickable. Config: `ui.auto_detect_urls`
   (bool, default `true`).
 
+  **Status (2026-04-23):** All 10 subtasks implemented. `cargo test --all` passes (8 new
+  integration tests in `auto_url_detection.rs`, 17 new unit tests in `url_detect.rs`).
+  `cargo clippy --all-targets --all-features -- -D warnings` clean.
+  `cargo bench` numbers on the new `bench_flatten_url_heavy` bench (cold buffer, 80×50
+  with one URL per row): ~108 µs per full-visible flatten (~2.1 µs per row including
+  regex + splicing). `bench_visible_flatten` (cached path, no URLs): ~3.4 µs — no
+  regression vs. pre-change baseline. Known limitation: single-row detection only
+  (soft-wrapped URLs are documented as a follow-up). Not yet committed per user request.
+
   **Design — piggyback on the existing per-row flatten cache (NOT a separate PTY-side scan).**
   An earlier design considered running detection in `TerminalHandler` after each PTY batch
   and stamping matches onto cells via `Cell::set_url`. That design was rejected because it

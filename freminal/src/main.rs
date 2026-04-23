@@ -117,6 +117,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         &args,
         cfg.scrollback.limit,
         theme,
+        cfg.ui.auto_detect_urls,
         &repaint_handle,
         FreminalTerminalSize {
             width: usize::from(DEFAULT_WIDTH),

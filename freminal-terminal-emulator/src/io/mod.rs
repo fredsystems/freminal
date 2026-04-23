@@ -67,6 +67,13 @@ pub enum InputEvent {
     /// Coordinates are buffer-absolute row indices and 0-indexed columns.
     /// The PTY thread extracts the text and sends it back through a dedicated
     /// clipboard response channel.
+    /// Enable or disable auto-detection of plain URLs in terminal output.
+    ///
+    /// Sent by the Settings Modal when the user toggles `auto_detect_urls`
+    /// in the UI tab.  The PTY thread forwards this to the buffer via
+    /// `Buffer::set_auto_detect_urls`, which invalidates the row flatten
+    /// cache so subsequent snapshots carry the updated detection state.
+    AutoDetectUrls(bool),
     ExtractSelection {
         start_row: usize,
         start_col: usize,

@@ -87,6 +87,33 @@ impl FreminalGui {
                     );
                     freminal_common::keybindings::BindingMap::default()
                 });
+
+                // Broadcast auto URL detection toggle to all panes when changed.
+                if new_cfg.ui.auto_detect_urls != self.config.ui.auto_detect_urls {
+                    let enabled = new_cfg.ui.auto_detect_urls;
+                    for win in self.windows.values() {
+                        for tab in win.tabs.iter() {
+                            match tab.pane_tree.iter_panes() {
+                                Ok(panes) => {
+                                    for pane in panes {
+                                        send_or_log!(
+                                            pane.input_tx,
+                                            InputEvent::AutoDetectUrls(enabled),
+                                            "Failed to send AutoDetectUrls to PTY thread"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "iter_panes() failed on tab during auto URL \
+                                         apply: {e}; skipping this tab"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 self.config = new_cfg;
 
                 // Apply background image to all panes in all windows.

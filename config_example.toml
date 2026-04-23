@@ -148,6 +148,14 @@ limit = 4000
 #
 # background_image_opacity = 0.5
 
+# Automatically detect plain URLs (http, https, file, ftp, mailto) in terminal
+# output and make them clickable, in addition to OSC 8 hyperlinks. When an
+# OSC 8 link covers the same cells as an auto-detected URL, the OSC 8 link
+# wins.
+# Default: true
+#
+# auto_detect_urls = true
+
 ## ##############################################################################
 # SHADER SETTINGS
 ## ##############################################################################
