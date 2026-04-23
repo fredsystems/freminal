@@ -456,7 +456,15 @@ Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_bu
   Window title sync uses `Tab::display_name()`. 4 new unit tests.
 - **71.2** — PTY spawn failure surface. When a shell fails to launch (bad path, missing
   binary, permission error), show an inline error row inside the tab (or a toast) with the
-  error message and a retry button. Currently silent.
+  error message and a retry button. Currently silent. **COMPLETE (2026-04-22).** Added a
+  reusable app-level toast system (`freminal/src/gui/toast.rs`) with `ToastKind`
+  (`Error`/`Warning`/`Info`), FIFO stack (MAX_TOASTS=5), kind-based auto-expire
+  (Error=10s / Warning=6s / Info=3s), 200ms hover keep-alive, and dismiss button.
+  `FreminalGui::toasts` uses `RefCell<ToastStack>` with a `push_error_toast(&self, …)`
+  helper to avoid cascading `&mut self` through spawn call chains. Wired all 4 PTY spawn
+  failure sites (new window in `app_impl.rs`, new tab / split pane / layout leaf in
+  `tab_spawning.rs`). Toasts render top-right via `egui::Area` after the central panel.
+  7 new unit tests.
 - **71.3** — Layout load failure surface. TOML parse errors and missing-file errors currently
   log and disappear. Show a modal dialog naming the layout file and the specific error.
 - **71.4** — Shader compile error surface. When a custom shader fails to compile, show a

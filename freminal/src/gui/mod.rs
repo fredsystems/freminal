@@ -45,6 +45,7 @@ mod run;
 mod session;
 mod settings_dispatch;
 mod tab_spawning;
+mod toast;
 pub(crate) mod window;
 
 use tracing::{error, warn};
@@ -191,6 +192,19 @@ struct FreminalGui {
     /// True only on the first frame after the save-layout prompt opens.
     /// Used to focus the text field exactly once instead of every frame.
     save_layout_prompt_just_opened: bool,
+
+    /// App-level stack of user-visible transient notifications (toasts).
+    ///
+    /// Shared across all windows: pushing a toast here makes it visible in
+    /// every open window, and dismissing it in one dismisses it everywhere.
+    /// Used to surface non-fatal errors such as PTY spawn failures, layout
+    /// load errors, and shader compile errors.
+    ///
+    /// Wrapped in `RefCell` so that `&self` methods (notably the various
+    /// PTY-spawn helpers) can push error notifications without forcing a
+    /// cascade of `&mut self` through otherwise-read-only call sites.  The
+    /// entire GUI runs on a single thread, so `RefCell` is sufficient.
+    toasts: std::cell::RefCell<toast::ToastStack>,
 }
 
 impl FreminalGui {
@@ -279,6 +293,7 @@ impl FreminalGui {
             pending_load_layout: None,
             pending_save_layout: None,
             save_layout_prompt_just_opened: false,
+            toasts: std::cell::RefCell::new(toast::ToastStack::default()),
         }
     }
 
@@ -289,6 +304,22 @@ impl FreminalGui {
             self.next_recording_window_id += 1;
             id
         })
+    }
+
+    /// Push an error toast onto the app-level toast stack.
+    ///
+    /// Takes `&self` because the stack lives behind a `RefCell`.  If the
+    /// borrow happens to be contended (which should not happen on a single
+    /// thread unless two sites on the call stack both attempt to push), the
+    /// push is silently dropped after logging — user-visible notification
+    /// is best-effort by design.
+    pub(super) fn push_error_toast(&self, title: impl Into<String>, detail: Option<String>) {
+        match self.toasts.try_borrow_mut() {
+            Ok(mut stack) => stack.error(title, detail),
+            Err(_) => {
+                tracing::warn!("toast stack was already borrowed; dropping error toast");
+            }
+        }
     }
 
     /// Compute the initial PTY terminal size from pixel dimensions and cell size.

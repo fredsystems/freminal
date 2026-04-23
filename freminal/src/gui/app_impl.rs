@@ -354,6 +354,10 @@ impl freminal_windowing::App for FreminalGui {
                 }
                 Err(e) => {
                     error!("Failed to spawn PTY for new window: {e}");
+                    self.push_error_toast(
+                        "Failed to open new window",
+                        Some(format!("The shell could not be started: {e}")),
+                    );
                 }
             }
         }
@@ -1524,6 +1528,13 @@ impl freminal_windowing::App for FreminalGui {
                 ctx.request_repaint_after(delay);
             }
         });
+
+        // Render the app-level toast stack as an overlay on top of all panels.
+        // Toasts are shared across every window, so they appear consistently
+        // regardless of which window the user is looking at.
+        if let Ok(mut stack) = self.toasts.try_borrow_mut() {
+            stack.show(ctx);
+        }
 
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {

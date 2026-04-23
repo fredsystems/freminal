@@ -114,6 +114,10 @@ impl FreminalGui {
             }
             Err(e) => {
                 error!("Failed to spawn new tab: {e}");
+                self.push_error_toast(
+                    "Failed to open new tab",
+                    Some(format!("The shell could not be started: {e}")),
+                );
             }
         }
     }
@@ -213,6 +217,10 @@ impl FreminalGui {
             Ok(ch) => ch,
             Err(e) => {
                 error!("Failed to spawn split pane: {e}");
+                self.push_error_toast(
+                    "Failed to split pane",
+                    Some(format!("The shell could not be started: {e}")),
+                );
                 return;
             }
         };
@@ -349,6 +357,10 @@ impl FreminalGui {
             Ok(ch) => ch,
             Err(e) => {
                 error!("layout: failed to spawn pane '{}': {e}", leaf.id);
+                self.push_error_toast(
+                    format!("Layout pane '{}' failed to start", leaf.id),
+                    Some(format!("The shell could not be started: {e}")),
+                );
                 return None;
             }
         };
