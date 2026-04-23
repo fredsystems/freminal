@@ -40,6 +40,7 @@ mod app_impl;
 mod hot_reload;
 mod layout_ops;
 mod menu;
+mod platform;
 mod rendering;
 mod run;
 mod session;

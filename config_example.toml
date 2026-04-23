@@ -202,7 +202,12 @@ limit = 4000
 ## ##############################################################################
 [bell]
 # How the terminal responds to a bell character (\x07).
-# Options: "visual" (flash the terminal), "none" (ignore).
+# Options:
+#   "visual" - flash the terminal area briefly
+#   "none"   - ignore the bell
+#   "audio"  - best-effort system beep (stderr BEL on Linux, NSBeep on
+#              macOS, MessageBeep on Windows)
+#   "both"   - both visual flash and system beep
 # Default: "visual"
 # mode = "visual"
 

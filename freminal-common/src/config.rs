@@ -415,6 +415,12 @@ pub enum BellMode {
     Visual,
     /// Do nothing.
     None,
+    /// Best-effort system beep via the native platform API (`\x07` to stderr
+    /// on Linux, `NSBeep` on macOS, `MessageBeep` on Windows).  See
+    /// `gui::platform::system_beep` for details.
+    Audio,
+    /// Both the visual flash and the system beep.
+    Both,
 }
 
 /// Configuration for the terminal bell.
@@ -1779,6 +1785,50 @@ mode = "none"
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert_eq!(deserialized.bell.mode, BellMode::None);
+    }
+
+    #[test]
+    fn bell_config_deserialize_audio() {
+        let toml_str = r#"
+[bell]
+mode = "audio"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let bell = partial.bell.expect("bell section should be present");
+        assert_eq!(bell.mode, BellMode::Audio);
+    }
+
+    #[test]
+    fn bell_config_deserialize_both() {
+        let toml_str = r#"
+[bell]
+mode = "both"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let bell = partial.bell.expect("bell section should be present");
+        assert_eq!(bell.mode, BellMode::Both);
+    }
+
+    #[test]
+    fn bell_config_roundtrip_audio() {
+        let mut cfg = Config::default();
+        cfg.bell.mode = BellMode::Audio;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert_eq!(deserialized.bell.mode, BellMode::Audio);
+    }
+
+    #[test]
+    fn bell_config_roundtrip_both() {
+        let mut cfg = Config::default();
+        cfg.bell.mode = BellMode::Both;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert_eq!(deserialized.bell.mode, BellMode::Both);
     }
 
     // ── Security config tests ────────────────────────────────────────

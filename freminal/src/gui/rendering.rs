@@ -484,21 +484,29 @@ pub(super) fn handle_window_manipulation(
                 send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};{payload}\x1b\\"));
             }
 
-            // Terminal bell: ignored entirely when bell mode is `None`.
-            // Otherwise mark this tab as having an unacknowledged bell and
-            // start the visual flash timer.  When the window is unfocused,
-            // also request OS-level taskbar attention.
+            // Terminal bell: dispatch to the visual and/or audio paths based
+            // on the user's [bell] mode.  `None` is a silent drop.  Audio is
+            // a best-effort system beep (see `gui::platform::system_beep`).
+            // In every non-None case, request OS taskbar attention when the
+            // window is unfocused so the user notices even off-screen.
             WindowManipulation::Bell => {
-                if bell_mode == BellMode::Visual {
+                let visual = matches!(bell_mode, BellMode::Visual | BellMode::Both);
+                let audio = matches!(bell_mode, BellMode::Audio | BellMode::Both);
+
+                if visual {
                     *bell_active = true;
                     *bell_since = Some(Instant::now());
+                }
 
-                    if !flags.window_focused {
-                        ui.ctx()
-                            .send_viewport_cmd(ViewportCommand::RequestUserAttention(
-                                egui::UserAttentionType::Informational,
-                            ));
-                    }
+                if audio {
+                    super::platform::system_beep();
+                }
+
+                if (visual || audio) && !flags.window_focused {
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ));
                 }
             }
         }

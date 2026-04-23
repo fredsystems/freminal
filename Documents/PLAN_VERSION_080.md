@@ -720,8 +720,9 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
 
 - **71.14** — Extend `BellMode` in `freminal-common/src/config.rs:406` with `Audio` and
   `Both` variants. Wire `Audio` to a simple system-bell sound (platform-appropriate — `\a`
-  on Linux, `NSBeep` on macOS, `MessageBeep` on Windows). Add a config option for a custom
-  sound file path. Update Settings Modal picker.
+  on Linux, `NSBeep` on macOS, `MessageBeep` on Windows). Update Settings Modal picker.
+  (Scope note: the originally-proposed custom sound-file path was dropped as out of scope;
+  matches WezTerm's `SystemBeep` behaviour plus a `Both` variant.)
 - **71.15** — In-app recording toggle. Add a `ToggleRecording` `KeyAction`, a menu item in
   the Edit menu (or a dedicated "Session" menu), and a visible `● REC` indicator in the
   tab/window chrome when recording is active. Recording currently only activates via

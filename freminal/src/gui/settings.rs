@@ -1060,6 +1060,8 @@ impl SettingsModal {
                     config::BellMode::Visual,
                     "Visual",
                 );
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Audio, "Audio");
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Both, "Both");
                 ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None");
             });
 
@@ -1621,6 +1623,8 @@ const fn bell_mode_label(mode: config::BellMode) -> &'static str {
     match mode {
         config::BellMode::Visual => "Visual",
         config::BellMode::None => "None",
+        config::BellMode::Audio => "Audio",
+        config::BellMode::Both => "Both",
     }
 }
 
