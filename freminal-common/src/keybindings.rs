@@ -732,6 +732,13 @@ pub enum KeyAction {
     ScrollLineUp,
     /// Scroll down by one line.
     ScrollLineDown,
+    /// Erase the scrollback buffer, leaving the visible display intact.
+    ///
+    /// Distinct from the CSI 3 J (`ClearScrollbackandDisplay`) escape
+    /// sequence in that it preserves the currently-visible rows and only
+    /// drops the off-screen history. Useful for cleaning up a session's
+    /// accumulated history without clearing the current prompt context.
+    ClearScrollback,
 
     // -- Pane management ---------------------------------------------------
     /// Split the focused pane vertically (left | right, vertical divider).
@@ -809,6 +816,7 @@ impl KeyAction {
             Self::ScrollToBottom => "scroll_to_bottom",
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
+            Self::ClearScrollback => "clear_scrollback",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
             Self::ClosePane => "close_pane",
@@ -870,6 +878,7 @@ impl KeyAction {
             Self::ScrollToBottom => "Scroll to Bottom",
             Self::ScrollLineUp => "Scroll Line Up",
             Self::ScrollLineDown => "Scroll Line Down",
+            Self::ClearScrollback => "Clear Scrollback",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
             Self::ClosePane => "Close Pane",
@@ -928,6 +937,7 @@ impl KeyAction {
         Self::ScrollToBottom,
         Self::ScrollLineUp,
         Self::ScrollLineDown,
+        Self::ClearScrollback,
         Self::SplitVertical,
         Self::SplitHorizontal,
         Self::ClosePane,
@@ -998,6 +1008,7 @@ impl FromStr for KeyAction {
             "scroll_to_bottom" => Ok(Self::ScrollToBottom),
             "scroll_line_up" => Ok(Self::ScrollLineUp),
             "scroll_line_down" => Ok(Self::ScrollLineDown),
+            "clear_scrollback" => Ok(Self::ClearScrollback),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
             "close_pane" => Ok(Self::ClosePane),
@@ -1267,6 +1278,15 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::ArrowDown, BindingModifiers::SHIFT),
         KeyAction::ScrollLineDown,
+    );
+
+    // Clear the scrollback buffer (leaves the visible display intact).
+    // Ctrl+Shift+Backspace avoids conflicts with readline Ctrl+K (kill-EOL)
+    // and the Ctrl+Shift+{H,J,K,L} pane-focus grid. Users can rebind via
+    // the [keybindings] config section.
+    map.bind(
+        KeyCombo::new(BindingKey::Backspace, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ClearScrollback,
     );
 }
 
@@ -1668,7 +1688,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            50,
+            51,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2030,11 +2050,11 @@ mod tests {
         //        + ScrollLineUp(1) + ScrollLineDown(1)
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
-        //        + ZoomPane(1) + NewWindow(1) = 41
+        //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1) = 42
         assert_eq!(
             map.len(),
-            41,
-            "default binding map should have exactly 41 bindings"
+            42,
+            "default binding map should have exactly 42 bindings"
         );
     }
 

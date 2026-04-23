@@ -84,6 +84,13 @@ pub enum InputEvent {
         /// `end_col` (the same column range on each row).
         is_block: bool,
     },
+    /// Erase the scrollback buffer, leaving the visible display intact.
+    ///
+    /// Triggered by the `ClearScrollback` `KeyAction`. The PTY thread calls
+    /// `buffer_mut().erase_scrollback()` and resets `gui_scroll_offset` to 0
+    /// (the GUI must also reset its local `ViewState::scroll_offset` so the
+    /// next frame renders from the live view).
+    ClearScrollback,
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

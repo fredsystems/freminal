@@ -330,6 +330,15 @@ fn spawn_pty_consumer_thread(
                             let total_rows = emulator.internal.handler.buffer().rows().len();
                             let _ = search_buffer_tx.send((total_rows, combined));
                         }
+                        Ok(InputEvent::ClearScrollback) => {
+                            // Drop every scrollback row; the visible display
+                            // is unaffected. Also reset the PTY-side
+                            // gui_scroll_offset so snapshots immediately render
+                            // from the live view (the GUI resets its local
+                            // ViewState::scroll_offset in parallel).
+                            emulator.internal.handler.buffer_mut().erase_scrollback();
+                            emulator.set_gui_scroll_offset(0);
+                        }
                         Err(_) => {
                             info!("Input channel closed; consumer thread exiting");
                             return false;

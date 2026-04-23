@@ -369,7 +369,11 @@ impl super::FreminalGui {
             KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
                 trace!("Cannot close tab: {e}");
             }
-            KeyAction::CloseTab => {}
+            // `CloseTab` with no error is a no-op here; `ClearScrollback` is
+            // fully handled synchronously in `dispatch_binding_action` (resets
+            // view scroll offset and sends `InputEvent::ClearScrollback` to
+            // the PTY thread) so it needs no deferred-action work.
+            KeyAction::CloseTab | KeyAction::ClearScrollback => {}
             KeyAction::NextTab => {
                 win.tabs.next_tab();
                 if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
