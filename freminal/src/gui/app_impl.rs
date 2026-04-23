@@ -1076,8 +1076,14 @@ impl freminal_windowing::App for FreminalGui {
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
-            let ui_overlay_open =
-                any_menu_open || self.pending_save_layout.is_some() || self.about_window_open;
+            // Tab rename is treated as an overlay: while the inline rename
+            // TextEdit is active, the terminal widget must release keyboard
+            // focus and stop consuming pointer events, or keystrokes would
+            // be forwarded to the PTY instead of the edit buffer.
+            let ui_overlay_open = any_menu_open
+                || self.pending_save_layout.is_some()
+                || self.about_window_open
+                || win.renaming_tab.is_some();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
