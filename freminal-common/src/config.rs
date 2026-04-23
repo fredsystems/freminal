@@ -537,6 +537,52 @@ const fn default_restore_last_session() -> bool {
 /// | macOS     | `~/Library/Application Support/Freminal/layouts/` |
 /// | Windows   | `%APPDATA%\Freminal\layouts\`               |
 ///
+/// Returns the platform-appropriate directory where FREC v2 recordings
+/// are stored by default.
+///
+/// - macOS: `~/Library/Application Support/Freminal/recordings`
+/// - Windows: `%APPDATA%\Freminal\recordings`
+/// - Linux/BSD: `$XDG_CONFIG_HOME/freminal/recordings` (typically
+///   `~/.config/freminal/recordings`)
+///
+/// The directory is created if it does not yet exist. Returns `None` if
+/// the base directories cannot be determined.
+#[must_use]
+pub fn recording_library_dir() -> Option<PathBuf> {
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.data_dir().join("Freminal").join("recordings");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_dir().join("Freminal").join("recordings");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // Linux / BSD
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        let p = base.config_dir().join("freminal").join("recordings");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Returns `None` if the base directories cannot be determined.
 #[must_use]
 pub fn layout_library_dir() -> Option<PathBuf> {

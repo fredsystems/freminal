@@ -39,102 +39,139 @@ impl super::FreminalGui {
         let mut menu_action = TabBarAction::None;
         let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
-            let freminal_resp = ui.menu_button("Freminal", |ui| {
-                if ui
-                    .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
-                    .clicked()
-                {
-                    if self.settings_window_id.is_some() {
-                        // Settings window already exists — focus it.
-                        self.pending_focus_settings = true;
-                    } else if !self.settings_modal.is_open && !self.pending_settings_window {
-                        let families = win.terminal_widget.monospace_families();
-                        self.settings_modal
-                            .open(&self.config, families, win.os_dark_mode);
-                        self.settings_modal
-                            .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
-                        self.settings_owner = Some(window_id);
-                        self.pending_settings_window = true;
-                    }
-                    ui.close();
-                }
+            self.show_menu_bar_contents(ui, win, window_id, &mut menu_action, &mut any_menu_open);
+        });
+        (menu_action, any_menu_open)
+    }
 
-                ui.separator();
-
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            if freminal_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let edit_resp = ui.menu_button("Edit", |ui| {
-                self.show_edit_menu(ui, win);
-            });
-            if edit_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let tab_resp = ui.menu_button("Tab", |ui| {
-                menu_action = self.show_tab_menu(ui, win);
-            });
-            if tab_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let pane_resp = ui.menu_button("Pane", |ui| {
-                self.show_pane_menu(ui, win);
-            });
-            if pane_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let window_resp = ui.menu_button("Window", |ui| {
-                if ui
-                    .add(self.menu_button_for("New Window", KeyAction::NewWindow))
-                    .clicked()
-                {
-                    win.pending_new_window = true;
-                    ui.close();
-                }
-            });
-            if window_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let layout_resp = ui.menu_button("Layouts", |ui| {
-                self.show_layouts_menu(ui, win, window_id);
-            });
-            if layout_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let help_resp = ui.menu_button("Help", |ui| {
-                self.show_help_menu(ui);
-            });
-            if help_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            // Password-prompt lock indicator: shown in the menu bar (which is
-            // always visible) so it works regardless of tab bar visibility.
-            if self.config.security.password_indicator
-                && win
-                    .tabs
-                    .active_tab()
-                    .active_pane()
-                    .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed))
+    /// Populate the menu bar with all top-level menus plus right-aligned
+    /// status indicators. Extracted from `show_menu_bar` to keep the entry
+    /// point under clippy's `too_many_lines` threshold.
+    fn show_menu_bar_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        win: &mut PerWindowState,
+        window_id: super::WindowId,
+        menu_action: &mut TabBarAction,
+        any_menu_open: &mut bool,
+    ) {
+        let freminal_resp = ui.menu_button("Freminal", |ui| {
+            if ui
+                .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
+                .clicked()
             {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.settings_window_id.is_some() {
+                    // Settings window already exists — focus it.
+                    self.pending_focus_settings = true;
+                } else if !self.settings_modal.is_open && !self.pending_settings_window {
+                    let families = win.terminal_widget.monospace_families();
+                    self.settings_modal
+                        .open(&self.config, families, win.os_dark_mode);
+                    self.settings_modal
+                        .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                    self.settings_owner = Some(window_id);
+                    self.pending_settings_window = true;
+                }
+                ui.close();
+            }
+
+            ui.separator();
+
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+        if freminal_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let edit_resp = ui.menu_button("Edit", |ui| {
+            self.show_edit_menu(ui, win);
+        });
+        if edit_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let tab_resp = ui.menu_button("Tab", |ui| {
+            *menu_action = self.show_tab_menu(ui, win);
+        });
+        if tab_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let pane_resp = ui.menu_button("Pane", |ui| {
+            self.show_pane_menu(ui, win);
+        });
+        if pane_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let window_resp = ui.menu_button("Window", |ui| {
+            if ui
+                .add(self.menu_button_for("New Window", KeyAction::NewWindow))
+                .clicked()
+            {
+                win.pending_new_window = true;
+                ui.close();
+            }
+        });
+        if window_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let layout_resp = ui.menu_button("Layouts", |ui| {
+            self.show_layouts_menu(ui, win, window_id);
+        });
+        if layout_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let session_resp = ui.menu_button("Session", |ui| {
+            self.show_session_menu(ui);
+        });
+        if session_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let help_resp = ui.menu_button("Help", |ui| {
+            self.show_help_menu(ui);
+        });
+        if help_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        // Right-aligned status indicators (recording state, password lock).
+        // The password-prompt lock indicator is shown in the menu bar
+        // (which is always visible) so it works regardless of tab bar
+        // visibility. The REC indicator shares the same right-aligned
+        // layout.
+        let show_lock = self.config.security.password_indicator
+            && win
+                .tabs
+                .active_tab()
+                .active_pane()
+                .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed));
+        let show_rec = self.is_recording();
+
+        if show_lock || show_rec {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if show_lock {
                     ui.label(
                         egui::RichText::new("\u{1F512}")
                             .color(egui::Color32::from_rgb(255, 200, 50)),
                     );
-                });
-            }
-        });
-        (menu_action, any_menu_open)
+                }
+                if show_rec {
+                    // Red filled bullet + "REC" label; kept short so
+                    // it does not crowd the menu bar.
+                    ui.label(
+                        egui::RichText::new("\u{25CF} REC")
+                            .color(egui::Color32::from_rgb(220, 60, 60))
+                            .strong(),
+                    );
+                }
+            });
+        }
     }
 
     /// Render the "Layouts" dropdown menu contents.
@@ -248,6 +285,41 @@ impl super::FreminalGui {
         if ui.button("Keybindings...").clicked() {
             self.pending_open_keybindings = true;
             ui.close();
+        }
+    }
+
+    /// Render the "Session" dropdown menu contents.
+    ///
+    /// Contains recording controls.  The toggle label reflects current
+    /// state: "Start Recording" when idle, "Stop Recording" when active.
+    /// When a recording is in progress, the destination path is shown as
+    /// a dimmed, non-interactive line below the toggle so the user can
+    /// see where the file is being written.
+    fn show_session_menu(&mut self, ui: &mut egui::Ui) {
+        let recording = self.is_recording();
+        let label = if recording {
+            "Stop Recording"
+        } else {
+            "Start Recording"
+        };
+        if ui
+            .add(self.menu_button_for(label, KeyAction::ToggleRecording))
+            .clicked()
+        {
+            self.toggle_recording();
+            ui.close();
+        }
+
+        if recording && let Some(path) = self.recording_path.as_ref() {
+            ui.separator();
+            ui.add_enabled(
+                false,
+                egui::Label::new(
+                    egui::RichText::new(format!("Recording to: {}", path.display()))
+                        .small()
+                        .weak(),
+                ),
+            );
         }
     }
 

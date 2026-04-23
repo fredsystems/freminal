@@ -314,6 +314,9 @@ limit = 4000
 #     resize_pane_right = "Ctrl+Alt+L"       (grow pane rightward)
 #     zoom_pane        = "Ctrl+Shift+Z"      (toggle zoom on focused pane)
 #
+#   Session:
+#     toggle_recording = "Ctrl+Shift+R"      (start/stop FREC v2 session recording)
+#
 # Example: remap copy/paste to Ctrl+C / Ctrl+V (warning: this will prevent
 # Ctrl+C from sending SIGINT to the running program):
 #

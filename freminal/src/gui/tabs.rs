@@ -37,6 +37,16 @@ impl TabId {
     pub const fn offset(n: u64) -> Self {
         Self(n)
     }
+
+    /// Return the raw numeric value of this `TabId`.
+    ///
+    /// Used by the FREC v2 recording layer to emit tab identifiers as
+    /// `u32` values. Callers must convert with `try_from` / `unwrap_or`
+    /// to handle the (practically impossible) overflow case.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 /// A single terminal tab.

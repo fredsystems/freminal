@@ -478,6 +478,13 @@ impl super::FreminalGui {
             KeyAction::NewWindow => {
                 win.pending_new_window = true;
             }
+            KeyAction::ToggleRecording => {
+                // Runtime recording toggle: starts a new FREC v2 file with
+                // the current topology snapshotted into the header, or
+                // stops the active recording and joins the writer thread
+                // so the file is fully flushed before we return.
+                self.toggle_recording();
+            }
             KeyAction::RenameTab => {
                 // Begin an inline rename on the active tab.  The tab bar
                 // renders a TextEdit in place of the label while

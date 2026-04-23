@@ -41,6 +41,7 @@ mod hot_reload;
 mod layout_ops;
 mod menu;
 mod platform;
+mod recording;
 mod rendering;
 mod run;
 mod session;
@@ -168,6 +169,21 @@ struct FreminalGui {
     /// into this swap; every pane observes the change on its next event
     /// without any rewiring.
     recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
+
+    /// Join handle for the currently-active recording writer thread.
+    ///
+    /// Held on the GUI side so that `toggle_recording` can deterministically
+    /// wait for the writer to finalize the file when recording is stopped.
+    /// `Some` while a recording is in progress (mirrors `recording_swap`
+    /// holding `Some`); `None` when no recording is active.
+    recording_join: Option<freminal_terminal_emulator::recording::RecordingJoinHandle>,
+
+    /// Path of the currently-active recording file, if any.
+    ///
+    /// Used by the menu bar and UI to display the recording destination
+    /// and by `toggle_recording` for logging. Mirrors `recording_swap`:
+    /// `Some` when a recording is active, `None` otherwise.
+    recording_path: Option<std::path::PathBuf>,
 
     /// Maps OS `WindowId` to recording-local u32 identifiers.
     recording_window_ids: HashMap<WindowId, u32>,
@@ -302,6 +318,8 @@ impl FreminalGui {
                 .map(freminal_common::window_state::WindowState::load_or_default)
                 .unwrap_or_default(),
             recording_swap,
+            recording_join: None,
+            recording_path: None,
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
             pending_layout_windows: std::collections::VecDeque::new(),

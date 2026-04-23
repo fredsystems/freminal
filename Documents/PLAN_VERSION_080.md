@@ -723,11 +723,17 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   on Linux, `NSBeep` on macOS, `MessageBeep` on Windows). Update Settings Modal picker.
   (Scope note: the originally-proposed custom sound-file path was dropped as out of scope;
   matches WezTerm's `SystemBeep` behaviour plus a `Both` variant.)
-- **71.15** — In-app recording toggle. Add a `ToggleRecording` `KeyAction`, a menu item in
-  the Edit menu (or a dedicated "Session" menu), and a visible `● REC` indicator in the
-  tab/window chrome when recording is active. Recording currently only activates via
-  `--recording-path`. Requires Task 59's FREC v2 runtime start/stop support (verify it
-  exists; if not, add a small runtime API on the recorder).
+- **71.15** — In-app recording toggle. Add a `ToggleRecording` `KeyAction`
+  (default `Ctrl+Shift+R`), a "Session" menu with Start/Stop Recording entry that
+  shows the destination path while active, and a right-aligned `● REC` indicator in
+  the menu bar while recording is active. Files are written to a per-platform
+  recording library directory (`$XDG_CONFIG_HOME/freminal/recordings` on Linux/BSD,
+  `Application Support/Freminal/recordings` on macOS, `%APPDATA%\Freminal\recordings`
+  on Windows) with a timestamped `freminal-<unix-ts>.frec` filename. The current
+  topology (all windows, tabs, and panes with CWD and size) is captured into the
+  FREC header so the recording stands alone. Implemented in two commits: 71.15a
+  added the hot-swappable `RecordingSwap` plumbing; 71.15b added the toggle,
+  keybinding, menu, and indicator.
 - **71.16** — Cross-platform CWD readback. `freminal/src/gui/mod.rs:950-961` uses
   `/proc/<pid>/cwd` (Linux-only), which means Layout restore silently degrades on macOS and
   Windows. Implement:
