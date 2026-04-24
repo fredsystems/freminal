@@ -286,6 +286,11 @@ impl super::FreminalGui {
             self.pending_open_keybindings = true;
             ui.close();
         }
+        ui.separator();
+        if ui.button("Show Welcome...").clicked() {
+            self.welcome.open();
+            ui.close();
+        }
     }
 
     /// Render the "Session" dropdown menu contents.

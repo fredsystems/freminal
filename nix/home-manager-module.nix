@@ -115,6 +115,10 @@ let
         inherit (s.startup) layout restore_last_session;
       };
 
+      onboardingSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.onboarding) first_run_complete;
+      };
+
       result = {
         version = 1;
         managed_by = "home-manager";
@@ -131,6 +135,7 @@ let
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
       // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
       // lib.optionalAttrs (startupSection != { }) { startup = startupSection; }
+      // lib.optionalAttrs (onboardingSection != { }) { onboarding = onboardingSection; }
       // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
     in
     result;
@@ -525,6 +530,20 @@ in
           description = ''
             When true, Freminal saves the current layout on exit and restores
             it on the next launch (unless --layout is given on the CLI).
+            Null uses the default (false).
+          '';
+        };
+      };
+
+      onboarding = {
+        first_run_complete = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When false (or unset), Freminal shows the first-run welcome
+            overlay on launch. It is automatically set to true once the user
+            skips or completes the overlay. Users can re-trigger the overlay
+            at any time via Help -> Show Welcome.
             Null uses the default (false).
           '';
         };

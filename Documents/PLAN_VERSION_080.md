@@ -796,9 +796,20 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   split across `show_startup_layout_group`, `populate_startup_layout_combo`, and
   `show_layout_library_group` to keep each under the pedantic line-count threshold.
   Verification green.
-- **71.20** — First-run onboarding. Show a 3-panel overlay on first launch explaining the
-  menu bar, the settings shortcut, and the layouts directory. Store a `first_run_complete`
-  flag in the config. Skippable and permanently dismissible.
+- **71.20** ✅ — First-run onboarding overlay. Added `OnboardingConfig { first_run_complete: bool }`
+  section to `Config` (with `ConfigPartial` merging, Nix home-manager module, and
+  `config_example.toml` documentation). Implemented `gui::welcome::WelcomeOverlay`, a
+  three-panel modal dialog introducing the menu bar (with the Ctrl+Shift+M shortcut),
+  the Settings dialog (with Ctrl+, / Cmd+,), and the layouts directory
+  (`~/.config/freminal/layouts/`). The overlay opens automatically on first launch
+  (when `first_run_complete == false`) and can be re-triggered at any time via
+  **Help → Show Welcome...**. Skip, Finish, and the title-bar close-X all set the
+  flag to `true` and persist `config.toml`; a save failure surfaces as an error
+  toast but does not re-open the overlay. The state machine (`Panel` enum,
+  `advance`/`go_back`/`dismiss`, `panel_content` lookup) is pure logic covered by
+  10 unit tests. The overlay is included in the `ui_overlay_open` input-suppression
+  check so terminal keystrokes do not leak into the PTY while it is visible.
+  Verification green.
 
 ### 71 Verification
 

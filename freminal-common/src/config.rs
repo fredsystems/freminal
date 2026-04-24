@@ -52,6 +52,10 @@ pub struct Config {
     /// Startup and layout configuration.
     #[serde(default)]
     pub startup: StartupConfig,
+
+    /// First-run onboarding state.
+    #[serde(default)]
+    pub onboarding: OnboardingConfig,
 }
 
 impl Default for Config {
@@ -72,6 +76,7 @@ impl Default for Config {
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
+            onboarding: OnboardingConfig::default(),
         }
     }
 }
@@ -529,6 +534,24 @@ const fn default_restore_last_session() -> bool {
     true
 }
 
+/// First-run onboarding state.
+///
+/// Freminal shows a short welcome overlay on the first launch after a fresh
+/// install, explaining the menu bar, the settings shortcut, and the layouts
+/// directory.  Once the user dismisses the overlay (via Skip, close, or
+/// completing all panels), [`Self::first_run_complete`] is set to `true` and
+/// persisted to `config.toml`, so the overlay does not reappear.
+///
+/// Users can re-open the overlay at any time via Help → Show Welcome.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OnboardingConfig {
+    /// `true` once the user has seen and dismissed the first-run welcome
+    /// overlay.  Defaults to `false` so a fresh config triggers the overlay
+    /// on first launch.
+    pub first_run_complete: bool,
+}
+
 /// Returns the platform-canonical layout library directory.
 ///
 /// | Platform  | Path                                        |
@@ -681,6 +704,7 @@ struct ConfigPartial {
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
     pub startup: Option<StartupConfig>,
+    pub onboarding: Option<OnboardingConfig>,
 }
 
 impl Config {
@@ -732,6 +756,9 @@ impl Config {
         }
         if let Some(startup) = partial.startup {
             self.startup = startup;
+        }
+        if let Some(onboarding) = partial.onboarding {
+            self.onboarding = onboarding;
         }
     }
 

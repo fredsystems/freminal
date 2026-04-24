@@ -48,6 +48,7 @@ mod session;
 mod settings_dispatch;
 mod tab_spawning;
 mod toast;
+mod welcome;
 pub(crate) mod window;
 
 use tracing::{error, warn};
@@ -231,6 +232,11 @@ struct FreminalGui {
     /// small floating `egui::Window` each frame while this is set.
     about_window_open: bool,
 
+    /// First-run welcome overlay state.  Opened automatically at startup
+    /// when `config.onboarding.first_run_complete` is `false`, or on
+    /// demand from the Help menu.  See `gui/welcome.rs`.
+    welcome: welcome::WelcomeOverlay,
+
     /// When `true`, the Help menu "Keybindings..." item was clicked and the
     /// Settings Modal should be opened (or refocused) with the Keybindings
     /// tab selected.  Drained in `update()` next frame.
@@ -305,6 +311,14 @@ impl FreminalGui {
             freminal_common::keybindings::BindingMap::default()
         });
 
+        // Open the welcome overlay automatically on first launch (before the
+        // user has seen — or dismissed — it).  The flag is persisted to
+        // `config.toml` on dismissal so subsequent launches skip it.
+        let mut welcome_overlay = welcome::WelcomeOverlay::new();
+        if !config.onboarding.first_run_complete {
+            welcome_overlay.open();
+        }
+
         Self {
             windows: HashMap::new(),
             binding_map,
@@ -340,6 +354,7 @@ impl FreminalGui {
             pending_save_layout: None,
             save_layout_prompt_just_opened: false,
             about_window_open: false,
+            welcome: welcome_overlay,
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
         }

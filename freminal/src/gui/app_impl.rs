@@ -1079,6 +1079,11 @@ impl freminal_windowing::App for FreminalGui {
             // via its own Close button or title-bar X.
             self.show_about_window(ctx);
 
+            // First-run welcome overlay (subtask 71.20).  Opened on first
+            // launch or from Help -> Show Welcome; persists
+            // `first_run_complete = true` on dismissal.
+            self.show_welcome_overlay(ctx);
+
             // Drain pending menu actions (Edit menu clicks: Copy, Paste,
             // Select All, Find...).  These were queued during
             // `show_menu_bar` above, which does not have mutable access to
@@ -1099,6 +1104,7 @@ impl freminal_windowing::App for FreminalGui {
             let ui_overlay_open = any_menu_open
                 || self.pending_save_layout.is_some()
                 || self.about_window_open
+                || self.welcome.is_open()
                 || win.renaming_tab.is_some();
 
             // ── Pane border drag-to-resize ───────────────────────────
