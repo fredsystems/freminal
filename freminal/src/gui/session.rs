@@ -107,13 +107,31 @@ impl FreminalGui {
     /// Apply the last-session layout if `restore_last_session` is enabled and
     /// the file exists.  Called once after the first window is ready.
     ///
-    /// Only called when no `--layout` CLI flag was provided.
+    /// Restore is skipped entirely when:
+    /// - `startup.restore_last_session` is `false` in `config.toml`;
+    /// - a `--layout` CLI flag (or `startup.layout`) supplied a layout for
+    ///   this launch (handled by the caller: this function is only invoked
+    ///   when no layout is active);
+    /// - a positional command was given on the CLI (e.g. `freminal yazi`),
+    ///   which indicates the user wants a one-shot program, not their
+    ///   persistent workspace;
+    /// - the `last_session.toml` file does not exist.
     pub(super) fn maybe_restore_last_session(
         &mut self,
         window_id: freminal_windowing::WindowId,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
         if !self.config.startup.restore_last_session {
+            return;
+        }
+        // A positional command (`freminal yazi`, `freminal -- nvim file.txt`)
+        // signals a one-shot program invocation; restoring the prior
+        // workspace would spawn the saved shells alongside the requested
+        // command and defeat the user's intent.
+        if !self.args.command.is_empty() {
+            tracing::debug!(
+                "maybe_restore_last_session: skipping restore because a positional command was supplied"
+            );
             return;
         }
         let Some(path) = Self::last_session_path() else {
