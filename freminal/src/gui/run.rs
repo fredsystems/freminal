@@ -11,9 +11,8 @@ use freminal_common::args::Args;
 use freminal_common::config::Config;
 use freminal_windowing::{RepaintProxy, WindowId};
 use renderer::WindowPostRenderer;
-use tabs::Tab;
 
-use super::{FreminalGui, renderer, tabs};
+use super::{FreminalGui, renderer};
 
 /// Launch the Freminal GUI application.
 ///
@@ -22,7 +21,6 @@ use super::{FreminalGui, renderer, tabs};
 /// Returns an error if the window icon cannot be loaded from the embedded PNG
 /// bytes, or if the windowing event loop fails to start.
 pub fn run(
-    initial_tab: Tab,
     config: Config,
     args: Args,
     config_path: Option<std::path::PathBuf>,
@@ -67,7 +65,6 @@ pub fn run(
     };
 
     let mut app = FreminalGui::new(
-        initial_tab,
         config,
         args,
         repaint_handle,

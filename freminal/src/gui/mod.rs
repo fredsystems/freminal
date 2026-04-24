@@ -11,13 +11,10 @@ use egui;
 use freminal_common::args::Args;
 use freminal_common::config::Config;
 use freminal_common::pty_write::FreminalTerminalSize;
-use freminal_common::send_or_log;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{RepaintProxy, WindowId};
 use renderer::WindowPostRenderer;
 use settings::SettingsModal;
-use tabs::Tab;
 use window::PerWindowState;
 
 pub mod atlas;
@@ -51,7 +48,7 @@ mod toast;
 mod welcome;
 pub(crate) mod window;
 
-use tracing::{error, warn};
+use tracing::error;
 
 /// Action requested by the tab bar UI.
 ///
@@ -98,8 +95,12 @@ struct PaneBorderDrag {
 
 /// Initial per-window state consumed by `on_window_created()` for the first
 /// window.  Subsequent windows spawn their own PTY tabs.
+///
+/// The first window's PTY is spawned lazily inside `on_window_created` (not
+/// before GUI startup) so that PTY-spawn failures can surface as a toast in
+/// the newly-created window, and so that no throwaway PTY is created when a
+/// startup layout or session restore will immediately replace the tabs.
 struct InitialWindowState {
-    tab: Tab,
     window_post: Arc<Mutex<WindowPostRenderer>>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
 }
@@ -259,7 +260,6 @@ struct FreminalGui {
 impl FreminalGui {
     #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
     fn new(
-        initial_tab: Tab,
         config: Config,
         args: Args,
         repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
@@ -267,32 +267,10 @@ impl FreminalGui {
         window_post: Arc<Mutex<WindowPostRenderer>>,
         recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
     ) -> Self {
-        // Inform the initial tab about the configured theme mode and current OS
-        // dark/light preference so DECRPM ?2031 responses are correct from the start.
-        // OS dark mode is not yet known (no egui context). Assume light mode initially.
-        let os_dark_mode = false;
-        if let Some(pane) = initial_tab.active_pane() {
-            send_or_log!(
-                pane.input_tx,
-                InputEvent::ThemeModeUpdate(config.theme.mode, os_dark_mode),
-                "Failed to send initial ThemeModeUpdate to tab"
-            );
-        } else {
-            warn!("initial tab has no active pane when sending ThemeModeUpdate");
-        }
-
-        // Apply initial background image from config (if set).
-        let initial_bg_path = config.ui.background_image.clone();
-        if initial_bg_path.is_some()
-            && let Ok(panes) = initial_tab.pane_tree.iter_panes()
-        {
-            for pane in panes {
-                if let Ok(mut rs) = pane.render_state.lock() {
-                    rs.set_pending_bg_image(initial_bg_path.clone());
-                }
-            }
-        }
-        // Push pending shader to the shared WindowPostRenderer.
+        // Push pending shader to the shared WindowPostRenderer.  The first
+        // window's tab is spawned lazily in `on_window_created`, so any
+        // per-tab initial state (ThemeModeUpdate, background image) is
+        // applied there rather than here.
         let initial_shader_src: Option<String> = config.shader.path.as_ref().and_then(|p| {
             std::fs::read_to_string(p)
                 .map_err(|e| {
@@ -337,7 +315,6 @@ impl FreminalGui {
             settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),
             initial_state: Some(InitialWindowState {
-                tab: initial_tab,
                 window_post,
                 repaint_handle,
             }),

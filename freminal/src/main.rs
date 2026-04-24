@@ -58,20 +58,19 @@ use tracing_subscriber::{
 
 pub mod gui;
 use anyhow::Result;
-use freminal_common::pty_write::FreminalTerminalSize;
-use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-use freminal_common::{args::Args, config, config::load_config, themes};
+use freminal_common::{args::Args, config, config::load_config};
 use freminal_terminal_emulator::recording::{
     RecordingMetadata, RecordingSwap, TopologySnapshot, empty_recording_swap, start_recording,
 };
-use gui::pty::{PtyTabConfig, spawn_pty_tab};
 
 use clap::Parser;
 
 /// Run the PTY-backed terminal path.
 ///
-/// Spawns a PTY-backed terminal tab via [`spawn_pty_tab`] and starts the
-/// GUI event loop.
+/// Starts the GUI event loop.  The initial terminal tab's PTY is spawned
+/// lazily in `on_window_created` so that spawn failures can surface as a
+/// user-visible toast and so that a startup layout or session restore can
+/// replace the tabs without leaving an orphaned PTY behind.
 fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
     // Shared recording swap. Populated below if --recording-path was given;
     // the GUI can also mutate it at runtime via the ToggleRecording action.
@@ -99,12 +98,6 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         }
     }
 
-    // Select the initial theme.  The OS dark/light preference is not yet
-    // available (no egui context), so `active_slug(false)` assumes light mode
-    // for `ThemeMode::Auto`.  The GUI constructor will detect the real OS
-    // preference and send a corrective `ThemeChange` if needed.
-    let theme = themes::by_slug(cfg.theme.active_slug(false)).unwrap_or(&themes::CATPPUCCIN_MOCHA);
-
     // Shared egui context handle so the PTY consumer thread can request
     // repaints after publishing new snapshots.
     let repaint_handle: Arc<
@@ -114,54 +107,11 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
         )>,
     > = Arc::new(OnceLock::new());
 
-    let channels = spawn_pty_tab(
-        &args,
-        cfg.scrollback.limit,
-        theme,
-        cfg.ui.auto_detect_urls,
-        &repaint_handle,
-        FreminalTerminalSize {
-            width: usize::from(DEFAULT_WIDTH),
-            height: usize::from(DEFAULT_HEIGHT),
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-        PtyTabConfig {
-            cwd: None,
-            shell_override: None,
-            extra_env: None,
-            recording_swap: recording_swap.clone(),
-            recording_pane_id: 0,
-        },
-    )?;
-
     let config_path = args.config.clone();
 
     let window_post = Arc::new(Mutex::new(gui::renderer::WindowPostRenderer::new()));
 
-    let initial_pane = gui::panes::Pane {
-        id: gui::panes::PaneId::first(),
-        arc_swap: channels.arc_swap,
-        input_tx: channels.input_tx,
-        pty_write_tx: channels.pty_write_tx,
-        window_cmd_rx: channels.window_cmd_rx,
-        clipboard_rx: channels.clipboard_rx,
-        search_buffer_rx: channels.search_buffer_rx,
-        pty_dead_rx: channels.pty_dead_rx,
-        title: "Terminal".to_owned(),
-        bell_active: false,
-        pending_copy: false,
-        title_stack: Vec::new(),
-        view_state: gui::view_state::ViewState::new(),
-        echo_off: channels.echo_off,
-        child_pid: channels.child_pid,
-        render_state: gui::terminal::new_render_state(Arc::clone(&window_post)),
-        render_cache: gui::terminal::PaneRenderCache::new(),
-    };
-    let initial_tab = gui::tabs::Tab::new(gui::tabs::TabId::first(), initial_pane);
-
     gui::run(
-        initial_tab,
         cfg,
         args,
         config_path,
