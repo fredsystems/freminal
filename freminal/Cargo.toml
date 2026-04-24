@@ -58,6 +58,14 @@ rustc-hash.workspace = true
 unicode-width.workspace = true
 freminal-windowing = { path = "../freminal-windowing" }
 
+# Platform-specific: CWD readback for layout save / recording snapshots.
+# See freminal/src/gui/platform.rs::read_cwd and plan subtask 71.16.
+# `sysinfo` wraps proc_pidinfo (macOS) and NtQueryInformationProcess (Windows)
+# behind a safe, cross-platform `Process::cwd()` API.  Linux uses the
+# built-in `/proc/<pid>/cwd` readlink path and does not need sysinfo.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+sysinfo.workspace = true
+
 # dev dependencies
 [dev-dependencies]
 criterion.workspace = true

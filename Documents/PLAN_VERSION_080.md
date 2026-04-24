@@ -734,13 +734,26 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   FREC header so the recording stands alone. Implemented in two commits: 71.15a
   added the hot-swappable `RecordingSwap` plumbing; 71.15b added the toggle,
   keybinding, menu, and indicator.
-- **71.16** — Cross-platform CWD readback. `freminal/src/gui/mod.rs:950-961` uses
-  `/proc/<pid>/cwd` (Linux-only), which means Layout restore silently degrades on macOS and
-  Windows. Implement:
-  - macOS: `libproc::proc_pidinfo` with `PROC_PIDVNODEPATHINFO`.
-  - Windows: query the console's current directory via `NtQueryInformationProcess` or
-    `GetFinalPathNameByHandle` on the process handle.
-  - Abstract behind a `platform::read_cwd(pid)` function with per-OS implementations.
+- **71.16** — ✅ Cross-platform CWD readback. `freminal/src/gui/layout_ops.rs`
+  previously used `/proc/<pid>/cwd` directly, returning `None` on macOS and
+  Windows (silently degrading Layout save and FREC topology snapshots).
+  Implemented:
+  - New [`crate::gui::platform::read_cwd(pid: u32) -> Option<String>`] in
+    `freminal/src/gui/platform.rs`.
+  - **Linux** — `std::fs::read_link("/proc/<pid>/cwd")` (unchanged path, no
+    new dep).
+  - **macOS / Windows** — `sysinfo` crate, added as a target-gated workspace
+    dependency, using `Process::cwd()` (wraps `proc_pidinfo` with
+    `PROC_PIDVNODEPATHINFO` on macOS and `NtQueryInformationProcess` +
+    PEB `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory` on Windows).
+  - `read_cwd_for_pane_with_extra` now delegates to `platform::read_cwd`,
+    keeping the PID-lookup logic in the GUI layer and the platform logic
+    behind a safe single-function boundary.
+  - Stale doc comments updated across `freminal-terminal-emulator/src/io/pty.rs`,
+    `freminal-terminal-emulator/src/interface.rs`, `freminal/src/gui/pty.rs`,
+    and `freminal/src/gui/panes/mod.rs`.
+  - Cross-platform verification is still required (see 71 Verification) —
+    the macOS and Windows code paths compile but need an actual run.
 - **71.17** — Config hot-reload. Currently only shaders hot-reload. Add a "Reload Config"
   menu item that re-reads `config.toml` and applies theme / font / keybinding / opacity
   changes live without restart. Use a file-watcher-optional design (opt-in auto-reload).

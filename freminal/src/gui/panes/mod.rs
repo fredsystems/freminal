@@ -190,7 +190,8 @@ pub struct Pane {
 
     /// OS process ID of the PTY child shell for this pane.
     ///
-    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
 
@@ -1053,8 +1054,9 @@ impl PaneTree {
     /// writing to a layout TOML file.
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
-    /// working directory of that pane as a string (e.g. read from
-    /// `/proc/<pid>/cwd`).  Returning `None` omits the `directory` field.
+    /// working directory of that pane as a string (typically via
+    /// [`crate::gui::platform::read_cwd`]).  Returning `None` omits the
+    /// `directory` field.
     #[must_use]
     pub fn to_layout_panes<F>(
         &self,
@@ -1076,7 +1078,8 @@ impl PaneTree {
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
     /// working directory of that pane as a string (typically via
-    /// `/proc/<pid>/cwd` on Linux).  `None` omits the `cwd` field on the leaf.
+    /// [`crate::gui::platform::read_cwd`]).  `None` omits the `cwd` field on
+    /// the leaf.
     ///
     /// `shell_fn` is called for each leaf pane id and should return the
     /// shell command used to launch the pane, if known.  Most callers will

@@ -75,7 +75,8 @@ pub struct TabChannels {
 
     /// OS process ID of the PTY child shell.
     ///
-    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
 }

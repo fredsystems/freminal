@@ -259,8 +259,11 @@ impl FreminalGui {
 
     /// Read the current working directory of the shell in the given pane.
     ///
-    /// On Linux this resolves `/proc/<pid>/cwd`.  Returns `None` on non-Linux
-    /// platforms or when the child PID is unknown.
+    /// Delegates to [`crate::gui::platform::read_cwd`], which supports Linux
+    /// (`/proc/<pid>/cwd`), macOS (`proc_pidinfo(PROC_PIDVNODEPATHINFO)` via
+    /// `sysinfo`), and Windows (`NtQueryInformationProcess` via `sysinfo`).
+    /// Returns `None` when the child PID is unknown, the process has exited,
+    /// the platform is unsupported, or the path is not valid UTF-8.
     pub(super) fn read_cwd_for_pane_with_extra(
         &self,
         pane_id: panes::PaneId,
@@ -290,18 +293,7 @@ impl FreminalGui {
                 })
             })?;
 
-        #[cfg(target_os = "linux")]
-        {
-            let link = format!("/proc/{child_pid}/cwd");
-            std::fs::read_link(&link)
-                .ok()
-                .and_then(|p| p.into_os_string().into_string().ok())
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = child_pid;
-            None
-        }
+        crate::gui::platform::read_cwd(child_pid)
     }
 
     /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]
