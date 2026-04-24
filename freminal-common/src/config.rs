@@ -994,6 +994,20 @@ pub fn save_config(config: &Config, path: Option<&Path>) -> Result<(), ConfigErr
     })
 }
 
+/// Serialize `config` to TOML for diff / dirty-check purposes.
+///
+/// Used by callers that need a canonical string representation of a
+/// `Config` for equality comparison (e.g. the Settings Modal's
+/// unsaved-changes guard).  Uses the compact `toml::to_string` form rather
+/// than `to_string_pretty` because only byte-equality matters.  Returns an
+/// empty string on serialization failure; callers treat an empty baseline
+/// as "always dirty", which conservatively triggers the confirm prompt
+/// rather than silently dropping edits.
+#[must_use]
+pub fn serialize_config_for_diff(config: &Config) -> String {
+    toml::to_string(config).unwrap_or_default()
+}
+
 /// Check whether the effective config file is writable.
 ///
 /// If `explicit_path` is `Some`, that path is tested. Otherwise the

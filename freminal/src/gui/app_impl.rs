@@ -403,14 +403,26 @@ impl freminal_windowing::App for FreminalGui {
     fn on_close_requested(&mut self, window_id: WindowId) -> bool {
         // Settings window closed (via OS close button).
         if self.settings_window_id == Some(window_id) {
+            // Consult the unsaved-changes guard.  When dirty, the modal
+            // surfaces a confirm prompt on its next frame; veto the OS close
+            // so the window stays open long enough for the user to decide.
+            if !self.settings_modal.request_close() {
+                return false;
+            }
             self.settings_modal.is_open = false;
             self.settings_window_id = None;
             self.settings_owner = None;
             self.persist_window_state();
             return true;
         }
-        // If this window owns the settings modal, close it.
+        // If this window owns the settings modal (embedded floating), try
+        // the same guard.  If close is vetoed, still allow the owning
+        // terminal window to close — but keep the modal's dirty state so a
+        // confirm prompt appears on the next frame of a sibling window if
+        // any exists.  In practice this path closes the modal regardless
+        // because the modal has no window of its own to live in.
         if self.settings_owner == Some(window_id) {
+            let _ = self.settings_modal.request_close();
             self.settings_modal.is_open = false;
             self.settings_owner = None;
         }

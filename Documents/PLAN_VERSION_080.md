@@ -772,8 +772,20 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
 
 #### 71.P3 — Polish
 
-- **71.18** — Unsaved-changes guard on Settings close. If Settings has pending unsaved
-  edits and the user dismisses the modal, prompt to Save / Discard / Cancel.
+- **71.18** — ✅ Unsaved-changes guard on Settings close. Added `is_dirty()`
+  and `request_close()` to `SettingsModal`: the former compares the draft
+  against a TOML-serialized baseline captured on `open()` / after
+  successful `try_apply()` / on `sync_from_config()`; the latter returns
+  `true` for immediate close (clean draft or read-only mode) and `false`
+  while deferring to a `PendingClose::Asking` state that renders a
+  Save / Discard / Cancel prompt on top of the settings UI. The Cancel
+  button, embedded window X, and OS titlebar close of the standalone
+  settings window all route through the guard, so every close path is
+  protected. Read-only mode bypasses the guard because Apply is disabled
+  and no unsaved edits can exist from the user's perspective. Added
+  `freminal_common::config::serialize_config_for_diff` so the GUI crate
+  does not need a direct `toml` dependency. Three unit tests cover the
+  clean/dirty/read-only branches. Verification green.
 - **71.19** — Startup tab layout setting in Settings Modal becomes a dropdown of layouts
   discovered in `~/.config/freminal/layouts/`, not a free-text field.
 - **71.20** — First-run onboarding. Show a 3-panel overlay on first launch explaining the

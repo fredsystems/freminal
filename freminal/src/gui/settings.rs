@@ -101,6 +101,20 @@ enum KeyCapture {
     Combo(KeyCombo),
 }
 
+/// Pending close request state for the unsaved-changes guard.
+///
+/// When the user tries to close the settings modal while `is_dirty()` is true,
+/// the close is deferred and a confirmation prompt is shown asking whether to
+/// save, discard, or cancel.  The variant records how the close was requested
+/// so the guard can answer correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingClose {
+    /// No close pending.
+    None,
+    /// Close was requested — show the confirm prompt until the user chooses.
+    Asking,
+}
+
 /// State machine for the press-to-record keybinding editor.
 #[derive(Debug, Clone)]
 enum KeyRecordingState {
@@ -191,6 +205,19 @@ pub struct SettingsModal {
     /// a layout.  Consumed by `show_standalone` / `show` which return it as
     /// `SettingsAction::DeleteLayout`.
     pending_delete_layout: Option<std::path::PathBuf>,
+
+    /// Serialized TOML of the draft at the moment the modal was opened or the
+    /// last successful Apply.  Used by `is_dirty()` to detect unsaved edits
+    /// without requiring `PartialEq` on every sub-config struct.
+    ///
+    /// Serialization is cheap enough to perform on open/apply and only
+    /// required once per close attempt.
+    baseline_toml: String,
+
+    /// Pending close request from Cancel, embedded X, or OS close.  When
+    /// `Asking`, the settings UI renders a confirmation prompt instead of
+    /// actually closing.  Cleared by Save / Discard / keep-open decisions.
+    pending_close: PendingClose,
 }
 
 impl SettingsModal {
@@ -214,6 +241,8 @@ impl SettingsModal {
             key_recording: KeyRecordingState::Idle,
             discovered_layouts: Vec::new(),
             pending_delete_layout: None,
+            baseline_toml: String::new(),
+            pending_close: PendingClose::None,
         }
     }
 
@@ -227,6 +256,84 @@ impl SettingsModal {
         self.draft = live_config.clone();
         self.original_theme_slug = live_config.theme.active_slug(self.os_dark_mode).to_string();
         self.original_opacity = live_config.ui.background_opacity;
+        self.baseline_toml = Self::serialize_for_baseline(live_config);
+        self.pending_close = PendingClose::None;
+    }
+
+    /// Serialize a config to the canonical TOML form used as the dirty-check
+    /// baseline.  Delegates to `freminal_common::config::serialize_config_for_diff`
+    /// so all callers share the same canonical form.  Returns an empty string
+    /// on serialization failure, which causes `is_dirty()` to conservatively
+    /// report dirty and trigger the confirmation prompt — preferable to
+    /// silently dropping edits.
+    fn serialize_for_baseline(config: &Config) -> String {
+        config::serialize_config_for_diff(config)
+    }
+
+    /// Returns `true` if the draft differs from the baseline captured at the
+    /// last open/apply.  Used by the unsaved-changes guard on close.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        Self::serialize_for_baseline(&self.draft) != self.baseline_toml
+    }
+
+    /// Request to close the modal, consulting the dirty state.
+    ///
+    /// Returns `true` if the modal may close immediately (no pending edits),
+    /// `false` if the caller should keep the window open so the user can
+    /// resolve the confirm prompt.  Callers include the embedded Cancel
+    /// button, the egui window X, and the app's `on_close_requested` hook
+    /// for the standalone settings OS window.
+    ///
+    /// When read-only, close is always allowed (Apply is disabled, so there
+    /// can be no unsaved edits from the user's perspective).
+    pub fn request_close(&mut self) -> bool {
+        if !self.is_open {
+            return true;
+        }
+        if self.read_only_reason.is_some() || !self.is_dirty() {
+            self.is_open = false;
+            self.pending_close = PendingClose::None;
+            return true;
+        }
+        self.pending_close = PendingClose::Asking;
+        false
+    }
+
+    /// Render the unsaved-changes confirmation prompt, if one is pending.
+    ///
+    /// Returns `Some(action)` when the user chose Save (triggers apply) or
+    /// Discard (closes the modal).  Returns `None` for Cancel / still
+    /// deciding / no prompt pending.
+    fn show_confirm_close_prompt(&mut self, ctx: &egui::Context) -> SettingsAction {
+        if self.pending_close != PendingClose::Asking {
+            return SettingsAction::None;
+        }
+        let mut action = SettingsAction::None;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("You have unsaved changes in Settings.");
+                ui.add_space(6.0);
+                ui.label("Save before closing?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        action = self.try_apply();
+                        self.pending_close = PendingClose::None;
+                    }
+                    if ui.button("Discard").clicked() {
+                        self.is_open = false;
+                        self.pending_close = PendingClose::None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending_close = PendingClose::None;
+                    }
+                });
+            });
+        action
     }
 
     /// Open the modal, cloning the live config into the draft for editing.
@@ -269,6 +376,8 @@ impl SettingsModal {
         };
 
         self.key_recording = KeyRecordingState::Idle;
+        self.baseline_toml = Self::serialize_for_baseline(live_config);
+        self.pending_close = PendingClose::None;
         self.is_open = true;
     }
 
@@ -344,7 +453,9 @@ impl SettingsModal {
                         action = self.try_apply();
                     }
                     if ui.button("Cancel").clicked() {
-                        self.is_open = false;
+                        // Route through the dirty-state guard so unsaved
+                        // edits surface a confirmation prompt.
+                        self.request_close();
                     }
                 });
             });
@@ -384,6 +495,14 @@ impl SettingsModal {
                     self.draw_active_tab(ui);
                 });
         });
+
+        // Render the unsaved-changes prompt on top of the settings UI.
+        // If it returns Applied (Save button), adopt it so the revert/preview
+        // fallthrough below doesn't misread the closed state as a cancel.
+        let prompt_action = self.show_confirm_close_prompt(ctx);
+        if prompt_action == SettingsAction::Applied {
+            action = prompt_action;
+        }
 
         // Revert / preview logic (same as show())
         if let Some(path) = self.pending_delete_layout.take() {
@@ -508,15 +627,29 @@ impl SettingsModal {
                             action = self.try_apply();
                         }
                         if ui.button("Cancel").clicked() {
-                            self.is_open = false;
+                            // Route through the dirty-state guard so unsaved
+                            // edits surface a confirmation prompt.
+                            self.request_close();
                         }
                     });
                 });
             });
 
-        // Handle the X button on the window title bar.
-        if !open {
+        // Handle the X button on the window title bar.  When the user clicks
+        // X, egui sets `open = false`; route that through the guard too so
+        // the X respects unsaved changes.  If the guard vetoes the close,
+        // re-open the embedded window by leaving `is_open = true`.
+        if !open && self.is_open && !self.request_close() {
+            // Guard deferred the close — keep the window open so the
+            // confirm prompt can render on top.
+        } else if !open {
             self.is_open = false;
+        }
+
+        // Render the unsaved-changes prompt on top of the settings UI.
+        let prompt_action = self.show_confirm_close_prompt(ctx);
+        if prompt_action == SettingsAction::Applied {
+            action = prompt_action;
         }
 
         // If the modal just closed (Cancel or X) without Apply, revert any
@@ -1492,6 +1625,10 @@ impl SettingsModal {
             Ok(()) => {
                 self.is_open = false;
                 self.status_message = None;
+                // Refresh baseline so any subsequent reopen sees the saved
+                // state as clean.
+                self.baseline_toml = Self::serialize_for_baseline(&self.draft);
+                self.pending_close = PendingClose::None;
                 SettingsAction::Applied
             }
             Err(e) => {
@@ -1892,5 +2029,60 @@ mod tests {
             modal.original_theme_slug,
             reloaded.theme.active_slug(modal.os_dark_mode).to_string()
         );
+    }
+
+    #[test]
+    fn is_dirty_false_after_open_and_true_after_edit() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+
+        assert!(
+            !modal.is_dirty(),
+            "freshly-opened modal should match its baseline"
+        );
+
+        // Mutate the draft — any change should flip the dirty flag.
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(modal.is_dirty(), "edited draft should be dirty");
+    }
+
+    #[test]
+    fn request_close_closes_when_clean_and_defers_when_dirty() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+        // Force writable state: on some CI environments the default config
+        // path is not writable, which would otherwise short-circuit the
+        // guard into read-only mode.
+        modal.read_only_reason = None;
+
+        // Clean modal closes immediately.
+        assert!(modal.request_close());
+        assert!(!modal.is_open);
+
+        // Dirty modal defers and sets the Asking state.
+        modal.open(&live, Vec::new(), false);
+        modal.read_only_reason = None;
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(!modal.request_close(), "dirty close should be vetoed");
+        assert!(modal.is_open, "modal must stay open while Asking");
+        assert_eq!(modal.pending_close, PendingClose::Asking);
+    }
+
+    #[test]
+    fn request_close_bypasses_guard_in_read_only_mode() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+        // Force read-only and dirty.  Even when the draft differs, read-only
+        // mode cannot apply anyway, so closing without a prompt is correct.
+        modal.read_only_reason = Some("test: read-only".to_string());
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(modal.request_close());
+        assert!(!modal.is_open);
     }
 }
