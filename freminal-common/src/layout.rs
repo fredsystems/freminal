@@ -873,13 +873,32 @@ pub struct LayoutSummary {
 /// broken layout should not prevent the rest of the library from loading.
 ///
 /// Returns an empty `Vec` if `dir` does not exist or cannot be read.
+///
+/// Use [`discover_layouts_with_errors`] when the caller needs to report
+/// broken layouts (for example as a startup toast); this function drops
+/// parse errors after logging them.
 #[must_use]
 pub fn discover_layouts(dir: &Path) -> Vec<LayoutSummary> {
+    discover_layouts_with_errors(dir).0
+}
+
+/// Like [`discover_layouts`], but also returns parse errors for any
+/// `.toml` files that could not be loaded.
+///
+/// The second tuple element is a list of `(path, error_message)` pairs
+/// for broken layout files.  This lets the UI surface a startup notice
+/// (e.g. a toast) so users notice corrupt layouts instead of them just
+/// "disappearing" from menus.
+///
+/// Returns `(empty, empty)` if `dir` does not exist or cannot be read.
+#[must_use]
+pub fn discover_layouts_with_errors(dir: &Path) -> (Vec<LayoutSummary>, Vec<(PathBuf, String)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
+        return (vec![], vec![]);
     };
 
     let mut summaries = Vec::new();
+    let mut errors = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
@@ -895,11 +914,12 @@ pub fn discover_layouts(dir: &Path) -> Vec<LayoutSummary> {
             }
             Err(e) => {
                 warn!("skipping layout {:?}: {e}", path);
+                errors.push((path, e.to_string()));
             }
         }
     }
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
-    summaries
+    (summaries, errors)
 }
 
 // ---------------------------------------------------------------------------

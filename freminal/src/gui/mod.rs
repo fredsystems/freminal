@@ -319,7 +319,17 @@ impl FreminalGui {
             welcome_overlay.open();
         }
 
-        Self {
+        // Discover layouts once at startup. Any parse errors are
+        // surfaced as a single aggregated toast after `self` is built so
+        // the user notices broken layout files (otherwise they silently
+        // disappear from the Layouts menu).
+        let (discovered_layouts, layout_errors) = freminal_common::config::layout_library_dir()
+            .map_or_else(
+                || (Vec::new(), Vec::new()),
+                |dir| freminal_common::layout::discover_layouts_with_errors(&dir),
+            );
+
+        let app = Self {
             windows: HashMap::new(),
             binding_map,
             config,
@@ -347,9 +357,7 @@ impl FreminalGui {
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
             pending_layout_windows: std::collections::VecDeque::new(),
-            discovered_layouts: freminal_common::config::layout_library_dir()
-                .map(|dir| freminal_common::layout::discover_layouts(&dir))
-                .unwrap_or_default(),
+            discovered_layouts,
             pending_load_layout: None,
             pending_save_layout: None,
             save_layout_prompt_just_opened: false,
@@ -357,7 +365,24 @@ impl FreminalGui {
             welcome: welcome_overlay,
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
+        };
+
+        if !layout_errors.is_empty() {
+            let count = layout_errors.len();
+            let detail = layout_errors
+                .iter()
+                .map(|(path, err)| format!("{}: {err}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let title = if count == 1 {
+                "1 layout failed to load".to_owned()
+            } else {
+                format!("{count} layouts failed to load")
+            };
+            app.push_error_toast(title, Some(detail));
         }
+
+        app
     }
 
     /// Get or assign a recording-local u32 ID for the given OS `WindowId`.
