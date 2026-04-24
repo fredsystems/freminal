@@ -786,8 +786,16 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   `freminal_common::config::serialize_config_for_diff` so the GUI crate
   does not need a direct `toml` dependency. Three unit tests cover the
   clean/dirty/read-only branches. Verification green.
-- **71.19** — Startup tab layout setting in Settings Modal becomes a dropdown of layouts
-  discovered in `~/.config/freminal/layouts/`, not a free-text field.
+- **71.19** ✅ — Startup tab layout setting in Settings Modal becomes a dropdown of layouts
+  discovered in `~/.config/freminal/layouts/`, not a free-text field. An explicit
+  `(none)` sentinel entry clears the startup layout; a configured-but-missing layout
+  is preserved and marked `(missing)` so the user can re-select it once the file
+  reappears without having to retype the name. Layout descriptions are shown inline
+  alongside each entry. The selection logic was factored into a pure helper
+  `startup_layout_is_missing` with unit-test coverage, and the ComboBox rendering was
+  split across `show_startup_layout_group`, `populate_startup_layout_combo`, and
+  `show_layout_library_group` to keep each under the pedantic line-count threshold.
+  Verification green.
 - **71.20** — First-run onboarding. Show a 3-panel overlay on first launch explaining the
   menu bar, the settings shortcut, and the layouts directory. Store a `first_run_complete`
   flag in the config. Skippable and permanently dismissible.

@@ -1667,34 +1667,135 @@ impl SettingsModal {
         ui.add_space(8.0);
 
         // ── Default startup layout ───────────────────────────────────────────
+        self.show_startup_layout_group(ui);
+
+        ui.add_space(8.0);
+
+        // ── Layout library ───────────────────────────────────────────────────
+        self.show_layout_library_group(ui);
+    }
+
+    /// Render the "Default Layout" group within the Startup tab.
+    ///
+    /// Split out from [`Self::show_startup_tab`] to keep that function under
+    /// the pedantic line-count threshold and to make the layout-selection
+    /// logic easier to locate when iterating on UX.
+    fn show_startup_layout_group(&mut self, ui: &mut Ui) {
+        // Sentinel label shown when no startup layout is configured.
+        // Blank strings inside a ComboBox render as zero-width items,
+        // which is easy to miss; an explicit label is unambiguous.
+        const NONE_LABEL: &str = "(none)";
+
         ui.group(|ui| {
             ui.label(egui::RichText::new("Default Layout").strong());
             ui.add_space(4.0);
+
+            // Selected layout name, or the NONE_LABEL sentinel.
+            let current = self
+                .draft
+                .startup
+                .layout
+                .clone()
+                .unwrap_or_else(|| NONE_LABEL.to_string());
+
+            // Track whether the configured layout is missing from the
+            // discovered list (e.g. layouts dir was removed, or the user
+            // typed a name manually in a previous session).  In that case
+            // we still show the current value so the user can see what's
+            // configured, but mark it with a warning suffix.
+            let configured_missing = startup_layout_is_missing(
+                self.draft.startup.layout.as_deref(),
+                &self.discovered_layouts,
+            );
+
             ui.horizontal(|ui| {
-                ui.label("Layout name:");
-                let mut layout_text = self.draft.startup.layout.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut layout_text).changed() {
-                    self.draft.startup.layout = if layout_text.is_empty() {
-                        None
-                    } else {
-                        Some(layout_text)
-                    };
-                }
+                ui.label("Layout:");
+                let selected_text = if configured_missing {
+                    format!("{current}  (missing)")
+                } else {
+                    current.clone()
+                };
+                ComboBox::from_id_salt("startup_layout_combo")
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        self.populate_startup_layout_combo(
+                            ui,
+                            NONE_LABEL,
+                            &current,
+                            configured_missing,
+                        );
+                    });
             });
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(
-                    "Name of a layout file in ~/.config/freminal/layouts/ to load on startup. \
-                     Leave empty for the default single-pane session.",
+                    "Layout to load on startup, from ~/.config/freminal/layouts/. \
+                     Select \"(none)\" for the default single-pane session.",
                 )
                 .weak()
                 .small(),
             );
         });
+    }
 
-        ui.add_space(8.0);
+    /// Populate the entries of the startup-layout `ComboBox`.
+    ///
+    /// Extracted from [`Self::show_startup_layout_group`] purely to keep
+    /// line counts below the pedantic threshold.
+    fn populate_startup_layout_combo(
+        &mut self,
+        ui: &mut Ui,
+        none_label: &str,
+        current: &str,
+        configured_missing: bool,
+    ) {
+        // "(none)" entry clears the startup layout.
+        if ui
+            .selectable_label(self.draft.startup.layout.is_none(), none_label)
+            .clicked()
+        {
+            self.draft.startup.layout = None;
+        }
+        // Keep an entry for the configured-but-missing layout so
+        // re-selecting it is trivial once the file reappears, and so
+        // the user isn't forced to delete the setting just to reach
+        // the combo.
+        if configured_missing {
+            let is_selected = self
+                .draft
+                .startup
+                .layout
+                .as_deref()
+                .is_some_and(|n| n == current);
+            let label = format!("{current}  (missing)");
+            if ui.selectable_label(is_selected, label).clicked() {
+                self.draft.startup.layout = Some(current.to_string());
+            }
+        }
+        for layout in &self.discovered_layouts {
+            let is_selected = self
+                .draft
+                .startup
+                .layout
+                .as_deref()
+                .is_some_and(|n| n == layout.name);
+            let label = layout.description.as_deref().map_or_else(
+                || layout.name.clone(),
+                |d| format!("{}  —  {d}", layout.name),
+            );
+            if ui.selectable_label(is_selected, label).clicked() {
+                self.draft.startup.layout = Some(layout.name.clone());
+            }
+        }
+    }
 
-        // ── Layout library ───────────────────────────────────────────────────
+    /// Render the "Layout Library" group within the Startup tab.
+    ///
+    /// Shows discovered layouts with per-entry delete buttons, or a hint
+    /// when the layouts directory is empty.  Extracted from
+    /// [`Self::show_startup_tab`] for the same reason as
+    /// [`Self::show_startup_layout_group`].
+    fn show_layout_library_group(&mut self, ui: &mut Ui) {
         ui.group(|ui| {
             ui.label(egui::RichText::new("Layout Library").strong());
             ui.add_space(4.0);
@@ -1775,6 +1876,16 @@ const fn bell_mode_label(mode: config::BellMode) -> &'static str {
         config::BellMode::Audio => "Audio",
         config::BellMode::Both => "Both",
     }
+}
+
+/// Returns `true` when a startup layout is configured but not present in
+/// the discovered layout list.  Extracted for unit testing since the
+/// `ComboBox` UI itself is hard to exercise in isolation.
+fn startup_layout_is_missing(
+    configured: Option<&str>,
+    discovered: &[freminal_common::layout::LayoutSummary],
+) -> bool {
+    configured.is_some_and(|name| !discovered.iter().any(|l| l.name.as_str() == name))
 }
 
 /// Paint a small colored rectangle as an inline swatch.
@@ -2084,5 +2195,34 @@ mod tests {
             (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
         assert!(modal.request_close());
         assert!(!modal.is_open);
+    }
+
+    #[test]
+    fn startup_layout_is_missing_detects_absent_and_present() {
+        use freminal_common::layout::LayoutSummary;
+        use std::path::PathBuf;
+
+        let discovered = vec![
+            LayoutSummary {
+                name: "dev".to_string(),
+                description: None,
+                path: PathBuf::from("/tmp/dev.toml"),
+            },
+            LayoutSummary {
+                name: "ops".to_string(),
+                description: Some("Ops layout".to_string()),
+                path: PathBuf::from("/tmp/ops.toml"),
+            },
+        ];
+
+        // None => not missing (nothing is configured).
+        assert!(!startup_layout_is_missing(None, &discovered));
+        // Configured and present => not missing.
+        assert!(!startup_layout_is_missing(Some("dev"), &discovered));
+        assert!(!startup_layout_is_missing(Some("ops"), &discovered));
+        // Configured but absent => missing.
+        assert!(startup_layout_is_missing(Some("ghost"), &discovered));
+        // Configured but discovered list is empty => missing.
+        assert!(startup_layout_is_missing(Some("dev"), &[]));
     }
 }
