@@ -779,6 +779,16 @@ pub enum KeyAction {
     LoadLayout,
     /// Save the current session topology as a layout file.
     SaveLayout,
+
+    // -- Configuration ---------------------------------------------------
+    /// Reload `config.toml` from disk and apply every change live.
+    ///
+    /// If no config path is associated with the running session (i.e.
+    /// freminal was launched without `--config` and no default config
+    /// exists), a user-visible toast explains the no-op.  Parse errors
+    /// are logged and surfaced as error toasts; the currently-live
+    /// configuration is preserved on failure.
+    ReloadConfig,
 }
 
 impl KeyAction {
@@ -840,6 +850,7 @@ impl KeyAction {
             Self::ZoomPane => "zoom_pane",
             Self::LoadLayout => "load_layout",
             Self::SaveLayout => "save_layout",
+            Self::ReloadConfig => "reload_config",
         }
     }
 
@@ -903,6 +914,7 @@ impl KeyAction {
             Self::ZoomPane => "Zoom Pane",
             Self::LoadLayout => "Load Layout",
             Self::SaveLayout => "Save Layout",
+            Self::ReloadConfig => "Reload Config",
         }
     }
 
@@ -963,6 +975,7 @@ impl KeyAction {
         Self::ZoomPane,
         Self::LoadLayout,
         Self::SaveLayout,
+        Self::ReloadConfig,
     ];
 }
 
@@ -1035,6 +1048,7 @@ impl FromStr for KeyAction {
             "zoom_pane" => Ok(Self::ZoomPane),
             "load_layout" => Ok(Self::LoadLayout),
             "save_layout" => Ok(Self::SaveLayout),
+            "reload_config" => Ok(Self::ReloadConfig),
             other => Err(KeyBindingError::UnknownAction(other.to_string())),
         }
     }
@@ -1709,7 +1723,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            52,
+            53,
             "KeyAction::ALL should contain all variants"
         );
     }

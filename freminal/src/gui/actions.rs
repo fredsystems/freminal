@@ -348,6 +348,7 @@ impl super::FreminalGui {
         action: freminal_common::keybindings::KeyAction,
         win: &mut PerWindowState,
         window_id: super::WindowId,
+        handle: &freminal_windowing::WindowHandle<'_>,
     ) {
         use freminal_common::keybindings::KeyAction;
 
@@ -641,6 +642,13 @@ impl super::FreminalGui {
                         );
                     }
                 }
+            }
+            KeyAction::ReloadConfig => {
+                // Re-read config.toml from disk and broadcast every derived
+                // state change to every pane in every window.  Toast-reports
+                // success or failure; leaves the live config unchanged on
+                // parse error.  See `reload_config_from_disk` for details.
+                self.reload_config_from_disk(handle);
             }
         }
     }

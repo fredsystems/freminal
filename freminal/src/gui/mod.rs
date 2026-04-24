@@ -185,6 +185,15 @@ struct FreminalGui {
     /// `Some` when a recording is active, `None` otherwise.
     recording_path: Option<std::path::PathBuf>,
 
+    /// Path to the `config.toml` file currently backing `self.config`, if
+    /// one was resolved at startup. `None` when running with no config
+    /// file (e.g. fresh first launch before any config exists).
+    ///
+    /// Used by "Reload Config" (subtask 71.17) to re-read the file from
+    /// disk and diff it against `self.config`. Keep in sync with
+    /// `settings_modal.config_path` — both should point to the same file.
+    config_path: Option<std::path::PathBuf>,
+
     /// Maps OS `WindowId` to recording-local u32 identifiers.
     recording_window_ids: HashMap<WindowId, u32>,
 
@@ -301,7 +310,7 @@ impl FreminalGui {
             binding_map,
             config,
             args,
-            settings_modal: SettingsModal::new(config_path),
+            settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),
             initial_state: Some(InitialWindowState {
                 tab: initial_tab,
@@ -320,6 +329,7 @@ impl FreminalGui {
             recording_swap,
             recording_join: None,
             recording_path: None,
+            config_path,
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
             pending_layout_windows: std::collections::VecDeque::new(),
@@ -356,6 +366,17 @@ impl FreminalGui {
             Ok(mut stack) => stack.error(title, detail),
             Err(_) => {
                 tracing::warn!("toast stack was already borrowed; dropping error toast");
+            }
+        }
+    }
+
+    /// Push a best-effort informational toast.  Same borrow semantics as
+    /// [`Self::push_error_toast`].
+    pub(super) fn push_info_toast(&self, title: impl Into<String>, detail: Option<String>) {
+        match self.toasts.try_borrow_mut() {
+            Ok(mut stack) => stack.info(title, detail),
+            Err(_) => {
+                tracing::warn!("toast stack was already borrowed; dropping info toast");
             }
         }
     }

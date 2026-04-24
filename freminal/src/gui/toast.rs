@@ -32,7 +32,6 @@ pub(super) enum ToastKind {
     // Reserved for future subtasks (71.3 layout non-fatal, 71.4 shader warnings).
     Warning,
     /// Informational message.
-    #[allow(dead_code)] // Reserved for future subtasks.
     Info,
 }
 
@@ -127,6 +126,11 @@ impl ToastStack {
     /// Push a new error toast onto the stack.
     pub(super) fn error(&mut self, title: impl Into<String>, detail: Option<String>) {
         self.push(ToastKind::Error, title.into(), detail);
+    }
+
+    /// Push a new informational toast onto the stack.
+    pub(super) fn info(&mut self, title: impl Into<String>, detail: Option<String>) {
+        self.push(ToastKind::Info, title.into(), detail);
     }
 
     fn push(&mut self, kind: ToastKind, title: String, detail: Option<String>) {

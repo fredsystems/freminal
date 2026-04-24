@@ -754,9 +754,21 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
     and `freminal/src/gui/panes/mod.rs`.
   - Cross-platform verification is still required (see 71 Verification) —
     the macOS and Windows code paths compile but need an actual run.
-- **71.17** — Config hot-reload. Currently only shaders hot-reload. Add a "Reload Config"
-  menu item that re-reads `config.toml` and applies theme / font / keybinding / opacity
-  changes live without restart. Use a file-watcher-optional design (opt-in auto-reload).
+- **71.17** — ✅ Config hot-reload. Added `KeyAction::ReloadConfig` in
+  `freminal-common/src/keybindings.rs` (no default binding — menu-only, 53
+  total variants) and a "Reload Config" entry in the Session menu
+  (`freminal/src/gui/menu.rs`), disabled with a tooltip when no config path
+  is associated with the session. Refactored
+  `freminal/src/gui/settings_dispatch.rs` to extract the ~150-line Applied
+  broadcast logic into a shared `apply_new_config(Config, &WindowHandle)`
+  method used by both the Settings "Apply" path and the new
+  `reload_config_from_disk(&WindowHandle)` method. Added
+  `SettingsModal::sync_from_config` so the draft stays in sync after a
+  reload, plus `FreminalGui::push_info_toast` and `ToastStack::info` for
+  success messaging. Plumbed `config_path: Option<PathBuf>` into
+  `FreminalGui` from startup. File-watcher auto-reload was dropped per user
+  direction. Verified: `cargo test --all` (53 KeyAction variants,
+  `sync_from_config` unit test), clippy clean, machete clean.
 
 #### 71.P3 — Polish
 

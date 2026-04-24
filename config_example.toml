@@ -317,6 +317,11 @@ limit = 4000
 #   Session:
 #     toggle_recording = "Ctrl+Shift+R"      (start/stop FREC v2 session recording)
 #
+#   Configuration:
+#     reload_config  = (no default)         (re-read config.toml from disk and
+#                                            apply every change live; available
+#                                            from the Session menu)
+#
 # Example: remap copy/paste to Ctrl+C / Ctrl+V (warning: this will prevent
 # Ctrl+C from sending SIGINT to the running program):
 #

@@ -127,7 +127,7 @@ impl super::FreminalGui {
         }
 
         let session_resp = ui.menu_button("Session", |ui| {
-            self.show_session_menu(ui);
+            self.show_session_menu(ui, win);
         });
         if session_resp.inner.is_some() {
             *any_menu_open = true;
@@ -295,7 +295,7 @@ impl super::FreminalGui {
     /// When a recording is in progress, the destination path is shown as
     /// a dimmed, non-interactive line below the toggle so the user can
     /// see where the file is being written.
-    fn show_session_menu(&mut self, ui: &mut egui::Ui) {
+    fn show_session_menu(&mut self, ui: &mut egui::Ui, win: &mut PerWindowState) {
         let recording = self.is_recording();
         let label = if recording {
             "Stop Recording"
@@ -320,6 +320,23 @@ impl super::FreminalGui {
                         .weak(),
                 ),
             );
+        }
+
+        ui.separator();
+        // Re-reads `config.toml` from disk and applies every change live.
+        // See `FreminalGui::reload_config_from_disk` for behaviour, including
+        // the no-op toast when no config path is associated with the session.
+        let reload_enabled = self.config_path.is_some();
+        let reload_resp = ui.add_enabled(
+            reload_enabled,
+            self.menu_button_for("Reload Config", KeyAction::ReloadConfig),
+        );
+        if reload_resp.clicked() {
+            win.pending_menu_actions.push(KeyAction::ReloadConfig);
+            ui.close();
+        }
+        if !reload_enabled {
+            reload_resp.on_disabled_hover_text("No config file is associated with this session.");
         }
     }
 

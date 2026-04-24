@@ -1572,7 +1572,7 @@ impl freminal_windowing::App for FreminalGui {
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
             for action in all_deferred_actions {
-                self.dispatch_deferred_action(action, &mut win, window_id);
+                self.dispatch_deferred_action(action, &mut win, window_id, handle);
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).

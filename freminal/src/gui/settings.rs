@@ -217,6 +217,18 @@ impl SettingsModal {
         }
     }
 
+    /// Replace the draft with `live_config` so that a subsequent `open()`
+    /// (or the currently-open modal) reflects on-disk state.
+    ///
+    /// Used by the "Reload Config" menu action (subtask 71.17) to keep the
+    /// settings draft in sync with a live config reloaded from `config.toml`.
+    /// Preserves the currently-selected tab and other transient UI state.
+    pub(super) fn sync_from_config(&mut self, live_config: &Config) {
+        self.draft = live_config.clone();
+        self.original_theme_slug = live_config.theme.active_slug(self.os_dark_mode).to_string();
+        self.original_opacity = live_config.ui.background_opacity;
+    }
+
     /// Open the modal, cloning the live config into the draft for editing.
     ///
     /// `monospace_families` is the sorted, deduplicated list of monospaced font
@@ -1854,5 +1866,31 @@ mod tests {
         modal.open(&live, families.clone(), false);
 
         assert_eq!(modal.monospace_families, families);
+    }
+
+    #[test]
+    fn sync_from_config_updates_draft_and_originals() {
+        let mut modal = SettingsModal::new(None);
+        // Seed the modal with an initial config via open() so os_dark_mode
+        // and the original_* fields are initialised.
+        let initial = Config::default();
+        modal.open(&initial, Vec::new(), false);
+        let initial_opacity = modal.original_opacity;
+
+        // Build a mutated config and sync.  Use a distinguishable opacity
+        // and theme slug so we can verify the draft updates.
+        let mut reloaded = Config::default();
+        reloaded.ui.background_opacity = (initial_opacity - 0.5).clamp(0.0, 1.0);
+        modal.sync_from_config(&reloaded);
+
+        assert!(
+            (modal.draft.ui.background_opacity - reloaded.ui.background_opacity).abs()
+                < f32::EPSILON
+        );
+        assert!((modal.original_opacity - reloaded.ui.background_opacity).abs() < f32::EPSILON);
+        assert_eq!(
+            modal.original_theme_slug,
+            reloaded.theme.active_slug(modal.os_dark_mode).to_string()
+        );
     }
 }
