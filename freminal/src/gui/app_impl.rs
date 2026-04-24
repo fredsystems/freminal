@@ -227,23 +227,6 @@ impl freminal_windowing::App for FreminalGui {
                 return;
             }
 
-            // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
-            // PaintCallbacks run on the render thread and can't access `self`, so
-            // they stash compile/init errors in `WindowPostRenderer::last_error`.
-            // Surface any such error as a toast here (71.4).
-            if let Some(win) = self.windows.get(&window_id) {
-                let err = {
-                    let mut wpr = win
-                        .window_post
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    wpr.last_error.take()
-                };
-                if let Some(msg) = err {
-                    self.push_error_toast("Shader error", Some(msg));
-                }
-            }
-
             // Subsequent window — spawn a new PTY tab.
             let theme =
                 freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
@@ -586,6 +569,25 @@ impl freminal_windowing::App for FreminalGui {
         let Some(mut win) = self.windows.remove(&window_id) else {
             return;
         };
+
+        // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
+        // PaintCallbacks run on the render thread and can't access `self`, so
+        // they stash compile/init errors in `WindowPostRenderer::last_error`.
+        // Drained here every frame (71.4 bug fix): previously only ran in the
+        // subsequent-window branch of `on_window_created`, which never fires
+        // for the first/only window and never re-runs after window creation.
+        {
+            let err = {
+                let mut wpr = win
+                    .window_post
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                wpr.last_error.take()
+            };
+            if let Some(msg) = err {
+                self.push_error_toast("Shader error", Some(msg));
+            }
+        }
 
         // ── Spawn new window ─────────────────────────────────────────────────
         if win.pending_new_window {
