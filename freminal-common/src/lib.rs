@@ -45,6 +45,12 @@
 #![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
 #![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
 
+/// Persisted application state, kept outside `config.toml`.
+///
+/// Holds runtime state (currently just the first-run flag) in a separate
+/// file so read-only/managed configs (NixOS home-manager, system-wide
+/// installs) still get a writable location for mutable state.
+pub mod app_state;
 /// CLI argument types.
 pub mod args;
 /// Base-64 encoding/decoding utilities.

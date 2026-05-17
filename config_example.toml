@@ -246,20 +246,22 @@ limit = 4000
 # restore_last_session = true
 
 ## ##############################################################################
-# ONBOARDING
+# ONBOARDING (DEPRECATED — kept for backward compatibility)
 ## ##############################################################################
-# Tracks whether the first-run welcome overlay has been shown and dismissed.
-# The overlay appears on the first launch after a fresh install, explaining
-# the menu bar, the settings shortcut, and the layouts directory. Once the
-# user dismisses the overlay (via Skip, close, or completing all panels),
-# Freminal sets first_run_complete = true and persists it here so the overlay
-# does not reappear on subsequent launches.
+# The first-run welcome overlay flag used to live in this section.  It now
+# lives in `state.toml` under $XDG_STATE_HOME/freminal/ (Linux),
+# ~/Library/Application Support/Freminal/ (macOS), or %APPDATA%\Freminal\
+# (Windows), so managed installs with a read-only config.toml (NixOS
+# home-manager, system-wide configs) can still record the dismissal.
 #
-# You can re-open the overlay at any time via Help → Show Welcome.
-# Setting first_run_complete = false forces the overlay to show on the next
-# launch, useful for testing or for sharing a config with a new user.
-# Default: false.
-[onboarding]
+# A `first_run_complete = true` value here is still honored on first launch
+# with a new binary — it is migrated forward into state.toml — but new code
+# does not write to this section.  You can re-open the overlay at any time
+# via Help → Show Welcome.
+#
+# To reset onboarding, delete state.toml from the platform's state directory
+# (NOT this config file).
+# [onboarding]
 # first_run_complete = false
 
 ## ##############################################################################

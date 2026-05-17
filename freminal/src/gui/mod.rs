@@ -163,6 +163,19 @@ struct FreminalGui {
     /// so the next launch restores the user's layout.
     window_state: freminal_common::window_state::WindowState,
 
+    /// Persisted mutable application state (currently just the first-run
+    /// onboarding flag).  Lives in `$XDG_STATE_HOME/freminal/state.toml`
+    /// (Linux) so read-only/managed `config.toml` installs (NixOS
+    /// home-manager, system-wide configs) can still record dismissals
+    /// without trying to mutate the config file.
+    app_state: freminal_common::app_state::AppState,
+
+    /// Path to `state.toml`, cached so we don't recompute it on every
+    /// save.  `None` if the platform base directories cannot be
+    /// determined (in which case onboarding dismissal cannot be
+    /// persisted — same fallback as today's `config_path == None`).
+    app_state_path: Option<std::path::PathBuf>,
+
     /// Shared, hot-swappable FREC v2 recording handle.
     ///
     /// When the inner `Option<RecordingHandle>` is `Some`, topology,
@@ -234,8 +247,8 @@ struct FreminalGui {
     about_window_open: bool,
 
     /// First-run welcome overlay state.  Opened automatically at startup
-    /// when `config.onboarding.first_run_complete` is `false`, or on
-    /// demand from the Help menu.  See `gui/welcome.rs`.
+    /// when `self.app_state.first_run_complete` is `false`, or on demand
+    /// from the Help menu.  See `gui/welcome.rs`.
     welcome: welcome::WelcomeOverlay,
 
     /// When `true`, the Help menu "Keybindings..." item was clicked and the
@@ -289,11 +302,44 @@ impl FreminalGui {
             freminal_common::keybindings::BindingMap::default()
         });
 
-        // Open the welcome overlay automatically on first launch (before the
-        // user has seen — or dismissed — it).  The flag is persisted to
-        // `config.toml` on dismissal so subsequent launches skip it.
+        // Load persisted app state (currently just the first-run flag).
+        // Lives in `$XDG_STATE_HOME/freminal/state.toml` so NixOS
+        // home-manager users with a read-only `config.toml` can still
+        // record dismissals.
+        let app_state_path = freminal_common::app_state::app_state_path();
+        let mut app_state = app_state_path
+            .as_deref()
+            .map(freminal_common::app_state::AppState::load_or_default)
+            .unwrap_or_default();
+
+        // Legacy migration: prior versions stored the dismissal flag in
+        // `config.toml` under `[onboarding] first_run_complete`.  If that
+        // flag is set and the new state file does not yet record it, copy
+        // the value forward (in-memory and best-effort to disk).  We do
+        // not delete the legacy field from `config.toml`; on read-only
+        // configs we couldn't anyway, and leaving it harmless keeps
+        // rollbacks safe.
+        if config.onboarding.first_run_complete && !app_state.first_run_complete {
+            app_state.first_run_complete = true;
+            if let Some(path) = app_state_path.as_deref()
+                && let Err(e) = app_state.save(path)
+            {
+                // Migration failure is non-fatal: the legacy config flag
+                // still suppresses the overlay this session, and the
+                // user will be re-prompted next launch if it stays
+                // unwritable (extremely unlikely for $XDG_STATE_HOME).
+                tracing::warn!(
+                    "Failed to migrate first_run_complete to {}: {e}",
+                    path.display()
+                );
+            }
+        }
+
+        // Open the welcome overlay automatically on first launch (before
+        // the user has seen — or dismissed — it).  The flag is persisted
+        // to `state.toml` on dismissal so subsequent launches skip it.
         let mut welcome_overlay = welcome::WelcomeOverlay::new();
-        if !config.onboarding.first_run_complete {
+        if !app_state.first_run_complete {
             welcome_overlay.open();
         }
 
@@ -327,6 +373,8 @@ impl FreminalGui {
                 .as_deref()
                 .map(freminal_common::window_state::WindowState::load_or_default)
                 .unwrap_or_default(),
+            app_state,
+            app_state_path,
             recording_swap,
             recording_join: None,
             recording_path: None,

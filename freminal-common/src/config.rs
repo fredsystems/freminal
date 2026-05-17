@@ -534,21 +534,31 @@ const fn default_restore_last_session() -> bool {
     true
 }
 
-/// First-run onboarding state.
+/// **Deprecated** first-run onboarding state (kept for backward
+/// compatibility with older `config.toml` files).
 ///
-/// Freminal shows a short welcome overlay on the first launch after a fresh
-/// install, explaining the menu bar, the settings shortcut, and the layouts
-/// directory.  Once the user dismisses the overlay (via Skip, close, or
-/// completing all panels), [`Self::first_run_complete`] is set to `true` and
-/// persisted to `config.toml`, so the overlay does not reappear.
+/// Historically Freminal stored the "user has dismissed the welcome
+/// overlay" flag here.  This was moved out of `config.toml` because
+/// managed installs (NixOS home-manager, system-wide configs, dotfile
+/// managers locking permissions) make `config.toml` read-only, and the
+/// program could not record the dismissal — the overlay reappeared on
+/// every launch.
+///
+/// The flag now lives in `state.toml` under
+/// `$XDG_STATE_HOME/freminal/` (Linux) — see
+/// [`crate::app_state::AppState`].  This struct is kept so old
+/// `config.toml` files still parse; on first launch with a new binary,
+/// a `[onboarding] first_run_complete = true` value is migrated into
+/// the new state file and then ignored.
 ///
 /// Users can re-open the overlay at any time via Help → Show Welcome.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OnboardingConfig {
-    /// `true` once the user has seen and dismissed the first-run welcome
-    /// overlay.  Defaults to `false` so a fresh config triggers the overlay
-    /// on first launch.
+    /// **Deprecated** — see struct docs.  `true` once the user has seen
+    /// and dismissed the first-run welcome overlay.  Defaults to `false`.
+    /// New code reads/writes `AppState::first_run_complete` instead;
+    /// this field is migrated forward on first launch.
     pub first_run_complete: bool,
 }
 

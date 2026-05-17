@@ -15,8 +15,9 @@
 //! 3. The layouts directory and how to save/load layouts.
 //!
 //! The overlay stores no user-facing configuration of its own — the only
-//! persistent bit is the `[onboarding] first_run_complete` flag in
-//! `config.toml`, which is flipped to `true` on Skip, Finish, or close.
+//! persistent bit is the `first_run_complete` flag in `state.toml` (see
+//! [`freminal_common::app_state`]), which is flipped to `true` on Skip,
+//! Finish, or close.
 
 use std::fmt;
 
@@ -215,10 +216,10 @@ impl FreminalGui {
     /// Render the first-run welcome overlay as a centered `egui::Window`.
     ///
     /// Does nothing when the overlay is closed.  When the user clicks
-    /// Skip, Finish, or the title-bar close button, the overlay is hidden
-    /// and the `[onboarding] first_run_complete` flag is set to `true`
-    /// and persisted to `config.toml` (best-effort: a save error surfaces
-    /// as a toast but does not block dismissal).
+    /// Skip, Finish, or the title-bar close button, the overlay is
+    /// hidden and the `first_run_complete` flag in `state.toml` is set
+    /// to `true` and persisted (best-effort: a save error surfaces as a
+    /// toast but does not block dismissal).
     pub(super) fn show_welcome_overlay(&mut self, ctx: &egui::Context) {
         if !self.welcome.is_open() {
             return;
@@ -293,19 +294,36 @@ impl FreminalGui {
         }
     }
 
-    /// Set `first_run_complete = true` and persist the config.  A save
-    /// failure surfaces as an error toast but does not re-open the
-    /// overlay — the user has already dismissed it and should not be
-    /// pestered again.
+    /// Set `first_run_complete = true` in `state.toml` and persist it.
+    ///
+    /// State lives in `$XDG_STATE_HOME/freminal/state.toml` (Linux), not
+    /// in `config.toml`, specifically so that read-only/managed configs
+    /// (NixOS home-manager, system-wide installs, dotfile managers
+    /// locking permissions) can still record the dismissal.  See
+    /// [`freminal_common::app_state`] for the format and rationale.
+    ///
+    /// A save failure surfaces as an error toast but does not re-open
+    /// the overlay — the user has already dismissed it and should not be
+    /// pestered again.  In the rare case that `$XDG_STATE_HOME` itself
+    /// is unwritable, the user will see the overlay again on next
+    /// launch; that is preferable to a silent infinite loop.
     fn mark_onboarding_complete(&mut self) {
-        if self.config.onboarding.first_run_complete {
+        if self.app_state.first_run_complete {
             return;
         }
-        self.config.onboarding.first_run_complete = true;
-        if let Err(e) =
-            freminal_common::config::save_config(&self.config, self.config_path.as_deref())
-        {
-            tracing::error!("Failed to persist onboarding flag: {e}");
+        self.app_state.first_run_complete = true;
+
+        let Some(path) = self.app_state_path.as_deref() else {
+            tracing::warn!(
+                "Cannot persist onboarding flag: state path is unavailable on this platform"
+            );
+            return;
+        };
+        if let Err(e) = self.app_state.save(path) {
+            tracing::error!(
+                "Failed to persist onboarding flag to {}: {e}",
+                path.display()
+            );
             self.push_error_toast("Could not save onboarding flag", Some(format!("{e}")));
         }
     }
