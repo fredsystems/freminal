@@ -174,7 +174,7 @@ fn bench_softwrap_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: flatten visible rows → (Vec<TChar>, Vec<FormatTag>)
+// Criterion bootstrap
 // ---------------------------------------------------------------
 fn bench_visible_flatten(c: &mut Criterion) {
     // Pre-populate a 200×50 buffer with content so all visible rows are non-empty.
@@ -574,6 +574,66 @@ fn bench_move_cursor_relative(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: flatten a buffer whose visible rows each contain a plain URL.
+//
+// Measures the cost of the single-pass URL detection + tag splicing added
+// in Task 71.7b.  Each iteration builds a fresh buffer so the flatten cache
+// starts cold; this captures the full work of byte-mirror construction,
+// regex scanning, and tag splicing across the full visible window.
+// ---------------------------------------------------------------
+fn bench_flatten_url_heavy(c: &mut Criterion) {
+    let width = 80usize;
+    let height = 50usize;
+    let url = b"https://example.com/path?q=1&r=2";
+    let prefix = b"see ";
+    let suffix_template = b" for more info xyz";
+
+    let mut data: Vec<TChar> = Vec::with_capacity(height * (width + 1));
+    for _ in 0..height {
+        let mut row_len = 0usize;
+        for &b in prefix {
+            data.push(TChar::Ascii(b));
+            row_len += 1;
+        }
+        for &b in url {
+            data.push(TChar::Ascii(b));
+            row_len += 1;
+        }
+        for &b in suffix_template {
+            if row_len >= width {
+                break;
+            }
+            data.push(TChar::Ascii(b));
+            row_len += 1;
+        }
+        while row_len < width {
+            data.push(TChar::Ascii(b' '));
+            row_len += 1;
+        }
+        data.push(TChar::NewLine);
+    }
+
+    let mut group = c.benchmark_group("bench_flatten_url_heavy");
+    group.throughput(Throughput::Elements((width * height) as u64));
+
+    group.bench_function("visible_80x50_with_urls", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(width, height);
+                buf.insert_text(&data);
+                buf
+            },
+            |mut buf| {
+                std::hint::black_box(buf.visible_as_tchars_and_tags(0));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -586,6 +646,7 @@ criterion_group!(
         bench_softwrap_heavy,
         bench_visible_flatten,
         bench_scrollback_flatten,
+        bench_flatten_url_heavy,
         bench_insert_with_color_changes,
         bench_cursor_ops,
         bench_move_cursor_relative,

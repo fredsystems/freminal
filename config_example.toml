@@ -148,6 +148,14 @@ limit = 4000
 #
 # background_image_opacity = 0.5
 
+# Automatically detect plain URLs (http, https, file, ftp, mailto) in terminal
+# output and make them clickable, in addition to OSC 8 hyperlinks. When an
+# OSC 8 link covers the same cells as an auto-detected URL, the OSC 8 link
+# wins.
+# Default: true
+#
+# auto_detect_urls = true
+
 ## ##############################################################################
 # SHADER SETTINGS
 ## ##############################################################################
@@ -194,7 +202,12 @@ limit = 4000
 ## ##############################################################################
 [bell]
 # How the terminal responds to a bell character (\x07).
-# Options: "visual" (flash the terminal), "none" (ignore).
+# Options:
+#   "visual" - flash the terminal area briefly
+#   "none"   - ignore the bell
+#   "audio"  - best-effort system beep (stderr BEL on Linux, NSBeep on
+#              macOS, MessageBeep on Windows)
+#   "both"   - both visual flash and system beep
 # Default: "visual"
 # mode = "visual"
 
@@ -231,6 +244,25 @@ limit = 4000
 # The layout is written to ~/.config/freminal/layouts/last_session.toml.
 # Default: true.
 # restore_last_session = true
+
+## ##############################################################################
+# ONBOARDING (DEPRECATED — kept for backward compatibility)
+## ##############################################################################
+# The first-run welcome overlay flag used to live in this section.  It now
+# lives in `state.toml` under $XDG_STATE_HOME/freminal/ (Linux),
+# ~/Library/Application Support/Freminal/ (macOS), or %APPDATA%\Freminal\
+# (Windows), so managed installs with a read-only config.toml (NixOS
+# home-manager, system-wide configs) can still record the dismissal.
+#
+# A `first_run_complete = true` value here is still honored on first launch
+# with a new binary — it is migrated forward into state.toml — but new code
+# does not write to this section.  You can re-open the overlay at any time
+# via Help → Show Welcome.
+#
+# To reset onboarding, delete state.toml from the platform's state directory
+# (NOT this config file).
+# [onboarding]
+# first_run_complete = false
 
 ## ##############################################################################
 # KEY BINDINGS
@@ -285,6 +317,7 @@ limit = 4000
 #     scroll_to_bottom = "Shift+End"
 #     scroll_line_up   = "Shift+Up"
 #     scroll_line_down = "Shift+Down"
+#     clear_scrollback = "Ctrl+Shift+Backspace"  (erase scrollback; leaves visible display)
 #
 #   Pane management:
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)
@@ -299,6 +332,14 @@ limit = 4000
 #     resize_pane_up    = "Ctrl+Alt+K"       (shrink pane upward)
 #     resize_pane_right = "Ctrl+Alt+L"       (grow pane rightward)
 #     zoom_pane        = "Ctrl+Shift+Z"      (toggle zoom on focused pane)
+#
+#   Session:
+#     toggle_recording = "Ctrl+Shift+R"      (start/stop FREC v2 session recording)
+#
+#   Configuration:
+#     reload_config  = (no default)         (re-read config.toml from disk and
+#                                            apply every change live; available
+#                                            from the Session menu)
 #
 # Example: remap copy/paste to Ctrl+C / Ctrl+V (warning: this will prevent
 # Ctrl+C from sending SIGINT to the running program):

@@ -5,10 +5,11 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use egui;
 use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::{
-    PaneBorderDrag, renderer::WindowPostRenderer, tabs::TabManager,
+    PaneBorderDrag, renderer::WindowPostRenderer, tabs::TabId, tabs::TabManager,
     terminal::FreminalTerminalWidget,
 };
 
@@ -94,4 +95,51 @@ pub(super) struct PerWindowState {
     /// Updated every frame from `ViewportInfo::outer_rect` when available.
     /// `None` on Wayland (position is not reported) or before the first frame.
     pub(super) last_known_position: Option<[i32; 2]>,
+
+    /// Tab currently being renamed via an inline text editor.
+    ///
+    /// Set by `KeyAction::RenameTab` (renames the active tab) or a
+    /// double-click on a tab label.  While `Some`, the tab bar renders
+    /// a `TextEdit` widget in place of the label for this tab.
+    ///
+    /// Cleared when the user commits (Enter) or cancels (Escape) the
+    /// rename, or when the target tab is closed.
+    pub(super) renaming_tab: Option<TabId>,
+
+    /// Scratch buffer for the in-progress rename.
+    ///
+    /// Initialised from the target tab's current display name when
+    /// `renaming_tab` is set, mutated by the `TextEdit`, and consumed on
+    /// commit.  Cleared when rename ends.
+    pub(super) rename_buffer: String,
+
+    /// Index of the tab currently being dragged, if any.
+    ///
+    /// Set when a mouse drag starts on a tab label, cleared when the drag
+    /// ends (at which point a `TabBarAction::Reorder` is emitted if the
+    /// pointer was released over a different tab).
+    pub(super) dragging_tab: Option<usize>,
+
+    /// Tab rects indexed by original tab position, used to compute the
+    /// drop slot during a drag.
+    ///
+    /// Captured at the end of each frame's `show_tab_bar`, but **frozen**
+    /// for the duration of a drag: once `dragging_tab` is set, rects are
+    /// NOT refreshed until the drag ends. Freezing is essential because
+    /// the rendered (preview) rects shift as the ghost moves between
+    /// slots — if we used those shifted rects to decide the next frame's
+    /// slot, differently-sized tabs would oscillate between orderings
+    /// (pointer crosses center → swap → new rect moves under pointer →
+    /// swap back). Freezing rects to the natural pre-drag layout gives
+    /// stable decision boundaries for the entire drag.
+    pub(super) last_tab_rects: Vec<egui::Rect>,
+
+    /// `KeyAction`s triggered from menu items (Edit, Help, etc.) that must
+    /// run against the active pane's `ViewState` + PTY `input_tx`.
+    ///
+    /// The menu bar itself cannot dispatch these directly because it runs
+    /// with `&mut PerWindowState` (no pane view-state access), so it pushes
+    /// here.  Drained and dispatched at the top of the active pane's input
+    /// processing each frame.
+    pub(super) pending_menu_actions: Vec<freminal_common::keybindings::KeyAction>,
 }

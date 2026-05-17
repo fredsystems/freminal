@@ -14,12 +14,20 @@ and that no advertised feature silently does nothing.
 
 ## Task Summary
 
-| #   | Feature                          | Scope  | Status  | Dependencies |
-| --- | -------------------------------- | ------ | ------- | ------------ |
-| 70  | Code Correctness & Hygiene Sweep | Large  | Pending | None         |
-| 71  | UX Completeness & Polish Sweep   | Medium | Pending | None         |
+| #   | Feature                          | Scope  | Status                | Dependencies |
+| --- | -------------------------------- | ------ | --------------------- | ------------ |
+| 70  | Code Correctness & Hygiene Sweep | Large  | Complete (2026-04-22) | None         |
+| 71  | UX Completeness & Polish Sweep   | Medium | Complete (2026-05-17) | None         |
 
 Both tasks are independent and may be executed in parallel across sub-agents.
+
+**Task 70** merged to `main` as PR #324 (commit `c537ae1`) on 2026-04-22.
+
+**Task 71** committed on branch `task-71/ux-polish-sweep`. All 21 subtasks
+(71.1–71.20 plus 71.7b) are implemented and committed. Five
+manual-testing bug fixes (`e5ffec7`, `8252da0`, `004e751`, `253428a`,
+`d4c21a9`) were added on top after dogfooding — see "Post-implementation
+bug fixes" below.
 
 ---
 
@@ -447,76 +455,437 @@ error paths that log-and-disappear with no user feedback.
 - **71.1** — Wire up `RenameTab`. `freminal/src/gui/actions.rs:299-301` is currently a
   `trace!` no-op. Implement an inline text-entry overlay on the target tab (similar to
   a rename in a file manager). Persist the custom name on the tab struct; clear it if the
-  shell sets a title via OSC 0/1/2.
+  shell sets a title via OSC 0/1/2. **COMPLETE (2026-04-22).** Added `custom_name:
+Option<String>` and `display_name()` to `Tab`; added `renaming_tab` + `rename_buffer`
+  to `PerWindowState`. `KeyAction::RenameTab` and double-click on a tab now open an
+  inline `TextEdit`. `TabBarAction` gained `BeginRename` / `CommitRename` / `CancelRename`.
+  `handle_window_manipulation` now returns whether the shell asserted a title this frame;
+  the caller clears `tab.custom_name` so shell-driven OSC 0/1/2 titles remain authoritative.
+  Window title sync uses `Tab::display_name()`. 4 new unit tests.
 - **71.2** — PTY spawn failure surface. When a shell fails to launch (bad path, missing
   binary, permission error), show an inline error row inside the tab (or a toast) with the
-  error message and a retry button. Currently silent.
+  error message and a retry button. Currently silent. **COMPLETE (2026-04-22).** Added a
+  reusable app-level toast system (`freminal/src/gui/toast.rs`) with `ToastKind`
+  (`Error`/`Warning`/`Info`), FIFO stack (MAX_TOASTS=5), kind-based auto-expire
+  (Error=10s / Warning=6s / Info=3s), 200ms hover keep-alive, and dismiss button.
+  `FreminalGui::toasts` uses `RefCell<ToastStack>` with a `push_error_toast(&self, …)`
+  helper to avoid cascading `&mut self` through spawn call chains. Wired all 4 PTY spawn
+  failure sites (new window in `app_impl.rs`, new tab / split pane / layout leaf in
+  `tab_spawning.rs`). Toasts render top-right via `egui::Area` after the central panel.
+  7 new unit tests.
 - **71.3** — Layout load failure surface. TOML parse errors and missing-file errors currently
   log and disappear. Show a modal dialog naming the layout file and the specific error.
+  **COMPLETE (2026-04-22).** Reused the toast system from 71.2 instead of a modal dialog —
+  non-blocking toasts are less intrusive for recoverable failures. Wired all layout
+  load/save failure sites: CLI `--layout` / `startup.layout` load and resolve errors
+  (`app_impl.rs`), Layouts menu selection failures (`menu.rs`), `SaveLayout` action
+  failures including missing library dir, directory creation failure, and TOML write
+  failure (`actions.rs`), and `restore_last_session` apply failures (`session.rs`).
+  Auto-save-on-shutdown failures in `auto_save_session` are intentionally log-only since
+  the UI is already tearing down.
 - **71.4** — Shader compile error surface. When a custom shader fails to compile, show a
   dismissible error banner naming the shader file and including the first line of the GLSL
   error. Piggybacks on `GpuInitError` types introduced in 70.E.
+  **COMPLETE (2026-04-22).** Used the toast system (71.2) instead of a banner.
+  `WindowPostRenderer` gained a `last_error: Option<String>` field written by
+  `PaintCallback` closures (which cannot access `FreminalGui` directly — they run on
+  the render thread with only `Arc<Mutex<WindowPostRenderer>>` in scope). The main
+  thread drains this field at the top of each window's `update()` call and pushes an
+  error toast. Both failure paths wired: `WindowPostRenderer::init` failure and
+  `update_shader` compile failure. The `GpuInitError`'s `Display` impl already contains
+  the shader label and GLSL error from glow's `get_shader_info_log`, so no additional
+  formatting is needed.
 
 #### 71.P1 — Discoverability
 
 - **71.5** — Add Edit menu. Contains Copy, Paste, Select All, Find. Each item shows its
   current keybinding from `BindingMap`. Platform-appropriate placement (macOS menubar vs.
   Linux/Windows in-window menu bar).
-- **71.6** — Add Help menu. Contains About (version + build hash, embedded via Task 16
-  pipeline), "Report Issue…" (opens GitHub issue tracker URL), "Keybindings…" (jumps to
-  Settings Modal keybindings tab).
+  **COMPLETE (2026-04-22).** Added `Edit` menu between `Freminal` and `Tab` with Copy,
+  Paste, Select All, and Find entries. Each button uses `menu_button_for(label, action)`
+  to show the current keybinding combo from the `BindingMap`. Menu clicks push onto a new
+  `PerWindowState::pending_menu_actions: Vec<KeyAction>` queue (menu closures do not have
+  mutable access to the active pane's `ViewState` / `input_tx`). The queue is drained at
+  the top of `FreminalGui::update` via a new `dispatch_menu_action` associated function
+  that applies Copy/Paste/Select All directly to the active pane and routes the rest
+  (OpenSearch, etc.) through the existing `all_deferred_actions` pipeline. For Copy, a
+  new `Pane::pending_copy` boolean signals the widget to read `clipboard_rx` on its next
+  `show()` call (mirroring the in-widget `clipboard_pending` flow). The Edit menu body
+  was extracted into a `show_edit_menu` helper to keep `show_menu_bar` under clippy's
+  `too_many_lines` threshold. This plumbing is reusable for 71.6 (Help menu).
+- **71.6** — **COMPLETE (2026-04-22).** Added `Help` menu between `Layouts` and the lock
+  indicator with three entries: `About Freminal`, `Report Issue...`, and `Keybindings...`.
+  `About Freminal` opens an in-app floating `egui::Window` centered on the screen, showing
+  the package name, `CARGO_PKG_VERSION`, build hash (re-exported as
+  `freminal_terminal_emulator::GIT_DESCRIBE` from the `VERGEN_GIT_DESCRIBE` already emitted
+  by the emulator's `build.rs`), a short description, and a Close button. The dialog is
+  self-dismissing via its Close button or title-bar X. `Report Issue...` opens
+  `https://github.com/fredsystems/freminal/issues/new` via `open::that`, surfacing failures
+  as error toasts. `Keybindings...` sets a new `pending_open_keybindings` flag that the next
+  `update()` frame drains — mirroring the existing Settings-menu flow, it either focuses an
+  already-open settings window (and switches it to the Keybindings tab via a new
+  `SettingsModal::set_active_tab` method) or opens a new settings modal pre-focused on
+  Keybindings via a new `SettingsModal::open_to_tab` method. Two new bool fields were added
+  to `FreminalGui` (`about_window_open`, `pending_open_keybindings`), crossing the
+  `struct_excessive_bools` threshold; a targeted `#[allow]` with justification was added to
+  the struct — each bool is an independent, short-lived UI intent flag and combining them
+  into a state machine would couple unrelated concerns. No new `KeyAction` variants were
+  introduced (the Help items have no shortcuts by design), so `agents.md`'s keybinding
+  convention does not apply. Unit tests added for `open_to_tab` and `set_active_tab`.
 - **71.7** — URL hover tooltip. When the mouse hovers over an OSC 8 or auto-detected URL,
-  show a tooltip with the target URL and change the cursor to a pointer.
+  show a tooltip with the target URL and change the cursor to a pointer. **COMPLETE** —
+  Added an `egui::Tooltip::always_open` at the pointer in `widget.rs` (after the cursor-icon
+  update) driven by `cache.cached_hovered_url`. The tooltip displays the URL text and a
+  platform-appropriate hint ("Ctrl+click to open" / "Cmd+click to open"). Suppressed while
+  `view_state.selection.is_selecting` to avoid visually competing with an in-progress
+  selection drag. Cursor-pointer switching was already implemented; this subtask adds only
+  the tooltip. Auto-detected URL support is tracked separately as **71.7b** below.
+- **71.7b** — Auto-detect URLs in plain terminal output (programs that do not emit OSC 8).
+  Regex-match `http://`, `https://`, `file://`, `ftp://`, and `mailto:` URLs in cell text
+  and surface them through the same URL-rendering and hover machinery used for OSC 8 links,
+  so that lazygit, cat-ed logs, git output, etc. become clickable. Config: `ui.auto_detect_urls`
+  (bool, default `true`).
+
+  **Status (2026-04-23):** All 10 subtasks implemented. `cargo test --all` passes (8 new
+  integration tests in `auto_url_detection.rs`, 17 new unit tests in `url_detect.rs`).
+  `cargo clippy --all-targets --all-features -- -D warnings` clean.
+  `cargo bench` numbers on the new `bench_flatten_url_heavy` bench (cold buffer, 80×50
+  with one URL per row): ~108 µs per full-visible flatten (~2.1 µs per row including
+  regex + splicing). `bench_visible_flatten` (cached path, no URLs): ~3.4 µs — no
+  regression vs. pre-change baseline. Known limitation: single-row detection only
+  (soft-wrapped URLs are documented as a follow-up). Not yet committed per user request.
+
+  **Design — piggyback on the existing per-row flatten cache (NOT a separate PTY-side scan).**
+  An earlier design considered running detection in `TerminalHandler` after each PTY batch
+  and stamping matches onto cells via `Cell::set_url`. That design was rejected because it
+  introduces new per-batch string/byte allocations on the PTY read path, which is an
+  unacceptable performance regression during bursty output (`cat bigfile`, heavy build logs,
+  etc.). Auto-detected URLs therefore **never touch cells** and never participate in the
+  cell-level OSC 8 URL storage.
+
+  Instead, detection runs inside the existing `rows_as_tchars_and_tags_cached` pipeline in
+  `freminal-buffer/src/buffer/flatten.rs`. That pipeline is the only place that walks cells
+  to produce `(Vec<TChar>, Vec<FormatTag>)` for rendering, and it already caches the result
+  per row. Detection is amortized into that cache: a row's bytes are built exactly once per
+  dirty cycle, regex runs once per dirty cycle, and every subsequent frame reuses the cached
+  result for free.
+
+  **Row cache extension.** The per-row cache entry grows from
+  `(Vec<TChar>, Vec<FormatTag>)` to a named struct `RowCacheEntry` containing:
+  - `chars: Vec<TChar>` — unchanged.
+  - `tags: Vec<FormatTag>` — unchanged.
+  - `bytes: Vec<u8>` — UTF-8 representation of `chars`, built in the same cell-iteration
+    pass that populates `chars`. Pre-sized via `Vec::with_capacity(chars_upper_bound)`.
+    No per-cell allocations — each cell's bytes are appended via `extend_from_slice` from
+    `TChar::as_bytes()`.
+  - `byte_to_char: Vec<u32>` — dense map from `bytes` index to `chars` index, length
+    `bytes.len() + 1`. Built during the same pass. Used to translate regex byte-offset
+    matches back to flat character positions.
+  - `auto_urls: Vec<AutoUrlRange>` where
+    `AutoUrlRange { char_start: u32, char_end: u32, url: Arc<Url> }`. Populated by running
+    `freminal_terminal_emulator::url_detect::find_urls_bytes` (regex::bytes::Regex) on
+    `bytes` immediately after the byte buffer is built.
+
+  **Tag splicing in the merge step.** `rows_as_tchars_and_tags_cached`'s Step 2 currently
+  merges per-row tags with a running `global_offset`. That merge is extended to also splice
+  in `auto_urls` ranges as synthetic `FormatTag` overlays. Because `FormatTag` ranges are
+  non-overlapping by model invariant, any normal tag whose range crosses an auto-URL
+  boundary is split into up to three pieces: pre-URL (unchanged), URL-overlap (URL field
+  set, all other fields inherited from the base tag), and post-URL (unchanged). OSC 8 URLs
+  already carried on the base tag take precedence: if a base tag has `url.is_some()`, the
+  auto-URL overlay is skipped for that range. This is the "OSC 8 wins" rule from the
+  original design.
+
+  **Soft-wrap (multi-row URLs).** Single-row detection only for the first implementation.
+  A URL that soft-wraps across two rows will be detected as two partial matches (one
+  terminated by row end, one starting mid-match with no scheme) and the second half will
+  not register. A follow-up enhancement can handle this by concatenating `bytes` buffers
+  across soft-wrapped rows at merge time (cost paid per flatten call, not per dirty row).
+  Tracked as a known limitation in the initial landing.
+
+  **PTY read path invariant (hard constraint).** This design does NOT add any allocation,
+  string conversion, or per-batch work to the PTY read path (`handle_incoming_data` →
+  `process_outputs` → cell writes). All new work is in the already-allocated flatten-cache
+  rebuild path, which is called only when a consumer (GUI render, snapshot builder,
+  selection text extraction) asks for flat data, and reuses cached entries across calls.
+
+  **Subtasks.**
+  1. `UiConfig.auto_detect_urls: bool` (default `true`) in `freminal-common/src/config.rs`
+     with doc comment and `config_example.toml` entry. Plumb through to the buffer's
+     flatten path via a new `Buffer::set_auto_detect_urls(bool)` setter called from the
+     config-apply code path (and defaulted `true` at buffer construction).
+  2. `freminal-terminal-emulator/src/url_detect.rs` — new module. `pub fn
+find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with a
+     `LazyLock<Regex>` compiled once per process. Supports `http://`, `https://`,
+     `file://`, `ftp://`, `mailto:` schemes. GFM-style termination: whitespace/control
+     bytes terminate the match, then trailing `.,;:!?)]}>` is stripped, with `)` only
+     stripped when unbalanced (preserves `https://en.wikipedia.org/wiki/Foo_(bar)`).
+     Returns `Vec<UrlMatch { byte_start, byte_end, text: &str }>`. Comprehensive unit tests
+     covering all schemes, trailing punctuation, parenthesized URLs, Wikipedia-style
+     internal parens, multiple URLs in one line, percent-encoded paths (spaces preserved
+     as `%20`), bare-path non-match (no scheme), and byte-offset correctness. Add
+     `regex.workspace = true` to `freminal-terminal-emulator/Cargo.toml`.
+  3. `freminal-buffer`: introduce `RowCacheEntry` struct with fields listed above. Rename
+     `row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>` to
+     `row_cache: Vec<Option<RowCacheEntry>>` throughout `freminal-buffer/src/buffer/`
+     (mod.rs, flatten.rs, resize_and_alt.rs, lifecycle.rs — ~15 call sites). Add a
+     `SavedPrimaryState.row_cache` type migration to match.
+  4. Rewrite `Buffer::flatten_row` in `freminal-buffer/src/buffer/flatten.rs` to produce a
+     `RowCacheEntry`. The new implementation does the current cell walk once, building
+     `chars`, `tags`, `bytes`, and `byte_to_char` in the same loop. After the walk, if
+     `auto_detect_urls` is enabled, invoke `url_detect::find_urls_bytes` on `bytes` and
+     populate `auto_urls` by translating byte offsets via `byte_to_char`. Because
+     `freminal-buffer` cannot depend on `freminal-terminal-emulator` (circular), the URL
+     detector is exposed through a small trait / function-pointer injected at buffer
+     construction, or — simpler — the `url_detect` module is moved into `freminal-common`
+     or `freminal-buffer` itself. Decision: move `url_detect` into `freminal-buffer`
+     (the only caller is `flatten_row`) to avoid the dependency inversion. `regex` becomes
+     a workspace dep of `freminal-buffer`.
+  5. Rewrite the merge step in `rows_as_tchars_and_tags_cached` to splice `auto_urls`
+     into the tag sequence. Implementation: for each row's tags, walk them in order and
+     for each `AutoUrlRange` that intersects the row, split the covering tag into
+     (pre, overlap, post), setting `overlap.url = Some(Arc<Url>)` on the overlap piece.
+     Handle the case where multiple tags cover one URL range (split each separately).
+     Handle OSC 8 precedence (skip overlay if base tag's `url.is_some()`). Verify
+     `collect_url_tag_indices` (currently at `freminal-buffer/src/buffer/flatten.rs:193`)
+     picks up auto-detected URLs correctly — no change expected because `url.is_some()`
+     suffices.
+  6. Invalidation — because auto-URL results are embedded in the cache entry and the
+     cache entry is wholesale rebuilt whenever `row.dirty`, no new invalidation logic is
+     needed. Config flag changes (`auto_detect_urls` toggle) must invalidate all cache
+     entries; hook that into the setter.
+  7. Integration tests in `freminal-terminal-emulator/tests/` — feed bytes containing
+     plain URLs, assert the rendered flat tags contain URL-bearing ranges at the right
+     positions. Test: plain URL mid-text; URL followed by period (stripped); URL with
+     query + fragment; two URLs on one line; URL in a cell that also has bold/color
+     formatting (verify tag split preserves color + adds URL); OSC 8 URL not overridden
+     by auto-detect when they coincide; config flag `auto_detect_urls = false` disables
+     detection entirely.
+  8. Benchmark — extend `freminal-terminal-emulator/benches/buffer_benches.rs` and/or
+     `freminal-buffer/benches/buffer_row_bench.rs` with a `bench_flatten_url_heavy`
+     variant that seeds a buffer with 100 rows each containing a URL, then flattens.
+     Record before/after numbers. The "before" baseline is current `flatten_row` without
+     the bytes/byte_to_char/auto_urls fields, so the measured delta reflects the full
+     cost of 71.7b on dirty-row flatten. Target: regression ≤ 15% (per `agents.md`
+     regression threshold). Regressions above that must either be optimized or justified.
+  9. Update `Documents/ESCAPE_SEQUENCE_COVERAGE.md` / `GAPS.md` only if 71.7b changes
+     escape-sequence coverage (it does not — OSC 8 handling is unchanged). Skip this
+     subtask unless coverage actually moves.
+  10. Final `cargo xtask ci` run, commit on `task-71/ux-polish-sweep`, PR at end of
+      Task 71 per the existing workflow.
+
+  **Out of scope for 71.7b.** Multi-row soft-wrap URL detection (tracked as a follow-up).
+  Clickable auto-URLs (hover + click already work via the existing URL tag machinery; no
+  new click-handling code needed). URL unescaping or validation (purely syntactic match).
+  Bare path detection without scheme (`/tmp/foo`) — users must prefix `file://` for path
+  URLs, matching WezTerm/iTerm2/Kitty convention.
 
 #### 71.P2 — Search Polish
 
-- **71.8** — Case-sensitivity toggle in the search bar (`Aa` icon or checkbox).
+- **71.8** — Case-sensitivity toggle in the search bar (`Aa` icon or checkbox). **COMPLETE** —
+  Added `case_sensitive: bool` and `last_searched_case_sensitive: bool` to `SearchState`
+  (default `false` to preserve existing behavior). `run_search()` now takes a
+  `case_sensitive` parameter: in substring mode it skips the ASCII-lowercase fold when `true`;
+  in regex mode it prepends the `(?i)` inline flag when `false`. `needs_refresh()` and
+  `mark_fresh()` track the new flag so the search re-runs when the user toggles it.
+  `close()` resets `last_searched_case_sensitive` while preserving `case_sensitive` as a
+  user preference across open/close (matching how `regex_mode` is preserved). The search
+  bar's row 2 now has an `Aa` checkbox with an "Match case" hover tooltip next to the
+  existing Regex checkbox. Added `#[allow(clippy::struct_excessive_bools)]` on `SearchState`
+  with justification: the bools are independent, orthogonal UI flags (open-state + two live
+  toggles + two cached copies). Four new tests cover case-sensitive substring match,
+  case-sensitive substring rejection, case-insensitive regex match, and case-sensitive
+  regex rejection.
 - **71.9** — Tooltips on `<` / `>` / `X` buttons ("Previous match", "Next match", "Close").
+  **COMPLETE (2026-04-23).** Added `.on_hover_text(...)` to each of the three search bar
+  buttons in `freminal/src/gui/search.rs`, mirroring the existing pattern used on the `Aa`
+  case-sensitivity checkbox. Pure UI affordance — no state changes, no new tests needed.
 - **71.10** — Red-background tint on the search input when match count is zero.
+  **COMPLETE (2026-04-23).** When the query is non-empty and `match_count == 0`, the
+  `TextEdit` gets `background_color(Color32::from_rgb(80, 20, 20))` — a muted dark red
+  that stands out on both light and dark themes without being garish. Existing "No matches"
+  label remains as the explicit textual indicator.
 - **71.11** — Verify Task 69's search panel positioning fix landed and still behaves
   correctly under all window sizes and tab configurations.
+  **COMPLETE (2026-04-23).** Verified by code inspection that both Task 69.5 commits
+  (`37488d2` per-pane unique Area IDs, `275af03` `.pivot()` instead of `.anchor()`) are
+  still present in `freminal/src/gui/search.rs:413-416`. The search `Area` uses
+  `egui::Id::new("search_overlay").with(pane_id)` and anchors via `pivot(Align2::RIGHT_TOP)`
+  with `fixed_pos(Pos2::new(terminal_rect.right() - 4.0, terminal_rect.top() + 4.0))`,
+  which pins the bar to each pane's terminal rect rather than the window rect.
 
 #### 71.P2 — Tab & Pane UX
 
-- **71.12** — Tab close button ("×") on each tab, tab drag-reorder within a window (using
+- **71.12** ✅ — Tab close button ("×") on each tab, tab drag-reorder within a window (using
   egui's drag sense), and in-place tab rename (double-click, tied to the `RenameTab`
-  implementation from 71.1).
-- **71.13** — Add a `ClearScrollback` `KeyAction` (distinct from the existing
-  `ClearScrollbackandDisplay`). Bind to a sensible default (`Ctrl+K` on macOS convention,
-  configurable). Include in `KeyAction::ALL`, `name()`, `display_label()`, `FromStr`, and
-  `BindingMap::default()` per the keybinding convention in `agents.md`.
+  implementation from 71.1). **COMPLETE (2026-04-23, commit `7130b7c`).** The close button
+  and double-click rename were already present from earlier work; this subtask added the
+  remaining drag-reorder piece using a ghost-preview model. `TabBarAction::Reorder { from,
+to }` dispatches to `TabManager::move_tab`. `PerWindowState` gained `dragging_tab` (source
+  index during drag) and `last_tab_rects` (natural-order tab rects, frozen for the duration
+  of a drag to prevent oscillation when tabs have different widths). The dragged tab
+  renders dimmed (`rgba 120,120,120,40`) so the user sees it floating. Escape cancels the
+  drag without dispatch. Existing `TabManager::move_tab` unit tests cover the reorder math.
+- **71.13** ✅ — Add a `ClearScrollback` `KeyAction` (distinct from the existing
+  `ClearScrollbackandDisplay`). **COMPLETE (2026-04-23, commit `7185c2d`).** Added
+  `KeyAction::ClearScrollback` (variant + `name()` + `display_label()` + `FromStr` + `ALL`
+  entry + default binding in `register_misc_bindings()`). Bound to `Ctrl+Shift+Backspace`
+  by default: `Ctrl+K` conflicts with readline kill-to-EOL; `Ctrl+Shift+K` / `Ctrl+Shift+L`
+  collide with the `FocusPane*` direction grid; `Ctrl+Shift+Backspace` is free on all
+  platforms and mirrors a "hard clear" gesture. Dispatch path: keypress →
+  `dispatch_binding_action` resets `view_state.scroll_offset` and sends
+  `InputEvent::ClearScrollback` → PTY thread calls `Buffer::erase_scrollback()` and
+  `set_gui_scroll_offset(0)`. Test counters bumped (`key_action_all_count` 50 → 51,
+  `default_binding_total_count` 41 → 42); binding documented in `config_example.toml`.
 
 #### 71.P2 — Feature Completeness
 
-- **71.14** — Extend `BellMode` in `freminal-common/src/config.rs:406` with `Audio` and
-  `Both` variants. Wire `Audio` to a simple system-bell sound (platform-appropriate — `\a`
-  on Linux, `NSBeep` on macOS, `MessageBeep` on Windows). Add a config option for a custom
-  sound file path. Update Settings Modal picker.
-- **71.15** — In-app recording toggle. Add a `ToggleRecording` `KeyAction`, a menu item in
-  the Edit menu (or a dedicated "Session" menu), and a visible `● REC` indicator in the
-  tab/window chrome when recording is active. Recording currently only activates via
-  `--recording-path`. Requires Task 59's FREC v2 runtime start/stop support (verify it
-  exists; if not, add a small runtime API on the recorder).
-- **71.16** — Cross-platform CWD readback. `freminal/src/gui/mod.rs:950-961` uses
-  `/proc/<pid>/cwd` (Linux-only), which means Layout restore silently degrades on macOS and
-  Windows. Implement:
-  - macOS: `libproc::proc_pidinfo` with `PROC_PIDVNODEPATHINFO`.
-  - Windows: query the console's current directory via `NtQueryInformationProcess` or
-    `GetFinalPathNameByHandle` on the process handle.
-  - Abstract behind a `platform::read_cwd(pid)` function with per-OS implementations.
-- **71.17** — Config hot-reload. Currently only shaders hot-reload. Add a "Reload Config"
-  menu item that re-reads `config.toml` and applies theme / font / keybinding / opacity
-  changes live without restart. Use a file-watcher-optional design (opt-in auto-reload).
+- **71.14** ✅ — Extend `BellMode` in `freminal-common/src/config.rs:406` with `Audio` and
+  `Both` variants. **COMPLETE (2026-04-23, commit `9df2d1b`).** Wired `Audio` to a
+  best-effort native system beep per OS: Linux writes BEL (0x07) to stderr (translated by
+  the host terminal when freminal is launched from one; silent otherwise); macOS calls
+  AppKit `NSBeep` via raw extern (AppKit is already linked by winit); Windows calls
+  `user32::MessageBeep(MB_OK)` via raw extern. No new workspace dependencies — per-OS
+  calls live in a new `freminal::gui::platform` module. `Both` triggers the visual flash
+  and audible beep together; either path requests user-attention when the window is
+  unfocused. Settings Modal picker updated. The originally-proposed custom sound-file path
+  was dropped from scope (matches WezTerm's `SystemBeep` plus a `Both` variant).
+- **71.15** — In-app recording toggle. Add a `ToggleRecording` `KeyAction`
+  (default `Ctrl+Shift+R`), a "Session" menu with Start/Stop Recording entry that
+  shows the destination path while active, and a right-aligned `● REC` indicator in
+  the menu bar while recording is active. Files are written to a per-platform
+  recording library directory (`$XDG_CONFIG_HOME/freminal/recordings` on Linux/BSD,
+  `Application Support/Freminal/recordings` on macOS, `%APPDATA%\Freminal\recordings`
+  on Windows) with a timestamped `freminal-<unix-ts>.frec` filename. The current
+  topology (all windows, tabs, and panes with CWD and size) is captured into the
+  FREC header so the recording stands alone. Implemented in two commits: 71.15a
+  added the hot-swappable `RecordingSwap` plumbing; 71.15b added the toggle,
+  keybinding, menu, and indicator.
+- **71.16** — ✅ Cross-platform CWD readback. `freminal/src/gui/layout_ops.rs`
+  previously used `/proc/<pid>/cwd` directly, returning `None` on macOS and
+  Windows (silently degrading Layout save and FREC topology snapshots).
+  Implemented:
+  - New [`crate::gui::platform::read_cwd(pid: u32) -> Option<String>`] in
+    `freminal/src/gui/platform.rs`.
+  - **Linux** — `std::fs::read_link("/proc/<pid>/cwd")` (unchanged path, no
+    new dep).
+  - **macOS / Windows** — `sysinfo` crate, added as a target-gated workspace
+    dependency, using `Process::cwd()` (wraps `proc_pidinfo` with
+    `PROC_PIDVNODEPATHINFO` on macOS and `NtQueryInformationProcess` +
+    PEB `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory` on Windows).
+  - `read_cwd_for_pane_with_extra` now delegates to `platform::read_cwd`,
+    keeping the PID-lookup logic in the GUI layer and the platform logic
+    behind a safe single-function boundary.
+  - Stale doc comments updated across `freminal-terminal-emulator/src/io/pty.rs`,
+    `freminal-terminal-emulator/src/interface.rs`, `freminal/src/gui/pty.rs`,
+    and `freminal/src/gui/panes/mod.rs`.
+  - Cross-platform verification is still required (see 71 Verification) —
+    the macOS and Windows code paths compile but need an actual run.
+- **71.17** — ✅ Config hot-reload. Added `KeyAction::ReloadConfig` in
+  `freminal-common/src/keybindings.rs` (no default binding — menu-only, 53
+  total variants) and a "Reload Config" entry in the Session menu
+  (`freminal/src/gui/menu.rs`), disabled with a tooltip when no config path
+  is associated with the session. Refactored
+  `freminal/src/gui/settings_dispatch.rs` to extract the ~150-line Applied
+  broadcast logic into a shared `apply_new_config(Config, &WindowHandle)`
+  method used by both the Settings "Apply" path and the new
+  `reload_config_from_disk(&WindowHandle)` method. Added
+  `SettingsModal::sync_from_config` so the draft stays in sync after a
+  reload, plus `FreminalGui::push_info_toast` and `ToastStack::info` for
+  success messaging. Plumbed `config_path: Option<PathBuf>` into
+  `FreminalGui` from startup. File-watcher auto-reload was dropped per user
+  direction. Verified: `cargo test --all` (53 KeyAction variants,
+  `sync_from_config` unit test), clippy clean, machete clean.
 
 #### 71.P3 — Polish
 
-- **71.18** — Unsaved-changes guard on Settings close. If Settings has pending unsaved
-  edits and the user dismisses the modal, prompt to Save / Discard / Cancel.
-- **71.19** — Startup tab layout setting in Settings Modal becomes a dropdown of layouts
-  discovered in `~/.config/freminal/layouts/`, not a free-text field.
-- **71.20** — First-run onboarding. Show a 3-panel overlay on first launch explaining the
-  menu bar, the settings shortcut, and the layouts directory. Store a `first_run_complete`
-  flag in the config. Skippable and permanently dismissible.
+- **71.18** — ✅ Unsaved-changes guard on Settings close. Added `is_dirty()`
+  and `request_close()` to `SettingsModal`: the former compares the draft
+  against a TOML-serialized baseline captured on `open()` / after
+  successful `try_apply()` / on `sync_from_config()`; the latter returns
+  `true` for immediate close (clean draft or read-only mode) and `false`
+  while deferring to a `PendingClose::Asking` state that renders a
+  Save / Discard / Cancel prompt on top of the settings UI. The Cancel
+  button, embedded window X, and OS titlebar close of the standalone
+  settings window all route through the guard, so every close path is
+  protected. Read-only mode bypasses the guard because Apply is disabled
+  and no unsaved edits can exist from the user's perspective. Added
+  `freminal_common::config::serialize_config_for_diff` so the GUI crate
+  does not need a direct `toml` dependency. Three unit tests cover the
+  clean/dirty/read-only branches. Verification green.
+- **71.19** ✅ — Startup tab layout setting in Settings Modal becomes a dropdown of layouts
+  discovered in `~/.config/freminal/layouts/`, not a free-text field. An explicit
+  `(none)` sentinel entry clears the startup layout; a configured-but-missing layout
+  is preserved and marked `(missing)` so the user can re-select it once the file
+  reappears without having to retype the name. Layout descriptions are shown inline
+  alongside each entry. The selection logic was factored into a pure helper
+  `startup_layout_is_missing` with unit-test coverage, and the ComboBox rendering was
+  split across `show_startup_layout_group`, `populate_startup_layout_combo`, and
+  `show_layout_library_group` to keep each under the pedantic line-count threshold.
+  Verification green.
+- **71.20** ✅ — First-run onboarding overlay. Added `OnboardingConfig { first_run_complete: bool }`
+  section to `Config` (with `ConfigPartial` merging, Nix home-manager module, and
+  `config_example.toml` documentation). Implemented `gui::welcome::WelcomeOverlay`, a
+  three-panel modal dialog introducing the menu bar (with the Ctrl+Shift+M shortcut),
+  the Settings dialog (with Ctrl+, / Cmd+,), and the layouts directory
+  (`~/.config/freminal/layouts/`). The overlay opens automatically on first launch
+  (when `first_run_complete == false`) and can be re-triggered at any time via
+  **Help → Show Welcome...**. Skip, Finish, and the title-bar close-X all set the
+  flag to `true` and persist `config.toml`; a save failure surfaces as an error
+  toast but does not re-open the overlay. The state machine (`Panel` enum,
+  `advance`/`go_back`/`dismiss`, `panel_content` lookup) is pure logic covered by
+  10 unit tests. The overlay is included in the `ui_overlay_open` input-suppression
+  check so terminal keystrokes do not leak into the PTY while it is visible.
+  Verification green.
+
+#### 71.PostManualTest — Bug fixes from dogfooding
+
+After all 21 feature subtasks landed, a manual-testing pass surfaced 6
+bugs in the new code paths. All 6 are fixed on the same branch.
+
+- **PostMT-1** ✅ — Cold launch with no flags spawned the initial PTY
+  _before_ the event loop started, in `main::normal_run`. A failure
+  bubbled through `?` into `main` with only a `tracing::error!` —
+  silent exit, no toast. **Fix (commit `253428a`):** defer the initial
+  PTY spawn into `FreminalGui::on_window_created`, surface failures via
+  the existing toast system and close the empty window if the shell
+  cannot start.
+- **PostMT-2** ✅ — `maybe_restore_last_session` ran even when the user
+  passed a positional command (e.g. `freminal yazi`), so the requested
+  command never got to launch. **Fix (commit `e5ffec7`):**
+  early-return from session restore when `args.command` is `Some`.
+- **PostMT-3** ✅ — A broken `--layout <path>` or `startup.layout`
+  setting produced no user-visible error; the application started
+  empty. Shared root cause with PostMT-1 and resolved by the same
+  refactor (`253428a`): the layout-or-restore branch of the
+  first-window helper surfaces resolution failures via a toast and
+  falls back to a default PTY so the user is not left with a black
+  window.
+- **PostMT-4** ✅ — Malformed `.toml` files under
+  `~/.config/freminal/layouts/` were silently dropped from the Layouts
+  menu with no indication that a layout existed but failed to load.
+  **Fix (commit `004e751`):** added
+  `freminal_common::layout::discover_layouts_with_errors` and an
+  aggregated startup toast listing every failure.
+- **PostMT-5** ✅ — Shader compile errors only surfaced on subsequent
+  window creation, because the `last_error` drain lived on the spawn
+  path rather than per-frame. **Fix (commit `8252da0`):** moved the
+  `WindowPostRenderer::last_error.take()` drain to the top of every
+  window's `update()` so a compile error appears as a toast within one
+  frame on the active window.
+- **PostMT-6** ✅ — NixOS home-manager users whose `config.toml` is a
+  read-only symlink could not dismiss the first-run welcome overlay.
+  `mark_onboarding_complete` tried to mutate `config.toml`, failed
+  with `EROFS`, raised an error toast, and the overlay reappeared on
+  every launch. **Fix (commit `d4c21a9`):** introduced
+  `freminal_common::app_state` (sidecar `state.toml` under
+  `$XDG_STATE_HOME/freminal/` on Linux, `~/Library/Application Support`
+  on macOS, `%APPDATA%` on Windows) and moved `first_run_complete` out
+  of `config.toml` into it. The legacy `OnboardingConfig` is retained
+  for back-compat parsing and a `true` value is migrated forward on
+  first launch with the new binary. Sets up the natural home for
+  future per-install runtime state (dismissed update prompts, tips,
+  etc.). 11 new unit tests in `app_state.rs`.
 
 ### 71 Verification
 
@@ -527,6 +896,20 @@ error paths that log-and-disappear with no user feedback.
   one Linux, one macOS, one Windows run.
 
 Task 71 is complete when every one of the 20 items is implemented, tested, and verified.
+
+**Final status (2026-05-17):**
+
+- All 21 subtasks (71.1–71.20 + 71.7b) implemented, committed, and
+  marked complete.
+- All 6 post-implementation bugs found during manual testing fixed and
+  committed.
+- Full verification suite green on the branch:
+  `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo machete`.
+- **Outstanding:** end-to-end manual UX walkthrough (P1/P2/P3 plan)
+  and cross-platform verification of 71.14 + 71.16 + the new
+  `app_state` sidecar path on macOS / Windows. The Linux paths for
+  all of the above have been exercised during development.
 
 ---
 

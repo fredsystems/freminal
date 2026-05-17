@@ -47,3 +47,4 @@ pub mod cell;
 pub mod image_store;
 pub mod response;
 pub mod row;
+pub mod url_detect;

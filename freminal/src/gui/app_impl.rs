@@ -54,140 +54,35 @@ impl freminal_windowing::App for FreminalGui {
         let os_dark_mode = ctx.global_style().visuals.dark_mode;
 
         if let Some(initial) = self.initial_state.take() {
-            // First window — use the pre-spawned tab and widget.
-            let proxy = handle.event_loop_proxy();
-            let _ = initial.repaint_handle.set((proxy, window_id));
-
-            let initial_theme =
-                freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
-                    .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
-            rendering::set_egui_options(ctx, initial_theme, self.config.ui.background_opacity);
-
-            // Re-create terminal widget with real egui context for correct
-            // font registration and DPI scaling.
-            let terminal_widget =
-                FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
-                    tracing::error!(
-                        "fatal: failed to initialise terminal widget (font manager): {e}"
-                    );
-                    std::process::exit(1);
-                });
-
-            // Send an immediate resize to the PTY so the shell starts at the
-            // correct dimensions instead of the pre-spawn defaults (100x100).
-            let (cell_w, cell_h) = terminal_widget.cell_size();
-            let computed_size =
-                Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
-            let cell_pixel_w = cell_w.value_as::<usize>().unwrap_or(0);
-            let cell_pixel_h = cell_h.value_as::<usize>().unwrap_or(0);
-            if let Ok(panes) = initial.tab.pane_tree.iter_panes() {
-                for pane in panes {
-                    send_or_log!(
-                        pane.input_tx,
-                        InputEvent::Resize(
-                            computed_size.width,
-                            computed_size.height,
-                            cell_pixel_w,
-                            cell_pixel_h,
-                        ),
-                        "Failed to send initial resize to pre-spawned pane"
-                    );
-                }
-            }
-
-            // Correct the theme for auto mode if the real OS preference differs
-            // from the assumed-light default used during construction.
-            if os_dark_mode
-                && let Some(theme) =
-                    freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
-                && let Ok(panes) = initial.tab.pane_tree.iter_panes()
-            {
-                for pane in panes {
-                    send_or_log!(
-                        pane.input_tx,
-                        InputEvent::ThemeChange(theme),
-                        "Failed to send corrective ThemeChange"
-                    );
-                    send_or_log!(
-                        pane.input_tx,
-                        InputEvent::ThemeModeUpdate(self.config.theme.mode, os_dark_mode,),
-                        "Failed to send ThemeModeUpdate"
-                    );
-                }
-            }
-
-            let win = PerWindowState {
-                tabs: TabManager::new(initial.tab),
-                terminal_widget,
-                last_window_title: String::from("Freminal"),
-                os_dark_mode,
-                style_cache: None,
-                pending_close_pane: false,
-                pending_focus_direction: None,
-                border_drag: None,
-                shader_last_mtime: None,
-                window_post: initial.window_post,
-                repaint_handle: initial.repaint_handle,
-                pending_new_window: false,
-                pending_geometry: None,
-                last_known_size: None,
-                last_known_position: None,
-            };
-            self.windows.insert(window_id, win);
-
-            // If --layout was given on the CLI, apply it to this first window.
-            // Fall through to config.startup.layout when absent.
-            let startup_layout_name = self
-                .args
-                .layout
-                .clone()
-                .or_else(|| self.config.startup.layout.clone());
-
-            if let Some(ref name_or_path) = startup_layout_name {
-                // Resolve bare name (e.g. "dev") to library path; treat anything
-                // with a path separator or .toml suffix as a literal path.
-                let path = {
-                    let p = std::path::Path::new(name_or_path.as_str());
-                    if p.extension().is_some_and(|e| e == "toml") || p.components().count() > 1 {
-                        p.to_path_buf()
-                    } else {
-                        freminal_common::config::layout_library_dir().map_or_else(
-                            || p.to_path_buf(),
-                            |d| d.join(format!("{name_or_path}.toml")),
-                        )
-                    }
-                };
-                let positional: Vec<String> = self
-                    .args
-                    .layout_vars
-                    .iter()
-                    .filter(|s| !s.contains('='))
-                    .cloned()
-                    .collect();
-                let var_map = self.args.layout_var_map();
-                match freminal_common::layout::Layout::from_file(&path) {
-                    Ok(layout) => match layout.apply_variables(&positional, &var_map).resolve() {
-                        Ok(resolved) => {
-                            let cmds = self.apply_layout(&resolved, window_id, handle);
-                            self.inject_layout_commands(&cmds);
-                        }
-                        Err(e) => {
-                            error!("Failed to resolve layout '{}': {e}", path.display());
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to load layout '{}': {e}", path.display());
-                    }
-                }
+            // First window — spawn the initial PTY tab now, or if a
+            // startup layout/session-restore applies, delegate to the
+            // layout machinery (which will build the tabs itself and
+            // avoid a throwaway PTY spawn).
+            if self.will_layout_or_restore_apply() {
+                self.create_first_window_from_layout_or_restore(
+                    window_id,
+                    ctx,
+                    handle,
+                    inner_size,
+                    os_dark_mode,
+                    initial.repaint_handle,
+                    initial.window_post,
+                );
             } else {
-                // No --layout CLI flag and no startup.layout — try to restore
-                // the last session if configured.
-                self.maybe_restore_last_session(window_id, handle);
+                self.create_first_window_with_default_pty(
+                    window_id,
+                    ctx,
+                    handle,
+                    inner_size,
+                    os_dark_mode,
+                    initial.repaint_handle,
+                    initial.window_post,
+                );
             }
 
             // Emit WindowCreate recording event.
             let rec_wid = self.recording_window_id(window_id);
-            if let Some(ref h) = self.recording_handle {
+            if let Some(h) = self.recording_swap.load_full() {
                 h.emit(
                     freminal_terminal_emulator::recording::EventPayload::WindowCreate {
                         window_id: rec_wid,
@@ -208,6 +103,7 @@ impl freminal_windowing::App for FreminalGui {
                     handle,
                     inner_size,
                     os_dark_mode,
+                    None,
                 ) {
                     self.inject_layout_commands(&cmds);
                 }
@@ -247,13 +143,14 @@ impl freminal_windowing::App for FreminalGui {
                 &self.args,
                 self.config.scrollback.limit,
                 theme,
+                self.config.ui.auto_detect_urls,
                 &repaint_handle,
                 initial_size,
                 super::pty::PtyTabConfig {
                     cwd: None,
                     shell_override: None,
                     extra_env: None,
-                    recording_handle: self.recording_handle.clone(),
+                    recording_swap: self.recording_swap.clone(),
                     recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
                 },
             ) {
@@ -269,6 +166,7 @@ impl freminal_windowing::App for FreminalGui {
                         pty_dead_rx: channels.pty_dead_rx,
                         title: "Terminal".to_owned(),
                         bell_active: false,
+                        pending_copy: false,
                         title_stack: Vec::new(),
                         view_state: view_state::ViewState::new(),
                         echo_off: channels.echo_off,
@@ -331,12 +229,17 @@ impl freminal_windowing::App for FreminalGui {
                         pending_geometry: None,
                         last_known_size: None,
                         last_known_position: None,
+                        renaming_tab: None,
+                        rename_buffer: String::new(),
+                        dragging_tab: None,
+                        last_tab_rects: Vec::new(),
+                        pending_menu_actions: Vec::new(),
                     };
                     self.windows.insert(window_id, win);
 
                     // Emit WindowCreate recording event.
                     let rec_wid = self.recording_window_id(window_id);
-                    if let Some(ref h) = self.recording_handle {
+                    if let Some(h) = self.recording_swap.load_full() {
                         h.emit(
                             freminal_terminal_emulator::recording::EventPayload::WindowCreate {
                                 window_id: rec_wid,
@@ -350,6 +253,10 @@ impl freminal_windowing::App for FreminalGui {
                 }
                 Err(e) => {
                     error!("Failed to spawn PTY for new window: {e}");
+                    self.push_error_toast(
+                        "Failed to open new window",
+                        Some(format!("The shell could not be started: {e}")),
+                    );
                 }
             }
         }
@@ -362,14 +269,26 @@ impl freminal_windowing::App for FreminalGui {
     fn on_close_requested(&mut self, window_id: WindowId) -> bool {
         // Settings window closed (via OS close button).
         if self.settings_window_id == Some(window_id) {
+            // Consult the unsaved-changes guard.  When dirty, the modal
+            // surfaces a confirm prompt on its next frame; veto the OS close
+            // so the window stays open long enough for the user to decide.
+            if !self.settings_modal.request_close() {
+                return false;
+            }
             self.settings_modal.is_open = false;
             self.settings_window_id = None;
             self.settings_owner = None;
             self.persist_window_state();
             return true;
         }
-        // If this window owns the settings modal, close it.
+        // If this window owns the settings modal (embedded floating), try
+        // the same guard.  If close is vetoed, still allow the owning
+        // terminal window to close — but keep the modal's dirty state so a
+        // confirm prompt appears on the next frame of a sibling window if
+        // any exists.  In practice this path closes the modal regardless
+        // because the modal has no window of its own to live in.
         if self.settings_owner == Some(window_id) {
+            let _ = self.settings_modal.request_close();
             self.settings_modal.is_open = false;
             self.settings_owner = None;
         }
@@ -408,7 +327,7 @@ impl freminal_windowing::App for FreminalGui {
 
         // Emit WindowClose recording event (only for known windows), and clean up the mapping.
         if let Some(rec_wid) = self.recording_window_ids.remove(&window_id)
-            && let Some(ref h) = self.recording_handle
+            && let Some(h) = self.recording_swap.load_full()
         {
             h.emit(
                 freminal_terminal_emulator::recording::EventPayload::WindowClose {
@@ -533,6 +452,25 @@ impl freminal_windowing::App for FreminalGui {
         let Some(mut win) = self.windows.remove(&window_id) else {
             return;
         };
+
+        // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
+        // PaintCallbacks run on the render thread and can't access `self`, so
+        // they stash compile/init errors in `WindowPostRenderer::last_error`.
+        // Drained here every frame (71.4 bug fix): previously only ran in the
+        // subsequent-window branch of `on_window_created`, which never fires
+        // for the first/only window and never re-runs after window creation.
+        {
+            let err = {
+                let mut wpr = win
+                    .window_post
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                wpr.last_error.take()
+            };
+            if let Some(msg) = err {
+                self.push_error_toast("Shader error", Some(msg));
+            }
+        }
 
         // ── Spawn new window ─────────────────────────────────────────────────
         if win.pending_new_window {
@@ -696,7 +634,7 @@ impl freminal_windowing::App for FreminalGui {
             match tab.pane_tree.close(pane_id) {
                 Ok(_closed) => {
                     // Emit PaneClose recording event.
-                    if let Some(ref h) = self.recording_handle {
+                    if let Some(h) = self.recording_swap.load_full() {
                         // Saturating `u64 -> u32`: pane IDs are monotonic from
                         // 0 and will never realistically exceed u32::MAX.
                         h.emit(
@@ -793,6 +731,32 @@ impl freminal_windowing::App for FreminalGui {
             self.dispatch_tab_bar_action(menu_action, &mut win);
         }
 
+        // Help menu → "Keybindings..." routes here.  Opens the Settings
+        // Modal with the Keybindings tab preselected, or focuses the
+        // existing settings window if one is already open.  Mirrors the
+        // Settings menu item in `show_menu_bar`, but jumps to the
+        // Keybindings tab instead of the default Font tab.
+        if self.pending_open_keybindings {
+            self.pending_open_keybindings = false;
+            if self.settings_window_id.is_some() {
+                self.pending_focus_settings = true;
+                self.settings_modal
+                    .set_active_tab(crate::gui::settings::SettingsTab::Keybindings);
+            } else if !self.settings_modal.is_open && !self.pending_settings_window {
+                let families = win.terminal_widget.monospace_families();
+                self.settings_modal.open_to_tab(
+                    &self.config,
+                    families,
+                    win.os_dark_mode,
+                    crate::gui::settings::SettingsTab::Keybindings,
+                );
+                self.settings_modal
+                    .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                self.settings_owner = Some(window_id);
+                self.pending_settings_window = true;
+            }
+        }
+
         // Tab bar: shown when multiple tabs are open, or when the config
         // option `tabs.show_single_tab` is enabled.
         let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
@@ -803,7 +767,7 @@ impl freminal_windowing::App for FreminalGui {
                 freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
             };
             let tab_action = panel
-                .show_inside(&mut root_ui, |ui| self.show_tab_bar(&win, ui))
+                .show_inside(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui))
                 .inner;
             self.dispatch_tab_bar_action(tab_action, &mut win);
         }
@@ -872,9 +836,10 @@ impl freminal_windowing::App for FreminalGui {
                     }
                 };
                 if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                    let mut tab_shell_set_title = false;
                     for pane in panes {
                         let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
-                        rendering::handle_window_manipulation(
+                        let shell_set = rendering::handle_window_manipulation(
                             ui,
                             &pane.window_cmd_rx,
                             &pane.pty_write_tx,
@@ -893,6 +858,15 @@ impl freminal_windowing::App for FreminalGui {
                                 is_only_pane,
                             },
                         );
+                        if shell_set {
+                            tab_shell_set_title = true;
+                        }
+                    }
+                    // Once the shell asserts a title via OSC 0/1/2, any
+                    // user-pinned custom name for this tab is cleared so
+                    // shell-driven titles become authoritative again.
+                    if tab_shell_set_title && tab.custom_name.is_some() {
+                        tab.custom_name = None;
                     }
                 }
             }
@@ -985,10 +959,38 @@ impl freminal_windowing::App for FreminalGui {
                 all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
             }
 
+            // Floating "About Freminal" dialog.  Shown whenever the user
+            // clicked "About Freminal" in the Help menu.  Self-dismissing
+            // via its own Close button or title-bar X.
+            self.show_about_window(ctx);
+
+            // First-run welcome overlay (subtask 71.20).  Opened on first
+            // launch or from Help -> Show Welcome; persists
+            // `first_run_complete = true` on dismissal.
+            self.show_welcome_overlay(ctx);
+
+            // Drain pending menu actions (Edit menu clicks: Copy, Paste,
+            // Select All, Find...).  These were queued during
+            // `show_menu_bar` above, which does not have mutable access to
+            // the active pane's ViewState / input_tx.  Menu-local actions
+            // (Copy, Paste, Select All) are applied directly to the active
+            // pane; others are routed through the deferred-action pipeline.
+            for action in std::mem::take(&mut win.pending_menu_actions) {
+                Self::dispatch_menu_action(&mut win, action, &mut all_deferred_actions);
+            }
+
             // Track repaint needs across all panes.
             let mut shortest_repaint_delay: Option<std::time::Duration> = None;
 
-            let ui_overlay_open = any_menu_open || self.pending_save_layout.is_some();
+            // Tab rename is treated as an overlay: while the inline rename
+            // TextEdit is active, the terminal widget must release keyboard
+            // focus and stop consuming pointer events, or keystrokes would
+            // be forwarded to the PTY instead of the edit buffer.
+            let ui_overlay_open = any_menu_open
+                || self.pending_save_layout.is_some()
+                || self.about_window_open
+                || self.welcome.is_open()
+                || win.renaming_tab.is_some();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
@@ -1221,8 +1223,11 @@ impl freminal_windowing::App for FreminalGui {
                 let is_active = pane_id == active_pane_id;
 
                 // Build a RecordingContext for this pane if recording is active.
+                // Hold the Arc locally so the borrow in `RecordingContext.handle`
+                // remains valid for the lifetime of `rec_ctx`.
                 let rec_window_id = self.recording_window_id(window_id);
-                let rec_ctx = self.recording_handle.as_ref().map(|h| {
+                let rec_handle = self.recording_swap.load_full();
+                let rec_ctx = rec_handle.as_ref().map(|h| {
                     freminal_terminal_emulator::recording::RecordingContext {
                         handle: h,
                         window_id: rec_window_id,
@@ -1256,6 +1261,7 @@ impl freminal_windowing::App for FreminalGui {
                             is_active,
                             pane_id,
                             rec_ctx.as_ref(),
+                            &mut pane.pending_copy,
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;
@@ -1327,7 +1333,6 @@ impl freminal_windowing::App for FreminalGui {
                 let shader_active = wpr_check.is_active();
                 let pending = wpr_check.pending_shader.is_some();
                 drop(wpr_check);
-
                 if shader_active || pending {
                     let frame_dt = ui.input(|i| i.stable_dt);
                     let wpr_for_post = Arc::clone(&win.window_post);
@@ -1345,6 +1350,7 @@ impl freminal_windowing::App for FreminalGui {
                                 && let Err(e) = wpr.init(gl)
                             {
                                 error!("WindowPostRenderer init failed: {e}");
+                                wpr.last_error = Some(format!("Renderer init failed: {e}"));
                                 return;
                             }
 
@@ -1360,6 +1366,8 @@ impl freminal_windowing::App for FreminalGui {
                                         ) =>
                                     {
                                         error!("Shader compilation failed: {e}");
+                                        wpr.last_error =
+                                            Some(format!("Shader compile failed: {e}"));
                                     }
                                     Some(_) => {}
                                     None => wpr.clear_shader(gl),
@@ -1467,7 +1475,7 @@ impl freminal_windowing::App for FreminalGui {
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
             for action in all_deferred_actions {
-                self.dispatch_deferred_action(action, &mut win, window_id);
+                self.dispatch_deferred_action(action, &mut win, window_id, handle);
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
@@ -1485,14 +1493,16 @@ impl freminal_windowing::App for FreminalGui {
             // This handles tab switches, OSC 0/2 title changes, and restore
             // from the title stack — all in one place.
             //
+            // A user-assigned custom tab name (via `RenameTab` or a
+            // double-click rename) takes precedence over the pane-derived
+            // title.  The custom name is cleared by `handle_window_manipulation`
+            // the next time the shell asserts a title via OSC 0/1/2.
+            //
             // Only issue the viewport command when the title actually changed;
             // calling `send_viewport_cmd` unconditionally every frame triggers
             // an infinite repaint loop (~3 % idle CPU).
-            let active_title = win
-                .tabs
-                .active_tab()
-                .active_pane()
-                .map_or("", |p| p.title.as_str());
+            let active_tab = win.tabs.active_tab();
+            let active_title = active_tab.display_name();
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
@@ -1508,6 +1518,13 @@ impl freminal_windowing::App for FreminalGui {
                 ctx.request_repaint_after(delay);
             }
         });
+
+        // Render the app-level toast stack as an overlay on top of all panels.
+        // Toasts are shared across every window, so they appear consistently
+        // regardless of which window the user is looking at.
+        if let Ok(mut stack) = self.toasts.try_borrow_mut() {
+            stack.show(ctx);
+        }
 
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {
@@ -1546,5 +1563,314 @@ impl freminal_windowing::App for FreminalGui {
         //   - 500 ms (cursor blink)                 → ~2 FPS
         //   - no request (true idle, steady cursor)  → 0 FPS
         raw_input.predicted_dt = 0.0;
+    }
+}
+
+impl FreminalGui {
+    /// First-window spawn path when no layout or session restore will apply.
+    ///
+    /// Spawns a default single-pane PTY.  PTY-spawn failures surface as a
+    /// user-visible toast (the window still opens, empty) rather than
+    /// aborting the application.  This mirrors the subsequent-window
+    /// branch's error handling.
+    #[allow(clippy::too_many_arguments)] // Helper inherits all of on_window_created's context.
+    fn create_first_window_with_default_pty(
+        &mut self,
+        window_id: WindowId,
+        ctx: &egui::Context,
+        handle: &freminal_windowing::WindowHandle<'_>,
+        inner_size: (u32, u32),
+        os_dark_mode: bool,
+        repaint_handle: Arc<std::sync::OnceLock<(freminal_windowing::RepaintProxy, WindowId)>>,
+        window_post: Arc<Mutex<WindowPostRenderer>>,
+    ) {
+        let proxy = handle.event_loop_proxy();
+        let _ = repaint_handle.set((proxy, window_id));
+
+        let theme = freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
+            .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+        rendering::set_egui_options(ctx, theme, self.config.ui.background_opacity);
+
+        let terminal_widget = FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
+            tracing::error!("fatal: failed to initialise terminal widget (font manager): {e}");
+            std::process::exit(1);
+        });
+        let (cell_w, cell_h) = terminal_widget.cell_size();
+        let initial_size = Self::compute_initial_size(inner_size.0, inner_size.1, cell_w, cell_h);
+
+        let pane_id = self
+            .pane_id_gen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_id();
+
+        let channels = match super::pty::spawn_pty_tab(
+            &self.args,
+            self.config.scrollback.limit,
+            theme,
+            self.config.ui.auto_detect_urls,
+            &repaint_handle,
+            initial_size,
+            super::pty::PtyTabConfig {
+                cwd: None,
+                shell_override: None,
+                extra_env: None,
+                recording_swap: self.recording_swap.clone(),
+                recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+            },
+        ) {
+            Ok(channels) => channels,
+            Err(e) => {
+                error!("Failed to spawn initial PTY: {e}");
+                self.push_error_toast(
+                    "Failed to start shell",
+                    Some(format!("The shell could not be started: {e}")),
+                );
+                // Without a PTY there is nothing to show in this window.
+                // Close it so the user is not left with a black rectangle.
+                handle.close_window(window_id);
+                return;
+            }
+        };
+
+        let pane = panes::Pane {
+            id: pane_id,
+            arc_swap: channels.arc_swap,
+            input_tx: channels.input_tx,
+            pty_write_tx: channels.pty_write_tx,
+            window_cmd_rx: channels.window_cmd_rx,
+            clipboard_rx: channels.clipboard_rx,
+            search_buffer_rx: channels.search_buffer_rx,
+            pty_dead_rx: channels.pty_dead_rx,
+            title: "Terminal".to_owned(),
+            bell_active: false,
+            pending_copy: false,
+            title_stack: Vec::new(),
+            view_state: view_state::ViewState::new(),
+            echo_off: channels.echo_off,
+            child_pid: channels.child_pid,
+            render_state: new_render_state(Arc::clone(&window_post)),
+            render_cache: super::terminal::PaneRenderCache::new(),
+        };
+
+        let tab = Tab::new(super::tabs::TabId::first(), pane);
+
+        // Inform the initial tab about the configured theme mode and real
+        // OS dark/light preference so DECRPM ?2031 responses are correct.
+        if let Some(active) = tab.active_pane()
+            && let Err(e) =
+                active
+                    .input_tx
+                    .send(freminal_terminal_emulator::io::InputEvent::ThemeModeUpdate(
+                        self.config.theme.mode,
+                        os_dark_mode,
+                    ))
+        {
+            error!("Failed to send ThemeModeUpdate to initial tab: {e}");
+        }
+
+        // Apply initial background image from config (if set).
+        let initial_bg_path = self.config.ui.background_image.clone();
+        if initial_bg_path.is_some()
+            && let Ok(panes_list) = tab.pane_tree.iter_panes()
+        {
+            for p in panes_list {
+                if let Ok(mut rs) = p.render_state.lock() {
+                    rs.set_pending_bg_image(initial_bg_path.clone());
+                }
+            }
+        }
+
+        let win = Self::new_per_window_state(
+            tab,
+            terminal_widget,
+            os_dark_mode,
+            window_post,
+            repaint_handle,
+        );
+        self.windows.insert(window_id, win);
+    }
+
+    /// Construct a `PerWindowState` with default field values for all
+    /// transient UI state.  Extracted to keep
+    /// `create_first_window_with_default_pty` under the line limit.
+    fn new_per_window_state(
+        tab: Tab,
+        terminal_widget: FreminalTerminalWidget,
+        os_dark_mode: bool,
+        window_post: Arc<Mutex<WindowPostRenderer>>,
+        repaint_handle: Arc<std::sync::OnceLock<(freminal_windowing::RepaintProxy, WindowId)>>,
+    ) -> PerWindowState {
+        PerWindowState {
+            tabs: TabManager::new(tab),
+            terminal_widget,
+            last_window_title: String::from("Freminal"),
+            os_dark_mode,
+            style_cache: None,
+            pending_close_pane: false,
+            pending_focus_direction: None,
+            border_drag: None,
+            shader_last_mtime: None,
+            window_post,
+            repaint_handle,
+            pending_new_window: false,
+            pending_geometry: None,
+            last_known_size: None,
+            last_known_position: None,
+            renaming_tab: None,
+            rename_buffer: String::new(),
+            dragging_tab: None,
+            last_tab_rects: Vec::new(),
+            pending_menu_actions: Vec::new(),
+        }
+    }
+
+    /// First-window spawn path when a startup layout or session restore
+    /// will populate the window's tabs.
+    ///
+    /// Resolves the layout (from `--layout`, `startup.layout`, or
+    /// `last_session.toml`), pushes every resolved window into
+    /// `pending_layout_windows`, builds the first `PerWindowState` by
+    /// popping the first entry, and creates OS windows for the rest.
+    ///
+    /// If resolution fails, pushes an error toast and falls back to
+    /// spawning a default PTY so the user still gets a usable terminal.
+    #[allow(clippy::too_many_arguments)] // Helper inherits all of on_window_created's context.
+    fn create_first_window_from_layout_or_restore(
+        &mut self,
+        window_id: WindowId,
+        ctx: &egui::Context,
+        handle: &freminal_windowing::WindowHandle<'_>,
+        inner_size: (u32, u32),
+        os_dark_mode: bool,
+        repaint_handle: Arc<std::sync::OnceLock<(freminal_windowing::RepaintProxy, WindowId)>>,
+        window_post: Arc<Mutex<WindowPostRenderer>>,
+    ) {
+        let Some(resolved) = self.resolve_startup_layout_or_session() else {
+            // Resolution failed and a toast was already pushed.  Fall
+            // back to a default PTY so the window is still useful.
+            self.create_first_window_with_default_pty(
+                window_id,
+                ctx,
+                handle,
+                inner_size,
+                os_dark_mode,
+                repaint_handle,
+                window_post,
+            );
+            return;
+        };
+
+        // Queue all resolved windows.  The first is consumed below for
+        // this window; subsequent ones trigger fresh
+        // `on_window_created` callbacks that will pop and build their
+        // own `PerWindowState`.
+        for w in &resolved.windows {
+            self.pending_layout_windows.push_back(w.clone());
+        }
+
+        // Build this first window by popping the first queued entry.
+        let cmds_opt = self.build_window_from_pending_layout(
+            window_id,
+            ctx,
+            handle,
+            inner_size,
+            os_dark_mode,
+            Some((repaint_handle, window_post)),
+        );
+
+        // Create OS windows for any remaining pending layout windows.
+        // Their sizes/positions are taken from the layout.
+        let remaining: Vec<_> = self.pending_layout_windows.iter().cloned().collect();
+        for extra_window in remaining {
+            handle.create_window(freminal_windowing::WindowConfig {
+                title: "Freminal".to_owned(),
+                inner_size: extra_window.size.map(<[u32; 2]>::into),
+                position: extra_window.position.map(<[i32; 2]>::into),
+                transparent: true,
+                icon: self.icon.clone(),
+                app_id: Some("freminal".into()),
+            });
+        }
+
+        if let Some(cmds) = cmds_opt {
+            self.inject_layout_commands(&cmds);
+        }
+    }
+
+    /// Resolve the startup layout or session-restore source to a
+    /// `ResolvedLayout`, if any applies.
+    ///
+    /// Tries in priority order:
+    /// 1. `--layout` CLI flag
+    /// 2. `startup.layout` in config
+    /// 3. `last_session.toml` when `startup.restore_last_session` is on
+    ///    and no positional command was supplied.
+    ///
+    /// Returns `None` if no source applies or if loading/resolution
+    /// fails.  On failure, pushes an error toast so the caller can fall
+    /// back to a default PTY.
+    fn resolve_startup_layout_or_session(&self) -> Option<freminal_common::layout::ResolvedLayout> {
+        // Priority 1 + 2: --layout / startup.layout.
+        if let Some(name_or_path) = self
+            .args
+            .layout
+            .clone()
+            .or_else(|| self.config.startup.layout.clone())
+        {
+            let path = Self::resolve_startup_layout_path(&name_or_path);
+            let positional: Vec<String> = self
+                .args
+                .layout_vars
+                .iter()
+                .filter(|s| !s.contains('='))
+                .cloned()
+                .collect();
+            let var_map = self.args.layout_var_map();
+            return match freminal_common::layout::Layout::from_file(&path) {
+                Ok(layout) => match layout.apply_variables(&positional, &var_map).resolve() {
+                    Ok(resolved) => Some(resolved),
+                    Err(e) => {
+                        error!("Failed to resolve layout '{}': {e}", path.display());
+                        self.push_error_toast(
+                            "Failed to resolve layout",
+                            Some(format!("{}: {e}", path.display())),
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to load layout '{}': {e}", path.display());
+                    self.push_error_toast(
+                        "Failed to load layout",
+                        Some(format!("{}: {e}", path.display())),
+                    );
+                    None
+                }
+            };
+        }
+
+        // Priority 3: session restore.
+        let path = Self::last_session_path()?;
+        if !path.exists() {
+            return None;
+        }
+        match freminal_common::layout::Layout::from_file(&path).and_then(|l| {
+            l.apply_variables(&[], &std::collections::HashMap::new())
+                .resolve()
+        }) {
+            Ok(resolved) => Some(resolved),
+            Err(e) => {
+                error!(
+                    "restore_last_session: failed to apply {}: {e}",
+                    path.display()
+                );
+                self.push_error_toast(
+                    "Failed to restore last session",
+                    Some(format!("{}: {e}", path.display())),
+                );
+                None
+            }
+        }
     }
 }

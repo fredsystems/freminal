@@ -39,88 +39,139 @@ impl super::FreminalGui {
         let mut menu_action = TabBarAction::None;
         let mut any_menu_open = false;
         egui::MenuBar::new().ui(ui, |ui| {
-            let freminal_resp = ui.menu_button("Freminal", |ui| {
-                if ui
-                    .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
-                    .clicked()
-                {
-                    if self.settings_window_id.is_some() {
-                        // Settings window already exists — focus it.
-                        self.pending_focus_settings = true;
-                    } else if !self.settings_modal.is_open && !self.pending_settings_window {
-                        let families = win.terminal_widget.monospace_families();
-                        self.settings_modal
-                            .open(&self.config, families, win.os_dark_mode);
-                        self.settings_modal
-                            .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
-                        self.settings_owner = Some(window_id);
-                        self.pending_settings_window = true;
-                    }
-                    ui.close();
-                }
+            self.show_menu_bar_contents(ui, win, window_id, &mut menu_action, &mut any_menu_open);
+        });
+        (menu_action, any_menu_open)
+    }
 
-                ui.separator();
-
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            if freminal_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let tab_resp = ui.menu_button("Tab", |ui| {
-                menu_action = self.show_tab_menu(ui, win);
-            });
-            if tab_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let pane_resp = ui.menu_button("Pane", |ui| {
-                self.show_pane_menu(ui, win);
-            });
-            if pane_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let window_resp = ui.menu_button("Window", |ui| {
-                if ui
-                    .add(self.menu_button_for("New Window", KeyAction::NewWindow))
-                    .clicked()
-                {
-                    win.pending_new_window = true;
-                    ui.close();
-                }
-            });
-            if window_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            let layout_resp = ui.menu_button("Layouts", |ui| {
-                self.show_layouts_menu(ui, win, window_id);
-            });
-            if layout_resp.inner.is_some() {
-                any_menu_open = true;
-            }
-
-            // Password-prompt lock indicator: shown in the menu bar (which is
-            // always visible) so it works regardless of tab bar visibility.
-            if self.config.security.password_indicator
-                && win
-                    .tabs
-                    .active_tab()
-                    .active_pane()
-                    .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed))
+    /// Populate the menu bar with all top-level menus plus right-aligned
+    /// status indicators. Extracted from `show_menu_bar` to keep the entry
+    /// point under clippy's `too_many_lines` threshold.
+    fn show_menu_bar_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        win: &mut PerWindowState,
+        window_id: super::WindowId,
+        menu_action: &mut TabBarAction,
+        any_menu_open: &mut bool,
+    ) {
+        let freminal_resp = ui.menu_button("Freminal", |ui| {
+            if ui
+                .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
+                .clicked()
             {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.settings_window_id.is_some() {
+                    // Settings window already exists — focus it.
+                    self.pending_focus_settings = true;
+                } else if !self.settings_modal.is_open && !self.pending_settings_window {
+                    let families = win.terminal_widget.monospace_families();
+                    self.settings_modal
+                        .open(&self.config, families, win.os_dark_mode);
+                    self.settings_modal
+                        .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                    self.settings_owner = Some(window_id);
+                    self.pending_settings_window = true;
+                }
+                ui.close();
+            }
+
+            ui.separator();
+
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+        if freminal_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let edit_resp = ui.menu_button("Edit", |ui| {
+            self.show_edit_menu(ui, win);
+        });
+        if edit_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let tab_resp = ui.menu_button("Tab", |ui| {
+            *menu_action = self.show_tab_menu(ui, win);
+        });
+        if tab_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let pane_resp = ui.menu_button("Pane", |ui| {
+            self.show_pane_menu(ui, win);
+        });
+        if pane_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let window_resp = ui.menu_button("Window", |ui| {
+            if ui
+                .add(self.menu_button_for("New Window", KeyAction::NewWindow))
+                .clicked()
+            {
+                win.pending_new_window = true;
+                ui.close();
+            }
+        });
+        if window_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let layout_resp = ui.menu_button("Layouts", |ui| {
+            self.show_layouts_menu(ui, win, window_id);
+        });
+        if layout_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let session_resp = ui.menu_button("Session", |ui| {
+            self.show_session_menu(ui, win);
+        });
+        if session_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        let help_resp = ui.menu_button("Help", |ui| {
+            self.show_help_menu(ui);
+        });
+        if help_resp.inner.is_some() {
+            *any_menu_open = true;
+        }
+
+        // Right-aligned status indicators (recording state, password lock).
+        // The password-prompt lock indicator is shown in the menu bar
+        // (which is always visible) so it works regardless of tab bar
+        // visibility. The REC indicator shares the same right-aligned
+        // layout.
+        let show_lock = self.config.security.password_indicator
+            && win
+                .tabs
+                .active_tab()
+                .active_pane()
+                .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed));
+        let show_rec = self.is_recording();
+
+        if show_lock || show_rec {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if show_lock {
                     ui.label(
                         egui::RichText::new("\u{1F512}")
                             .color(egui::Color32::from_rgb(255, 200, 50)),
                     );
-                });
-            }
-        });
-        (menu_action, any_menu_open)
+                }
+                if show_rec {
+                    // Red filled bullet + "REC" label; kept short so
+                    // it does not crowd the menu bar.
+                    ui.label(
+                        egui::RichText::new("\u{25CF} REC")
+                            .color(egui::Color32::from_rgb(220, 60, 60))
+                            .strong(),
+                    );
+                }
+            });
+        }
     }
 
     /// Render the "Layouts" dropdown menu contents.
@@ -157,11 +208,184 @@ impl super::FreminalGui {
                         }
                         Err(e) => {
                             tracing::error!("Failed to load layout '{}': {e}", summary.name);
+                            self.push_error_toast(
+                                "Failed to load layout",
+                                Some(format!("{}: {e}", summary.name)),
+                            );
                         }
                     }
                     ui.close();
                 }
             }
+        }
+    }
+
+    /// Render the "Edit" dropdown menu contents.
+    ///
+    /// Each item enqueues a `KeyAction` onto `win.pending_menu_actions`,
+    /// which is drained in `update()` after the menu bar finishes rendering.
+    /// See `FreminalGui::dispatch_menu_action` for the receiving side.
+    fn show_edit_menu(&self, ui: &mut egui::Ui, win: &mut PerWindowState) {
+        if ui
+            .add(self.menu_button_for("Copy", KeyAction::Copy))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::Copy);
+            ui.close();
+        }
+        if ui
+            .add(self.menu_button_for("Paste", KeyAction::Paste))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::Paste);
+            ui.close();
+        }
+        if ui
+            .add(self.menu_button_for("Select All", KeyAction::SelectAll))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::SelectAll);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add(self.menu_button_for("Find...", KeyAction::OpenSearch))
+            .clicked()
+        {
+            win.pending_menu_actions.push(KeyAction::OpenSearch);
+            ui.close();
+        }
+    }
+
+    /// Render the "Help" dropdown menu contents.
+    ///
+    /// Contains three entries:
+    /// - "About Freminal" — opens the in-app About dialog
+    /// - "Report Issue..." — opens the GitHub issue tracker in the user's
+    ///   default browser
+    /// - "Keybindings..." — opens the Settings Modal focused on the
+    ///   Keybindings tab
+    ///
+    /// None of these items have keyboard shortcuts, so they use plain
+    /// `ui.button(...)` rather than `menu_button_for`.
+    fn show_help_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("About Freminal").clicked() {
+            self.about_window_open = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Report Issue...").clicked() {
+            let url = "https://github.com/fredsystems/freminal/issues/new";
+            if let Err(e) = open::that(url) {
+                tracing::error!("Failed to open issue tracker URL '{url}': {e}");
+                self.push_error_toast("Failed to open issue tracker", Some(format!("{e}")));
+            }
+            ui.close();
+        }
+        if ui.button("Keybindings...").clicked() {
+            self.pending_open_keybindings = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Show Welcome...").clicked() {
+            self.welcome.open();
+            ui.close();
+        }
+    }
+
+    /// Render the "Session" dropdown menu contents.
+    ///
+    /// Contains recording controls.  The toggle label reflects current
+    /// state: "Start Recording" when idle, "Stop Recording" when active.
+    /// When a recording is in progress, the destination path is shown as
+    /// a dimmed, non-interactive line below the toggle so the user can
+    /// see where the file is being written.
+    fn show_session_menu(&mut self, ui: &mut egui::Ui, win: &mut PerWindowState) {
+        let recording = self.is_recording();
+        let label = if recording {
+            "Stop Recording"
+        } else {
+            "Start Recording"
+        };
+        if ui
+            .add(self.menu_button_for(label, KeyAction::ToggleRecording))
+            .clicked()
+        {
+            self.toggle_recording();
+            ui.close();
+        }
+
+        if recording && let Some(path) = self.recording_path.as_ref() {
+            ui.separator();
+            ui.add_enabled(
+                false,
+                egui::Label::new(
+                    egui::RichText::new(format!("Recording to: {}", path.display()))
+                        .small()
+                        .weak(),
+                ),
+            );
+        }
+
+        ui.separator();
+        // Re-reads `config.toml` from disk and applies every change live.
+        // See `FreminalGui::reload_config_from_disk` for behaviour, including
+        // the no-op toast when no config path is associated with the session.
+        let reload_enabled = self.config_path.is_some();
+        let reload_resp = ui.add_enabled(
+            reload_enabled,
+            self.menu_button_for("Reload Config", KeyAction::ReloadConfig),
+        );
+        if reload_resp.clicked() {
+            win.pending_menu_actions.push(KeyAction::ReloadConfig);
+            ui.close();
+        }
+        if !reload_enabled {
+            reload_resp.on_disabled_hover_text("No config file is associated with this session.");
+        }
+    }
+
+    /// Show the "About Freminal" floating dialog.
+    ///
+    /// Rendered every frame when `about_window_open` is `true`.  Displays
+    /// the package version, the git-describe string (build hash), a short
+    /// description, and a Close button.  The dialog is anchored to the
+    /// window center and is neither resizable nor collapsible.
+    pub(super) fn show_about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_window_open {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("About Freminal")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(4.0);
+                    ui.heading("Freminal");
+                    ui.add_space(2.0);
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.label(format!(
+                        "Build {}",
+                        freminal_terminal_emulator::GIT_DESCRIBE
+                    ));
+                    ui.add_space(6.0);
+                    ui.label("A modern terminal emulator written in Rust.");
+                    ui.add_space(2.0);
+                    ui.label("Licensed under the MIT License.");
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        self.about_window_open = false;
+                    }
+                });
+            });
+
+        // Honor the window's own close button (the `X` in the title bar).
+        if !open {
+            self.about_window_open = false;
         }
     }
 
@@ -285,30 +509,106 @@ impl super::FreminalGui {
     /// more than one tab is open, and a "+" button at the end to create
     /// new tabs. Tabs are separated by thin vertical dividers.
     ///
+    /// When `win.renaming_tab` matches a tab, that tab's label is replaced
+    /// with a `TextEdit` bound to `win.rename_buffer`.  Enter commits,
+    /// Escape cancels, and loss of focus also cancels (matches most
+    /// file-manager rename UX).
+    ///
     /// Returns a `TabBarAction` describing what the user did (if anything).
-    pub(super) fn show_tab_bar(&self, win: &PerWindowState, ui: &mut egui::Ui) -> TabBarAction {
+    pub(super) fn show_tab_bar(&self, win: &mut PerWindowState, ui: &mut egui::Ui) -> TabBarAction {
+        // Escape cancels an in-progress drag without dispatching a reorder.
+        // Checked before rendering so the dim/preview disappears on the same
+        // frame the user presses Escape.
+        if win.dragging_tab.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            win.dragging_tab = None;
+        }
+
+        // Compute the render order for this frame. When a tab is being
+        // dragged, the source tab "floats" to the slot nearest the current
+        // pointer position so the user sees a live preview of the reorder.
+        // When no drag is active, render in natural order.
+        //
+        // The preview uses last frame's tab rects (stable between frames
+        // unless the window resizes) because rects for the current frame
+        // aren't known until AFTER rendering. One frame of lag at the start
+        // of a drag is imperceptible.
+        let count = win.tabs.tab_count();
+        let preview_order: Vec<usize> = if let Some(from) = win.dragging_tab
+            && !win.last_tab_rects.is_empty()
+            && let Some(pointer) = ui.input(|i| i.pointer.latest_pos())
+        {
+            // Find the target insertion slot based on pointer.x vs each
+            // tab's center. Walk from left to right: first tab whose center
+            // is to the right of the pointer determines the slot.
+            let mut target_slot = count; // default: drop at end
+            for (i, rect) in win.last_tab_rects.iter().enumerate() {
+                if pointer.x < rect.center().x {
+                    target_slot = i;
+                    break;
+                }
+            }
+
+            // Build the preview order: original indices in order, but with
+            // `from` extracted and reinserted at `target_slot`. Clamp the
+            // slot to a valid insertion index after removal.
+            let mut order: Vec<usize> = (0..count).filter(|&i| i != from).collect();
+            let insert_at = target_slot.min(order.len());
+            order.insert(insert_at, from);
+            order
+        } else {
+            (0..count).collect()
+        };
+
+        // Render position of the dragged tab (index into `preview_order`),
+        // used on `drag_stopped` to decide whether the reorder was a no-op.
+        // Captured before rendering because `show_single_tab` clears
+        // `dragging_tab` on `drag_stopped`.
+        let drag_source: Option<usize> = win.dragging_tab;
+        let source_render_pos =
+            drag_source.and_then(|from| preview_order.iter().position(|&i| i == from));
+
         ui.horizontal(|ui| {
             let active = win.tabs.active_index();
-            let count = win.tabs.tab_count();
+            let renaming = win.renaming_tab;
             let mut action = TabBarAction::None;
+            let mut current_rects: Vec<egui::Rect> = vec![egui::Rect::NOTHING; count];
+            let mut drag_ended_this_frame = false;
 
-            for (i, tab) in win.tabs.iter().enumerate() {
-                // Thin vertical separator between tabs (skip before first).
-                if i > 0 {
+            // Render tabs in the preview order. The source tab (while being
+            // dragged) renders at its preview slot, dimmed; all other tabs
+            // appear at their shifted positions so the user sees where the
+            // drop will land.
+            for (render_pos, &orig_idx) in preview_order.iter().enumerate() {
+                if render_pos > 0 {
                     ui.separator();
                 }
 
-                // Read the echo-off state directly from the live atomic flag on
-                // the Tab, not from the snapshot.  Snapshots are only published
-                // when new PTY output arrives, so they go stale when the shell
-                // is idle at a password prompt.  The atomic is updated by the
-                // writer thread every 250 ms regardless of PTY activity.
+                let Some(tab) = win.tabs.iter().nth(orig_idx) else {
+                    continue;
+                };
+
                 let is_echo_off = self.config.security.password_indicator
                     && tab
                         .active_pane()
                         .is_some_and(|p| p.echo_off.load(std::sync::atomic::Ordering::Relaxed));
 
-                let tab_action = Self::show_single_tab(ui, tab, i, i == active, count, is_echo_off);
+                let is_renaming = renaming == Some(tab.id);
+                let is_being_dragged = win.dragging_tab == Some(orig_idx);
+
+                let (tab_action, tab_rect) = Self::show_single_tab(
+                    ui,
+                    tab,
+                    orig_idx,
+                    orig_idx == active,
+                    count,
+                    is_echo_off,
+                    is_renaming,
+                    is_being_dragged,
+                    &mut win.rename_buffer,
+                    &mut win.dragging_tab,
+                    &mut drag_ended_this_frame,
+                );
+                current_rects[orig_idx] = tab_rect;
                 if !matches!(tab_action, TabBarAction::None) {
                     action = tab_action;
                 }
@@ -319,6 +619,37 @@ impl super::FreminalGui {
             // "+" button to create a new tab.
             if ui.button("+").clicked() {
                 action = TabBarAction::NewTab;
+            }
+
+            // On drag release: dispatch Reorder if the preview position
+            // differs from the source tab's original position. The source
+            // `from` was captured at top-of-frame (before `show_single_tab`
+            // cleared `dragging_tab`); `to` is the preview position we
+            // rendered the source at this frame.
+            if drag_ended_this_frame
+                && let Some(from) = drag_source
+                && let Some(to) = source_render_pos
+                && from != to
+            {
+                action = TabBarAction::Reorder { from, to };
+            }
+
+            // Stash rects for next frame's preview computation — but ONLY
+            // when this frame rendered in natural order (no drag was active
+            // at the start of the frame). During a drag, `last_tab_rects`
+            // must stay frozen at the natural pre-drag layout so
+            // slot-decision boundaries don't move under the pointer.
+            // Refreshing mid-drag causes oscillation with differently-sized
+            // tabs: the ghost shifts a rect under the pointer, which flips
+            // the decision, which shifts the rect back.
+            //
+            // We key off `drag_source` (captured at top-of-frame) rather
+            // than `win.dragging_tab` (which may have been set mid-render
+            // by `show_single_tab` on the drag-start frame). This ensures
+            // the drag-start frame's natural-order rects are captured for
+            // the drag to use.
+            if drag_source.is_none() {
+                win.last_tab_rects = current_rects;
             }
 
             action
@@ -335,6 +666,30 @@ impl super::FreminalGui {
     /// A lock icon is prepended to the label when `is_echo_off` is `true`,
     /// indicating that the foreground process has disabled terminal echo (i.e.
     /// a password prompt such as `sudo` or `ssh` is waiting for input).
+    ///
+    /// When `is_renaming` is `true`, the label is replaced by a `TextEdit`
+    /// bound to `rename_buffer`.  Enter returns `CommitRename`; Escape
+    /// returns `CancelRename`; losing focus also cancels to avoid leaving
+    /// the window in a stuck-edit state.
+    ///
+    /// A double-click on the label returns `BeginRename(index)`.
+    ///
+    /// A mouse drag on the label sets `*dragging_tab = Some(index)`; on
+    /// release, `*drag_ended_this_frame = true` signals the caller to
+    /// dispatch the reorder action. The caller (`show_tab_bar`) owns the
+    /// preview-order logic and decides the final destination slot.
+    /// While `is_being_dragged` is true, the tab is rendered with a
+    /// distinct fill so the user can see which tab they picked up.
+    ///
+    /// Returns the tab action (if any) plus the screen rect of the label
+    /// area so the caller can hit-test drop targets.
+    // Allows:
+    // - too_many_arguments / fn_params_excessive_bools: this is a single-use
+    //   helper for `show_tab_bar`. Each bool (is_active, is_echo_off,
+    //   is_renaming, is_being_dragged) reflects an independent per-tab UI
+    //   state; folding them into an enum would require a 16-variant combo
+    //   or nested structs that add more noise than the current flat list.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub(super) fn show_single_tab(
         ui: &mut egui::Ui,
         tab: &Tab,
@@ -342,13 +697,22 @@ impl super::FreminalGui {
         is_active: bool,
         count: usize,
         is_echo_off: bool,
-    ) -> TabBarAction {
+        is_renaming: bool,
+        is_being_dragged: bool,
+        rename_buffer: &mut String,
+        dragging_tab: &mut Option<usize>,
+        drag_ended_this_frame: &mut bool,
+    ) -> (TabBarAction, egui::Rect) {
         let mut action = TabBarAction::None;
         let pane = tab.active_pane();
-        let label = match pane {
-            Some(p) if !p.title.is_empty() => p.title.as_str(),
-            _ => "Shell",
-        };
+        // Prefer the user-assigned tab name over the pane-derived title.
+        let label = tab.custom_name.as_deref().map_or_else(
+            || match pane {
+                Some(p) if !p.title.is_empty() => p.title.as_str(),
+                _ => "Shell",
+            },
+            |name| if name.is_empty() { "Shell" } else { name },
+        );
 
         let has_bell = pane.is_some_and(|p| p.bell_active) && !is_active;
 
@@ -363,8 +727,16 @@ impl super::FreminalGui {
         };
 
         // Tab frame: active gets a gray fill, bell-active inactive tabs
-        // get a warm amber tint, others use a transparent frame.
-        let frame = if is_active {
+        // get a warm amber tint, others use a transparent frame. A tab
+        // that is currently being dragged renders as a translucent ghost
+        // (dimmed fill) at its preview position so the user sees where
+        // the reorder will land without committing the move.
+        let frame = if is_being_dragged {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgba_unmultiplied(120, 120, 120, 40))
+                .corner_radius(4.0)
+                .inner_margin(0.0)
+        } else if is_active {
             egui::Frame::NONE
                 .fill(egui::Color32::from_gray(100))
                 .corner_radius(4.0)
@@ -378,30 +750,74 @@ impl super::FreminalGui {
             egui::Frame::NONE
         };
 
-        frame.show(ui, |ui| {
+        let frame_response = frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Bell-active tabs use amber text for visibility.
-                let rich_label = if has_bell {
-                    egui::RichText::new(&display_label)
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(255, 180, 50))
+                if is_renaming {
+                    // Inline rename editor.  Commit on Enter, cancel on
+                    // Escape or focus loss.
+                    let edit_id = egui::Id::new(("tab_rename", tab.id));
+                    let edit = egui::TextEdit::singleline(rename_buffer)
+                        .id(edit_id)
+                        .desired_width(120.0);
+                    let response = ui.add(edit);
+                    // Auto-focus on the first frame the editor appears.
+                    if !response.has_focus() && !response.lost_focus() {
+                        response.request_focus();
+                    }
+                    let enter =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if enter {
+                        action = TabBarAction::CommitRename(index, rename_buffer.clone());
+                    } else if escape || response.lost_focus() {
+                        action = TabBarAction::CancelRename;
+                    }
                 } else {
-                    egui::RichText::new(&display_label).size(13.0)
-                };
+                    // Bell-active tabs use amber text for visibility.
+                    let rich_label = if has_bell {
+                        egui::RichText::new(&display_label)
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(255, 180, 50))
+                    } else {
+                        egui::RichText::new(&display_label).size(13.0)
+                    };
 
-                let response = ui.selectable_label(is_active, rich_label);
-                if response.clicked() && !is_active {
-                    action = TabBarAction::SwitchTo(index);
-                }
+                    // Use Button::selectable with click_and_drag sense so the
+                    // tab can be picked up and dragged. `selectable_label` only
+                    // senses clicks; retrofitting a drag sense onto its
+                    // response via `.interact()` registers the drag too late
+                    // — egui's interaction state machine needs the sense at
+                    // widget allocation time, not after.
+                    let response = ui.add(
+                        egui::Button::selectable(is_active, rich_label)
+                            .sense(egui::Sense::click_and_drag()),
+                    );
+                    if response.double_clicked() {
+                        action = TabBarAction::BeginRename(index);
+                    } else if response.clicked() && !is_active {
+                        action = TabBarAction::SwitchTo(index);
+                    }
+                    if response.drag_started() {
+                        *dragging_tab = Some(index);
+                    }
+                    if response.drag_stopped() {
+                        // Signal the caller that a drag ended this frame.
+                        // The actual drop resolution (source vs. preview
+                        // position) is handled in `show_tab_bar` using the
+                        // preview-order state captured at top of frame.
+                        *drag_ended_this_frame = true;
+                        *dragging_tab = None;
+                    }
 
-                // Show close button when more than one tab is open.
-                if count > 1 && ui.small_button("\u{00d7}").clicked() {
-                    action = TabBarAction::Close(index);
+                    // Show close button when more than one tab is open.
+                    if count > 1 && ui.small_button("\u{00d7}").clicked() {
+                        action = TabBarAction::Close(index);
+                    }
                 }
             });
         });
 
-        action
+        (action, frame_response.response.rect)
     }
 
     /// Show the floating "Save Layout" name-entry prompt.

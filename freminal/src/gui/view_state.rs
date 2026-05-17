@@ -165,6 +165,12 @@ pub enum BufferRequestState {
 /// All fields are private-to-GUI — the PTY thread never reads them.
 /// Searching is done against the full buffer (scrollback + visible), which
 /// is fetched on-demand from the PTY thread via `InputEvent::RequestSearchBuffer`.
+///
+/// The bool fields here are independent, orthogonal UI flags (open-state,
+/// two live toggles the user can flip at any time, and two cached-copies
+/// used to detect when the compiled-search is stale). Modelling them as a
+/// state machine would couple unrelated concerns.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default)]
 pub struct SearchState {
     /// Whether the search overlay is currently visible.
@@ -182,12 +188,19 @@ pub struct SearchState {
     pub current_match: usize,
     /// When `true`, the query is compiled as a regular expression.
     pub regex_mode: bool,
+    /// When `true`, the query matches case-sensitively. When `false`
+    /// (the default), substring searches are compared after
+    /// ASCII-lowercase folding and regex searches are compiled with
+    /// the `(?i)` inline flag.
+    pub case_sensitive: bool,
     /// The query string that was used to produce the current `matches` list.
     ///
     /// Used to detect when the query changed and a re-search is needed.
     pub last_searched_query: String,
     /// Whether `regex_mode` was active when `matches` was last computed.
     pub last_searched_regex: bool,
+    /// Whether `case_sensitive` was active when `matches` was last computed.
+    pub last_searched_case_sensitive: bool,
     /// The full-buffer `TChar` corpus that was searched for the current
     /// `matches` list.  When a new corpus is fetched from the PTY thread
     /// (because `total_rows` changed), the search is stale and must be re-run.
@@ -210,12 +223,14 @@ impl SearchState {
         self.cached_full_buffer.is_none()
             || self.query != self.last_searched_query
             || self.regex_mode != self.last_searched_regex
+            || self.case_sensitive != self.last_searched_case_sensitive
     }
 
     /// Mark the current matches as up-to-date.
     pub fn mark_fresh(&mut self) {
         self.last_searched_query.clone_from(&self.query);
         self.last_searched_regex = self.regex_mode;
+        self.last_searched_case_sensitive = self.case_sensitive;
     }
 
     /// Move to the next match, wrapping around.
@@ -251,12 +266,17 @@ impl SearchState {
     }
 
     /// Reset matches and navigation when the search overlay closes.
+    ///
+    /// User-facing preferences (`query`, `regex_mode`, `case_sensitive`)
+    /// are preserved across open/close so the user does not have to
+    /// re-configure the search bar every time.
     pub fn close(&mut self) {
         self.is_open = false;
         self.matches.clear();
         self.current_match = 0;
         self.last_searched_query.clear();
         self.last_searched_regex = false;
+        self.last_searched_case_sensitive = false;
         self.cached_full_buffer = None;
         self.last_known_total_rows = 0;
         self.buffer_request_state = BufferRequestState::Idle;

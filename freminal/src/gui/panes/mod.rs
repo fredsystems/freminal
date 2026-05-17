@@ -151,6 +151,14 @@ pub struct Pane {
     /// Whether a bell has fired in this pane and not yet been cleared.
     pub bell_active: bool,
 
+    /// Pending "Copy to clipboard" request triggered outside the widget
+    /// (e.g. from the Edit menu).  The widget drains this flag on its next
+    /// `show()` call: if set, it waits briefly for the PTY thread to reply
+    /// on `clipboard_rx` with the extracted selection text, then copies to
+    /// the system clipboard.  This is the menu-side analogue of the
+    /// `clipboard_pending` flag used by the in-widget keybinding path.
+    pub pending_copy: bool,
+
     /// Per-pane title stack for `SaveWindowTitleToStack` /
     /// `RestoreWindowTitleFromStack` (CSI 22/23 t). Each pane maintains its
     /// own stack so that background shells pushing/popping titles do not
@@ -182,7 +190,8 @@ pub struct Pane {
 
     /// OS process ID of the PTY child shell for this pane.
     ///
-    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
 
@@ -1045,8 +1054,9 @@ impl PaneTree {
     /// writing to a layout TOML file.
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
-    /// working directory of that pane as a string (e.g. read from
-    /// `/proc/<pid>/cwd`).  Returning `None` omits the `directory` field.
+    /// working directory of that pane as a string (typically via
+    /// [`crate::gui::platform::read_cwd`]).  Returning `None` omits the
+    /// `directory` field.
     #[must_use]
     pub fn to_layout_panes<F>(
         &self,
@@ -1061,6 +1071,36 @@ impl PaneTree {
             collect_layout_panes(root, None, None, active_pane, &cwd_fn, &mut out);
         }
         out
+    }
+
+    /// Serialise the pane tree as a [`PaneTreeSnapshot`] for inclusion in a
+    /// FREC recording's initial topology.
+    ///
+    /// `cwd_fn` is called for each leaf pane id and should return the current
+    /// working directory of that pane as a string (typically via
+    /// [`crate::gui::platform::read_cwd`]).  `None` omits the `cwd` field on
+    /// the leaf.
+    ///
+    /// `shell_fn` is called for each leaf pane id and should return the
+    /// shell command used to launch the pane, if known.  Most callers will
+    /// return `None` — the shell is not tracked per-pane today.
+    ///
+    /// Returns `None` if the tree is in an invalid (empty) state.  Callers
+    /// should treat this as a bug rather than a user-facing condition.
+    #[must_use]
+    pub fn to_recording_snapshot<C, S>(
+        &self,
+        cwd_fn: C,
+        shell_fn: S,
+    ) -> Option<freminal_terminal_emulator::recording::PaneTreeSnapshot>
+    where
+        C: Fn(PaneId) -> Option<String>,
+        S: Fn(PaneId) -> Option<String>,
+    {
+        let root = self.root.as_ref()?;
+        Some(freminal_terminal_emulator::recording::PaneTreeSnapshot {
+            node: build_pane_node_snapshot(root, &cwd_fn, &shell_fn),
+        })
     }
 }
 
@@ -1161,6 +1201,68 @@ fn collect_layout_panes<F>(
                 cwd_fn,
                 out,
             );
+        }
+    }
+}
+
+/// Recursively walk a `PaneNode` tree and produce a `PaneNodeSnapshot`
+/// for inclusion in a FREC recording's initial topology.
+///
+/// `cwd_fn` / `shell_fn` are called at every leaf to populate the
+/// corresponding fields on `PaneNodeSnapshot::Leaf`.  Split nodes have no
+/// direct callback equivalents — their `direction` and `ratio` are copied
+/// straight from the tree node.
+///
+/// Cols/rows are read from the pane's latest `TerminalSnapshot` via
+/// `Pane::arc_swap`.  If the snapshot reports zero dimensions (shouldn't
+/// happen in practice but is possible during construction), they are
+/// recorded as-is rather than substituted with defaults, so a downstream
+/// reader can detect the anomaly.
+///
+/// The pane ID is truncated from `u64` to `u32` using `try_from`, falling
+/// back to `u32::MAX` on overflow, matching the existing recording emit
+/// sites in `tab_spawning.rs` and `app_impl.rs`.
+fn build_pane_node_snapshot<C, S>(
+    node: &PaneNode,
+    cwd_fn: &C,
+    shell_fn: &S,
+) -> freminal_terminal_emulator::recording::PaneNodeSnapshot
+where
+    C: Fn(PaneId) -> Option<String>,
+    S: Fn(PaneId) -> Option<String>,
+{
+    use freminal_terminal_emulator::recording::{PaneNodeSnapshot, RecordingSplitDirection};
+
+    match node {
+        PaneNode::Leaf(pane) => {
+            let snap = pane.arc_swap.load();
+            let cols = u32::try_from(snap.term_width).unwrap_or(u32::MAX);
+            let rows = u32::try_from(snap.height).unwrap_or(u32::MAX);
+            PaneNodeSnapshot::Leaf {
+                pane_id: u32::try_from(pane.id.raw()).unwrap_or(u32::MAX),
+                cols,
+                rows,
+                cwd: cwd_fn(pane.id),
+                shell: shell_fn(pane.id),
+                title: pane.title.clone(),
+            }
+        }
+        PaneNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let rec_dir = match direction {
+                SplitDirection::Horizontal => RecordingSplitDirection::Horizontal,
+                SplitDirection::Vertical => RecordingSplitDirection::Vertical,
+            };
+            PaneNodeSnapshot::Split {
+                direction: rec_dir,
+                ratio: *ratio,
+                first: Box::new(build_pane_node_snapshot(first, cwd_fn, shell_fn)),
+                second: Box::new(build_pane_node_snapshot(second, cwd_fn, shell_fn)),
+            }
         }
     }
 }
@@ -1274,6 +1376,7 @@ mod tests {
             pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,
+            pending_copy: false,
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),

@@ -52,6 +52,10 @@ pub struct Config {
     /// Startup and layout configuration.
     #[serde(default)]
     pub startup: StartupConfig,
+
+    /// First-run onboarding state.
+    #[serde(default)]
+    pub onboarding: OnboardingConfig,
 }
 
 impl Default for Config {
@@ -72,6 +76,7 @@ impl Default for Config {
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
+            onboarding: OnboardingConfig::default(),
         }
     }
 }
@@ -309,6 +314,11 @@ pub struct UiConfig {
     /// Opacity of the background image (0.0–1.0). Applied on top of the
     /// image itself; `background_opacity` then layers over that. Default: `0.5`.
     pub background_image_opacity: f32,
+    /// Automatically detect plain URLs (http/https/file/ftp/mailto) in
+    /// terminal output and make them clickable, in addition to OSC 8
+    /// hyperlinks. OSC 8 links always take precedence when they overlap
+    /// with an auto-detected URL. Default: `true`.
+    pub auto_detect_urls: bool,
 }
 
 impl Default for UiConfig {
@@ -319,6 +329,7 @@ impl Default for UiConfig {
             background_image: None,
             background_image_mode: BackgroundImageMode::Cover,
             background_image_opacity: 0.5,
+            auto_detect_urls: true,
         }
     }
 }
@@ -409,6 +420,12 @@ pub enum BellMode {
     Visual,
     /// Do nothing.
     None,
+    /// Best-effort system beep via the native platform API (`\x07` to stderr
+    /// on Linux, `NSBeep` on macOS, `MessageBeep` on Windows).  See
+    /// `gui::platform::system_beep` for details.
+    Audio,
+    /// Both the visual flash and the system beep.
+    Both,
 }
 
 /// Configuration for the terminal bell.
@@ -517,6 +534,34 @@ const fn default_restore_last_session() -> bool {
     true
 }
 
+/// **Deprecated** first-run onboarding state (kept for backward
+/// compatibility with older `config.toml` files).
+///
+/// Historically Freminal stored the "user has dismissed the welcome
+/// overlay" flag here.  This was moved out of `config.toml` because
+/// managed installs (NixOS home-manager, system-wide configs, dotfile
+/// managers locking permissions) make `config.toml` read-only, and the
+/// program could not record the dismissal — the overlay reappeared on
+/// every launch.
+///
+/// The flag now lives in `state.toml` under
+/// `$XDG_STATE_HOME/freminal/` (Linux) — see
+/// [`crate::app_state::AppState`].  This struct is kept so old
+/// `config.toml` files still parse; on first launch with a new binary,
+/// a `[onboarding] first_run_complete = true` value is migrated into
+/// the new state file and then ignored.
+///
+/// Users can re-open the overlay at any time via Help → Show Welcome.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OnboardingConfig {
+    /// **Deprecated** — see struct docs.  `true` once the user has seen
+    /// and dismissed the first-run welcome overlay.  Defaults to `false`.
+    /// New code reads/writes `AppState::first_run_complete` instead;
+    /// this field is migrated forward on first launch.
+    pub first_run_complete: bool,
+}
+
 /// Returns the platform-canonical layout library directory.
 ///
 /// | Platform  | Path                                        |
@@ -525,6 +570,52 @@ const fn default_restore_last_session() -> bool {
 /// | macOS     | `~/Library/Application Support/Freminal/layouts/` |
 /// | Windows   | `%APPDATA%\Freminal\layouts\`               |
 ///
+/// Returns the platform-appropriate directory where FREC v2 recordings
+/// are stored by default.
+///
+/// - macOS: `~/Library/Application Support/Freminal/recordings`
+/// - Windows: `%APPDATA%\Freminal\recordings`
+/// - Linux/BSD: `$XDG_CONFIG_HOME/freminal/recordings` (typically
+///   `~/.config/freminal/recordings`)
+///
+/// The directory is created if it does not yet exist. Returns `None` if
+/// the base directories cannot be determined.
+#[must_use]
+pub fn recording_library_dir() -> Option<PathBuf> {
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.data_dir().join("Freminal").join("recordings");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_dir().join("Freminal").join("recordings");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // Linux / BSD
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        let p = base.config_dir().join("freminal").join("recordings");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Returns `None` if the base directories cannot be determined.
 #[must_use]
 pub fn layout_library_dir() -> Option<PathBuf> {
@@ -623,6 +714,7 @@ struct ConfigPartial {
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
     pub startup: Option<StartupConfig>,
+    pub onboarding: Option<OnboardingConfig>,
 }
 
 impl Config {
@@ -674,6 +766,9 @@ impl Config {
         }
         if let Some(startup) = partial.startup {
             self.startup = startup;
+        }
+        if let Some(onboarding) = partial.onboarding {
+            self.onboarding = onboarding;
         }
     }
 
@@ -934,6 +1029,20 @@ pub fn save_config(config: &Config, path: Option<&Path>) -> Result<(), ConfigErr
         path: target,
         source,
     })
+}
+
+/// Serialize `config` to TOML for diff / dirty-check purposes.
+///
+/// Used by callers that need a canonical string representation of a
+/// `Config` for equality comparison (e.g. the Settings Modal's
+/// unsaved-changes guard).  Uses the compact `toml::to_string` form rather
+/// than `to_string_pretty` because only byte-equality matters.  Returns an
+/// empty string on serialization failure; callers treat an empty baseline
+/// as "always dirty", which conservatively triggers the confirm prompt
+/// rather than silently dropping edits.
+#[must_use]
+pub fn serialize_config_for_diff(config: &Config) -> String {
+    toml::to_string(config).unwrap_or_default()
 }
 
 /// Check whether the effective config file is writable.
@@ -1775,6 +1884,50 @@ mode = "none"
         assert_eq!(deserialized.bell.mode, BellMode::None);
     }
 
+    #[test]
+    fn bell_config_deserialize_audio() {
+        let toml_str = r#"
+[bell]
+mode = "audio"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let bell = partial.bell.expect("bell section should be present");
+        assert_eq!(bell.mode, BellMode::Audio);
+    }
+
+    #[test]
+    fn bell_config_deserialize_both() {
+        let toml_str = r#"
+[bell]
+mode = "both"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let bell = partial.bell.expect("bell section should be present");
+        assert_eq!(bell.mode, BellMode::Both);
+    }
+
+    #[test]
+    fn bell_config_roundtrip_audio() {
+        let mut cfg = Config::default();
+        cfg.bell.mode = BellMode::Audio;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert_eq!(deserialized.bell.mode, BellMode::Audio);
+    }
+
+    #[test]
+    fn bell_config_roundtrip_both() {
+        let mut cfg = Config::default();
+        cfg.bell.mode = BellMode::Both;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert_eq!(deserialized.bell.mode, BellMode::Both);
+    }
+
     // ── Security config tests ────────────────────────────────────────
 
     #[test]
@@ -2180,6 +2333,19 @@ trail_duration_ms = 250
     fn background_image_opacity_default_is_0_5() {
         let cfg = UiConfig::default();
         assert!((cfg.background_image_opacity - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn auto_detect_urls_default_is_true() {
+        let cfg = UiConfig::default();
+        assert!(cfg.auto_detect_urls);
+    }
+
+    #[test]
+    fn auto_detect_urls_deserialize_false() {
+        let toml = "auto_detect_urls = false";
+        let cfg: UiConfig = toml::from_str(toml).expect("parse");
+        assert!(!cfg.auto_detect_urls);
     }
 
     #[test]

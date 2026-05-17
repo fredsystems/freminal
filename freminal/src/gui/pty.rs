@@ -24,7 +24,7 @@ use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
-use freminal_terminal_emulator::recording::{EventPayload, RecordingHandle};
+use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_windowing::{RepaintProxy, WindowId};
 
@@ -75,7 +75,8 @@ pub struct TabChannels {
 
     /// OS process ID of the PTY child shell.
     ///
-    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
 }
@@ -92,8 +93,10 @@ pub struct PtyTabConfig<'a> {
     pub shell_override: Option<&'a str>,
     /// Extra environment variables to set on the child process.
     pub extra_env: Option<&'a std::collections::HashMap<String, String>>,
-    /// Recording handle for FREC v2 recording (None if not recording).
-    pub recording_handle: Option<RecordingHandle>,
+    /// Shared, hot-swappable FREC v2 recording handle. The pane observes
+    /// the current `Option<RecordingHandle>` on every event; turning
+    /// recording on or off at runtime requires no rewiring.
+    pub recording_swap: RecordingSwap,
     /// Pane ID used in FREC v2 recording event payloads.
     pub recording_pane_id: u32,
 }
@@ -115,6 +118,7 @@ pub fn spawn_pty_tab(
     args: &Args,
     scrollback_limit: usize,
     theme: &'static freminal_common::themes::ThemePalette,
+    auto_detect_urls: bool,
     repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
     initial_size: FreminalTerminalSize,
     tab_cfg: PtyTabConfig<'_>,
@@ -131,6 +135,14 @@ pub fn spawn_pty_tab(
 
     // Apply the configured theme so all snapshots carry the correct palette.
     terminal.internal.handler.set_theme(theme);
+
+    // Apply the auto URL detection flag so the buffer's flatten cache
+    // surfaces auto-detected URLs in `FormatTag.url` entries.
+    terminal
+        .internal
+        .handler
+        .buffer_mut()
+        .set_auto_detect_urls(auto_detect_urls);
 
     // Shared snapshot (ArcSwap).
     let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
@@ -163,7 +175,7 @@ pub fn spawn_pty_tab(
         arc_swap,
         repaint_handle_pty,
         pty_dead_tx,
-        tab_cfg.recording_handle,
+        tab_cfg.recording_swap,
         tab_cfg.recording_pane_id,
     );
 
@@ -204,7 +216,7 @@ fn spawn_pty_consumer_thread(
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
     pty_dead_tx: Sender<()>,
-    recording_handle: Option<RecordingHandle>,
+    recording_swap: RecordingSwap,
     recording_pane_id: u32,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
@@ -255,7 +267,7 @@ fn spawn_pty_consumer_thread(
                  -> bool {
                     match msg {
                         Ok(InputEvent::Resize(w, h, pw, ph)) => {
-                            if let Some(ref rec) = recording_handle {
+                            if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PaneResize {
                                     pane_id: recording_pane_id,
                                     cols: w.try_into().unwrap_or(u32::MAX),
@@ -268,7 +280,7 @@ fn spawn_pty_consumer_thread(
                             if let Err(e) = emulator.write_raw_bytes(&bytes) {
                                 error!("Failed to forward key bytes to PTY: {e}");
                             }
-                            if let Some(ref rec) = recording_handle {
+                            if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PtyInput {
                                     pane_id: recording_pane_id,
                                     data: bytes,
@@ -283,6 +295,13 @@ fn spawn_pty_consumer_thread(
                         }
                         Ok(InputEvent::ThemeChange(theme)) => {
                             emulator.internal.handler.set_theme(theme);
+                        }
+                        Ok(InputEvent::AutoDetectUrls(enabled)) => {
+                            emulator
+                                .internal
+                                .handler
+                                .buffer_mut()
+                                .set_auto_detect_urls(enabled);
                         }
                         Ok(InputEvent::ThemeModeUpdate(theme_mode, os_is_dark)) => {
                             emulator.internal.modes.theme_mode = theme_mode;
@@ -314,6 +333,15 @@ fn spawn_pty_consumer_thread(
                             let total_rows = emulator.internal.handler.buffer().rows().len();
                             let _ = search_buffer_tx.send((total_rows, combined));
                         }
+                        Ok(InputEvent::ClearScrollback) => {
+                            // Drop every scrollback row; the visible display
+                            // is unaffected. Also reset the PTY-side
+                            // gui_scroll_offset so snapshots immediately render
+                            // from the live view (the GUI resets its local
+                            // ViewState::scroll_offset in parallel).
+                            emulator.internal.handler.buffer_mut().erase_scrollback();
+                            emulator.set_gui_scroll_offset(0);
+                        }
                         Err(_) => {
                             info!("Input channel closed; consumer thread exiting");
                             return false;
@@ -328,7 +356,7 @@ fn spawn_pty_consumer_thread(
                     recv(pty_read_rx) -> msg => {
                         if let Ok(read) = msg {
                             let data = &read.buf[0..read.read_amount];
-                            if let Some(ref rec) = recording_handle {
+                            if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PtyOutput {
                                     pane_id: recording_pane_id,
                                     data: data.to_vec(),

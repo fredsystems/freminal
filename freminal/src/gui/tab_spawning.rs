@@ -67,13 +67,14 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
+            self.config.ui.auto_detect_urls,
             &win.repaint_handle,
             initial_size,
             pty::PtyTabConfig {
                 cwd: cwd_path,
                 shell_override: None,
                 extra_env: None,
-                recording_handle: self.recording_handle.clone(),
+                recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
             },
         ) {
@@ -90,6 +91,7 @@ impl FreminalGui {
                     pty_dead_rx: channels.pty_dead_rx,
                     title: "Terminal".to_owned(),
                     bell_active: false,
+                    pending_copy: false,
                     title_stack: Vec::new(),
                     view_state: view_state::ViewState::new(),
                     echo_off: channels.echo_off,
@@ -114,6 +116,10 @@ impl FreminalGui {
             }
             Err(e) => {
                 error!("Failed to spawn new tab: {e}");
+                self.push_error_toast(
+                    "Failed to open new tab",
+                    Some(format!("The shell could not be started: {e}")),
+                );
             }
         }
     }
@@ -200,19 +206,24 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
+            self.config.ui.auto_detect_urls,
             &win.repaint_handle,
             initial_size,
             pty::PtyTabConfig {
                 cwd: cwd_path,
                 shell_override: None,
                 extra_env: None,
-                recording_handle: self.recording_handle.clone(),
+                recording_swap: self.recording_swap.clone(),
                 recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
             },
         ) {
             Ok(ch) => ch,
             Err(e) => {
                 error!("Failed to spawn split pane: {e}");
+                self.push_error_toast(
+                    "Failed to split pane",
+                    Some(format!("The shell could not be started: {e}")),
+                );
                 return;
             }
         };
@@ -234,6 +245,7 @@ impl FreminalGui {
                 pty_dead_rx: channels.pty_dead_rx,
                 title: "Terminal".to_owned(),
                 bell_active: false,
+                pending_copy: false,
                 title_stack: Vec::new(),
                 view_state: view_state::ViewState::new(),
                 echo_off: channels.echo_off,
@@ -336,19 +348,24 @@ impl FreminalGui {
             &self.args,
             self.config.scrollback.limit,
             theme,
+            self.config.ui.auto_detect_urls,
             repaint_handle,
             initial_size,
             pty::PtyTabConfig {
                 cwd,
                 shell_override,
                 extra_env,
-                recording_handle: self.recording_handle.clone(),
+                recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
             },
         ) {
             Ok(ch) => ch,
             Err(e) => {
                 error!("layout: failed to spawn pane '{}': {e}", leaf.id);
+                self.push_error_toast(
+                    format!("Layout pane '{}' failed to start", leaf.id),
+                    Some(format!("The shell could not be started: {e}")),
+                );
                 return None;
             }
         };
@@ -364,6 +381,7 @@ impl FreminalGui {
             pty_dead_rx: channels.pty_dead_rx,
             title: leaf.title.clone().unwrap_or_else(|| "Terminal".to_owned()),
             bell_active: false,
+            pending_copy: false,
             title_stack: Vec::new(),
             view_state: view_state::ViewState::new(),
             echo_off: channels.echo_off,

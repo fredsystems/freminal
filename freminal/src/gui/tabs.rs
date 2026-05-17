@@ -37,6 +37,16 @@ impl TabId {
     pub const fn offset(n: u64) -> Self {
         Self(n)
     }
+
+    /// Return the raw numeric value of this `TabId`.
+    ///
+    /// Used by the FREC v2 recording layer to emit tab identifiers as
+    /// `u32` values. Callers must convert with `try_from` / `unwrap_or`
+    /// to handle the (practically impossible) overflow case.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 /// A single terminal tab.
@@ -58,6 +68,16 @@ pub struct Tab {
     /// When set, this pane is zoomed (occupies the entire tab area)
     /// and the rest of the tree is hidden but preserved.
     pub zoomed_pane: Option<PaneId>,
+
+    /// User-assigned tab name.
+    ///
+    /// When `Some`, this overrides the pane-derived title in the tab bar
+    /// and window title.  Set via `KeyAction::RenameTab` or a double-click
+    /// on the tab label.  Cleared automatically when the shell sets a new
+    /// title via OSC 0/1/2 (`SetTitleBarText` or `RestoreWindowTitleFromStack`)
+    /// so that shell-driven titles remain authoritative once the user stops
+    /// pinning a custom name.
+    pub custom_name: Option<String>,
 }
 
 impl Tab {
@@ -70,7 +90,22 @@ impl Tab {
             pane_tree: PaneTree::new(pane),
             active_pane: pane_id,
             zoomed_pane: None,
+            custom_name: None,
         }
+    }
+
+    /// Return the name to display for this tab.
+    ///
+    /// Returns the user-assigned `custom_name` if set, otherwise falls
+    /// back to the active pane's title.  Returns an empty string if the
+    /// active pane cannot be resolved (a programming bug — every tab
+    /// must have a valid active pane).
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        if let Some(name) = self.custom_name.as_deref() {
+            return name;
+        }
+        self.active_pane().map_or("", |p| p.title.as_str())
     }
 
     /// Return a reference to the currently active pane, if it exists.
@@ -100,6 +135,7 @@ impl std::fmt::Debug for Tab {
             .field("id", &self.id)
             .field("active_pane", &self.active_pane)
             .field("zoomed_pane", &self.zoomed_pane)
+            .field("custom_name", &self.custom_name)
             .finish_non_exhaustive()
     }
 }
@@ -378,6 +414,7 @@ mod tests {
             pty_dead_rx,
             title: title.to_owned(),
             bell_active: false,
+            pending_copy: false,
             title_stack: Vec::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
@@ -399,6 +436,39 @@ mod tests {
         assert_eq!(mgr.tab_count(), 1);
         assert_eq!(mgr.active_index(), 0);
         assert_eq!(mgr.active_tab().active_pane().unwrap().title, "Tab 1");
+    }
+
+    #[test]
+    fn display_name_defaults_to_pane_title() {
+        let tab = dummy_tab(TabId(0), "PaneTitle");
+        assert!(tab.custom_name.is_none());
+        assert_eq!(tab.display_name(), "PaneTitle");
+    }
+
+    #[test]
+    fn display_name_prefers_custom_name_when_set() {
+        let mut tab = dummy_tab(TabId(0), "PaneTitle");
+        tab.custom_name = Some("My Custom Tab".to_owned());
+        assert_eq!(tab.display_name(), "My Custom Tab");
+    }
+
+    #[test]
+    fn display_name_empty_custom_name_is_returned_verbatim() {
+        // Trimming/fallback for an empty custom name is a UI concern
+        // (`show_single_tab` replaces it with "Shell"); the model layer
+        // returns whatever was stored.
+        let mut tab = dummy_tab(TabId(0), "PaneTitle");
+        tab.custom_name = Some(String::new());
+        assert_eq!(tab.display_name(), "");
+    }
+
+    #[test]
+    fn display_name_falls_back_when_custom_name_cleared() {
+        let mut tab = dummy_tab(TabId(0), "PaneTitle");
+        tab.custom_name = Some("Custom".to_owned());
+        assert_eq!(tab.display_name(), "Custom");
+        tab.custom_name = None;
+        assert_eq!(tab.display_name(), "PaneTitle");
     }
 
     #[test]

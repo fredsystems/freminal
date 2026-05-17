@@ -732,6 +732,21 @@ pub enum KeyAction {
     ScrollLineUp,
     /// Scroll down by one line.
     ScrollLineDown,
+    /// Erase the scrollback buffer, leaving the visible display intact.
+    ///
+    /// Distinct from the CSI 3 J (`ClearScrollbackandDisplay`) escape
+    /// sequence in that it preserves the currently-visible rows and only
+    /// drops the off-screen history. Useful for cleaning up a session's
+    /// accumulated history without clearing the current prompt context.
+    ClearScrollback,
+    /// Start or stop recording the current session to a `.frec` file.
+    ///
+    /// Toggle-on captures the current topology (all windows, tabs, pane
+    /// trees) into the recording header, then streams events from that
+    /// moment forward. Toggle-off finalises the file and releases the
+    /// writer thread. The default recording path is
+    /// `~/.config/freminal/recordings/YYYY-MM-DD_HHMMSS.frec`.
+    ToggleRecording,
 
     // -- Pane management ---------------------------------------------------
     /// Split the focused pane vertically (left | right, vertical divider).
@@ -764,6 +779,16 @@ pub enum KeyAction {
     LoadLayout,
     /// Save the current session topology as a layout file.
     SaveLayout,
+
+    // -- Configuration ---------------------------------------------------
+    /// Reload `config.toml` from disk and apply every change live.
+    ///
+    /// If no config path is associated with the running session (i.e.
+    /// freminal was launched without `--config` and no default config
+    /// exists), a user-visible toast explains the no-op.  Parse errors
+    /// are logged and surfaced as error toasts; the currently-live
+    /// configuration is preserved on failure.
+    ReloadConfig,
 }
 
 impl KeyAction {
@@ -809,6 +834,8 @@ impl KeyAction {
             Self::ScrollToBottom => "scroll_to_bottom",
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
+            Self::ClearScrollback => "clear_scrollback",
+            Self::ToggleRecording => "toggle_recording",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
             Self::ClosePane => "close_pane",
@@ -823,6 +850,7 @@ impl KeyAction {
             Self::ZoomPane => "zoom_pane",
             Self::LoadLayout => "load_layout",
             Self::SaveLayout => "save_layout",
+            Self::ReloadConfig => "reload_config",
         }
     }
 
@@ -870,6 +898,8 @@ impl KeyAction {
             Self::ScrollToBottom => "Scroll to Bottom",
             Self::ScrollLineUp => "Scroll Line Up",
             Self::ScrollLineDown => "Scroll Line Down",
+            Self::ClearScrollback => "Clear Scrollback",
+            Self::ToggleRecording => "Toggle Recording",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
             Self::ClosePane => "Close Pane",
@@ -884,6 +914,7 @@ impl KeyAction {
             Self::ZoomPane => "Zoom Pane",
             Self::LoadLayout => "Load Layout",
             Self::SaveLayout => "Save Layout",
+            Self::ReloadConfig => "Reload Config",
         }
     }
 
@@ -928,6 +959,8 @@ impl KeyAction {
         Self::ScrollToBottom,
         Self::ScrollLineUp,
         Self::ScrollLineDown,
+        Self::ClearScrollback,
+        Self::ToggleRecording,
         Self::SplitVertical,
         Self::SplitHorizontal,
         Self::ClosePane,
@@ -942,6 +975,7 @@ impl KeyAction {
         Self::ZoomPane,
         Self::LoadLayout,
         Self::SaveLayout,
+        Self::ReloadConfig,
     ];
 }
 
@@ -998,6 +1032,8 @@ impl FromStr for KeyAction {
             "scroll_to_bottom" => Ok(Self::ScrollToBottom),
             "scroll_line_up" => Ok(Self::ScrollLineUp),
             "scroll_line_down" => Ok(Self::ScrollLineDown),
+            "clear_scrollback" => Ok(Self::ClearScrollback),
+            "toggle_recording" => Ok(Self::ToggleRecording),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
             "close_pane" => Ok(Self::ClosePane),
@@ -1012,6 +1048,7 @@ impl FromStr for KeyAction {
             "zoom_pane" => Ok(Self::ZoomPane),
             "load_layout" => Ok(Self::LoadLayout),
             "save_layout" => Ok(Self::SaveLayout),
+            "reload_config" => Ok(Self::ReloadConfig),
             other => Err(KeyBindingError::UnknownAction(other.to_string())),
         }
     }
@@ -1267,6 +1304,24 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::ArrowDown, BindingModifiers::SHIFT),
         KeyAction::ScrollLineDown,
+    );
+
+    // Clear the scrollback buffer (leaves the visible display intact).
+    // Ctrl+Shift+Backspace avoids conflicts with readline Ctrl+K (kill-EOL)
+    // and the Ctrl+Shift+{H,J,K,L} pane-focus grid. Users can rebind via
+    // the [keybindings] config section.
+    map.bind(
+        KeyCombo::new(BindingKey::Backspace, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ClearScrollback,
+    );
+
+    // Toggle session recording on/off. Ctrl+Shift+R is free on all
+    // platforms (bash readline Ctrl+R reverse-search uses only Ctrl, no
+    // Shift) and is a mnemonic match for "Record". Users can rebind via
+    // the [keybindings] config section.
+    map.bind(
+        KeyCombo::new(BindingKey::R, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ToggleRecording,
     );
 }
 
@@ -1668,7 +1723,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            50,
+            53,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2030,11 +2085,12 @@ mod tests {
         //        + ScrollLineUp(1) + ScrollLineDown(1)
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
-        //        + ZoomPane(1) + NewWindow(1) = 41
+        //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
+        //        + ToggleRecording(1) = 43
         assert_eq!(
             map.len(),
-            41,
-            "default binding map should have exactly 41 bindings"
+            43,
+            "default binding map should have exactly 43 bindings"
         );
     }
 

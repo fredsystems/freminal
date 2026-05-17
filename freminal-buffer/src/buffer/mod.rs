@@ -18,6 +18,8 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
+pub use flatten::{AutoUrlRange, RowCacheEntry};
+
 #[cfg(test)]
 use crate::cell::Cell;
 #[cfg(test)]
@@ -75,8 +77,9 @@ pub struct Buffer {
 
     /// Per-row flat-representation cache.  Index matches `self.rows`.
     /// `None` = dirty (must be re-flattened on next snapshot).
-    /// `Some((chars, tags))` = clean cached flat representation for that row.
-    pub(in crate::buffer) row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+    /// `Some(entry)` = clean cached flat representation for that row, see
+    /// [`RowCacheEntry`].
+    pub(in crate::buffer) row_cache: Vec<Option<RowCacheEntry>>,
 
     /// Width and height of the terminal grid.
     pub(in crate::buffer) width: usize,
@@ -92,6 +95,15 @@ pub struct Buffer {
     ///  - `scrollback_limit` = 1000
     ///    Means `rows.len()` will be at most 1040.
     pub(in crate::buffer) scrollback_limit: usize,
+
+    /// When `true`, plain URLs are auto-detected in terminal output and
+    /// surfaced through the same `FormatTag.url` machinery used by OSC 8
+    /// hyperlinks. OSC 8 links always take precedence where ranges overlap.
+    ///
+    /// Driven by `UiConfig.auto_detect_urls`. Hot-reloadable via
+    /// [`Buffer::set_auto_detect_urls`], which invalidates the flatten cache
+    /// so subsequent snapshots reflect the new setting.
+    pub(in crate::buffer) auto_detect_urls: bool,
 
     /// Whether this is the primary or alternate buffer mode.
     ///
@@ -180,7 +192,7 @@ pub struct SavedPrimaryState {
     /// All primary-buffer rows (scrollback + visible region) at the time of the switch.
     pub rows: Vec<Row>,
     /// Per-row flat-representation cache saved alongside `rows`.
-    pub row_cache: Vec<Option<(Vec<TChar>, Vec<FormatTag>)>>,
+    pub row_cache: Vec<Option<RowCacheEntry>>,
     /// Cursor state (position, attributes) at the time of the switch.
     pub cursor: CursorState,
     /// Caller-owned scroll offset (from `ViewState`) at the time of the switch.
@@ -232,6 +244,41 @@ impl Buffer {
     #[must_use]
     pub const fn scrollback_limit(&self) -> usize {
         self.scrollback_limit
+    }
+
+    /// Return a new buffer with `auto_detect_urls` set to the given value.
+    /// Builder-style method intended to flow a value from `UiConfig` at
+    /// buffer construction time.
+    #[must_use]
+    pub const fn with_auto_detect_urls(mut self, enabled: bool) -> Self {
+        self.auto_detect_urls = enabled;
+        self
+    }
+
+    /// Return whether plain URLs are auto-detected in terminal output.
+    #[must_use]
+    pub const fn auto_detect_urls(&self) -> bool {
+        self.auto_detect_urls
+    }
+
+    /// Update the auto-URL-detection flag at runtime and invalidate the
+    /// per-row flatten cache so the next snapshot reflects the new setting.
+    ///
+    /// Called by the PTY thread in response to a config hot-reload. The
+    /// invalidation is O(rows) — we set every `Some(_)` cache entry to
+    /// `None` and mark the corresponding row dirty so the next flatten pass
+    /// rebuilds it with the correct `auto_detect` mode.
+    pub fn set_auto_detect_urls(&mut self, enabled: bool) {
+        if self.auto_detect_urls == enabled {
+            return;
+        }
+        self.auto_detect_urls = enabled;
+        for entry in &mut self.row_cache {
+            *entry = None;
+        }
+        for row in &mut self.rows {
+            row.mark_dirty();
+        }
     }
 
     /// Returns a reference to all rows in this buffer (scrollback + visible region).

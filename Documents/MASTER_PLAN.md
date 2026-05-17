@@ -10,19 +10,19 @@ and plan document maintenance rules.
 
 ### Version Roadmap
 
-| Version | Codename                   | Plan Document                                                         | Tasks       | Status   |
-| ------- | -------------------------- | --------------------------------------------------------------------- | ----------- | -------- |
-| v0.2.0  | —                          | (Tasks 1–35 below)                                                    | 35          | Done     |
-| v0.3.0  | Daily Driver               | (retired — see DESIGN_DECISIONS.md)                                   | 36–44       | Complete |
-| v0.4.0  | Search & Protocol          | (retired — see DESIGN_DECISIONS.md)                                   | 45–52       | Complete |
-| v0.5.0  | Multi-Instance & Visual    | (retired — see DESIGN_DECISIONS.md)                                   | 53–58       | Complete |
-| v0.6.0  | Foundation                 | (retired — see DESIGN_DECISIONS.md)                                   | 62–67       | Complete |
-| v0.7.0  | Recording & Layouts        | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69 | Complete |
-| v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md`                                                 | 70–71       | Pending  |
-| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77       | Stub     |
-| v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md`                                                 | 78–83       | Stub     |
-| v0.11.0 | Platform Play              | `PLAN_VERSION_110.md`                                                 | 84–87       | Stub     |
-| v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md`                                                 | 88–93       | Stub     |
+| Version | Codename                   | Plan Document                                                         | Tasks        | Status        |
+| ------- | -------------------------- | --------------------------------------------------------------------- | ------------ | ------------- |
+| v0.2.0  | —                          | (Tasks 1–35 below)                                                    | 35           | Done          |
+| v0.3.0  | Daily Driver               | (retired — see DESIGN_DECISIONS.md)                                   | 36–44        | Complete      |
+| v0.4.0  | Search & Protocol          | (retired — see DESIGN_DECISIONS.md)                                   | 45–52        | Complete      |
+| v0.5.0  | Multi-Instance & Visual    | (retired — see DESIGN_DECISIONS.md)                                   | 53–58        | Complete      |
+| v0.6.0  | Foundation                 | (retired — see DESIGN_DECISIONS.md)                                   | 62–67        | Complete      |
+| v0.7.0  | Recording & Layouts        | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69  | Complete      |
+| v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md`                                                 | 70–71        | Pending merge |
+| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95 | Stub          |
+| v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md`                                                 | 78–83, 96–97 | Stub          |
+| v0.11.0 | Platform Play              | `PLAN_VERSION_110.md`                                                 | 84–87        | Stub          |
+| v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md`                                                 | 88–93        | Stub          |
 
 **v0.8.0 is a hard gate.** No work on v0.9.0 or later begins until v0.8.0 (Tasks 70 and 71)
 is complete. v0.8.0 closes every correctness and hygiene gap identified in the post-v0.7.0
@@ -51,79 +51,84 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 
 ## Task Summary
 
-| #   | Task                                     | Plan Document                                 | Status   | Dependencies         |
-| --- | ---------------------------------------- | --------------------------------------------- | -------- | -------------------- |
-| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                      | Complete | None                 |
-| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                       | Complete | None                 |
-| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                   | Complete | Task 2               |
-| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`                 | Complete | Task 2               |
-| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                   | Complete | Task 1               |
-| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                        | Complete | None                 |
-| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`                 | Complete | None                 |
-| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                       | Complete | None                 |
-| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`          | Complete | None                 |
-| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`           | Complete | None                 |
-| 11  | Theming                                  | `PLAN_11_THEMING.md`                          | Complete | Tasks 2, 3           |
-| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                         | Complete | None                 |
-| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                   | Complete | Task 1               |
-| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md`   | Complete | None                 |
-| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`          | Complete | None                 |
-| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                   | Complete | None                 |
-| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                    | Complete | None                 |
-| 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`                 | Pending  | Tasks 2, 3, 16       |
-| 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`       | Pending  | None (separate repo) |
-| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`                | Complete | None                 |
-| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                        | Complete | None                 |
-| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`               | Complete | None                 |
-| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                    | Complete | None                 |
-| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`           | Complete | None                 |
-| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                     | Complete | None                 |
-| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                     | Complete | None                 |
-| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                      | Complete | None                 |
-| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                    | Complete | None                 |
-| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`                | Complete | All other tasks      |
-| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`               | Complete | None                 |
-| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                  | Complete | None                 |
-| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`            | Complete | None                 |
-| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`         | Complete | None                 |
-| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`               | Complete | None                 |
-| 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`          | Complete | None                 |
-| 53  | Multiple Windows                         | See `DESIGN_DECISIONS.md`                     | Complete | Task 36 (Tabs)       |
-| 58  | Built-in Multiplexer (Split Panes)       | See `DESIGN_DECISIONS.md`                     | Complete | Task 36 (Tabs)       |
-| 59  | FREC v2: Recording Overhaul              | See `FREC_FORMAT.md`, `DESIGN_DECISIONS.md`   | Complete | Task 58              |
-| 61  | Saved Layouts (Session Templates)        | See `LAYOUT_FORMAT.md`, `DESIGN_DECISIONS.md` | Complete | Tasks 36, 58         |
-| 68  | Platform Performance Triage              | See `DESIGN_DECISIONS.md`                     | Complete | None                 |
-| 69  | UI Polish & Settings Completeness        | See `DESIGN_DECISIONS.md`                     | Complete | None                 |
-| 62  | freminal-windowing crate + event loop    | See `DESIGN_DECISIONS.md`                     | Complete | None                 |
-| 63  | Single-window migration                  | See `DESIGN_DECISIONS.md`                     | Complete | Task 62              |
-| 64  | Multi-window parity                      | See `DESIGN_DECISIONS.md`                     | Complete | Task 63              |
-| 65  | Frame pacing + idle optimization         | See `DESIGN_DECISIONS.md`                     | Complete | Task 63              |
-| 66  | Cleanup + eframe removal                 | See `DESIGN_DECISIONS.md`                     | Complete | Task 64              |
-| 67  | Window spawn truncation diagnostic       | See `DESIGN_DECISIONS.md`                     | Complete | Task 64              |
-| 70  | Code Correctness & Hygiene Sweep         | `PLAN_VERSION_080.md` (Task 70)               | Pending  | None                 |
-| 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)               | Pending  | None                 |
-| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Stub     | v0.8.0               |
-| 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub     | Task 72              |
-| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub     | v0.8.0, Task 58      |
-| 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub     | v0.8.0, Task 61      |
-| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Stub     | v0.8.0, Task 72      |
-| 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Stub     | v0.8.0               |
-| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)               | Stub     | v0.8.0               |
-| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)               | Stub     | v0.8.0               |
-| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_100.md` (Task 80)               | Stub     | Task 78              |
-| 81  | GPU-Accelerated Scrollback Regex Search  | `PLAN_VERSION_100.md` (Task 81)               | Stub     | v0.8.0               |
-| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_100.md` (Task 82)               | Stub     | v0.8.0               |
-| 83  | Command Palette                          | `PLAN_VERSION_100.md` (Task 83)               | Stub     | v0.8.0               |
-| 84  | Scripting Layer (Lua or WASM)            | `PLAN_VERSION_110.md` (Task 84)               | Stub     | v0.10.0              |
-| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_110.md` (Task 85)               | Stub     | Task 84 preferred    |
-| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_110.md` (Task 86)               | Stub     | v0.10.0              |
-| 87  | AI Command Assist (opt-in)               | `PLAN_VERSION_110.md` (Task 87)               | Stub     | Tasks 72, 84         |
-| 88  | IME / CJK Input Support                  | `PLAN_VERSION_120.md` (Task 88)               | Stub     | v0.8.0               |
-| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_120.md` (Task 89)               | Stub     | v0.8.0               |
-| 90  | Windows Platform Quality Pass            | `PLAN_VERSION_120.md` (Task 90)               | Stub     | v0.8.0               |
-| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)               | Stub     | Task 19              |
-| 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)               | Stub     | None                 |
-| 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)               | Stub     | None                 |
+| #   | Task                                     | Plan Document                                 | Status        | Dependencies           |
+| --- | ---------------------------------------- | --------------------------------------------- | ------------- | ---------------------- |
+| 1   | Custom Terminal Renderer                 | `PLAN_01_GLYPH_ATLAS.md`                      | Complete      | None                   |
+| 2   | CLI Args + TOML Config                   | `PLAN_02_CLI_CONFIG.md`                       | Complete      | None                   |
+| 3   | Settings Modal                           | `PLAN_03_SETTINGS_MODAL.md`                   | Complete      | Task 2                 |
+| 4   | Deployment Flake                         | `PLAN_04_DEPLOYMENT_FLAKE.md`                 | Complete      | Task 2                 |
+| 5   | Font Ligatures                           | `PLAN_05_FONT_LIGATURES.md`                   | Complete      | Task 1                 |
+| 6   | Test Gap Coverage                        | `PLAN_06_TEST_GAPS.md`                        | Complete      | None                   |
+| 7   | Escape Sequence Coverage                 | `PLAN_07_ESCAPE_SEQUENCES.md`                 | Complete      | None                   |
+| 8   | Primary Screen Scrollback                | `PLAN_08_SCROLLBACK.md`                       | Complete      | None                   |
+| 9   | tmux Compat + Logging                    | `PLAN_09_TMUX_COMPAT_AND_LOGGING.md`          | Complete      | None                   |
+| 10  | vttest Cursor Movement                   | `PLAN_10_VTTEST_CURSOR_MOVEMENT.md`           | Complete      | None                   |
+| 11  | Theming                                  | `PLAN_11_THEMING.md`                          | Complete      | Tasks 2, 3             |
+| 12  | Terminfo Audit                           | `PLAN_12_TERMINFO.md`                         | Complete      | None                   |
+| 13  | Image Protocol Support                   | `PLAN_13_IMAGE_PROTOCOL.md`                   | Complete      | Task 1                 |
+| 14  | Bug Fixes: Modes/URL/Selection           | `PLAN_14_MODE_NOISE_URL_HOVER_SELECTION.md`   | Complete      | None                   |
+| 15  | Launch program from arg                  | `PLAN_15_LAUNCH_PROGRAM_FROM_ARG.md`          | Complete      | None                   |
+| 16  | Github Action for building and releasing | `PLAN_16_GITHUB_ACTIONS.md`                   | Complete      | None                   |
+| 17  | Update readme                            | `PLAN_17_UPDATE_README.md`                    | Complete      | None                   |
+| 18  | Client-Side Update Mechanism             | `PLAN_18_UPDATE_MECHANISM.md`                 | Pending       | Tasks 2, 3, 16         |
+| 19  | Update Service & Website                 | `PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md`       | Pending       | None (separate repo)   |
+| 20  | DEC Private Mode Coverage                | `PLAN_20_DEC_MODE_COVERAGE.md`                | Complete      | None                   |
+| 21  | Tab Stop Correctness                     | `PLAN_21_TAB_STOPS.md`                        | Complete      | None                   |
+| 22  | vttest Integration Test Suite            | `PLAN_22_VTTEST_INTEGRATION.md`               | Complete      | None                   |
+| 23  | Blinking Text                            | `PLAN_23_BLINKING_TEXT.md`                    | Complete      | None                   |
+| 24  | Benchmark Improvements                   | `PLAN_24_BENCHMARK_IMPROVEMENTS.md`           | Complete      | None                   |
+| 25  | Code Quality Refactoring                 | `PLAN_25_CODE_QUALITY.md`                     | Complete      | None                   |
+| 26  | Bool-to-Enum Mode Refactor               | `PLAN_26_BOOL_TO_ENUM.md`                     | Complete      | None                   |
+| 27  | FIXME/TODO Audit                         | `PLAN_27_FIXME_AUDIT.md`                      | Complete      | None                   |
+| 28  | Code Comment Audit                       | `PLAN_28_COMMENT_AUDIT.md`                    | Complete      | None                   |
+| 29  | God File Refactoring                     | `PLAN_29_GOD_FILE_REFACTOR.md`                | Complete      | All other tasks        |
+| 30  | Clippy Allow Audit                       | `PLAN_30_CLIPPY_ALLOW_AUDIT.md`               | Complete      | None                   |
+| 31  | Dead Code Audit                          | `PLAN_31_DEAD_CODE_AUDIT.md`                  | Complete      | None                   |
+| 32  | Playback Feature Flag                    | `PLAN_32_PLAYBACK_FEATURE_FLAG.md`            | Complete      | None                   |
+| 33  | WezTerm & Ghostty Palettes               | `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md`         | Complete      | None                   |
+| 34  | Window Background Opacity                | `PLAN_34_BACKGROUND_OPACITY.md`               | Complete      | None                   |
+| 35  | Kitty Keyboard Protocol                  | `PLAN_35_KITTY_KEYBOARD_PROTOCOL.md`          | Complete      | None                   |
+| 53  | Multiple Windows                         | See `DESIGN_DECISIONS.md`                     | Complete      | Task 36 (Tabs)         |
+| 58  | Built-in Multiplexer (Split Panes)       | See `DESIGN_DECISIONS.md`                     | Complete      | Task 36 (Tabs)         |
+| 59  | FREC v2: Recording Overhaul              | See `FREC_FORMAT.md`, `DESIGN_DECISIONS.md`   | Complete      | Task 58                |
+| 61  | Saved Layouts (Session Templates)        | See `LAYOUT_FORMAT.md`, `DESIGN_DECISIONS.md` | Complete      | Tasks 36, 58           |
+| 68  | Platform Performance Triage              | See `DESIGN_DECISIONS.md`                     | Complete      | None                   |
+| 69  | UI Polish & Settings Completeness        | See `DESIGN_DECISIONS.md`                     | Complete      | None                   |
+| 62  | freminal-windowing crate + event loop    | See `DESIGN_DECISIONS.md`                     | Complete      | None                   |
+| 63  | Single-window migration                  | See `DESIGN_DECISIONS.md`                     | Complete      | Task 62                |
+| 64  | Multi-window parity                      | See `DESIGN_DECISIONS.md`                     | Complete      | Task 63                |
+| 65  | Frame pacing + idle optimization         | See `DESIGN_DECISIONS.md`                     | Complete      | Task 63                |
+| 66  | Cleanup + eframe removal                 | See `DESIGN_DECISIONS.md`                     | Complete      | Task 64                |
+| 67  | Window spawn truncation diagnostic       | See `DESIGN_DECISIONS.md`                     | Complete      | Task 64                |
+| 70  | Code Correctness & Hygiene Sweep         | `PLAN_VERSION_080.md` (Task 70)               | Complete      | None                   |
+| 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)               | Pending merge | None                   |
+| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Stub          | v0.8.0                 |
+| 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub          | Task 72                |
+| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub          | v0.8.0, Task 58        |
+| 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub          | v0.8.0, Task 61        |
+| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Stub          | v0.8.0, Task 72        |
+| 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Stub          | v0.8.0                 |
+| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)               | Stub          | v0.8.0                 |
+| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)               | Stub          | v0.8.0                 |
+| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_100.md` (Task 80)               | Stub          | Task 78                |
+| 81  | GPU-Accelerated Scrollback Regex Search  | `PLAN_VERSION_100.md` (Task 81)               | Stub          | v0.8.0                 |
+| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_100.md` (Task 82)               | Stub          | v0.8.0                 |
+| 83  | Command Palette                          | `PLAN_VERSION_100.md` (Task 83)               | Stub          | v0.8.0                 |
+| 83a | Expanded Auto-Detection (TENTATIVE)      | `PLAN_VERSION_100.md` (Task 83a)              | Tentative     | Task 71.7b             |
+| 84  | Scripting Layer (Lua or WASM)            | `PLAN_VERSION_110.md` (Task 84)               | Stub          | v0.10.0                |
+| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_110.md` (Task 85)               | Stub          | Task 84 preferred      |
+| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_110.md` (Task 86)               | Stub          | v0.10.0                |
+| 87  | AI Command Assist (opt-in)               | `PLAN_VERSION_110.md` (Task 87)               | Stub          | Tasks 72, 84           |
+| 88  | IME / CJK Input Support                  | `PLAN_VERSION_120.md` (Task 88)               | Stub          | v0.8.0                 |
+| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_120.md` (Task 89)               | Stub          | v0.8.0                 |
+| 90  | Windows Platform Quality Pass            | `PLAN_VERSION_120.md` (Task 90)               | Stub          | v0.8.0                 |
+| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)               | Stub          | Task 19                |
+| 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)               | Stub          | None                   |
+| 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)               | Stub          | None                   |
+| 94  | Tab Title Precedence (OSC vs custom)     | `PLAN_VERSION_090.md` (Task 94)               | Stub          | v0.8.0 (71.1)          |
+| 95  | Persist Custom Tab Names in Layouts      | `PLAN_VERSION_090.md` (Task 95)               | Stub          | v0.8.0 (71.1), Task 61 |
+| 96  | Per-Pane Title Bar                       | `PLAN_VERSION_100.md` (Task 96)               | Stub          | Task 58                |
+| 97  | Dynamic Tab Width & Overflow             | `PLAN_VERSION_100.md` (Task 97)               | Stub          | v0.8.0 (71.1)          |
 
 ---
 
@@ -454,56 +459,58 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                                                                 |
-| ---- | ---------- | ---------- | --------------------------------------------------------------------- |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                                      |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                                       |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                                      |
-| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4                                  |
-| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4                         |
-| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)                        |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                                              |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                                               |
-| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging                            |
-| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                                                 |
-| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4                         |
-| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4                         |
-| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4                         |
-| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection                           |
-| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17                             |
-| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17                             |
-| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17                             |
-| 18   |            |            |                                                                       |
-| 19   |            |            |                                                                       |
-| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage                          |
-| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                                   |
-| 22   | 2026-04-04 | 2026-04-04 | Phase B complete — 248 tests, 7 bugs fixed, compliance report written |
-| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text                      |
-| 24   | 2026-04-05 | 2026-04-05 | All 7 subtasks complete on task-24/benchmark-improvements             |
-| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality                      |
-| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                                |
-| 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit                        |
-| 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit                     |
-| 29   | 2026-04-06 | 2026-04-06 | All 12 subtasks complete on task-29/god-file-refactor                 |
-| 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit                 |
-| 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)                       |
-| 32   | 2026-04-06 | 2026-04-06 | All 9 subtasks complete on task-32/playback-feature-flag              |
-| 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                               |
-| 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                |
-| 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                    |
-| 53   | 2026-04-15 | 2026-04-15 | All 7 subtasks complete on task-53/multiple-windows                   |
-| 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders   |
-| 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders   |
-| 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                   |
-| 62   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-62/freminal-windowing                   |
-| 63   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-63/single-window-migration              |
-| 64   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-64/multi-window-parity                  |
-| 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete             |
-| 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                |
-| 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                    |
-| 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window            |
-| 59   | 2026-04-19 | 2026-04-20 | All 12 subtasks complete on task-59/frec-v2-recording                 |
-| 61   | 2026-04-20 | 2026-04-20 | All 12 subtasks complete on task-61/saved-layouts                     |
+| Task | Started    | Completed  | Notes                                                                    |
+| ---- | ---------- | ---------- | ------------------------------------------------------------------------ |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                                         |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                                          |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                                         |
+| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4                                     |
+| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4                            |
+| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)                           |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                                                 |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                                                  |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging                               |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                                                    |
+| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4                            |
+| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4                            |
+| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4                            |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection                              |
+| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17                                |
+| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17                                |
+| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17                                |
+| 18   |            |            |                                                                          |
+| 19   |            |            |                                                                          |
+| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage                             |
+| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                                      |
+| 22   | 2026-04-04 | 2026-04-04 | Phase B complete — 248 tests, 7 bugs fixed, compliance report written    |
+| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text                         |
+| 24   | 2026-04-05 | 2026-04-05 | All 7 subtasks complete on task-24/benchmark-improvements                |
+| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality                         |
+| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                                   |
+| 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit                           |
+| 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit                        |
+| 29   | 2026-04-06 | 2026-04-06 | All 12 subtasks complete on task-29/god-file-refactor                    |
+| 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit                    |
+| 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)                          |
+| 32   | 2026-04-06 | 2026-04-06 | All 9 subtasks complete on task-32/playback-feature-flag                 |
+| 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                                  |
+| 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                   |
+| 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                       |
+| 53   | 2026-04-15 | 2026-04-15 | All 7 subtasks complete on task-53/multiple-windows                      |
+| 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders      |
+| 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders      |
+| 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                      |
+| 62   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-62/freminal-windowing                      |
+| 63   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-63/single-window-migration                 |
+| 64   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-64/multi-window-parity                     |
+| 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete                |
+| 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                   |
+| 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                       |
+| 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window               |
+| 59   | 2026-04-19 | 2026-04-20 | All 12 subtasks complete on task-59/frec-v2-recording                    |
+| 61   | 2026-04-20 | 2026-04-20 | All 12 subtasks complete on task-61/saved-layouts                        |
+| 70   | 2026-04-21 | 2026-04-22 | All subtasks A–O complete; merged to main via PR #324 (`c537ae1`)        |
+| 71   | 2026-04-22 | 2026-05-17 | 21 subtasks + 6 post-MT bug fixes on task-71/ux-polish-sweep; PR pending |
 
 ---
 

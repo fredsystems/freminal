@@ -11,13 +11,10 @@ use egui;
 use freminal_common::args::Args;
 use freminal_common::config::Config;
 use freminal_common::pty_write::FreminalTerminalSize;
-use freminal_common::send_or_log;
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
-use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{RepaintProxy, WindowId};
 use renderer::WindowPostRenderer;
 use settings::SettingsModal;
-use tabs::Tab;
 use window::PerWindowState;
 
 pub mod atlas;
@@ -40,20 +37,24 @@ mod app_impl;
 mod hot_reload;
 mod layout_ops;
 mod menu;
+mod platform;
+mod recording;
 mod rendering;
 mod run;
 mod session;
 mod settings_dispatch;
 mod tab_spawning;
+mod toast;
+mod welcome;
 pub(crate) mod window;
 
-use tracing::{error, warn};
+use tracing::error;
 
 /// Action requested by the tab bar UI.
 ///
 /// Returned by `show_tab_bar()` and consumed by the main `ui()` method
 /// after the panel finishes rendering.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum TabBarAction {
     /// No tab bar interaction this frame.
     None,
@@ -63,6 +64,14 @@ enum TabBarAction {
     SwitchTo(usize),
     /// User clicked the "x" close button — close tab at `index`.
     Close(usize),
+    /// User double-clicked a tab label — begin inline rename on tab at `index`.
+    BeginRename(usize),
+    /// User pressed Enter in the rename editor — commit the new name.
+    CommitRename(usize, String),
+    /// User pressed Escape in the rename editor — discard the edit.
+    CancelRename,
+    /// User finished dragging tab `from` over tab `to` — move it.
+    Reorder { from: usize, to: usize },
 }
 
 /// Tracks an in-progress mouse drag on a pane split border.
@@ -86,12 +95,17 @@ struct PaneBorderDrag {
 
 /// Initial per-window state consumed by `on_window_created()` for the first
 /// window.  Subsequent windows spawn their own PTY tabs.
+///
+/// The first window's PTY is spawned lazily inside `on_window_created` (not
+/// before GUI startup) so that PTY-spawn failures can surface as a toast in
+/// the newly-created window, and so that no throwaway PTY is created when a
+/// startup layout or session restore will immediately replace the tabs.
 struct InitialWindowState {
-    tab: Tab,
     window_post: Arc<Mutex<WindowPostRenderer>>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
 }
 
+#[allow(clippy::struct_excessive_bools)] // Top-level app state aggregator: each bool is an independent, short-lived UI intent flag (pending window create/focus, one-frame just-opened, self-dismissing dialog visibility). Combining them into a state machine or enum would couple unrelated intents and obscure intent.
 struct FreminalGui {
     /// Per-window state keyed by OS window id.
     ///
@@ -149,9 +163,51 @@ struct FreminalGui {
     /// so the next launch restores the user's layout.
     window_state: freminal_common::window_state::WindowState,
 
-    /// Optional recording handle for FREC v2 session recording.
-    /// When `Some`, topology and window events are emitted.
-    recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
+    /// Persisted mutable application state (currently just the first-run
+    /// onboarding flag).  Lives in `$XDG_STATE_HOME/freminal/state.toml`
+    /// (Linux) so read-only/managed `config.toml` installs (NixOS
+    /// home-manager, system-wide configs) can still record dismissals
+    /// without trying to mutate the config file.
+    app_state: freminal_common::app_state::AppState,
+
+    /// Path to `state.toml`, cached so we don't recompute it on every
+    /// save.  `None` if the platform base directories cannot be
+    /// determined (in which case onboarding dismissal cannot be
+    /// persisted — same fallback as today's `config_path == None`).
+    app_state_path: Option<std::path::PathBuf>,
+
+    /// Shared, hot-swappable FREC v2 recording handle.
+    ///
+    /// When the inner `Option<RecordingHandle>` is `Some`, topology,
+    /// window, input, and PTY events are emitted by all panes.  The GUI
+    /// can toggle recording on and off at runtime by storing a new value
+    /// into this swap; every pane observes the change on its next event
+    /// without any rewiring.
+    recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
+
+    /// Join handle for the currently-active recording writer thread.
+    ///
+    /// Held on the GUI side so that `toggle_recording` can deterministically
+    /// wait for the writer to finalize the file when recording is stopped.
+    /// `Some` while a recording is in progress (mirrors `recording_swap`
+    /// holding `Some`); `None` when no recording is active.
+    recording_join: Option<freminal_terminal_emulator::recording::RecordingJoinHandle>,
+
+    /// Path of the currently-active recording file, if any.
+    ///
+    /// Used by the menu bar and UI to display the recording destination
+    /// and by `toggle_recording` for logging. Mirrors `recording_swap`:
+    /// `Some` when a recording is active, `None` otherwise.
+    recording_path: Option<std::path::PathBuf>,
+
+    /// Path to the `config.toml` file currently backing `self.config`, if
+    /// one was resolved at startup. `None` when running with no config
+    /// file (e.g. fresh first launch before any config exists).
+    ///
+    /// Used by "Reload Config" (subtask 71.17) to re-read the file from
+    /// disk and diff it against `self.config`. Keep in sync with
+    /// `settings_modal.config_path` — both should point to the same file.
+    config_path: Option<std::path::PathBuf>,
 
     /// Maps OS `WindowId` to recording-local u32 identifiers.
     recording_window_ids: HashMap<WindowId, u32>,
@@ -185,45 +241,49 @@ struct FreminalGui {
     /// True only on the first frame after the save-layout prompt opens.
     /// Used to focus the text field exactly once instead of every frame.
     save_layout_prompt_just_opened: bool,
+
+    /// When `true`, the Help menu "About" dialog is visible.  Rendered as a
+    /// small floating `egui::Window` each frame while this is set.
+    about_window_open: bool,
+
+    /// First-run welcome overlay state.  Opened automatically at startup
+    /// when `self.app_state.first_run_complete` is `false`, or on demand
+    /// from the Help menu.  See `gui/welcome.rs`.
+    welcome: welcome::WelcomeOverlay,
+
+    /// When `true`, the Help menu "Keybindings..." item was clicked and the
+    /// Settings Modal should be opened (or refocused) with the Keybindings
+    /// tab selected.  Drained in `update()` next frame.
+    pending_open_keybindings: bool,
+
+    /// App-level stack of user-visible transient notifications (toasts).
+    ///
+    /// Shared across all windows: pushing a toast here makes it visible in
+    /// every open window, and dismissing it in one dismisses it everywhere.
+    /// Used to surface non-fatal errors such as PTY spawn failures, layout
+    /// load errors, and shader compile errors.
+    ///
+    /// Wrapped in `RefCell` so that `&self` methods (notably the various
+    /// PTY-spawn helpers) can push error notifications without forcing a
+    /// cascade of `&mut self` through otherwise-read-only call sites.  The
+    /// entire GUI runs on a single thread, so `RefCell` is sufficient.
+    toasts: std::cell::RefCell<toast::ToastStack>,
 }
 
 impl FreminalGui {
     #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
     fn new(
-        initial_tab: Tab,
         config: Config,
         args: Args,
         repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
         config_path: Option<std::path::PathBuf>,
         window_post: Arc<Mutex<WindowPostRenderer>>,
-        recording_handle: Option<freminal_terminal_emulator::recording::RecordingHandle>,
+        recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
     ) -> Self {
-        // Inform the initial tab about the configured theme mode and current OS
-        // dark/light preference so DECRPM ?2031 responses are correct from the start.
-        // OS dark mode is not yet known (no egui context). Assume light mode initially.
-        let os_dark_mode = false;
-        if let Some(pane) = initial_tab.active_pane() {
-            send_or_log!(
-                pane.input_tx,
-                InputEvent::ThemeModeUpdate(config.theme.mode, os_dark_mode),
-                "Failed to send initial ThemeModeUpdate to tab"
-            );
-        } else {
-            warn!("initial tab has no active pane when sending ThemeModeUpdate");
-        }
-
-        // Apply initial background image from config (if set).
-        let initial_bg_path = config.ui.background_image.clone();
-        if initial_bg_path.is_some()
-            && let Ok(panes) = initial_tab.pane_tree.iter_panes()
-        {
-            for pane in panes {
-                if let Ok(mut rs) = pane.render_state.lock() {
-                    rs.set_pending_bg_image(initial_bg_path.clone());
-                }
-            }
-        }
-        // Push pending shader to the shared WindowPostRenderer.
+        // Push pending shader to the shared WindowPostRenderer.  The first
+        // window's tab is spawned lazily in `on_window_created`, so any
+        // per-tab initial state (ThemeModeUpdate, background image) is
+        // applied there rather than here.
         let initial_shader_src: Option<String> = config.shader.path.as_ref().and_then(|p| {
             std::fs::read_to_string(p)
                 .map_err(|e| {
@@ -242,15 +302,65 @@ impl FreminalGui {
             freminal_common::keybindings::BindingMap::default()
         });
 
-        Self {
+        // Load persisted app state (currently just the first-run flag).
+        // Lives in `$XDG_STATE_HOME/freminal/state.toml` so NixOS
+        // home-manager users with a read-only `config.toml` can still
+        // record dismissals.
+        let app_state_path = freminal_common::app_state::app_state_path();
+        let mut app_state = app_state_path
+            .as_deref()
+            .map(freminal_common::app_state::AppState::load_or_default)
+            .unwrap_or_default();
+
+        // Legacy migration: prior versions stored the dismissal flag in
+        // `config.toml` under `[onboarding] first_run_complete`.  If that
+        // flag is set and the new state file does not yet record it, copy
+        // the value forward (in-memory and best-effort to disk).  We do
+        // not delete the legacy field from `config.toml`; on read-only
+        // configs we couldn't anyway, and leaving it harmless keeps
+        // rollbacks safe.
+        if config.onboarding.first_run_complete && !app_state.first_run_complete {
+            app_state.first_run_complete = true;
+            if let Some(path) = app_state_path.as_deref()
+                && let Err(e) = app_state.save(path)
+            {
+                // Migration failure is non-fatal: the legacy config flag
+                // still suppresses the overlay this session, and the
+                // user will be re-prompted next launch if it stays
+                // unwritable (extremely unlikely for $XDG_STATE_HOME).
+                tracing::warn!(
+                    "Failed to migrate first_run_complete to {}: {e}",
+                    path.display()
+                );
+            }
+        }
+
+        // Open the welcome overlay automatically on first launch (before
+        // the user has seen — or dismissed — it).  The flag is persisted
+        // to `state.toml` on dismissal so subsequent launches skip it.
+        let mut welcome_overlay = welcome::WelcomeOverlay::new();
+        if !app_state.first_run_complete {
+            welcome_overlay.open();
+        }
+
+        // Discover layouts once at startup. Any parse errors are
+        // surfaced as a single aggregated toast after `self` is built so
+        // the user notices broken layout files (otherwise they silently
+        // disappear from the Layouts menu).
+        let (discovered_layouts, layout_errors) = freminal_common::config::layout_library_dir()
+            .map_or_else(
+                || (Vec::new(), Vec::new()),
+                |dir| freminal_common::layout::discover_layouts_with_errors(&dir),
+            );
+
+        let app = Self {
             windows: HashMap::new(),
             binding_map,
             config,
             args,
-            settings_modal: SettingsModal::new(config_path),
+            settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),
             initial_state: Some(InitialWindowState {
-                tab: initial_tab,
                 window_post,
                 repaint_handle,
             }),
@@ -263,17 +373,41 @@ impl FreminalGui {
                 .as_deref()
                 .map(freminal_common::window_state::WindowState::load_or_default)
                 .unwrap_or_default(),
-            recording_handle,
+            app_state,
+            app_state_path,
+            recording_swap,
+            recording_join: None,
+            recording_path: None,
+            config_path,
             recording_window_ids: HashMap::new(),
             next_recording_window_id: 0,
             pending_layout_windows: std::collections::VecDeque::new(),
-            discovered_layouts: freminal_common::config::layout_library_dir()
-                .map(|dir| freminal_common::layout::discover_layouts(&dir))
-                .unwrap_or_default(),
+            discovered_layouts,
             pending_load_layout: None,
             pending_save_layout: None,
             save_layout_prompt_just_opened: false,
+            about_window_open: false,
+            welcome: welcome_overlay,
+            pending_open_keybindings: false,
+            toasts: std::cell::RefCell::new(toast::ToastStack::default()),
+        };
+
+        if !layout_errors.is_empty() {
+            let count = layout_errors.len();
+            let detail = layout_errors
+                .iter()
+                .map(|(path, err)| format!("{}: {err}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let title = if count == 1 {
+                "1 layout failed to load".to_owned()
+            } else {
+                format!("{count} layouts failed to load")
+            };
+            app.push_error_toast(title, Some(detail));
         }
+
+        app
     }
 
     /// Get or assign a recording-local u32 ID for the given OS `WindowId`.
@@ -283,6 +417,33 @@ impl FreminalGui {
             self.next_recording_window_id += 1;
             id
         })
+    }
+
+    /// Push an error toast onto the app-level toast stack.
+    ///
+    /// Takes `&self` because the stack lives behind a `RefCell`.  If the
+    /// borrow happens to be contended (which should not happen on a single
+    /// thread unless two sites on the call stack both attempt to push), the
+    /// push is silently dropped after logging — user-visible notification
+    /// is best-effort by design.
+    pub(super) fn push_error_toast(&self, title: impl Into<String>, detail: Option<String>) {
+        match self.toasts.try_borrow_mut() {
+            Ok(mut stack) => stack.error(title, detail),
+            Err(_) => {
+                tracing::warn!("toast stack was already borrowed; dropping error toast");
+            }
+        }
+    }
+
+    /// Push a best-effort informational toast.  Same borrow semantics as
+    /// [`Self::push_error_toast`].
+    pub(super) fn push_info_toast(&self, title: impl Into<String>, detail: Option<String>) {
+        match self.toasts.try_borrow_mut() {
+            Ok(mut stack) => stack.info(title, detail),
+            Err(_) => {
+                tracing::warn!("toast stack was already borrowed; dropping info toast");
+            }
+        }
     }
 
     /// Compute the initial PTY terminal size from pixel dimensions and cell size.

@@ -11,6 +11,15 @@ use super::window::PerWindowState;
 
 impl PerWindowState {
     pub(super) fn close_tab(&mut self, index: usize) {
+        // If the tab being closed is the one currently being renamed,
+        // clear the rename state so the inline editor doesn't linger on
+        // whichever tab shifts into its position.
+        if let Some(target) = self.tabs.iter().nth(index).map(|t| t.id)
+            && self.renaming_tab == Some(target)
+        {
+            self.renaming_tab = None;
+            self.rename_buffer.clear();
+        }
         if let Err(e) = self.tabs.close_tab(index) {
             trace!("Cannot close tab: {e}");
         }
@@ -187,7 +196,149 @@ impl super::FreminalGui {
                 }
             }
             super::TabBarAction::Close(i) => win.close_tab(i),
+            super::TabBarAction::BeginRename(i) => {
+                // Start inline rename: seed the buffer with the current
+                // display name and mark the tab as renaming.  Clamp to a
+                // valid index — a stale action from an earlier frame may
+                // reference a tab that has since been closed.
+                if let Some(tab) = win.tabs.iter().nth(i) {
+                    let tab_id = tab.id;
+                    let current = tab.display_name().to_owned();
+                    win.renaming_tab = Some(tab_id);
+                    win.rename_buffer = current;
+                } else {
+                    warn!("TabBarAction::BeginRename: tab index {i} out of bounds");
+                }
+            }
+            super::TabBarAction::CommitRename(i, name) => {
+                // Commit the rename.  Empty string clears the custom name
+                // (revert to the pane-derived title).
+                if let Some(tab) = win.tabs.iter_mut().nth(i) {
+                    let trimmed = name.trim();
+                    tab.custom_name = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_owned())
+                    };
+                } else {
+                    warn!("TabBarAction::CommitRename: tab index {i} out of bounds");
+                }
+                win.renaming_tab = None;
+                win.rename_buffer.clear();
+            }
+            super::TabBarAction::CancelRename => {
+                win.renaming_tab = None;
+                win.rename_buffer.clear();
+            }
+            super::TabBarAction::Reorder { from, to } => {
+                if let Err(e) = win.tabs.move_tab(from, to) {
+                    warn!("TabBarAction::Reorder: move_tab({from}, {to}) failed: {e}");
+                }
+            }
             super::TabBarAction::None => {}
+        }
+    }
+
+    /// Dispatch a `KeyAction` that was triggered from a menu click.
+    ///
+    /// Menu clicks happen on the GUI thread during `show_menu_bar`, which
+    /// does not have mutable access to the active pane's `ViewState` or
+    /// `input_tx`.  The menu pushes actions onto `win.pending_menu_actions`,
+    /// and this method drains that queue after the menu bar finishes
+    /// rendering, applying each action to the active pane.
+    ///
+    /// Actions that are local to the active pane (Copy, Paste, Select All)
+    /// are dispatched directly here.  Other actions (`OpenSearch`,
+    /// `SaveLayout`, etc.) are pushed onto `all_deferred_actions` and
+    /// dispatched later by `dispatch_deferred_action` with full GUI state.
+    pub(super) fn dispatch_menu_action(
+        win: &mut PerWindowState,
+        action: freminal_common::keybindings::KeyAction,
+        all_deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
+    ) {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+        use freminal_common::keybindings::KeyAction;
+
+        match action {
+            KeyAction::Copy => {
+                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+                    warn!("Menu Copy: active tab has no active pane");
+                    return;
+                };
+                let Some((start, end)) = pane.view_state.selection.normalised() else {
+                    // No selection — nothing to copy.  Silently ignore; the
+                    // menu item is always enabled but this is a benign no-op.
+                    return;
+                };
+                if let Err(e) = pane.input_tx.send(InputEvent::ExtractSelection {
+                    start_row: start.row,
+                    start_col: start.col,
+                    end_row: end.row,
+                    end_col: end.col,
+                    is_block: pane.view_state.selection.is_block,
+                }) {
+                    error!("Menu Copy: failed to send ExtractSelection to PTY: {e}");
+                } else {
+                    pane.pending_copy = true;
+                }
+            }
+            KeyAction::Paste => {
+                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+                    warn!("Menu Paste: active tab has no active pane");
+                    return;
+                };
+                let snap = pane.arc_swap.load();
+                match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                    Ok(text) if !text.is_empty() => {
+                        let text = text.replace("\r\n", "\n");
+                        let payload = if snap.bracketed_paste == RlBracket::Enabled {
+                            format!("\x1b[200~{text}\x1b[201~")
+                        } else {
+                            text
+                        };
+                        if let Err(e) = pane.input_tx.send(InputEvent::Key(payload.into_bytes())) {
+                            error!("Menu Paste: failed to send paste to PTY: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Menu Paste: clipboard read failed: {e}");
+                    }
+                }
+            }
+            KeyAction::SelectAll => {
+                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+                    warn!("Menu SelectAll: active tab has no active pane");
+                    return;
+                };
+                let snap = pane.arc_swap.load();
+                // `visible_window_start` is `pub(super)` in `gui::terminal::coords`
+                // (private module); inline the same formula here.  See
+                // `gui::terminal::coords::visible_window_start` for the canonical
+                // definition and rationale.
+                let window_start = snap
+                    .total_rows
+                    .saturating_sub(snap.term_height)
+                    .saturating_sub(snap.scroll_offset);
+                let last_row = window_start + snap.height.saturating_sub(1);
+                let last_col = crate::gui::view_state::line_boundaries(
+                    &snap.visible_chars,
+                    snap.height.saturating_sub(1),
+                )
+                .1;
+                pane.view_state.selection.anchor = Some(crate::gui::view_state::CellCoord {
+                    col: 0,
+                    row: window_start,
+                });
+                pane.view_state.selection.end = Some(crate::gui::view_state::CellCoord {
+                    col: last_col,
+                    row: last_row,
+                });
+                pane.view_state.selection.is_selecting = false;
+            }
+            // Everything else (OpenSearch, SaveLayout, etc.) needs full GUI
+            // state — route through the existing deferred-action pipeline.
+            other => all_deferred_actions.push(other),
         }
     }
 
@@ -197,6 +348,7 @@ impl super::FreminalGui {
         action: freminal_common::keybindings::KeyAction,
         win: &mut PerWindowState,
         window_id: super::WindowId,
+        handle: &freminal_windowing::WindowHandle<'_>,
     ) {
         use freminal_common::keybindings::KeyAction;
 
@@ -218,7 +370,11 @@ impl super::FreminalGui {
             KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
                 trace!("Cannot close tab: {e}");
             }
-            KeyAction::CloseTab => {}
+            // `CloseTab` with no error is a no-op here; `ClearScrollback` is
+            // fully handled synchronously in `dispatch_binding_action` (resets
+            // view scroll offset and sends `InputEvent::ClearScrollback` to
+            // the PTY thread) so it needs no deferred-action work.
+            KeyAction::CloseTab | KeyAction::ClearScrollback => {}
             KeyAction::NextTab => {
                 win.tabs.next_tab();
                 if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
@@ -323,8 +479,22 @@ impl super::FreminalGui {
             KeyAction::NewWindow => {
                 win.pending_new_window = true;
             }
+            KeyAction::ToggleRecording => {
+                // Runtime recording toggle: starts a new FREC v2 file with
+                // the current topology snapshotted into the header, or
+                // stops the active recording and joins the writer thread
+                // so the file is fully flushed before we return.
+                self.toggle_recording();
+            }
             KeyAction::RenameTab => {
-                trace!("Unhandled deferred key action: {action:?}");
+                // Begin an inline rename on the active tab.  The tab bar
+                // renders a TextEdit in place of the label while
+                // `renaming_tab` is set; Enter commits, Escape cancels.
+                let tab = win.tabs.active_tab();
+                let tab_id = tab.id;
+                let current = tab.display_name().to_owned();
+                win.renaming_tab = Some(tab_id);
+                win.rename_buffer = current;
             }
             KeyAction::SplitVertical => {
                 self.spawn_split_pane(win, super::panes::SplitDirection::Horizontal);
@@ -420,6 +590,10 @@ impl super::FreminalGui {
                 // Determine where to write the layout file.
                 let Some(layout_dir) = freminal_common::config::layout_library_dir() else {
                     error!("SaveLayout: cannot determine layout library directory");
+                    self.push_error_toast(
+                        "Failed to save layout",
+                        Some("Cannot determine layout library directory".to_string()),
+                    );
                     return;
                 };
                 // Derive a filename from the user-supplied name, falling back
@@ -447,6 +621,10 @@ impl super::FreminalGui {
                 // Ensure the directory exists.
                 if let Err(e) = std::fs::create_dir_all(&layout_dir) {
                     error!("SaveLayout: cannot create layout library dir: {e}");
+                    self.push_error_toast(
+                        "Failed to save layout",
+                        Some(format!("Cannot create {}: {e}", layout_dir.display())),
+                    );
                     return;
                 }
                 match self.save_layout(&path, &name, Some(win)) {
@@ -458,8 +636,19 @@ impl super::FreminalGui {
                     }
                     Err(e) => {
                         error!("SaveLayout: failed to write {}: {e}", path.display());
+                        self.push_error_toast(
+                            "Failed to save layout",
+                            Some(format!("{}: {e}", path.display())),
+                        );
                     }
                 }
+            }
+            KeyAction::ReloadConfig => {
+                // Re-read config.toml from disk and broadcast every derived
+                // state change to every pane in every window.  Toast-reports
+                // success or failure; leaves the live config unchanged on
+                // parse error.  See `reload_config_from_disk` for details.
+                self.reload_config_from_disk(handle);
             }
         }
     }

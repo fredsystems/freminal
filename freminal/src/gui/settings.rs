@@ -101,6 +101,20 @@ enum KeyCapture {
     Combo(KeyCombo),
 }
 
+/// Pending close request state for the unsaved-changes guard.
+///
+/// When the user tries to close the settings modal while `is_dirty()` is true,
+/// the close is deferred and a confirmation prompt is shown asking whether to
+/// save, discard, or cancel.  The variant records how the close was requested
+/// so the guard can answer correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingClose {
+    /// No close pending.
+    None,
+    /// Close was requested — show the confirm prompt until the user chooses.
+    Asking,
+}
+
 /// State machine for the press-to-record keybinding editor.
 #[derive(Debug, Clone)]
 enum KeyRecordingState {
@@ -191,6 +205,19 @@ pub struct SettingsModal {
     /// a layout.  Consumed by `show_standalone` / `show` which return it as
     /// `SettingsAction::DeleteLayout`.
     pending_delete_layout: Option<std::path::PathBuf>,
+
+    /// Serialized TOML of the draft at the moment the modal was opened or the
+    /// last successful Apply.  Used by `is_dirty()` to detect unsaved edits
+    /// without requiring `PartialEq` on every sub-config struct.
+    ///
+    /// Serialization is cheap enough to perform on open/apply and only
+    /// required once per close attempt.
+    baseline_toml: String,
+
+    /// Pending close request from Cancel, embedded X, or OS close.  When
+    /// `Asking`, the settings UI renders a confirmation prompt instead of
+    /// actually closing.  Cleared by Save / Discard / keep-open decisions.
+    pending_close: PendingClose,
 }
 
 impl SettingsModal {
@@ -214,7 +241,99 @@ impl SettingsModal {
             key_recording: KeyRecordingState::Idle,
             discovered_layouts: Vec::new(),
             pending_delete_layout: None,
+            baseline_toml: String::new(),
+            pending_close: PendingClose::None,
         }
+    }
+
+    /// Replace the draft with `live_config` so that a subsequent `open()`
+    /// (or the currently-open modal) reflects on-disk state.
+    ///
+    /// Used by the "Reload Config" menu action (subtask 71.17) to keep the
+    /// settings draft in sync with a live config reloaded from `config.toml`.
+    /// Preserves the currently-selected tab and other transient UI state.
+    pub(super) fn sync_from_config(&mut self, live_config: &Config) {
+        self.draft = live_config.clone();
+        self.original_theme_slug = live_config.theme.active_slug(self.os_dark_mode).to_string();
+        self.original_opacity = live_config.ui.background_opacity;
+        self.baseline_toml = Self::serialize_for_baseline(live_config);
+        self.pending_close = PendingClose::None;
+    }
+
+    /// Serialize a config to the canonical TOML form used as the dirty-check
+    /// baseline.  Delegates to `freminal_common::config::serialize_config_for_diff`
+    /// so all callers share the same canonical form.  Returns an empty string
+    /// on serialization failure, which causes `is_dirty()` to conservatively
+    /// report dirty and trigger the confirmation prompt — preferable to
+    /// silently dropping edits.
+    fn serialize_for_baseline(config: &Config) -> String {
+        config::serialize_config_for_diff(config)
+    }
+
+    /// Returns `true` if the draft differs from the baseline captured at the
+    /// last open/apply.  Used by the unsaved-changes guard on close.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        Self::serialize_for_baseline(&self.draft) != self.baseline_toml
+    }
+
+    /// Request to close the modal, consulting the dirty state.
+    ///
+    /// Returns `true` if the modal may close immediately (no pending edits),
+    /// `false` if the caller should keep the window open so the user can
+    /// resolve the confirm prompt.  Callers include the embedded Cancel
+    /// button, the egui window X, and the app's `on_close_requested` hook
+    /// for the standalone settings OS window.
+    ///
+    /// When read-only, close is always allowed (Apply is disabled, so there
+    /// can be no unsaved edits from the user's perspective).
+    pub fn request_close(&mut self) -> bool {
+        if !self.is_open {
+            return true;
+        }
+        if self.read_only_reason.is_some() || !self.is_dirty() {
+            self.is_open = false;
+            self.pending_close = PendingClose::None;
+            return true;
+        }
+        self.pending_close = PendingClose::Asking;
+        false
+    }
+
+    /// Render the unsaved-changes confirmation prompt, if one is pending.
+    ///
+    /// Returns `Some(action)` when the user chose Save (triggers apply) or
+    /// Discard (closes the modal).  Returns `None` for Cancel / still
+    /// deciding / no prompt pending.
+    fn show_confirm_close_prompt(&mut self, ctx: &egui::Context) -> SettingsAction {
+        if self.pending_close != PendingClose::Asking {
+            return SettingsAction::None;
+        }
+        let mut action = SettingsAction::None;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("You have unsaved changes in Settings.");
+                ui.add_space(6.0);
+                ui.label("Save before closing?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        action = self.try_apply();
+                        self.pending_close = PendingClose::None;
+                    }
+                    if ui.button("Discard").clicked() {
+                        self.is_open = false;
+                        self.pending_close = PendingClose::None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending_close = PendingClose::None;
+                    }
+                });
+            });
+        action
     }
 
     /// Open the modal, cloning the live config into the draft for editing.
@@ -257,7 +376,33 @@ impl SettingsModal {
         };
 
         self.key_recording = KeyRecordingState::Idle;
+        self.baseline_toml = Self::serialize_for_baseline(live_config);
+        self.pending_close = PendingClose::None;
         self.is_open = true;
+    }
+
+    /// Open the modal with a specific tab preselected.
+    ///
+    /// Wraps [`Self::open`] and overrides the default `SettingsTab::Font`
+    /// starting tab.  Used by the Help menu's "Keybindings..." item to jump
+    /// directly to the Keybindings tab.
+    pub fn open_to_tab(
+        &mut self,
+        live_config: &Config,
+        monospace_families: Vec<String>,
+        os_dark_mode: bool,
+        tab: SettingsTab,
+    ) {
+        self.open(live_config, monospace_families, os_dark_mode);
+        self.active_tab = tab;
+    }
+
+    /// Set the active tab on an already-open modal.
+    ///
+    /// Used by the Help menu's "Keybindings..." item when the settings
+    /// window is already open — we switch tabs instead of re-opening.
+    pub const fn set_active_tab(&mut self, tab: SettingsTab) {
+        self.active_tab = tab;
     }
 
     /// Show the modal window. Returns the action the caller should take.
@@ -308,7 +453,9 @@ impl SettingsModal {
                         action = self.try_apply();
                     }
                     if ui.button("Cancel").clicked() {
-                        self.is_open = false;
+                        // Route through the dirty-state guard so unsaved
+                        // edits surface a confirmation prompt.
+                        self.request_close();
                     }
                 });
             });
@@ -348,6 +495,14 @@ impl SettingsModal {
                     self.draw_active_tab(ui);
                 });
         });
+
+        // Render the unsaved-changes prompt on top of the settings UI.
+        // If it returns Applied (Save button), adopt it so the revert/preview
+        // fallthrough below doesn't misread the closed state as a cancel.
+        let prompt_action = self.show_confirm_close_prompt(ctx);
+        if prompt_action == SettingsAction::Applied {
+            action = prompt_action;
+        }
 
         // Revert / preview logic (same as show())
         if let Some(path) = self.pending_delete_layout.take() {
@@ -472,15 +627,29 @@ impl SettingsModal {
                             action = self.try_apply();
                         }
                         if ui.button("Cancel").clicked() {
-                            self.is_open = false;
+                            // Route through the dirty-state guard so unsaved
+                            // edits surface a confirmation prompt.
+                            self.request_close();
                         }
                     });
                 });
             });
 
-        // Handle the X button on the window title bar.
-        if !open {
+        // Handle the X button on the window title bar.  When the user clicks
+        // X, egui sets `open = false`; route that through the guard too so
+        // the X respects unsaved changes.  If the guard vetoes the close,
+        // re-open the embedded window by leaving `is_open = true`.
+        if !open && self.is_open && !self.request_close() {
+            // Guard deferred the close — keep the window open so the
+            // confirm prompt can render on top.
+        } else if !open {
             self.is_open = false;
+        }
+
+        // Render the unsaved-changes prompt on top of the settings UI.
+        let prompt_action = self.show_confirm_close_prompt(ctx);
+        if prompt_action == SettingsAction::Applied {
+            action = prompt_action;
         }
 
         // If the modal just closed (Cancel or X) without Apply, revert any
@@ -864,6 +1033,21 @@ impl SettingsModal {
             "On X11, requires a running compositor (e.g. picom).",
         );
 
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.checkbox(
+            &mut self.draft.ui.auto_detect_urls,
+            "Auto-detect URLs in terminal output",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Makes plain URLs (http, https, file, ftp, mailto) clickable even when \
+             programs do not emit OSC 8 hyperlinks.",
+        );
+
         self.show_ui_background_image(ui);
         self.show_ui_shader(ui);
     }
@@ -1021,6 +1205,8 @@ impl SettingsModal {
                     config::BellMode::Visual,
                     "Visual",
                 );
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Audio, "Audio");
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Both, "Both");
                 ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None");
             });
 
@@ -1439,6 +1625,10 @@ impl SettingsModal {
             Ok(()) => {
                 self.is_open = false;
                 self.status_message = None;
+                // Refresh baseline so any subsequent reopen sees the saved
+                // state as clean.
+                self.baseline_toml = Self::serialize_for_baseline(&self.draft);
+                self.pending_close = PendingClose::None;
                 SettingsAction::Applied
             }
             Err(e) => {
@@ -1477,34 +1667,135 @@ impl SettingsModal {
         ui.add_space(8.0);
 
         // ── Default startup layout ───────────────────────────────────────────
+        self.show_startup_layout_group(ui);
+
+        ui.add_space(8.0);
+
+        // ── Layout library ───────────────────────────────────────────────────
+        self.show_layout_library_group(ui);
+    }
+
+    /// Render the "Default Layout" group within the Startup tab.
+    ///
+    /// Split out from [`Self::show_startup_tab`] to keep that function under
+    /// the pedantic line-count threshold and to make the layout-selection
+    /// logic easier to locate when iterating on UX.
+    fn show_startup_layout_group(&mut self, ui: &mut Ui) {
+        // Sentinel label shown when no startup layout is configured.
+        // Blank strings inside a ComboBox render as zero-width items,
+        // which is easy to miss; an explicit label is unambiguous.
+        const NONE_LABEL: &str = "(none)";
+
         ui.group(|ui| {
             ui.label(egui::RichText::new("Default Layout").strong());
             ui.add_space(4.0);
+
+            // Selected layout name, or the NONE_LABEL sentinel.
+            let current = self
+                .draft
+                .startup
+                .layout
+                .clone()
+                .unwrap_or_else(|| NONE_LABEL.to_string());
+
+            // Track whether the configured layout is missing from the
+            // discovered list (e.g. layouts dir was removed, or the user
+            // typed a name manually in a previous session).  In that case
+            // we still show the current value so the user can see what's
+            // configured, but mark it with a warning suffix.
+            let configured_missing = startup_layout_is_missing(
+                self.draft.startup.layout.as_deref(),
+                &self.discovered_layouts,
+            );
+
             ui.horizontal(|ui| {
-                ui.label("Layout name:");
-                let mut layout_text = self.draft.startup.layout.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut layout_text).changed() {
-                    self.draft.startup.layout = if layout_text.is_empty() {
-                        None
-                    } else {
-                        Some(layout_text)
-                    };
-                }
+                ui.label("Layout:");
+                let selected_text = if configured_missing {
+                    format!("{current}  (missing)")
+                } else {
+                    current.clone()
+                };
+                ComboBox::from_id_salt("startup_layout_combo")
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        self.populate_startup_layout_combo(
+                            ui,
+                            NONE_LABEL,
+                            &current,
+                            configured_missing,
+                        );
+                    });
             });
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(
-                    "Name of a layout file in ~/.config/freminal/layouts/ to load on startup. \
-                     Leave empty for the default single-pane session.",
+                    "Layout to load on startup, from ~/.config/freminal/layouts/. \
+                     Select \"(none)\" for the default single-pane session.",
                 )
                 .weak()
                 .small(),
             );
         });
+    }
 
-        ui.add_space(8.0);
+    /// Populate the entries of the startup-layout `ComboBox`.
+    ///
+    /// Extracted from [`Self::show_startup_layout_group`] purely to keep
+    /// line counts below the pedantic threshold.
+    fn populate_startup_layout_combo(
+        &mut self,
+        ui: &mut Ui,
+        none_label: &str,
+        current: &str,
+        configured_missing: bool,
+    ) {
+        // "(none)" entry clears the startup layout.
+        if ui
+            .selectable_label(self.draft.startup.layout.is_none(), none_label)
+            .clicked()
+        {
+            self.draft.startup.layout = None;
+        }
+        // Keep an entry for the configured-but-missing layout so
+        // re-selecting it is trivial once the file reappears, and so
+        // the user isn't forced to delete the setting just to reach
+        // the combo.
+        if configured_missing {
+            let is_selected = self
+                .draft
+                .startup
+                .layout
+                .as_deref()
+                .is_some_and(|n| n == current);
+            let label = format!("{current}  (missing)");
+            if ui.selectable_label(is_selected, label).clicked() {
+                self.draft.startup.layout = Some(current.to_string());
+            }
+        }
+        for layout in &self.discovered_layouts {
+            let is_selected = self
+                .draft
+                .startup
+                .layout
+                .as_deref()
+                .is_some_and(|n| n == layout.name);
+            let label = layout.description.as_deref().map_or_else(
+                || layout.name.clone(),
+                |d| format!("{}  —  {d}", layout.name),
+            );
+            if ui.selectable_label(is_selected, label).clicked() {
+                self.draft.startup.layout = Some(layout.name.clone());
+            }
+        }
+    }
 
-        // ── Layout library ───────────────────────────────────────────────────
+    /// Render the "Layout Library" group within the Startup tab.
+    ///
+    /// Shows discovered layouts with per-entry delete buttons, or a hint
+    /// when the layouts directory is empty.  Extracted from
+    /// [`Self::show_startup_tab`] for the same reason as
+    /// [`Self::show_startup_layout_group`].
+    fn show_layout_library_group(&mut self, ui: &mut Ui) {
         ui.group(|ui| {
             ui.label(egui::RichText::new("Layout Library").strong());
             ui.add_space(4.0);
@@ -1582,7 +1873,19 @@ const fn bell_mode_label(mode: config::BellMode) -> &'static str {
     match mode {
         config::BellMode::Visual => "Visual",
         config::BellMode::None => "None",
+        config::BellMode::Audio => "Audio",
+        config::BellMode::Both => "Both",
     }
+}
+
+/// Returns `true` when a startup layout is configured but not present in
+/// the discovered layout list.  Extracted for unit testing since the
+/// `ComboBox` UI itself is hard to exercise in isolation.
+fn startup_layout_is_missing(
+    configured: Option<&str>,
+    discovered: &[freminal_common::layout::LayoutSummary],
+) -> bool {
+    configured.is_some_and(|name| !discovered.iter().any(|l| l.name.as_str() == name))
 }
 
 /// Paint a small colored rectangle as an inline swatch.
@@ -1681,6 +1984,27 @@ mod tests {
         assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
         assert_eq!(SettingsTab::Startup.label(), "Startup");
+    }
+
+    #[test]
+    fn open_to_tab_selects_requested_tab() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open_to_tab(&cfg, Vec::new(), false, SettingsTab::Keybindings);
+        assert!(modal.is_open);
+        assert_eq!(modal.active_tab, SettingsTab::Keybindings);
+    }
+
+    #[test]
+    fn set_active_tab_switches_without_reopening() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        assert_eq!(modal.active_tab, SettingsTab::Font);
+        modal.set_active_tab(SettingsTab::Keybindings);
+        assert_eq!(modal.active_tab, SettingsTab::Keybindings);
+        // Still open; switching tabs doesn't close the modal.
+        assert!(modal.is_open);
     }
 
     #[test]
@@ -1790,5 +2114,115 @@ mod tests {
         modal.open(&live, families.clone(), false);
 
         assert_eq!(modal.monospace_families, families);
+    }
+
+    #[test]
+    fn sync_from_config_updates_draft_and_originals() {
+        let mut modal = SettingsModal::new(None);
+        // Seed the modal with an initial config via open() so os_dark_mode
+        // and the original_* fields are initialised.
+        let initial = Config::default();
+        modal.open(&initial, Vec::new(), false);
+        let initial_opacity = modal.original_opacity;
+
+        // Build a mutated config and sync.  Use a distinguishable opacity
+        // and theme slug so we can verify the draft updates.
+        let mut reloaded = Config::default();
+        reloaded.ui.background_opacity = (initial_opacity - 0.5).clamp(0.0, 1.0);
+        modal.sync_from_config(&reloaded);
+
+        assert!(
+            (modal.draft.ui.background_opacity - reloaded.ui.background_opacity).abs()
+                < f32::EPSILON
+        );
+        assert!((modal.original_opacity - reloaded.ui.background_opacity).abs() < f32::EPSILON);
+        assert_eq!(
+            modal.original_theme_slug,
+            reloaded.theme.active_slug(modal.os_dark_mode).to_string()
+        );
+    }
+
+    #[test]
+    fn is_dirty_false_after_open_and_true_after_edit() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+
+        assert!(
+            !modal.is_dirty(),
+            "freshly-opened modal should match its baseline"
+        );
+
+        // Mutate the draft — any change should flip the dirty flag.
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(modal.is_dirty(), "edited draft should be dirty");
+    }
+
+    #[test]
+    fn request_close_closes_when_clean_and_defers_when_dirty() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+        // Force writable state: on some CI environments the default config
+        // path is not writable, which would otherwise short-circuit the
+        // guard into read-only mode.
+        modal.read_only_reason = None;
+
+        // Clean modal closes immediately.
+        assert!(modal.request_close());
+        assert!(!modal.is_open);
+
+        // Dirty modal defers and sets the Asking state.
+        modal.open(&live, Vec::new(), false);
+        modal.read_only_reason = None;
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(!modal.request_close(), "dirty close should be vetoed");
+        assert!(modal.is_open, "modal must stay open while Asking");
+        assert_eq!(modal.pending_close, PendingClose::Asking);
+    }
+
+    #[test]
+    fn request_close_bypasses_guard_in_read_only_mode() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+        // Force read-only and dirty.  Even when the draft differs, read-only
+        // mode cannot apply anyway, so closing without a prompt is correct.
+        modal.read_only_reason = Some("test: read-only".to_string());
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(modal.request_close());
+        assert!(!modal.is_open);
+    }
+
+    #[test]
+    fn startup_layout_is_missing_detects_absent_and_present() {
+        use freminal_common::layout::LayoutSummary;
+        use std::path::PathBuf;
+
+        let discovered = vec![
+            LayoutSummary {
+                name: "dev".to_string(),
+                description: None,
+                path: PathBuf::from("/tmp/dev.toml"),
+            },
+            LayoutSummary {
+                name: "ops".to_string(),
+                description: Some("Ops layout".to_string()),
+                path: PathBuf::from("/tmp/ops.toml"),
+            },
+        ];
+
+        // None => not missing (nothing is configured).
+        assert!(!startup_layout_is_missing(None, &discovered));
+        // Configured and present => not missing.
+        assert!(!startup_layout_is_missing(Some("dev"), &discovered));
+        assert!(!startup_layout_is_missing(Some("ops"), &discovered));
+        // Configured but absent => missing.
+        assert!(startup_layout_is_missing(Some("ghost"), &discovered));
+        // Configured but discovered list is empty => missing.
+        assert!(startup_layout_is_missing(Some("dev"), &[]));
     }
 }

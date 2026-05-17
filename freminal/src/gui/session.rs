@@ -104,38 +104,41 @@ impl FreminalGui {
         }
     }
 
-    /// Apply the last-session layout if `restore_last_session` is enabled and
-    /// the file exists.  Called once after the first window is ready.
+    /// Resolve the path of a `--layout` or `startup.layout` name-or-path
+    /// string against the layout library directory.
     ///
-    /// Only called when no `--layout` CLI flag was provided.
-    pub(super) fn maybe_restore_last_session(
-        &mut self,
-        window_id: freminal_windowing::WindowId,
-        handle: &freminal_windowing::WindowHandle<'_>,
-    ) {
+    /// If the value has a `.toml` extension or contains a path separator it
+    /// is treated as a literal path; otherwise it is looked up inside the
+    /// layout library as `<name>.toml`.
+    pub(super) fn resolve_startup_layout_path(name_or_path: &str) -> std::path::PathBuf {
+        let p = std::path::Path::new(name_or_path);
+        if p.extension().is_some_and(|e| e == "toml") || p.components().count() > 1 {
+            p.to_path_buf()
+        } else {
+            freminal_common::config::layout_library_dir().map_or_else(
+                || p.to_path_buf(),
+                |d| d.join(format!("{name_or_path}.toml")),
+            )
+        }
+    }
+
+    /// Whether the first window will immediately have its tabs replaced by
+    /// a layout or session-restore apply.
+    ///
+    /// When this returns `true`, spawning a default PTY before window
+    /// creation is wasteful: the pre-spawned tab would be dropped the
+    /// moment `apply_layout` runs.  Callers use this to gate whether to
+    /// spawn a default PTY at all for the first window.
+    pub(super) fn will_layout_or_restore_apply(&self) -> bool {
+        if self.args.layout.is_some() || self.config.startup.layout.is_some() {
+            return true;
+        }
         if !self.config.startup.restore_last_session {
-            return;
+            return false;
         }
-        let Some(path) = Self::last_session_path() else {
-            return;
-        };
-        if !path.exists() {
-            return;
+        if !self.args.command.is_empty() {
+            return false;
         }
-        match freminal_common::layout::Layout::from_file(&path).and_then(|l| {
-            l.apply_variables(&[], &std::collections::HashMap::new())
-                .resolve()
-        }) {
-            Ok(resolved) => {
-                let commands = self.apply_layout(&resolved, window_id, handle);
-                self.inject_layout_commands(&commands);
-            }
-            Err(e) => {
-                error!(
-                    "restore_last_session: failed to apply {}: {e}",
-                    path.display()
-                );
-            }
-        }
+        Self::last_session_path().is_some_and(|p| p.exists())
     }
 }

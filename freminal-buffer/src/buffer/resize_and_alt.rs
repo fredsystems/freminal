@@ -190,6 +190,7 @@ impl Buffer {
             cursor: saved.cursor,
             current_tag: FormatTag::default(),
             scrollback_limit: 4000,
+            auto_detect_urls: true,
             kind: BufferType::Primary,
             saved_primary: None,
             saved_cursor: saved.saved_cursor,

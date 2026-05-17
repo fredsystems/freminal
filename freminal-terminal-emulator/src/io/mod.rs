@@ -67,6 +67,13 @@ pub enum InputEvent {
     /// Coordinates are buffer-absolute row indices and 0-indexed columns.
     /// The PTY thread extracts the text and sends it back through a dedicated
     /// clipboard response channel.
+    /// Enable or disable auto-detection of plain URLs in terminal output.
+    ///
+    /// Sent by the Settings Modal when the user toggles `auto_detect_urls`
+    /// in the UI tab.  The PTY thread forwards this to the buffer via
+    /// `Buffer::set_auto_detect_urls`, which invalidates the row flatten
+    /// cache so subsequent snapshots carry the updated detection state.
+    AutoDetectUrls(bool),
     ExtractSelection {
         start_row: usize,
         start_col: usize,
@@ -77,6 +84,13 @@ pub enum InputEvent {
         /// `end_col` (the same column range on each row).
         is_block: bool,
     },
+    /// Erase the scrollback buffer, leaving the visible display intact.
+    ///
+    /// Triggered by the `ClearScrollback` `KeyAction`. The PTY thread calls
+    /// `buffer_mut().erase_scrollback()` and resets `gui_scroll_offset` to 0
+    /// (the GUI must also reset its local `ViewState::scroll_offset` so the
+    /// next frame renders from the live view).
+    ClearScrollback,
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

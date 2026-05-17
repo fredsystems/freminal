@@ -12,16 +12,24 @@ Depends on v0.8.0 (correctness) and v0.9.0 (modern workflow primitives).
 
 ## Task Summary
 
-| #   | Feature                                 | Scope  | Status | Depends On |
-| --- | --------------------------------------- | ------ | ------ | ---------- |
-| 78  | Profiles + Quick Profile Switching      | Medium | Stub   | v0.8.0     |
-| 79  | Theme Preview + Color Picker            | Medium | Stub   | v0.8.0     |
-| 80  | Font Ligatures Per-Profile Toggle       | Small  | Stub   | Task 78    |
-| 81  | GPU-Accelerated Scrollback Regex Search | Medium | Stub   | v0.8.0     |
-| 82  | Quick-Select / Hints Mode               | Medium | Stub   | v0.8.0     |
-| 83  | Command Palette                         | Medium | Stub   | v0.8.0     |
+| #   | Feature                                 | Scope  | Status | Depends On    |
+| --- | --------------------------------------- | ------ | ------ | ------------- |
+| 78  | Profiles + Quick Profile Switching      | Medium | Stub   | v0.8.0        |
+| 79  | Theme Preview + Color Picker            | Medium | Stub   | v0.8.0        |
+| 80  | Font Ligatures Per-Profile Toggle       | Small  | Stub   | Task 78       |
+| 81  | GPU-Accelerated Scrollback Regex Search | Medium | Stub   | v0.8.0        |
+| 82  | Quick-Select / Hints Mode               | Medium | Stub   | v0.8.0        |
+| 83  | Command Palette                         | Medium | Stub   | v0.8.0        |
+| 83a | Expanded Auto-Detection (TENTATIVE)     | Medium | Stub   | 71.7b         |
+| 96  | Per-Pane Title Bar                      | Small  | Stub   | Task 58       |
+| 97  | Dynamic Tab Width & Overflow Behavior   | Small  | Stub   | v0.8.0 (71.1) |
 
 Tasks 82 and 83 absorb FUTURE_PLANS.md items B.3 and B.2 respectively.
+
+**Task 83a is TENTATIVE and may be removed.** It is a follow-up brainstorm from Task 71.7b
+(auto-detect plain URLs). A future agent MUST NOT begin work on Task 83a without the
+maintainer explicitly greenlighting it. Do not promote it to "Pending" or activate it
+autonomously.
 
 ---
 
@@ -120,9 +128,208 @@ it.
 
 ---
 
+## Task 96 — Per-Pane Title Bar
+
+### 96 Summary
+
+Tabs already display a single title (the active pane's title). When a tab contains
+multiple panes (Task 58), the inactive panes' titles are invisible — a real loss when
+those panes are running things like `htop`, `cargo watch`, or a remote SSH session whose
+hostname matters at a glance.
+
+Add an optional per-pane title bar rendered at the top of each split pane showing that
+pane's title (and possibly its running command, CWD basename, or PID). Toggleable
+globally and configurable per layout. Coexists with the existing tab bar — the tab bar
+still shows a single title (driven by Task 94's precedence rules) while each pane gets
+its own micro title bar.
+
+### 96 Open Questions (decide at activation)
+
+- Always-on vs. only-when-multiple-panes vs. config-driven.
+- Bar height (cells reserved vs. pixel band rendered above the cell grid).
+- Whether the focused pane's bar is visually accented (matching theme accent color).
+- Whether the bar carries affordances (close, zoom, rename) or is read-only.
+- Coexistence with Task 85's powerline status bar (which is per-window/per-tab) — these
+  are different bars at different scales and should not conflict.
+
+### 96 Scope
+
+Small to Medium. Touches `freminal/src/gui/terminal/` (pane rendering), `freminal/src/gui/panes/`
+(per-pane title field already exists), and `freminal-common/src/config.rs` (toggle).
+
+### 96 Dependencies
+
+- Task 58 (Built-in Multiplexer) — landed in v0.5.0.
+
+### 96 Reference
+
+Triaged from `bugs.txt` Idea 2 (2026-05-17).
+
+---
+
+## Task 97 — Dynamic Tab Width & Overflow Behavior
+
+### 97 Summary
+
+Today's tab bar uses fixed-width tabs. OSC-driven titles get visibly truncated, while
+user-set custom names render at full width — an inconsistency that surprises users. There
+is also no defined behavior when the tab bar overflows the window width (do tabs shrink,
+scroll, wrap, or do older tabs simply become inaccessible?).
+
+Audit the current behavior, decide on a coherent model, and implement it. Likely target
+behavior:
+
+- Dynamic per-tab width based on title length, bounded by a minimum (`~12 cells` of glyph
+  width so a tab with no title is still clickable) and a maximum (`~32 cells`).
+- Equal-share shrinking when the total natural width exceeds the available bar width,
+  down to the per-tab minimum.
+- Below that minimum, overflow handling: horizontal scroll with chevrons, dropdown menu
+  of overflow tabs, or both. (WezTerm and Alacritty have different answers here —
+  decide at activation.)
+- Consistent truncation (single character ellipsis, left- or right-truncated based on
+  whether the prefix or suffix is more informative).
+
+### 97 Open Questions (decide at activation)
+
+- Min/max tab widths (cell-based vs. pixel-based — currently the renderer is glyph-cell
+  oriented, so cells are likely the right unit).
+- Overflow strategy (scroll vs. dropdown vs. hybrid).
+- Whether to introduce an explicit "tab pinning" affordance so important tabs stay
+  visible during overflow.
+- Whether OSC titles get truncated to a different limit than custom names (current state)
+  or whether both follow the same rules (proposed).
+
+### 97 Scope
+
+Small to Medium. Concentrated in `freminal/src/gui/menu.rs` (tab bar rendering) and
+`freminal/src/gui/window.rs` (tab rect computation).
+
+### 97 Dependencies
+
+- 71.1 (custom tab rename) — landed in v0.8.0.
+- Interacts with Task 94 (tab title precedence): the truncation policy may differ when
+  a custom name is set vs. when OSC asserts the title.
+
+### 97 Reference
+
+Triaged from `bugs.txt` Idea 4 (2026-05-17). Note from the bug report: OSC-set titles
+appear visibly truncated where manually-set titles of the same length do not — confirm
+during activation that the truncation logic is consistent across both sources before
+designing the dynamic-width replacement.
+
+---
+
 ## Design Decisions (provisional)
 
 - **v0.10.0 is keyboard-first.** Every feature has a keybinding and is usable without the
   mouse.
 - **No scripting yet.** Scripting is the backbone of v0.11.0; we do not introduce it
   halfway here.
+
+---
+
+## Task 83a — Expanded Auto-Detection (TENTATIVE)
+
+**STATUS: TENTATIVE. May be removed. Do not start without maintainer approval.**
+
+This task is a brainstorm follow-up to Task 71.7b, which landed auto-detection of plain
+`http`/`https`/`file`/`ftp`/`mailto` URLs in terminal output. The maintainer has not
+committed to shipping any of the expansions below. A future agent encountering this task
+MUST stop and ask before doing any implementation work. It exists here so the ideas are
+not lost, not as a commitment to build them.
+
+### 83a Summary
+
+Extend the existing `freminal-buffer/src/url_detect.rs` machinery to recognize more
+clickable patterns beyond fully-qualified URLs. Three independent sub-features, each
+shippable on its own:
+
+1. **Absolute file paths** — `/etc/nginx/nginx.conf`, `/Users/fred/src/foo.rs:42:8`
+2. **Schemeless URLs** — `github.com`, `docs.rs/regex`, `localhost:8080`
+3. **Explicit relative paths** — `./src/main.rs`, `../Cargo.toml`
+
+All of these fit into the existing flatten-cache overlay architecture with no new PTY
+hot-path work. `UrlMatch` would gain a `kind: UrlKind` field so click dispatch can branch
+on the match type.
+
+### 83a.1 Absolute file paths with optional `:LINE[:COL]` suffix
+
+Detection via `(?:^|[\s("'\[])(/[^\s"'<>()\[\]]+)` with trailing-punctuation stripping and
+an optional `:NNN` or `:NNN:NNN` tail.
+
+**Existence checking:** optimistic detection, no `stat()` during flatten. Filesystem I/O
+on the flatten path is forbidden (blocking NFS, stalled mounts). Click attempts `xdg-open`
+or spawns `$EDITOR +LINE path` for paths with a line suffix; failure shows an error toast.
+
+Highest-value of the three — covers rustc/clippy/grep/cargo output. Low risk. Main false
+positive is `/etc/passwd`-style references in prose, which users can live with.
+
+### 83a.2 Schemeless URLs
+
+Detection via `\b([a-z0-9-]+\.)+[a-z]{2,}(:\d+)?(/[^\s]*)?\b` gated on a TLD allow-list
+(~30 entries from the Public Suffix List — `com`, `org`, `io`, `dev`, `net`, `rs`, `gov`,
+`edu`, …).
+
+**Critical caveat:** the `.rs` / `.io` / `.sh` / `.dev` TLDs collide with common Rust/shell
+filenames. Mitigation: for ambiguous TLDs, require either a path segment (`/foo`) or port
+(`:8080`) after the host. Drops bare `module.rs` but keeps `docs.rs/regex`.
+
+Click behavior prepends `https://` (configurable).
+
+**Opt-in only.** Default `false` in config. The false-positive risk on `.rs` files in a
+Rust-first terminal is bad enough that it must not be default-on.
+
+Config surface:
+
+```toml
+[ui]
+auto_detect_schemeless_urls = false
+auto_detect_schemeless_scheme = "https"
+```
+
+### 83a.3 Explicit relative paths (`./` and `../` only)
+
+Detection via `(?:^|\s)(\.{1,2}/[^\s"'<>()\[\]]+)`. Nearly zero false positives. Cheap.
+
+**Requires OSC 7** for click-to-open. Relative paths only resolve cleanly when the pane's
+CWD is known. Freminal already tracks CWD via `/proc/PID/cwd` for layout save, but many
+shells need configuration to emit OSC 7 reliably. If OSC 7 is absent and `/proc` lookup
+fails, the path is still detected (styled) but click surfaces an error.
+
+**Bare relative paths** (`src/buffer/flatten.rs` with no leading `./`) are explicitly
+**out of scope.** False-positive risk is too high and every token containing a `/` would
+light up.
+
+### 83a Open Questions (decide at activation)
+
+- Should `UrlMatch.kind` be exposed to the Settings UI for per-kind enable/disable, or is
+  one global `auto_detect_urls` toggle enough?
+- `$EDITOR` vs `$VISUAL` vs a config-driven `editor_command` template for file:line clicks.
+- TLD allow-list: hardcoded static list vs. embedded PSL subset vs. user-configurable.
+- Do we also want git SHA detection (`abc1234` → `$BROWSER origin/tree/abc1234`) and issue
+  references (`#1234`, `JIRA-123`)? Both would need their own config schema. Out of scope
+  for 83a but natural extensions.
+- Behavior when OSC 7 is unavailable: silently skip relative path detection, or detect
+  with a "missing CWD" hover tooltip?
+
+### 83a Non-goals
+
+- No filesystem I/O on the flatten path. Ever.
+- No bare relative path detection (too lossy).
+- No hover-time existence verification in v1 (possible polish pass later).
+- No integration with scripting (v0.11.0 Task 84).
+
+### 83a Effort estimate (rough, for planning only)
+
+| Sub-feature                          | Effort | Risk                              |
+| ------------------------------------ | ------ | --------------------------------- |
+| 83a.1 Absolute paths + `:LINE[:COL]` | 1–2 d  | Prose false positives (tolerable) |
+| 83a.2 Schemeless URLs                | 2 d    | `.rs`/`.io` TLD collisions        |
+| 83a.3 Explicit relative paths        | 1 d    | OSC 7 dependency, CWD plumbing    |
+
+Total: ~5 days if all three ship together. Each is independently landable.
+
+### 83a Reminder
+
+**This task is TENTATIVE.** It exists as captured thinking, not a commitment. Do not start
+work without explicit maintainer approval.

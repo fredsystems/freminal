@@ -182,7 +182,12 @@ pub(super) fn handle_window_manipulation(
     bell_since: &mut Option<Instant>,
     bell_mode: BellMode,
     flags: &WindowManipFlags,
-) {
+) -> bool {
+    // Whether the shell set (or restored) a title during this frame.  Used
+    // by the caller to clear any user-assigned custom tab name, so
+    // shell-driven titles take precedence once the user stops pinning a
+    // rename.  Returned at end of function.
+    let mut shell_set_title = false;
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
         let window_event = match wc {
@@ -216,6 +221,7 @@ pub(super) fn handle_window_manipulation(
             // ── Title: inactive tabs update their own title only ─────
             WindowManipulation::SetTitleBarText(title) if !flags.is_active => {
                 tab_title.clone_from(&title);
+                shell_set_title = true;
             }
 
             // ── Title stack: inactive tabs save their own tab title ──
@@ -228,6 +234,7 @@ pub(super) fn handle_window_manipulation(
                 } else {
                     tab_title.clear();
                 }
+                shell_set_title = true;
             }
             WindowManipulation::DeIconifyWindow => {
                 ui.ctx()
@@ -426,6 +433,7 @@ pub(super) fn handle_window_manipulation(
             WindowManipulation::SetTitleBarText(title) => {
                 // Update the tab title for the tab bar display.
                 tab_title.clone_from(&title);
+                shell_set_title = true;
                 // Set the window title bar to the active tab's title.
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -448,6 +456,7 @@ pub(super) fn handle_window_manipulation(
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Title("Freminal".to_string()));
                 }
+                shell_set_title = true;
             }
             // These are ignored. eGui doesn't give us a stacking order thing (that I can tell).
             // Refresh window is already happening because we ended up here.
@@ -475,23 +484,32 @@ pub(super) fn handle_window_manipulation(
                 send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};{payload}\x1b\\"));
             }
 
-            // Terminal bell: ignored entirely when bell mode is `None`.
-            // Otherwise mark this tab as having an unacknowledged bell and
-            // start the visual flash timer.  When the window is unfocused,
-            // also request OS-level taskbar attention.
+            // Terminal bell: dispatch to the visual and/or audio paths based
+            // on the user's [bell] mode.  `None` is a silent drop.  Audio is
+            // a best-effort system beep (see `gui::platform::system_beep`).
+            // In every non-None case, request OS taskbar attention when the
+            // window is unfocused so the user notices even off-screen.
             WindowManipulation::Bell => {
-                if bell_mode == BellMode::Visual {
+                let visual = matches!(bell_mode, BellMode::Visual | BellMode::Both);
+                let audio = matches!(bell_mode, BellMode::Audio | BellMode::Both);
+
+                if visual {
                     *bell_active = true;
                     *bell_since = Some(Instant::now());
+                }
 
-                    if !flags.window_focused {
-                        ui.ctx()
-                            .send_viewport_cmd(ViewportCommand::RequestUserAttention(
-                                egui::UserAttentionType::Informational,
-                            ));
-                    }
+                if audio {
+                    super::platform::system_beep();
+                }
+
+                if (visual || audio) && !flags.window_focused {
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ));
                 }
             }
         }
     }
+    shell_set_title
 }

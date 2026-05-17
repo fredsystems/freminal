@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use freminal_common::config::Config;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
@@ -11,11 +12,228 @@ use super::FreminalGui;
 use super::settings::SettingsAction;
 
 impl FreminalGui {
+    /// Replace `self.config` with `new_cfg` and broadcast every derived
+    /// state change — theme, font, keybindings, URL detection, background
+    /// image, shader source, opacity, and theme-mode updates — to every
+    /// pane in every window.
+    ///
+    /// Called from both the Settings "Apply" path (`SettingsAction::Applied`)
+    /// and the "Reload Config" menu action (subtask 71.17).  A single
+    /// definition keeps the two paths in lock-step; any new config-derived
+    /// side-effect only needs to be added here.
+    ///
+    /// The caller is responsible for having already produced `new_cfg`
+    /// (either from the settings draft or by re-reading `config.toml`).
+    #[allow(clippy::too_many_lines)] // Broadcasts 7 distinct config dimensions.
+    pub(super) fn apply_new_config(
+        &mut self,
+        new_cfg: Config,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        // Apply theme change to all windows.
+        for win in self.windows.values_mut() {
+            if new_cfg.theme.active_slug(win.os_dark_mode)
+                != self.config.theme.active_slug(win.os_dark_mode)
+                && let Some(theme) =
+                    freminal_common::themes::by_slug(new_cfg.theme.active_slug(win.os_dark_mode))
+            {
+                for tab in win.tabs.iter() {
+                    match tab.pane_tree.iter_panes() {
+                        Ok(panes) => {
+                            for pane in panes {
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::ThemeChange(theme),
+                                    "Failed to send ThemeChange to PTY thread"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "iter_panes() failed on tab during theme apply: {e}; \
+                                 skipping theme broadcast for this tab"
+                            );
+                        }
+                    }
+                }
+                for tab in win.tabs.iter_mut() {
+                    match tab.pane_tree.iter_panes_mut() {
+                        Ok(panes) => {
+                            for pane in panes {
+                                pane.render_cache.invalidate_theme_cache();
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "iter_panes_mut() failed on tab during theme \
+                                 cache invalidation: {e}; skipping this tab"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply font changes to all windows.
+        for win in self.windows.values_mut() {
+            let font_changed = win
+                .terminal_widget
+                .apply_config_changes_no_ctx(&self.config, &new_cfg);
+            if font_changed {
+                win.invalidate_all_pane_atlases();
+            }
+        }
+
+        self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
+            error!("Failed to rebuild binding map after config apply: {e}. Using defaults.");
+            freminal_common::keybindings::BindingMap::default()
+        });
+
+        // Broadcast auto URL detection toggle to all panes when changed.
+        if new_cfg.ui.auto_detect_urls != self.config.ui.auto_detect_urls {
+            let enabled = new_cfg.ui.auto_detect_urls;
+            for win in self.windows.values() {
+                for tab in win.tabs.iter() {
+                    match tab.pane_tree.iter_panes() {
+                        Ok(panes) => {
+                            for pane in panes {
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::AutoDetectUrls(enabled),
+                                    "Failed to send AutoDetectUrls to PTY thread"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "iter_panes() failed on tab during auto URL \
+                                 apply: {e}; skipping this tab"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        self.config = new_cfg;
+
+        // Apply background image to all panes in all windows.
+        let new_bg_path = self.config.ui.background_image.clone();
+        for win in self.windows.values() {
+            for tab in win.tabs.iter() {
+                match tab.pane_tree.iter_panes() {
+                    Ok(panes) => {
+                        for pane in panes {
+                            if let Ok(mut rs) = pane.render_state.lock() {
+                                rs.set_pending_bg_image(new_bg_path.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "iter_panes() failed on tab during background \
+                             image apply: {e}; skipping this tab"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Apply shader changes to all windows.
+        let has_shader_path = self.config.shader.path.is_some();
+        if !has_shader_path {
+            for win in self.windows.values() {
+                if let Ok(mut wpr) = win.window_post.lock() {
+                    wpr.pending_shader = Some(None);
+                }
+            }
+        } else if let Some(ref p) = self.config.shader.path {
+            match std::fs::read_to_string(p) {
+                Ok(src) => {
+                    for win in self.windows.values() {
+                        if let Ok(mut wpr) = win.window_post.lock() {
+                            wpr.pending_shader = Some(Some(src.clone()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to read shader file '{}': {e}; keeping current shader",
+                        p.display()
+                    );
+                }
+            }
+        }
+
+        // Notify all panes of theme mode update.
+        for win in self.windows.values() {
+            for tab in win.tabs.iter() {
+                match tab.pane_tree.iter_panes() {
+                    Ok(panes) => {
+                        for pane in panes {
+                            send_or_log!(
+                                pane.input_tx,
+                                InputEvent::ThemeModeUpdate(
+                                    self.config.theme.mode,
+                                    win.os_dark_mode,
+                                ),
+                                "Failed to send ThemeModeUpdate after config apply"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "iter_panes() failed on tab during theme-mode \
+                             broadcast: {e}; skipping this tab"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Request repaint on all terminal windows so changes are visible.
+        for &wid in self.windows.keys() {
+            handle.request_repaint(wid);
+        }
+    }
+
+    /// Re-read `config.toml` from disk and apply every change live.
+    ///
+    /// Invoked by the "Reload Config" menu entry (subtask 71.17).  If the
+    /// current session has no configured path (i.e. freminal was launched
+    /// before any config existed and no `--config` was supplied) this is a
+    /// no-op with a user-visible toast.  Parse errors are logged and a
+    /// toast is shown; `self.config` is left unchanged.
+    pub(super) fn reload_config_from_disk(
+        &mut self,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        let Some(path) = self.config_path.clone() else {
+            self.push_error_toast(
+                "Reload Config",
+                Some("No config file is associated with this session.".to_string()),
+            );
+            return;
+        };
+        let new_cfg = match freminal_common::config::load_config(Some(&path)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Reload Config: failed to load '{}': {e}", path.display());
+                self.push_error_toast("Reload Config failed", Some(e.to_string()));
+                return;
+            }
+        };
+        self.apply_new_config(new_cfg, handle);
+        // Re-sync the Settings modal's draft so opening Settings after a
+        // reload shows the now-live values, not a stale draft.
+        self.settings_modal.sync_from_config(&self.config);
+        self.push_info_toast("Config reloaded", Some(format!("From {}", path.display())));
+    }
+
     /// Handle a `SettingsAction` from the standalone settings window.
     ///
     /// Unlike the inline modal path (which operates on a single `win`), this
     /// applies changes across ALL terminal windows in `self.windows`.
-    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_settings_action(
         &mut self,
         action: &SettingsAction,
@@ -25,148 +243,7 @@ impl FreminalGui {
         match action {
             SettingsAction::Applied => {
                 let new_cfg = self.settings_modal.applied_config().clone();
-
-                // Apply theme change to all windows.
-                for win in self.windows.values_mut() {
-                    if new_cfg.theme.active_slug(win.os_dark_mode)
-                        != self.config.theme.active_slug(win.os_dark_mode)
-                        && let Some(theme) = freminal_common::themes::by_slug(
-                            new_cfg.theme.active_slug(win.os_dark_mode),
-                        )
-                    {
-                        for tab in win.tabs.iter() {
-                            match tab.pane_tree.iter_panes() {
-                                Ok(panes) => {
-                                    for pane in panes {
-                                        send_or_log!(
-                                            pane.input_tx,
-                                            InputEvent::ThemeChange(theme),
-                                            "Failed to send ThemeChange to PTY thread"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "iter_panes() failed on tab during theme apply: {e}; \
-                                         skipping theme broadcast for this tab"
-                                    );
-                                }
-                            }
-                        }
-                        for tab in win.tabs.iter_mut() {
-                            match tab.pane_tree.iter_panes_mut() {
-                                Ok(panes) => {
-                                    for pane in panes {
-                                        pane.render_cache.invalidate_theme_cache();
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "iter_panes_mut() failed on tab during theme \
-                                         cache invalidation: {e}; skipping this tab"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Apply font changes to all windows.
-                for win in self.windows.values_mut() {
-                    let font_changed = win
-                        .terminal_widget
-                        .apply_config_changes_no_ctx(&self.config, &new_cfg);
-                    if font_changed {
-                        win.invalidate_all_pane_atlases();
-                    }
-                }
-
-                self.binding_map = new_cfg.build_binding_map().unwrap_or_else(|e| {
-                    error!(
-                        "Failed to rebuild binding map after settings apply: {e}. Using defaults."
-                    );
-                    freminal_common::keybindings::BindingMap::default()
-                });
-                self.config = new_cfg;
-
-                // Apply background image to all panes in all windows.
-                let new_bg_path = self.config.ui.background_image.clone();
-                for win in self.windows.values() {
-                    for tab in win.tabs.iter() {
-                        match tab.pane_tree.iter_panes() {
-                            Ok(panes) => {
-                                for pane in panes {
-                                    if let Ok(mut rs) = pane.render_state.lock() {
-                                        rs.set_pending_bg_image(new_bg_path.clone());
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "iter_panes() failed on tab during background \
-                                     image apply: {e}; skipping this tab"
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Apply shader changes to all windows.
-                let has_shader_path = self.config.shader.path.is_some();
-                if !has_shader_path {
-                    for win in self.windows.values() {
-                        if let Ok(mut wpr) = win.window_post.lock() {
-                            wpr.pending_shader = Some(None);
-                        }
-                    }
-                } else if let Some(ref p) = self.config.shader.path {
-                    match std::fs::read_to_string(p) {
-                        Ok(src) => {
-                            for win in self.windows.values() {
-                                if let Ok(mut wpr) = win.window_post.lock() {
-                                    wpr.pending_shader = Some(Some(src.clone()));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to read shader file '{}': {e}; keeping current shader",
-                                p.display()
-                            );
-                        }
-                    }
-                }
-
-                // Notify all panes of theme mode update.
-                for win in self.windows.values() {
-                    for tab in win.tabs.iter() {
-                        match tab.pane_tree.iter_panes() {
-                            Ok(panes) => {
-                                for pane in panes {
-                                    send_or_log!(
-                                        pane.input_tx,
-                                        InputEvent::ThemeModeUpdate(
-                                            self.config.theme.mode,
-                                            win.os_dark_mode,
-                                        ),
-                                        "Failed to send ThemeModeUpdate after settings apply"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "iter_panes() failed on tab during theme-mode \
-                                     broadcast: {e}; skipping this tab"
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Request repaint on all terminal windows so changes are visible.
-                for &wid in self.windows.keys() {
-                    handle.request_repaint(wid);
-                }
+                self.apply_new_config(new_cfg, handle);
             }
             SettingsAction::PreviewOpacity(opacity) | SettingsAction::RevertOpacity(opacity) => {
                 self.config.ui.background_opacity = *opacity;

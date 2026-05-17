@@ -60,7 +60,7 @@ pub struct FreminalPtyInputOutput {
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// OS process ID of the PTY child shell.
     ///
-    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Used by the GUI layer for CWD discovery (via a platform-specific path readback) when saving layouts and recording snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
 }
@@ -169,7 +169,7 @@ pub struct RunTerminalResult {
     /// OS process ID of the PTY child (shell or direct command).
     ///
     /// `None` on platforms where `portable_pty` cannot report the PID.
-    /// Used for CWD discovery via `/proc/<pid>/cwd` when saving layouts.
+    /// Used by the GUI layer for CWD discovery (via a platform-specific path readback) when saving layouts and recording snapshots.
     pub child_pid: Option<u32>,
 }
 

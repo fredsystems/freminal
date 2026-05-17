@@ -312,6 +312,19 @@ pub(super) fn dispatch_binding_action(
                 );
             }
         }
+        KeyAction::ClearScrollback => {
+            // Reset the local scroll offset so the next render pulls from the
+            // live view — the PTY side will also drop its gui_scroll_offset
+            // when it processes the ClearScrollback event. Doing it here
+            // avoids one frame of stale rendering if the user was scrolled
+            // back at the moment they pressed the key.
+            view_state.scroll_offset = 0;
+            send_or_log!(
+                input_tx,
+                InputEvent::ClearScrollback,
+                "Failed to send ClearScrollback to PTY consumer"
+            );
+        }
         // All other actions (zoom, settings, tabs, etc.) require GUI state
         // not available here.  Defer them to the GUI layer.
         other => deferred_actions.push(other),

@@ -13,6 +13,15 @@ use tracing::{debug, error};
 use super::window::PerWindowState;
 use super::{FreminalGui, panes, renderer, rendering, tabs, terminal};
 
+/// Pre-allocated `(repaint_handle, window_post)` pair passed to
+/// `build_window_from_pending_layout` for the first window.  The first
+/// window reuses the handles created before the event loop started so
+/// the shared shader state installed in `FreminalGui::new` is preserved.
+pub(super) type FirstWindowPrealloc = (
+    Arc<OnceLock<(RepaintProxy, WindowId)>>,
+    Arc<Mutex<renderer::WindowPostRenderer>>,
+);
+
 // ── Layout helpers ────────────────────────────────────────────────────────────
 
 /// Convert a `LayoutSplitDirection` to a `panes::SplitDirection`.
@@ -259,8 +268,11 @@ impl FreminalGui {
 
     /// Read the current working directory of the shell in the given pane.
     ///
-    /// On Linux this resolves `/proc/<pid>/cwd`.  Returns `None` on non-Linux
-    /// platforms or when the child PID is unknown.
+    /// Delegates to [`crate::gui::platform::read_cwd`], which supports Linux
+    /// (`/proc/<pid>/cwd`), macOS (`proc_pidinfo(PROC_PIDVNODEPATHINFO)` via
+    /// `sysinfo`), and Windows (`NtQueryInformationProcess` via `sysinfo`).
+    /// Returns `None` when the child PID is unknown, the process has exited,
+    /// the platform is unsupported, or the path is not valid UTF-8.
     pub(super) fn read_cwd_for_pane_with_extra(
         &self,
         pane_id: panes::PaneId,
@@ -290,18 +302,7 @@ impl FreminalGui {
                 })
             })?;
 
-        #[cfg(target_os = "linux")]
-        {
-            let link = format!("/proc/{child_pid}/cwd");
-            std::fs::read_link(&link)
-                .ok()
-                .and_then(|p| p.into_os_string().into_string().ok())
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = child_pid;
-            None
-        }
+        crate::gui::platform::read_cwd(child_pid)
     }
 
     /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]
@@ -530,6 +531,12 @@ impl FreminalGui {
     /// Consume the next pending layout window and build a `PerWindowState` for it.
     ///
     /// Called from `on_window_created` when `pending_layout_windows` is non-empty.
+    ///
+    /// `prealloc` supplies an existing `(repaint_handle, window_post)` pair
+    /// instead of allocating fresh ones.  The first window uses this to
+    /// reuse the handles created by `main::normal_run` before the event
+    /// loop started (so the shared shader state set during
+    /// `FreminalGui::new` is not lost).  Subsequent windows pass `None`.
     pub(super) fn build_window_from_pending_layout(
         &mut self,
         window_id: freminal_windowing::WindowId,
@@ -537,6 +544,7 @@ impl FreminalGui {
         handle: &freminal_windowing::WindowHandle<'_>,
         inner_size: (u32, u32),
         os_dark_mode: bool,
+        prealloc: Option<FirstWindowPrealloc>,
     ) -> Option<Vec<(panes::PaneId, String)>> {
         let resolved_window = self.pending_layout_windows.pop_front()?;
 
@@ -544,10 +552,21 @@ impl FreminalGui {
             .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
         rendering::set_egui_options(ctx, theme, self.config.ui.background_opacity);
 
-        let repaint_handle = Arc::new(OnceLock::new());
-        let proxy = handle.event_loop_proxy();
-        let _ = repaint_handle.set((proxy, window_id));
-        let window_post = Arc::new(Mutex::new(renderer::WindowPostRenderer::new()));
+        let is_first_window = prealloc.is_some();
+        let (repaint_handle, window_post) = if let Some((rh, wp)) = prealloc {
+            // First window: the repaint handle was allocated before the
+            // event loop started and has not yet been populated.  Install
+            // the real proxy now.
+            let proxy = handle.event_loop_proxy();
+            let _ = rh.set((proxy, window_id));
+            (rh, wp)
+        } else {
+            let rh = Arc::new(OnceLock::new());
+            let proxy = handle.event_loop_proxy();
+            let _ = rh.set((proxy, window_id));
+            let wp = Arc::new(Mutex::new(renderer::WindowPostRenderer::new()));
+            (rh, wp)
+        };
 
         let terminal_widget = terminal::FreminalTerminalWidget::new(ctx, &self.config)
             .unwrap_or_else(|e| {
@@ -565,6 +584,21 @@ impl FreminalGui {
         );
         let tab_mgr = tab_mgr_opt?;
 
+        // When the first window is going through this code path, the OS
+        // window has already been created with geometry seeded from
+        // window_state.toml.  If the layout/session specifies size or
+        // position, apply it as a pending viewport command on the next
+        // frame.  Subsequent windows use the layout's size/position when
+        // the OS window is created, so no pending_geometry is needed
+        // there.
+        let pending_geometry = if is_first_window
+            && (resolved_window.size.is_some() || resolved_window.position.is_some())
+        {
+            Some((resolved_window.size, resolved_window.position))
+        } else {
+            None
+        };
+
         let win = super::window::PerWindowState {
             tabs: tab_mgr,
             terminal_widget,
@@ -578,15 +612,20 @@ impl FreminalGui {
             window_post,
             repaint_handle,
             pending_new_window: false,
-            pending_geometry: None,
+            pending_geometry,
             last_known_size: None,
             last_known_position: None,
+            renaming_tab: None,
+            rename_buffer: String::new(),
+            dragging_tab: None,
+            last_tab_rects: Vec::new(),
+            pending_menu_actions: Vec::new(),
         };
         self.windows.insert(window_id, win);
 
         // Emit WindowCreate recording event.
         let rec_wid = self.recording_window_id(window_id);
-        if let Some(ref h) = self.recording_handle {
+        if let Some(h) = self.recording_swap.load_full() {
             h.emit(
                 freminal_terminal_emulator::recording::EventPayload::WindowCreate {
                     window_id: rec_wid,
