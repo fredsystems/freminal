@@ -134,6 +134,52 @@ needs investigation.
 
 ---
 
+### B.9 — Logging Hygiene & Targeted Filters
+
+**Severity: Low** | **Reference: internal audit (2026-05-17 from `bugs.txt`)**
+
+The codebase has accumulated a large volume of `debug!` and a smaller volume of `trace!`
+calls. Two related problems make the current state useless for actual debugging:
+
+1. **Wrong levels.** Many sites that fire on every PTY batch, every render frame, or every
+   parsed escape sequence are emitted at `debug!`. Running with `RUST_LOG=debug` produces
+   firehose output dominated by routine activity, which drowns out the rare interesting
+   message a developer is actually trying to find. Most of these calls should be `trace!`.
+2. **No grouping / no targeted filtering.** `tracing` supports per-target filters
+   (`RUST_LOG=freminal::gui::renderer=debug,freminal::pty=trace`), but Freminal does not
+   organize its instrumentation around stable target names. There are no documented "log
+   groups" (e.g. `parser`, `render`, `pty`, `mux`, `recording`) that a contributor can
+   enable in isolation while debugging one subsystem.
+
+**Proposed scope:**
+
+- Audit every `debug!` / `trace!` call in the workspace and reclassify against an explicit
+  rubric: `debug!` = one-shot lifecycle / configuration / per-user-action events; `trace!`
+  = per-frame, per-batch, per-byte, per-sequence events.
+- Establish stable `target = "..."` names per subsystem and apply them via tracing spans
+  or explicit `target:` parameters. Suggested groups: `freminal::parser`, `freminal::render`,
+  `freminal::pty`, `freminal::mux`, `freminal::recording`, `freminal::config`,
+  `freminal::input`, `freminal::layout`.
+- Document the group names in a new `Documents/LOGGING.md` (or in `agents.md`) so users
+  and developers know which filters to use.
+- Optional: add a `[logging.targets]` config section so users can persist their preferred
+  filter set without exporting `RUST_LOG`.
+
+**Out of scope for the initial pass:**
+
+- Structured logging (JSON output) — possibly worth a later task but orthogonal.
+- Sampling / rate-limiting of high-frequency events — keep as a follow-up if firehose
+  output is still a problem after reclassification.
+- Replacing `tracing` with another framework.
+
+**Primary files:** workspace-wide audit; concentrated in
+`freminal-terminal-emulator/src/`, `freminal-buffer/src/buffer/`, `freminal/src/gui/`,
+and `freminal/src/io/`.
+
+**Scope:** Medium (mostly mechanical reclassification but spans every crate).
+
+---
+
 ### A.2 — Split Panes
 
 **Status: Subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.**
@@ -205,6 +251,7 @@ a project website at `freminal.dev`. Separate repository.
 
 - B.1 (Remote Mux) remains deferred — local muxing is now Task 58 in v0.5.0.
 - B.2, B.3, B.7, and B.8 are deferred pending design decisions — not rejected.
+- B.9 (Logging Hygiene) was added 2026-05-17 from a `bugs.txt` audit item.
 - A.2 (Split Panes) is subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.
 - Task 56 (Session Restore) is subsumed by Task 61 (Saved Layouts) in v0.7.0.
 - Category C items remain tracked in `MASTER_PLAN.md` with their existing plan documents.

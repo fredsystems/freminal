@@ -12,15 +12,17 @@ Depends on v0.8.0 (correctness) and v0.9.0 (modern workflow primitives).
 
 ## Task Summary
 
-| #   | Feature                                 | Scope  | Status | Depends On |
-| --- | --------------------------------------- | ------ | ------ | ---------- |
-| 78  | Profiles + Quick Profile Switching      | Medium | Stub   | v0.8.0     |
-| 79  | Theme Preview + Color Picker            | Medium | Stub   | v0.8.0     |
-| 80  | Font Ligatures Per-Profile Toggle       | Small  | Stub   | Task 78    |
-| 81  | GPU-Accelerated Scrollback Regex Search | Medium | Stub   | v0.8.0     |
-| 82  | Quick-Select / Hints Mode               | Medium | Stub   | v0.8.0     |
-| 83  | Command Palette                         | Medium | Stub   | v0.8.0     |
-| 83a | Expanded Auto-Detection (TENTATIVE)     | Medium | Stub   | 71.7b      |
+| #   | Feature                                 | Scope  | Status | Depends On    |
+| --- | --------------------------------------- | ------ | ------ | ------------- |
+| 78  | Profiles + Quick Profile Switching      | Medium | Stub   | v0.8.0        |
+| 79  | Theme Preview + Color Picker            | Medium | Stub   | v0.8.0        |
+| 80  | Font Ligatures Per-Profile Toggle       | Small  | Stub   | Task 78       |
+| 81  | GPU-Accelerated Scrollback Regex Search | Medium | Stub   | v0.8.0        |
+| 82  | Quick-Select / Hints Mode               | Medium | Stub   | v0.8.0        |
+| 83  | Command Palette                         | Medium | Stub   | v0.8.0        |
+| 83a | Expanded Auto-Detection (TENTATIVE)     | Medium | Stub   | 71.7b         |
+| 96  | Per-Pane Title Bar                      | Small  | Stub   | Task 58       |
+| 97  | Dynamic Tab Width & Overflow Behavior   | Small  | Stub   | v0.8.0 (71.1) |
 
 Tasks 82 and 83 absorb FUTURE_PLANS.md items B.3 and B.2 respectively.
 
@@ -123,6 +125,97 @@ it.
 - Fuzzy-match algorithm (skim, fzf-style, simple substring).
 - Whether to include non-`KeyAction` commands (layout load, profile switch, theme picker).
 - History and frecency ordering.
+
+---
+
+## Task 96 — Per-Pane Title Bar
+
+### 96 Summary
+
+Tabs already display a single title (the active pane's title). When a tab contains
+multiple panes (Task 58), the inactive panes' titles are invisible — a real loss when
+those panes are running things like `htop`, `cargo watch`, or a remote SSH session whose
+hostname matters at a glance.
+
+Add an optional per-pane title bar rendered at the top of each split pane showing that
+pane's title (and possibly its running command, CWD basename, or PID). Toggleable
+globally and configurable per layout. Coexists with the existing tab bar — the tab bar
+still shows a single title (driven by Task 94's precedence rules) while each pane gets
+its own micro title bar.
+
+### 96 Open Questions (decide at activation)
+
+- Always-on vs. only-when-multiple-panes vs. config-driven.
+- Bar height (cells reserved vs. pixel band rendered above the cell grid).
+- Whether the focused pane's bar is visually accented (matching theme accent color).
+- Whether the bar carries affordances (close, zoom, rename) or is read-only.
+- Coexistence with Task 85's powerline status bar (which is per-window/per-tab) — these
+  are different bars at different scales and should not conflict.
+
+### 96 Scope
+
+Small to Medium. Touches `freminal/src/gui/terminal/` (pane rendering), `freminal/src/gui/panes/`
+(per-pane title field already exists), and `freminal-common/src/config.rs` (toggle).
+
+### 96 Dependencies
+
+- Task 58 (Built-in Multiplexer) — landed in v0.5.0.
+
+### 96 Reference
+
+Triaged from `bugs.txt` Idea 2 (2026-05-17).
+
+---
+
+## Task 97 — Dynamic Tab Width & Overflow Behavior
+
+### 97 Summary
+
+Today's tab bar uses fixed-width tabs. OSC-driven titles get visibly truncated, while
+user-set custom names render at full width — an inconsistency that surprises users. There
+is also no defined behavior when the tab bar overflows the window width (do tabs shrink,
+scroll, wrap, or do older tabs simply become inaccessible?).
+
+Audit the current behavior, decide on a coherent model, and implement it. Likely target
+behavior:
+
+- Dynamic per-tab width based on title length, bounded by a minimum (`~12 cells` of glyph
+  width so a tab with no title is still clickable) and a maximum (`~32 cells`).
+- Equal-share shrinking when the total natural width exceeds the available bar width,
+  down to the per-tab minimum.
+- Below that minimum, overflow handling: horizontal scroll with chevrons, dropdown menu
+  of overflow tabs, or both. (WezTerm and Alacritty have different answers here —
+  decide at activation.)
+- Consistent truncation (single character ellipsis, left- or right-truncated based on
+  whether the prefix or suffix is more informative).
+
+### 97 Open Questions (decide at activation)
+
+- Min/max tab widths (cell-based vs. pixel-based — currently the renderer is glyph-cell
+  oriented, so cells are likely the right unit).
+- Overflow strategy (scroll vs. dropdown vs. hybrid).
+- Whether to introduce an explicit "tab pinning" affordance so important tabs stay
+  visible during overflow.
+- Whether OSC titles get truncated to a different limit than custom names (current state)
+  or whether both follow the same rules (proposed).
+
+### 97 Scope
+
+Small to Medium. Concentrated in `freminal/src/gui/menu.rs` (tab bar rendering) and
+`freminal/src/gui/window.rs` (tab rect computation).
+
+### 97 Dependencies
+
+- 71.1 (custom tab rename) — landed in v0.8.0.
+- Interacts with Task 94 (tab title precedence): the truncation policy may differ when
+  a custom name is set vs. when OSC asserts the title.
+
+### 97 Reference
+
+Triaged from `bugs.txt` Idea 4 (2026-05-17). Note from the bug report: OSC-set titles
+appear visibly truncated where manually-set titles of the same length do not — confirm
+during activation that the truncation logic is consistent across both sources before
+designing the dynamic-width replacement.
 
 ---
 
