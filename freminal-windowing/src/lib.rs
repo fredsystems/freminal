@@ -1,10 +1,32 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! `freminal-windowing` — Platform windowing layer for Freminal.
 //!
 //! Provides winit + glutin + egui integration, encapsulating the event loop,
 //! GL context management, and egui rendering. The `freminal` binary crate
 //! implements the [`App`] trait to receive per-window update callbacks.
 
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![deny(
+    clippy::pedantic,
+    clippy::cargo,
+    clippy::nursery,
+    clippy::style,
+    clippy::correctness,
+    clippy::all,
+    clippy::suspicious,
+    clippy::complexity,
+    clippy::perf,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
+#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace]
 
 pub mod error;
 
@@ -35,7 +57,7 @@ pub struct WindowConfig {
     pub transparent: bool,
     /// Window icon.
     pub icon: Option<egui::IconData>,
-    /// Wayland app_id / X11 WM_CLASS.
+    /// Wayland `app_id` / X11 `WM_CLASS`.
     pub app_id: Option<String>,
 }
 
@@ -109,7 +131,7 @@ pub struct WindowHandle<'a> {
     geometry: &'a std::cell::RefCell<std::collections::HashMap<WindowId, WindowGeometry>>,
 }
 
-impl<'a> WindowHandle<'a> {
+impl WindowHandle<'_> {
     /// Request that a new window be created.
     pub fn create_window(&self, config: WindowConfig) {
         self.pending_ops
@@ -167,6 +189,7 @@ impl<'a> WindowHandle<'a> {
     }
 
     /// Get a clone of the event loop proxy for cross-thread repaint requests.
+    #[must_use]
     pub fn event_loop_proxy(&self) -> RepaintProxy {
         RepaintProxy {
             proxy: self.proxy.clone(),
@@ -184,6 +207,7 @@ impl<'a> WindowHandle<'a> {
     /// this call.  This is more reliable than `ctx.input().viewport()`,
     /// which only populates `inner_rect` / `outer_rect` after the first
     /// such event arrives for the target window's egui context.
+    #[must_use]
     pub fn window_geometry(&self, id: WindowId) -> Option<WindowGeometry> {
         self.geometry.borrow().get(&id).copied()
     }

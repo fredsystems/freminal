@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! GL context management via glutin.
 //!
 //! Handles OpenGL display, surface, and context creation for each window.
@@ -20,7 +25,7 @@ use winit::window::Window;
 use crate::error::Error;
 
 /// Holds all GL state for a single window.
-pub(crate) struct GlState {
+pub struct GlState {
     pub(crate) surface: Surface<WindowSurface>,
     pub(crate) context: PossiblyCurrentContext,
     pub(crate) glow_context: Arc<glow::Context>,

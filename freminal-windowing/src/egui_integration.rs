@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! egui integration: input translation and rendering via `egui-winit` and `egui_glow`.
 
 use std::sync::Arc;
@@ -9,15 +14,15 @@ use crate::error::Error;
 use crate::gl_context::GlState;
 
 /// Output from a single egui frame.
-pub(crate) struct FrameOutput {
+pub struct FrameOutput {
     /// Viewport commands emitted by the app during this frame.
     pub commands: Vec<egui::ViewportCommand>,
-    /// Requested repaint delay (Duration::MAX = no repaint needed).
+    /// Requested repaint delay (`Duration::MAX` = no repaint needed).
     pub repaint_delay: std::time::Duration,
 }
 
 /// Per-window egui state.
-pub(crate) struct EguiState {
+pub struct EguiState {
     pub(crate) ctx: egui::Context,
     pub(crate) winit_state: egui_winit::State,
     pub(crate) painter: egui_glow::Painter,
@@ -103,9 +108,7 @@ impl EguiState {
 
         let viewport_output = full_output.viewport_output.get(&egui::ViewportId::ROOT);
 
-        let repaint_delay = viewport_output
-            .map(|vo| vo.repaint_delay)
-            .unwrap_or(std::time::Duration::MAX);
+        let repaint_delay = viewport_output.map_or(std::time::Duration::MAX, |vo| vo.repaint_delay);
 
         let commands = viewport_output
             .map(|vo| vo.commands.clone())

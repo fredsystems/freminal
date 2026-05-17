@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! winit event loop and `ApplicationHandler` implementation.
 
 use std::cell::RefCell;
@@ -74,7 +79,7 @@ struct Handler<A: App> {
 }
 
 impl<A: App> Handler<A> {
-    fn create_window_from_config(&mut self, event_loop: &ActiveEventLoop, config: WindowConfig) {
+    fn create_window_from_config(&mut self, event_loop: &ActiveEventLoop, config: &WindowConfig) {
         let mut attrs = WindowAttributes::default().with_title(&config.title);
 
         if let Some((w, h)) = config.inner_size {
@@ -221,7 +226,7 @@ impl<A: App> Handler<A> {
         for op in ops {
             match op {
                 WindowOp::CreateWindow(config) => {
-                    self.create_window_from_config(event_loop, config);
+                    self.create_window_from_config(event_loop, &config);
                 }
                 WindowOp::CloseWindow(id) => {
                     self.close_window(id.0);
@@ -283,10 +288,11 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         info!("Event loop resumed");
         if let Some(config) = self.initial_config.take() {
-            self.create_window_from_config(event_loop, config);
+            self.create_window_from_config(event_loop, &config);
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -397,8 +403,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 let scale = self
                     .windows
                     .get(&winit_id)
-                    .map(|s| s.window.scale_factor())
-                    .unwrap_or(1.0);
+                    .map_or(1.0, |s| s.window.scale_factor());
                 if let Some(state) = self.windows.get_mut(&winit_id)
                     && let (Some(w), Some(h)) =
                         (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -424,8 +429,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 let scale = self
                     .windows
                     .get(&winit_id)
-                    .map(|s| s.window.scale_factor())
-                    .unwrap_or(1.0);
+                    .map_or(1.0, |s| s.window.scale_factor());
                 let logical: winit::dpi::LogicalPosition<f64> = pos.to_logical(scale);
                 let mut geom = self.geometry.borrow_mut();
                 let entry = geom.entry(WindowId(winit_id)).or_default();
@@ -436,7 +440,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             }
             WindowEvent::RedrawRequested => {
                 // Split borrows by destructuring
-                let Handler {
+                let Self {
                     app,
                     windows,
                     proxy,
@@ -488,7 +492,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 // to prevent unbounded rendering from zero-delay requests
                 // (hover state, tooltip updates).  This ensures layout-settling
                 // frames still fire while keeping idle CPU near zero.
-                if frame_output.repaint_delay < std::time::Duration::from_secs(3600) {
+                if frame_output.repaint_delay < std::time::Duration::from_hours(1) {
                     let min_delay = std::time::Duration::from_millis(16);
                     let delay = frame_output.repaint_delay.max(min_delay);
                     let deadline = Instant::now() + delay;
@@ -644,6 +648,12 @@ fn process_viewport_command(window: &Window, cmd: egui::ViewportCommand, should_
 ///
 /// Creates the event loop, opens the initial window with the given config,
 /// and runs the application until all windows are closed.
+///
+/// # Errors
+///
+/// Returns [`Error::EventLoopCreation`] if the winit event loop fails to
+/// initialise or exits with an error.
+#[allow(clippy::too_many_lines)]
 pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
     let event_loop = EventLoop::with_user_event()
         .build()
