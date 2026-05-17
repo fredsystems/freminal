@@ -14,12 +14,20 @@ and that no advertised feature silently does nothing.
 
 ## Task Summary
 
-| #   | Feature                          | Scope  | Status  | Dependencies |
-| --- | -------------------------------- | ------ | ------- | ------------ |
-| 70  | Code Correctness & Hygiene Sweep | Large  | Pending | None         |
-| 71  | UX Completeness & Polish Sweep   | Medium | Pending | None         |
+| #   | Feature                          | Scope  | Status                | Dependencies |
+| --- | -------------------------------- | ------ | --------------------- | ------------ |
+| 70  | Code Correctness & Hygiene Sweep | Large  | Complete (2026-04-22) | None         |
+| 71  | UX Completeness & Polish Sweep   | Medium | Complete (2026-05-17) | None         |
 
 Both tasks are independent and may be executed in parallel across sub-agents.
+
+**Task 70** merged to `main` as PR #324 (commit `c537ae1`) on 2026-04-22.
+
+**Task 71** committed on branch `task-71/ux-polish-sweep`. All 21 subtasks
+(71.1–71.20 plus 71.7b) are implemented and committed. Five
+manual-testing bug fixes (`e5ffec7`, `8252da0`, `004e751`, `253428a`,
+`d4c21a9`) were added on top after dogfooding — see "Post-implementation
+bug fixes" below.
 
 ---
 
@@ -708,21 +716,40 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
 
 #### 71.P2 — Tab & Pane UX
 
-- **71.12** — Tab close button ("×") on each tab, tab drag-reorder within a window (using
+- **71.12** ✅ — Tab close button ("×") on each tab, tab drag-reorder within a window (using
   egui's drag sense), and in-place tab rename (double-click, tied to the `RenameTab`
-  implementation from 71.1).
-- **71.13** — Add a `ClearScrollback` `KeyAction` (distinct from the existing
-  `ClearScrollbackandDisplay`). Bind to a sensible default (`Ctrl+K` on macOS convention,
-  configurable). Include in `KeyAction::ALL`, `name()`, `display_label()`, `FromStr`, and
-  `BindingMap::default()` per the keybinding convention in `agents.md`.
+  implementation from 71.1). **COMPLETE (2026-04-23, commit `7130b7c`).** The close button
+  and double-click rename were already present from earlier work; this subtask added the
+  remaining drag-reorder piece using a ghost-preview model. `TabBarAction::Reorder { from,
+to }` dispatches to `TabManager::move_tab`. `PerWindowState` gained `dragging_tab` (source
+  index during drag) and `last_tab_rects` (natural-order tab rects, frozen for the duration
+  of a drag to prevent oscillation when tabs have different widths). The dragged tab
+  renders dimmed (`rgba 120,120,120,40`) so the user sees it floating. Escape cancels the
+  drag without dispatch. Existing `TabManager::move_tab` unit tests cover the reorder math.
+- **71.13** ✅ — Add a `ClearScrollback` `KeyAction` (distinct from the existing
+  `ClearScrollbackandDisplay`). **COMPLETE (2026-04-23, commit `7185c2d`).** Added
+  `KeyAction::ClearScrollback` (variant + `name()` + `display_label()` + `FromStr` + `ALL`
+  entry + default binding in `register_misc_bindings()`). Bound to `Ctrl+Shift+Backspace`
+  by default: `Ctrl+K` conflicts with readline kill-to-EOL; `Ctrl+Shift+K` / `Ctrl+Shift+L`
+  collide with the `FocusPane*` direction grid; `Ctrl+Shift+Backspace` is free on all
+  platforms and mirrors a "hard clear" gesture. Dispatch path: keypress →
+  `dispatch_binding_action` resets `view_state.scroll_offset` and sends
+  `InputEvent::ClearScrollback` → PTY thread calls `Buffer::erase_scrollback()` and
+  `set_gui_scroll_offset(0)`. Test counters bumped (`key_action_all_count` 50 → 51,
+  `default_binding_total_count` 41 → 42); binding documented in `config_example.toml`.
 
 #### 71.P2 — Feature Completeness
 
-- **71.14** — Extend `BellMode` in `freminal-common/src/config.rs:406` with `Audio` and
-  `Both` variants. Wire `Audio` to a simple system-bell sound (platform-appropriate — `\a`
-  on Linux, `NSBeep` on macOS, `MessageBeep` on Windows). Update Settings Modal picker.
-  (Scope note: the originally-proposed custom sound-file path was dropped as out of scope;
-  matches WezTerm's `SystemBeep` behaviour plus a `Both` variant.)
+- **71.14** ✅ — Extend `BellMode` in `freminal-common/src/config.rs:406` with `Audio` and
+  `Both` variants. **COMPLETE (2026-04-23, commit `9df2d1b`).** Wired `Audio` to a
+  best-effort native system beep per OS: Linux writes BEL (0x07) to stderr (translated by
+  the host terminal when freminal is launched from one; silent otherwise); macOS calls
+  AppKit `NSBeep` via raw extern (AppKit is already linked by winit); Windows calls
+  `user32::MessageBeep(MB_OK)` via raw extern. No new workspace dependencies — per-OS
+  calls live in a new `freminal::gui::platform` module. `Both` triggers the visual flash
+  and audible beep together; either path requests user-attention when the window is
+  unfocused. Settings Modal picker updated. The originally-proposed custom sound-file path
+  was dropped from scope (matches WezTerm's `SystemBeep` plus a `Both` variant).
 - **71.15** — In-app recording toggle. Add a `ToggleRecording` `KeyAction`
   (default `Ctrl+Shift+R`), a "Session" menu with Start/Stop Recording entry that
   shows the destination path while active, and a right-aligned `● REC` indicator in
@@ -811,6 +838,55 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   check so terminal keystrokes do not leak into the PTY while it is visible.
   Verification green.
 
+#### 71.PostManualTest — Bug fixes from dogfooding
+
+After all 21 feature subtasks landed, a manual-testing pass surfaced 6
+bugs in the new code paths. All 6 are fixed on the same branch.
+
+- **PostMT-1** ✅ — Cold launch with no flags spawned the initial PTY
+  _before_ the event loop started, in `main::normal_run`. A failure
+  bubbled through `?` into `main` with only a `tracing::error!` —
+  silent exit, no toast. **Fix (commit `253428a`):** defer the initial
+  PTY spawn into `FreminalGui::on_window_created`, surface failures via
+  the existing toast system and close the empty window if the shell
+  cannot start.
+- **PostMT-2** ✅ — `maybe_restore_last_session` ran even when the user
+  passed a positional command (e.g. `freminal yazi`), so the requested
+  command never got to launch. **Fix (commit `e5ffec7`):**
+  early-return from session restore when `args.command` is `Some`.
+- **PostMT-3** ✅ — A broken `--layout <path>` or `startup.layout`
+  setting produced no user-visible error; the application started
+  empty. Shared root cause with PostMT-1 and resolved by the same
+  refactor (`253428a`): the layout-or-restore branch of the
+  first-window helper surfaces resolution failures via a toast and
+  falls back to a default PTY so the user is not left with a black
+  window.
+- **PostMT-4** ✅ — Malformed `.toml` files under
+  `~/.config/freminal/layouts/` were silently dropped from the Layouts
+  menu with no indication that a layout existed but failed to load.
+  **Fix (commit `004e751`):** added
+  `freminal_common::layout::discover_layouts_with_errors` and an
+  aggregated startup toast listing every failure.
+- **PostMT-5** ✅ — Shader compile errors only surfaced on subsequent
+  window creation, because the `last_error` drain lived on the spawn
+  path rather than per-frame. **Fix (commit `8252da0`):** moved the
+  `WindowPostRenderer::last_error.take()` drain to the top of every
+  window's `update()` so a compile error appears as a toast within one
+  frame on the active window.
+- **PostMT-6** ✅ — NixOS home-manager users whose `config.toml` is a
+  read-only symlink could not dismiss the first-run welcome overlay.
+  `mark_onboarding_complete` tried to mutate `config.toml`, failed
+  with `EROFS`, raised an error toast, and the overlay reappeared on
+  every launch. **Fix (commit `d4c21a9`):** introduced
+  `freminal_common::app_state` (sidecar `state.toml` under
+  `$XDG_STATE_HOME/freminal/` on Linux, `~/Library/Application Support`
+  on macOS, `%APPDATA%` on Windows) and moved `first_run_complete` out
+  of `config.toml` into it. The legacy `OnboardingConfig` is retained
+  for back-compat parsing and a `true` value is migrated forward on
+  first launch with the new binary. Sets up the natural home for
+  future per-install runtime state (dismissed update prompts, tips,
+  etc.). 11 new unit tests in `app_state.rs`.
+
 ### 71 Verification
 
 - Full verification suite after each P-level group.
@@ -820,6 +896,20 @@ find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch>` using `regex::bytes::Regex` with
   one Linux, one macOS, one Windows run.
 
 Task 71 is complete when every one of the 20 items is implemented, tested, and verified.
+
+**Final status (2026-05-17):**
+
+- All 21 subtasks (71.1–71.20 + 71.7b) implemented, committed, and
+  marked complete.
+- All 6 post-implementation bugs found during manual testing fixed and
+  committed.
+- Full verification suite green on the branch:
+  `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo machete`.
+- **Outstanding:** end-to-end manual UX walkthrough (P1/P2/P3 plan)
+  and cross-platform verification of 71.14 + 71.16 + the new
+  `app_state` sidecar path on macOS / Windows. The Linux paths for
+  all of the above have been exercised during development.
 
 ---
 
