@@ -605,6 +605,26 @@ verification by running `echo $TERM_PROGRAM` in a freminal session.
 - Manual end-to-end test: source the script, run a few commands, verify
   freminal builds `CommandBlock`s with correct exit codes.
 
+**Completion notes (commit `e43911a`, 2026-05-17):**
+
+- Created `shell-integration/freminal.{bash,zsh,fish}` plus a
+  `shell-integration/README.md` (367 lines total).
+- Each script is **source-only** (no shebang line) — the project's
+  pre-commit hook `check-shebang-scripts-are-executable` rejects
+  shebangs on non-executable files; for source-only scripts the
+  canonical fix is to drop the shebang. A header comment in each file
+  notes this explicitly.
+- `bash -n`, `zsh -n`, and `shellcheck` all clean. `fish` is trusted
+  by inspection (no `--no-execute` available in the local dev shell).
+- One localised `# shellcheck disable=SC2064` in `freminal.bash`'s
+  DEBUG-trap composition; justified by the deliberate variable
+  expansion at install time.
+- CI step NOT added in 72.7 — the plan suggested it but kept it
+  optional; postponed to a future cleanup if regressions appear.
+- Two known issues filed for cleanup (see 72.16.b and 72.16.c below):
+  fish's A/B placement before the visual prompt, and a stale comment
+  in `freminal.bash` referencing an unimplemented state flag.
+
 #### 72.8 — Auto-install shell integration scripts on first launch
 
 **Scope:** `freminal/src/main.rs` or `freminal/src/gui/run.rs` (wherever
@@ -825,10 +845,95 @@ broken feature.
 - Audit found the OSC 22 (pointer shape) handler at `osc.rs:203` uses a
   superficially similar `AnsiOscToken::String`-only filter. The agent
   judged it correct-by-semantics: OSC 22 carries CSS/xcursor cursor
-  names, never bare integers. Logged here as a potential 72.16.b
-  candidate only if OSC 22 semantics are ever extended to accept
-  numerics — no fix needed today.
+  names, never bare integers. Logged here as a potential future
+  72.16.x candidate only if OSC 22 semantics are ever extended to
+  accept numerics — no fix needed today.
 - `freminal-terminal-emulator` test count: 2329 → 2330.
+
+##### 72.16.b — Fix fish_prompt A/B placement around visual prompt text
+
+**Surfaced in:** 72.7 (commit `e43911a`, 2026-05-17).
+
+**Bug:** `shell-integration/freminal.fish` registers an
+`--on-event fish_prompt` handler that emits BOTH `OSC 133 A` and
+`OSC 133 B` before the visual prompt text is drawn. The intent is for
+A to fire before the prompt and B to fire after (so the prompt text
+falls in the `InPrompt` region and the user's typed input falls in the
+`InCommand` region).
+
+Fish does not allow wrapping `fish_prompt` via `--on-event` without
+infinite recursion, and overriding `fish_prompt` directly would
+collide with user themes (Tide, Starship, oh-my-fish). The 72.7
+implementation chose the safer "A then B before the prompt" placement
+with an honest comment in the script.
+
+**Impact:**
+
+- Today (Task 72.7-72.10): block start row is correct, exit-status
+  gutter coloring is correct, command-block navigation is correct.
+  The semantic distinction between "prompt region" and "command-input
+  region" is collapsed in fish only.
+- Future (Task 72.11 — copy-output): copying a command's output will
+  include the prompt text in fish, because `output_start_row` is
+  computed from C, but `command_start_row` (from B) is wrong — it sits
+  before the prompt, so any UI feature keyed on `command_start_row..end_row`
+  in fish will include the prompt line.
+- bash and zsh are unaffected — their PS1 wrapping correctly emits B
+  after the prompt text.
+
+**Scope:** `shell-integration/freminal.fish` only.
+
+**Suggested approach (revisit at activation):**
+
+- Option A: detect whether the user has defined `fish_prompt` and, if
+  so, install a wrapper that calls the original. Requires careful
+  handling of fish 3.x's `functions --copy` to snapshot the user's
+  `fish_prompt` and call it from a renamed version. Conflicts arise if
+  the user redefines `fish_prompt` after sourcing our script.
+- Option B: emit B from a separate `fish_postprompt`-style event. Fish
+  does not have a built-in event matching this name; would require a
+  shim. Not preferred.
+- Option C: live with the limitation; document that copy-output in
+  fish includes the prompt line as a known caveat. Cheapest, defers
+  user-visible impact.
+
+Likely choice: Option A, attempted in 72.11 alongside the copy-output
+implementation. Until 72.11, no user impact.
+
+**Scheduling:** Must complete before 72.11 (Copy command output
+actions) ships. Tracked as a prerequisite for that subtask.
+
+**Status:** Pending.
+
+##### 72.16.c — Remove stale `__FREMINAL_CMD_PENDING` comment in freminal.bash
+
+**Surfaced in:** 72.7 (commit `e43911a`, 2026-05-17).
+
+**Bug:** `shell-integration/freminal.bash` lines 79-89 (approximately)
+contain a comment block describing a `__FREMINAL_CMD_PENDING` state
+flag and the conditions under which it suppresses double-emission of
+the C marker inside `PROMPT_COMMAND`. The flag was never actually
+implemented in the script. The DEBUG-trap function instead uses a
+`case "${BASH_COMMAND}" in __freminal_*) return 0 ;; esac` filter to
+skip our own internal commands. The filter is correct; the comment is
+misleading documentation describing code that doesn't exist.
+
+**Impact:** Documentation hygiene only. No functional impact. The
+script behaves correctly; the comment is internally inconsistent with
+the implementation.
+
+**Scope:** `shell-integration/freminal.bash` only — comment block
+deletion and a short replacement comment describing the actual
+filter (`__freminal_*` BASH_COMMAND case).
+
+**Suggested approach:** Replace the multi-paragraph comment block
+above `__freminal_debug_trap` with a 2-3 line description of the real
+filter. No code change needed.
+
+**Scheduling:** Cosmetic; can land at any time. No subtask blocked by
+this.
+
+**Status:** Pending.
 
 ### 72 Open Questions Resolved
 
