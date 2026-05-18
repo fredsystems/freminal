@@ -812,8 +812,41 @@ directly (e.g. tests in `shell_integration.rs`) needs to supply a
 a `fid: "test".to_owned()` or similar) but touches many existing
 tests. Sub-agent budget should include time for that.
 
-**Status:** Pending. Sub-agent dispatch comes after this plan-doc
-commit.
+**Status:** ✅ Complete (commit `4702b1a`, 2026-05-18).
+
+**Completion notes:**
+
+- 11 files modified: 9 in scope plus two out-of-scope test migrations
+  (`freminal-common/src/buffer_states/osc.rs` + `freminal-terminal-emulator/src/ansi_components/osc.rs`)
+  both required by the `FtcsMarker` variant-shape change. Mechanical
+  migrations, no production behavior change.
+- `FtcsMarker::{PromptStart, CommandStart, OutputStart, CommandFinished}`
+  are now struct variants carrying `fid: String`. `PromptProperty(PromptKind)`
+  stays as a tuple variant (informational only, no fid).
+- `parse_ftcs_params` walks the parameter list once, harvesting
+  `freminal=`, `fid=`, `k=`, and the first positional. A/B/C/D markers
+  return `None` unless `freminal=1` AND `fid=` are both present. P
+  is accepted from any emitter. Unknown params (`aid=`, `cl=`) are
+  silently ignored.
+- `CommandBlock` gains `fid: String`. `Buffer::start_command_block`
+  takes a `fid` arg; `mark_command_start_row`/`mark_output_start_row`/
+  `finish_command_block` take a `&str` fid and correlate by it
+  instead of "most-recent-open". No-op when no matching block exists.
+- 43+ existing test sites migrated mechanically across the FTCS test
+  suite (`mod.rs`, `shell_integration.rs`, `interface.rs`,
+  `ansi_components/osc.rs`).
+- New tests: 15 in `ftcs.rs`, 1 in `command_block.rs`, 4 in
+  `lifecycle.rs`, 2 in `shell_integration.rs`, 2 in `interface.rs`,
+  2 in `ansi_components/osc.rs`. All covering the `freminal=1` gate,
+  fid correlation, and foreign-marker rejection.
+- Coverage doc updated. The FTCS sub-table now lists the P row
+  explicitly and includes a "Freminal extension" paragraph.
+- Benchmark: `bench_command_block_record_10k` went from ~450 µs to
+  863 µs (+92%). The extra cost is intrinsic — one String allocation
+  per `start_command_block` + one &str comparison per `finish`. Well
+  within the >100% threshold that would have warranted pushback.
+- `cargo test --all`: 5118 tests pass. Workspace clippy clean.
+  `cargo-machete` clean. `cargo fmt --check` clean.
 
 #### 72.8b — Ghostty-style shell-integration injection
 
