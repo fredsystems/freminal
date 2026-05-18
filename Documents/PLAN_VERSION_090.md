@@ -805,7 +805,30 @@ Real shells will emit numeric exit codes the moment users source the
 scripts; shipping 72.7 without 72.16.a would mean shipping a known
 broken feature.
 
-**Status:** Pending.
+**Status:** ✅ Complete (2026-05-17, commit `9dd35ca`).
+
+**Completion notes:**
+
+- Replaced the `String`-only filter in the FTCS arm of
+  `dispatch_osc_target` with a serializer that maps both
+  `AnsiOscToken::String(s)` and `AnsiOscToken::OscValue(n)` to their
+  display form. Owned `String`s are required (numerics format at
+  runtime); refs collected into a sibling `Vec<&str>` for the call to
+  `parse_ftcs_params`.
+- The 72.4 byte-stream tests (`build_snapshot_populated_command_blocks`,
+  `build_snapshot_command_blocks_ordering`) were tightened to assert
+  exit codes (Some(0), Some(1), Some(2)) and the stale "known
+  limitation" comments removed.
+- New regression test `build_snapshot_command_block_preserves_exit_code_127`
+  drives `OSC 133;A` + `OSC 133;D;127` through the byte stream and
+  verifies `status() == Failure(127)`.
+- Audit found the OSC 22 (pointer shape) handler at `osc.rs:203` uses a
+  superficially similar `AnsiOscToken::String`-only filter. The agent
+  judged it correct-by-semantics: OSC 22 carries CSS/xcursor cursor
+  names, never bare integers. Logged here as a potential 72.16.b
+  candidate only if OSC 22 semantics are ever extended to accept
+  numerics — no fix needed today.
+- `freminal-terminal-emulator` test count: 2329 → 2330.
 
 ### 72 Open Questions Resolved
 
