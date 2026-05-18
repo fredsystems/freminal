@@ -22,6 +22,7 @@ pub enum SettingsTab {
     Logging,
     Ui,
     Tabs,
+    ShellIntegration,
     Bell,
     Security,
     Keybindings,
@@ -30,7 +31,7 @@ pub enum SettingsTab {
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -39,6 +40,7 @@ impl SettingsTab {
         Self::Logging,
         Self::Ui,
         Self::Tabs,
+        Self::ShellIntegration,
         Self::Bell,
         Self::Security,
         Self::Keybindings,
@@ -55,6 +57,7 @@ impl SettingsTab {
             Self::Logging => "Logging",
             Self::Ui => "UI",
             Self::Tabs => "Tabs",
+            Self::ShellIntegration => "Shell Integration",
             Self::Bell => "Bell",
             Self::Security => "Security",
             Self::Keybindings => "Keybindings",
@@ -712,6 +715,7 @@ impl SettingsModal {
             SettingsTab::Logging => self.show_logging_tab(ui),
             SettingsTab::Ui => self.show_ui_tab(ui),
             SettingsTab::Tabs => self.show_tabs_tab(ui),
+            SettingsTab::ShellIntegration => self.show_shell_integration_tab(ui),
             SettingsTab::Bell => self.show_bell_tab(ui),
             SettingsTab::Security => self.show_security_tab(ui),
             SettingsTab::Keybindings => self.show_keybindings_tab(ui),
@@ -1192,6 +1196,125 @@ impl SettingsModal {
                     "Bottom",
                 );
             });
+    }
+
+    fn show_shell_integration_tab(&mut self, ui: &mut Ui) {
+        // ── Shell Integration section ────────────────────────────────────────
+        ui.heading("Shell Integration");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "OSC 133 (FinalTerm/FTCS) shell integration lets Freminal detect \
+             where each shell command starts, ends, and what its exit code was. \
+             This powers command-block navigation, exit-status gutters, and \
+             desktop notifications.",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.draft.shell_integration.set_term_program,
+            "Set TERM_PROGRAM=freminal",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Sets TERM_PROGRAM and TERM_PROGRAM_VERSION in the PTY environment \
+             so shell scripts can detect Freminal.",
+        );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.draft.shell_integration.auto_install,
+            "Auto-install shell integration scripts on first launch",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Copies bash/zsh/fish hook scripts to \
+             ~/.config/freminal/shell-integration/ on the first launch.  \
+             Existing files are not overwritten.",
+        );
+
+        ui.add_space(8.0);
+
+        // Install-path display (read-only). The actual install path lookup
+        // uses the same helper as 72.8 will use to write files; here we just
+        // surface the path. If freminal_common::config::shell_integration_dir()
+        // is not yet defined (it lands in 72.8), fall back to a static label.
+        ui.horizontal(|ui| {
+            ui.label("Install path:");
+            // Show the conventional path. The actual install logic lands in 72.8;
+            // we display the canonical location here without implementing the
+            // install. Path display is informational only.
+            ui.monospace("~/.config/freminal/shell-integration/");
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // Both buttons are no-op placeholders. Real wiring lands in 72.8
+            // (re-install) and uses arboard for clipboard (copy path).
+            let _ = ui
+                .button("Re-install Scripts")
+                .on_hover_text("Wired in subtask 72.8 — currently inactive.");
+            let _ = ui
+                .button("Copy Path")
+                .on_hover_text("Wired in subtask 72.8 — currently inactive.");
+        });
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // ── Command Blocks section ───────────────────────────────────────────
+        ui.heading("Command Blocks");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Visual treatment of OSC 133 command blocks. Requires shell \
+             integration scripts to be sourced in your shell rc file.",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.draft.command_blocks.enabled,
+            "Enable command block tracking",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When disabled, OSC 133 markers are still parsed but no command \
+             blocks are surfaced to the GUI.",
+        );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.draft.command_blocks.show_duration,
+            "Show command duration",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Display the duration of long-running commands next to the gutter.",
+        );
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Duration threshold:");
+            ui.add(
+                egui::DragValue::new(&mut self.draft.command_blocks.duration_threshold_secs)
+                    .speed(0.1)
+                    .range(0.0_f32..=60.0_f32)
+                    .suffix(" s"),
+            );
+        });
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Minimum command duration before the duration label is shown.",
+        );
     }
 
     fn show_bell_tab(&mut self, ui: &mut Ui) {
@@ -1980,6 +2103,7 @@ mod tests {
         assert_eq!(SettingsTab::Logging.label(), "Logging");
         assert_eq!(SettingsTab::Ui.label(), "UI");
         assert_eq!(SettingsTab::Tabs.label(), "Tabs");
+        assert_eq!(SettingsTab::ShellIntegration.label(), "Shell Integration");
         assert_eq!(SettingsTab::Bell.label(), "Bell");
         assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
@@ -2025,7 +2149,7 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 12);
+        assert_eq!(SettingsTab::ALL.len(), 13);
     }
 
     #[test]

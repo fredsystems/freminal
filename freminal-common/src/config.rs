@@ -34,6 +34,8 @@ pub struct Config {
     pub tabs: TabsConfig,
     pub bell: BellConfig,
     pub security: SecurityConfig,
+    pub shell_integration: ShellIntegrationConfig,
+    pub command_blocks: CommandBlocksConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -73,6 +75,8 @@ impl Default for Config {
             tabs: TabsConfig::default(),
             bell: BellConfig::default(),
             security: SecurityConfig::default(),
+            shell_integration: ShellIntegrationConfig::default(),
+            command_blocks: CommandBlocksConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
@@ -472,6 +476,97 @@ impl Default for SecurityConfig {
         Self {
             allow_clipboard_read: false,
             password_indicator: true,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Shell Integration
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for OSC 133 (FinalTerm/FTCS) shell integration.
+///
+/// Freminal sets `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION=<crate version>`
+/// in the PTY environment so shell scripts can detect us, and (optionally)
+/// auto-installs prompt-hook scripts to `~/.config/freminal/shell-integration/`
+/// on first launch.  The shell scripts emit OSC 133 A/B/C/D markers so the
+/// terminal can render command blocks, gutters (Task 73), and notifications
+/// (Task 76).
+///
+/// ```toml
+/// [shell_integration]
+/// set_term_program = true
+/// auto_install = true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellIntegrationConfig {
+    /// When `true`, freminal sets `TERM_PROGRAM=freminal` and
+    /// `TERM_PROGRAM_VERSION` in the PTY environment.
+    ///
+    /// Default: `true`.  Disable only if you have an external workflow that
+    /// relies on the inherited `TERM_PROGRAM` from the parent process.
+    pub set_term_program: bool,
+
+    /// When `true`, freminal auto-installs shell integration scripts to
+    /// `~/.config/freminal/shell-integration/` on first launch.
+    ///
+    /// Existing files in the target directory are NOT overwritten (user
+    /// customisations are preserved).  Default: `true`.
+    pub auto_install: bool,
+}
+
+impl Default for ShellIntegrationConfig {
+    fn default() -> Self {
+        Self {
+            set_term_program: true,
+            auto_install: true,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Command Blocks
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for OSC 133 command-block visualization.
+///
+/// Command blocks group each shell command's prompt, input, and output into
+/// a selectable unit.  This config controls whether blocks are populated in
+/// the snapshot and surfaced to the GUI, and whether the per-command
+/// duration overlay is shown.
+///
+/// ```toml
+/// [command_blocks]
+/// enabled = true
+/// show_duration = true
+/// duration_threshold_secs = 2.0
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandBlocksConfig {
+    /// Master switch.  When `false`, OSC 133 markers are still parsed
+    /// (because `FtcsState` matters for other features) but `command_blocks`
+    /// is left empty in snapshots and the GUI shows no command-aware
+    /// affordances.  Default: `true`.
+    pub enabled: bool,
+
+    /// Display the duration of long-running commands next to the gutter
+    /// (e.g. `"1.3s"`).  Default: `true`.
+    pub show_duration: bool,
+
+    /// Minimum command duration (in seconds) before a duration label is
+    /// rendered.  Below this threshold the label is suppressed to avoid
+    /// flicker on fast commands.  Default: `2.0`.
+    pub duration_threshold_secs: f32,
+}
+
+impl Default for CommandBlocksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_duration: true,
+            duration_threshold_secs: 2.0,
         }
     }
 }
@@ -1276,6 +1371,25 @@ size = 14.0
     fn full_config_default_has_ligatures_true() {
         let cfg = Config::default();
         assert!(cfg.font.ligatures);
+    }
+
+    #[test]
+    fn shell_integration_and_command_blocks_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.shell_integration.set_term_program = false;
+        cfg.shell_integration.auto_install = false;
+        cfg.command_blocks.enabled = false;
+        cfg.command_blocks.show_duration = false;
+        cfg.command_blocks.duration_threshold_secs = 5.5;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise default config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert!(!parsed.shell_integration.set_term_program);
+        assert!(!parsed.shell_integration.auto_install);
+        assert!(!parsed.command_blocks.enabled);
+        assert!(!parsed.command_blocks.show_duration);
+        assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
     }
 
     #[test]
