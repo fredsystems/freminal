@@ -328,12 +328,25 @@ Some(cursor.pos.y)` on the most recent open block.
     `self.buffer.finish_command_block(*exit_code)`. Also update
     `self.last_exit_code` (existing behavior — keep it).
   - `PromptProperty`: still informational, no change to buffer state.
-- After `CommandFinished`, the handler must signal the GUI. Add a new
-  `WindowCommand::CommandFinished { pane_id: PaneId, block: CommandBlock }`
-  variant (use the existing `WindowCommand` enum that already routes from PTY
-  thread to GUI thread — search for `WindowCommand::` to find it). The PTY
-  loop sends this through the existing window-post channel after the
-  marker is handled.
+- After `CommandFinished`, the handler queues the finished `CommandBlock`
+  on a new `pending_command_events: Vec<CommandBlock>` field. The PTY loop
+  drains the queue via `drain_command_events()` after each batch is
+  processed (wired in 72.9).
+
+**Architectural note — Path C in effect (decided 2026-05-17):**
+
+The original plan called for adding a `WindowCommand::CommandFinished`
+variant. Investigation showed the `WindowCommand` enum
+(`freminal-terminal-emulator/src/io/mod.rs`) carries only viewport/report
+manipulations today, and the handler does not own a `Sender<WindowCommand>`
+— the PTY loop in `freminal/src/gui/pty.rs` wraps handler outputs into
+`WindowCommand::Viewport`/`Report`. Adding `CommandFinished` would require
+either pulling `WindowCommand` into the handler crate or restructuring the
+PTY loop. We chose Path C: queue on the handler, drain from the PTY loop
+in 72.9, deliver to the GUI through whatever channel 72.9 deems
+appropriate (most likely a new dedicated channel, since `CommandFinished`
+is semantically different from viewport ops). The `WindowCommand` enum
+remains untouched in 72.3.
 
 **Verification:**
 
@@ -343,8 +356,26 @@ Some(cursor.pos.y)` on the most recent open block.
   CommandBlock results.
 - A test that emits an interrupted A→B (no D) and verifies the block exists
   with `end_row = None` and `status() == Running`.
-- An integration test that captures emitted `WindowCommand::CommandFinished`
-  events.
+- A test that drain_command_events returns the finished blocks in FIFO
+  order and empties the queue.
+
+**Completion notes (commit `2880d3a`, 2026-05-17):**
+
+- `pending_command_events: Vec<CommandBlock>` added as a sibling to
+  `window_commands` on `TerminalHandler`. Same visibility (bare), same
+  init/clear pattern.
+- `pub fn drain_command_events(&mut self) -> Vec<CommandBlock>` exposed
+  using `std::mem::take`. `#[must_use]` to prevent dropped events.
+- `mark_prompt_row()` is preserved alongside `start_command_block(cwd)`;
+  it still drives the already-shipping PrevCommand/NextCommand navigation.
+- cwd is captured at PromptStart time via
+  `self.current_working_directory().map(str::to_owned)`.
+- 10 new tests in `shell_integration.rs` cover all mandatory scenarios
+  including interrupted A→A→D, missing-B fallthrough, and FIFO drain.
+- `cargo test --all` workspace-wide passes (no regressions in any crate).
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo-machete` clean.
+- freminal-terminal-emulator test count: 2310 → 2320 (+10).
 
 #### 72.4 — Expose `command_blocks` through `TerminalSnapshot`
 
