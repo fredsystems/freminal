@@ -530,6 +530,44 @@ Snapshot test that disabling `command_blocks.enabled` makes
 **Verification:** Unit test on the env-merge helper (existing or new). Manual
 verification by running `echo $TERM_PROGRAM` in a freminal session.
 
+**Completion notes (commit `46dfbfd`, 2026-05-17):**
+
+- **Scope correction:** The plan listed the scope as `freminal/src/gui/pty.rs`
+  and `tab_spawning.rs` only. In practice, `TERM_PROGRAM` was already set
+  unconditionally in `freminal-terminal-emulator/src/io/pty.rs`, so 72.6
+  is the _gating_ of pre-existing functionality, not net-new code.
+  Actual files modified: 5 (the gating flag must plumb through
+  `PtyTabConfig` → `TerminalEmulator::new` → `PtySpawnConfig` →
+  `run_terminal`).
+- **Pre-existing version-string format preserved exactly:**
+  `format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("VERGEN_GIT_DESCRIBE"))`.
+  A prior attempt silently degraded this to plain
+  `env!("CARGO_PKG_VERSION")` (dropping the git-describe suffix); that
+  attempt was rejected and reverted. The retry adds an explicit
+  regression test (`version_string_carries_vergen_git_describe_in_parens`)
+  that asserts the suffix is present.
+- New `pub fn term_program_env_pairs() -> [(&'static str, String); 2]`
+  helper in `freminal-terminal-emulator/src/io/pty.rs`. Non-const because
+  the version string is a runtime `format!()` result.
+- `PtySpawnConfig::set_term_program: bool` added.
+- `TerminalEmulator::new` gains a `set_term_program: bool` parameter at
+  the end of the argument list. Already had `#[allow(clippy::too_many_arguments)]` from prior work, so no new allow needed.
+- `PtyTabConfig::set_term_program: bool` added.
+- 5 `PtyTabConfig { ... }` construction sites updated to pass
+  `self.config.shell_integration.set_term_program`: 3 in
+  `tab_spawning.rs` (spawn_new_tab, spawn_split_pane, spawn_pane_from_leaf)
+  and 2 in `app_impl.rs` (on_window_created at line 155,
+  create_first_window_with_default_pty at line 1621).
+- TERM_PROGRAM is applied BEFORE the `extra_env` loop in `run_terminal`,
+  so layout/user env can override (e.g. setting `TERM_PROGRAM = ""` in a
+  layout disables our value for that pane).
+- 5 new tests in `io::pty::term_program_tests` covering the (key, value)
+  contract and the VERGEN-suffix regression guard.
+- `cargo test --all` workspace passes (no regressions).
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo-machete` clean.
+- `freminal-terminal-emulator` test count: 2324 → 2329.
+
 #### 72.7 — Ship shell integration scripts
 
 **Scope:** New top-level directory `shell-integration/`.
