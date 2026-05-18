@@ -58,6 +58,7 @@ use crate::state::{TerminalSections, internal::TerminalState};
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
+use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
@@ -524,6 +525,7 @@ impl TerminalEmulator {
     /// from the previous snapshot.  Cursor-only moves do not set it because
     /// cursor position is carried separately in the snapshot struct.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Struct literal dominates line count; logic is linear and clear
     pub fn build_snapshot(&mut self) -> TerminalSnapshot {
         // ── Cheap immutable reads (no &mut borrow of handler needed) ────────
         let (term_width, term_height) = self.internal.handler.win_size();
@@ -612,6 +614,15 @@ impl TerminalEmulator {
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
         let prompt_rows = Arc::<[usize]>::from(self.internal.handler.buffer().prompt_rows());
+        let command_blocks: Arc<[CommandBlock]> = self
+            .internal
+            .handler
+            .buffer()
+            .command_blocks()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         let theme = self.internal.handler.theme();
 
         // ── Inline image data ────────────────────────────────────────────────
@@ -664,6 +675,7 @@ impl TerminalEmulator {
             ftcs_state,
             last_exit_code,
             prompt_rows,
+            command_blocks,
             theme,
             images,
             visible_image_placements,
@@ -1277,6 +1289,78 @@ mod tests {
             snap.max_scroll_offset <= 10,
             "scrollback limit=10, but max_scroll_offset={}",
             snap.max_scroll_offset
+        );
+    }
+
+    // ── command_blocks in TerminalSnapshot (Task 72.4) ───────────────────────
+
+    #[test]
+    fn default_snapshot_has_empty_command_blocks() {
+        let snap = TerminalSnapshot::empty();
+        assert!(snap.command_blocks.is_empty());
+    }
+
+    #[test]
+    fn build_snapshot_empty_command_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.command_blocks.is_empty(),
+            "fresh emulator should have no command blocks"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_populated_command_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Drive one full A → B → C → D cycle via the byte-stream path.
+        // Note: exit-code parsing is covered by shell_integration.rs tests which
+        // call handle_osc() directly.  The byte-stream path has a known parser
+        // limitation in osc.rs:251-254 where AnsiOscToken::OscValue tokens are
+        // filtered out, so "D;0" arrives as CommandFinished(None) instead of
+        // CommandFinished(Some(0)).  We therefore do NOT assert on exit_code here.
+        emu.handle_incoming_data(b"\x1b]133;A\x07");
+        emu.handle_incoming_data(b"\x1b]133;B\x07");
+        emu.handle_incoming_data(b"\x1b]133;C\x07");
+        emu.handle_incoming_data(b"\x1b]133;D\x07");
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.command_blocks.len(),
+            1,
+            "expected 1 command block after A→B→C→D cycle"
+        );
+        assert!(
+            snap.command_blocks[0].end_row.is_some(),
+            "end_row should be set after D marker"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_command_blocks_ordering() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Drive 3 full A → B → C → D cycles.
+        // Note: exit-code parsing has a known limitation on the byte-stream path
+        // (see comment in build_snapshot_populated_command_blocks); we do not
+        // assert on exit codes here.
+        for _ in 0..3 {
+            emu.handle_incoming_data(b"\x1b]133;A\x07");
+            emu.handle_incoming_data(b"\x1b]133;B\x07");
+            emu.handle_incoming_data(b"\x1b]133;C\x07");
+            emu.handle_incoming_data(b"\x1b]133;D\x07");
+        }
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.command_blocks.len(),
+            3,
+            "expected 3 command blocks after 3 A→B→C→D cycles"
+        );
+        assert!(
+            snap.command_blocks[0].id < snap.command_blocks[1].id,
+            "command block IDs must be strictly increasing (oldest first)"
+        );
+        assert!(
+            snap.command_blocks[1].id < snap.command_blocks[2].id,
+            "command block IDs must be strictly increasing (oldest first)"
         );
     }
 }

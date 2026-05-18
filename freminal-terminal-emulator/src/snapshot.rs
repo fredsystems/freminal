@@ -16,6 +16,7 @@ use std::{collections::HashMap, sync::Arc};
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 use freminal_common::{
     buffer_states::{
+        command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
         ftcs::FtcsState,
@@ -268,6 +269,18 @@ pub struct TerminalSnapshot {
     /// sorted by row index.
     pub prompt_rows: Arc<[usize]>,
 
+    /// OSC 133 command blocks captured by the buffer.
+    ///
+    /// Each block records one shell command's full lifecycle — prompt start
+    /// (`A`), command input start (`B`), output start (`C`), command finished
+    /// (`D`) — along with optional exit code, captured CWD, and start/finish
+    /// timestamps.  Surfaced through the snapshot so the GUI can render
+    /// command gutters (Task 73), copy-output actions (Task 72.11), and fold
+    /// state (Task 72.10).
+    ///
+    /// Ordering: oldest-first.  Capped at the buffer's `scrollback_limit`.
+    pub command_blocks: Arc<[CommandBlock]>,
+
     /// The active color theme palette.
     ///
     /// Carried in the snapshot so the GUI can render with the user's chosen
@@ -356,6 +369,7 @@ impl TerminalSnapshot {
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
             prompt_rows: Arc::from([]),
+            command_blocks: Arc::from(Vec::<CommandBlock>::new()),
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
