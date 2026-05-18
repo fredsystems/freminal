@@ -485,6 +485,38 @@ full report and fix scope.
 Snapshot test that disabling `command_blocks.enabled` makes
 `snap.command_blocks` empty.
 
+**Completion notes (commit `467ca40`, 2026-05-17):**
+
+- The plan originally said Command Blocks should go inside a
+  "Behavior" tab. That tab does not exist in the current Settings UI.
+  Decision: bundle BOTH new sections into ONE new "Shell Integration"
+  tab between Tabs and Bell. Rationale: keeps the OSC 133 story in one
+  place; avoids disturbing the existing 12-tab taxonomy.
+- `SettingsTab::ALL` array size adjusted `[Self; 12] → [Self; 13]`; the
+  `ALL.len() == 12` test assertion adjusted to 13. These are the only
+  deletions in the entire diff.
+- Read-only install path is rendered via `ui.monospace(...)` (the
+  codebase's egui version does not expose `ui.code(...)`).
+- "Re-install Scripts" and "Copy Path" buttons are no-op placeholders
+  with `on_hover_text("Wired in subtask 72.8 — currently inactive.")`.
+  Real wiring lands in 72.8.
+- Duration threshold uses `egui::DragValue::range(0.0..=60.0).suffix(" s")`
+  with `speed(0.1)`. `DragValue::range` exists in this codebase (used in
+  `settings.rs:960`).
+- `#[serde(default)]` on both new structs and on every field so old
+  config files load unchanged.
+- 1 new round-trip TOML test in `freminal-common/src/config.rs`
+  (`shell_integration_and_command_blocks_round_trip_through_toml`),
+  +1 assertion line in `freminal/src/gui/settings.rs`
+  (`settings_tab_labels`), `ALL.len()` assertion updated.
+- `cargo test --all` workspace-wide passes (no regressions).
+- `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo-machete` clean.
+- `freminal-common`: 807 → 808; `freminal`: 388 → 389.
+- `settings_dispatch.rs` was NOT modified — the new config sections
+  do not require live broadcast; they take effect on next PTY spawn
+  (72.6) or first launch (72.8).
+
 #### 72.6 — TERM_PROGRAM environment variables
 
 **Scope:** `freminal/src/gui/pty.rs`, `tab_spawning.rs`.
