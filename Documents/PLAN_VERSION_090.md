@@ -625,6 +625,19 @@ verification by running `echo $TERM_PROGRAM` in a freminal session.
   fish's A/B placement before the visual prompt, and a stale comment
   in `freminal.bash` referencing an unimplemented state flag.
 
+**Superseded by 72.8b (2026-05-18).** After 72.7 + 72.8 landed, design
+review surfaced that the user-sources-it-themselves model the scripts
+were written for has too many failure modes (re-launching freminal-in-
+freminal, NixOS environments where the user's `~/.zshrc` already
+installs three competing FTCS emitters, etc.). The replacement
+architecture (documented in `Documents/DESIGN_DECISIONS.md` "Shell
+Integration Architecture") uses Ghostty-style spawn-time env injection
+so the scripts auto-load on every PTY spawn invisibly. 72.8b rewrites
+the scripts for the new mechanism. The flat-file layout
+(`shell-integration/freminal.{bash,zsh,fish}`) is replaced by the tree
+layout described in 72.8b. The 72.7 scripts and README are deleted as
+part of 72.8b.
+
 #### 72.8 — Auto-install shell integration scripts on first launch
 
 **Scope:** `freminal/src/main.rs` or `freminal/src/gui/run.rs` (wherever
@@ -698,6 +711,313 @@ overwritten on second launch.
   (used by `freminal-common` and `freminal-terminal-emulator` tests);
   the sub-agent missed this when reviewing dev-dependencies and chose
   the fragile alternative.
+
+**Partially superseded by 72.8b (2026-05-18).** The auto-install
+infrastructure (the function shape, the `include_str!()` embedding,
+the directory helper, the `main.rs` hook placement) is reused as-is.
+What changes in 72.8b:
+
+- `install_if_missing` is renamed to `sync_to_disk` because the policy
+  shifts from "skip if file exists" to "skip if file content matches
+  embedded bytes" (overwriting user edits — see
+  `DESIGN_DECISIONS.md` "Why freminal owns the on-disk script files").
+- `reinstall_scripts` and the `overwrite: bool` parameter are deleted —
+  no longer called by any UI.
+- `SettingsAction::ReinstallShellScripts` and
+  `CopyShellIntegrationPath` variants are deleted.
+- `SettingsModal::pending_shell_action` field is deleted.
+- The two Settings buttons ("Re-install Scripts", "Copy Path") are
+  deleted from the Shell Integration tab. The install-path display
+  remains.
+- The flat-file `SCRIPTS` const is replaced with a tree-shaped layout
+  (`bash/freminal-init.bash`, `zsh/.zshenv`, `zsh/freminal-integration`,
+  `fish/vendor_conf.d/freminal.fish`, `README.md`).
+- Tests are rewritten to use `tempfile::TempDir` (closing 72.16.d).
+- A new test invariant asserts every shipped script's
+  `# freminal-shell-integration v<N>` marker matches the
+  `FREMINAL_SHELL_INTEGRATION_VERSION: u32` Rust constant.
+
+#### 72.8c — Parser: `freminal=1; fid=<id>` marker support
+
+**Why this subtask exists:** post-72.8 design review (2026-05-18)
+concluded that freminal must coexist with other FTCS emitters (WezTerm
+shell integration, Starship, iTerm2, Kitty) that are already active in
+many users' shell environments. The parser must distinguish freminal-
+emitted markers from foreign markers and correlate A/D pairs explicitly.
+Captured durably in `Documents/DESIGN_DECISIONS.md` "Shell Integration
+Architecture".
+
+**Scope:** `freminal-common/src/buffer_states/ftcs.rs`,
+`freminal-buffer/src/buffer/lifecycle.rs`,
+`freminal-terminal-emulator/src/terminal_handler/osc.rs`.
+
+**Must land before 72.8b** so the parser supports the new marker format
+before the scripts emit it.
+
+- `FtcsMarker` variants carry an explicit `fid` field for A/B/C/D
+  markers and `freminal=1` is required for those variants to parse
+  successfully:
+
+  ```rust
+  pub enum FtcsMarker {
+      PromptStart { fid: String },
+      CommandStart { fid: String },
+      OutputStart { fid: String },
+      CommandFinished { exit_code: Option<i32>, fid: String },
+      PromptProperty(PromptKind),   // unchanged; informational only
+  }
+  ```
+
+- `parse_ftcs_params` walks the parameter list looking for
+  `freminal=<v>` and `fid=<id>`. For A/B/C/D, both must be present and
+  `freminal` must equal `1` (or some other accepted value — left as a
+  design choice for the implementer; "1" is fine). If either is missing
+  or `freminal` is not `1`, return `None`. The marker is silently
+  dropped at this layer and never reaches `Buffer::start_command_block`.
+- `Buffer::start_command_block(cwd, fid: String)` records `fid` on the
+  new block. `finish_command_block(exit_code, fid: String)` looks up the
+  matching open block by `fid`, falls back to no-op if not found (it
+  used to fall back to "most recent open"; the explicit-fid path is
+  strictly safer because every freminal-emitted A carries a unique
+  `fid` and the matching D will always quote it).
+- `mark_command_start_row(fid: String)` and
+  `mark_output_start_row(fid: String)` analogous.
+- `CommandBlock` gains a `fid: String` field. Snapshot transport
+  unchanged structurally (already carries `Arc<[CommandBlock]>`).
+
+**Verification:**
+
+- Unit tests in `ftcs.rs` covering:
+  - `freminal=1; fid=abc` on A → produces `PromptStart { fid: "abc" }`.
+  - Missing `freminal` param on A → returns `None`.
+  - `freminal=2` (wrong value) on A → returns `None`.
+  - Missing `fid` on A → returns `None`.
+  - WezTerm-style `OSC 133;A;cl=m;aid=12345` → returns `None`.
+  - Starship-style same → returns `None`.
+- Unit tests in `lifecycle.rs::command_block_tests` covering:
+  - A → D matched by fid produces one finished block.
+  - A → A → D with the second A's fid → only the second block is closed.
+  - D with unknown fid → no-op (returns `None`).
+- Integration test in `shell_integration.rs::tests` (the handler tests)
+  emitting a real `OSC 133;A;freminal=1;fid=foo` sequence through the
+  parser and verifying the buffer state.
+- Update `Documents/ESCAPE_SEQUENCE_COVERAGE.md` to document the
+  `freminal=1; fid=<id>` parameter convention as a freminal extension.
+- Update `Documents/ESCAPE_SEQUENCE_GAPS.md` if relevant.
+
+**Migration concern:** the existing `FtcsMarker::PromptStart` etc. did
+not carry `fid`. Any test or code that constructed those variants
+directly (e.g. tests in `shell_integration.rs`) needs to supply a
+`fid: String`. The migration is mechanical (every constructor site adds
+a `fid: "test".to_owned()` or similar) but touches many existing
+tests. Sub-agent budget should include time for that.
+
+**Status:** Pending. Sub-agent dispatch comes after this plan-doc
+commit.
+
+#### 72.8b — Ghostty-style shell-integration injection
+
+**Why this subtask exists:** see 72.8c rationale and
+`Documents/DESIGN_DECISIONS.md` "Shell Integration Architecture".
+
+**Scope:** Rewrites of `shell-integration/*` (deleting flat files,
+creating tree-layout files); changes to `freminal/src/shell_integration.rs`
+(rename `install_if_missing` → `sync_to_disk`; delete `reinstall_scripts`
+and the `overwrite` parameter; add `FREMINAL_SHELL_INTEGRATION_VERSION`
+constant; rewrite tests for `TempDir`); changes to `freminal-common/src/config.rs`
+(extend `shell_integration_dir()` with the `$FREMINAL_RESOURCES_DIR` /
+`$XDG_DATA_DIRS` search-order chain); changes to
+`freminal-terminal-emulator/src/io/pty.rs` (`run_terminal` performs
+shell detection and env injection); changes to `freminal/src/gui/settings.rs`
+(delete the two buttons; delete the `pending_shell_action` field; delete
+the two `SettingsAction` variants); changes to
+`freminal/src/gui/settings_dispatch.rs` (delete the two match arms);
+changes to `freminal/Cargo.toml` (add `tempfile.workspace = true` to
+`[dev-dependencies]`).
+
+**Must land after 72.8c.**
+
+**Detailed work breakdown:** the implementing sub-agent will receive a
+fully-detailed prompt with file-level scopes and exact code samples for
+each of the new scripts. The plan-doc summary here is intentionally
+high-level because the design is captured durably in
+`DESIGN_DECISIONS.md` and the sub-agent prompt is the right place for
+the exact code.
+
+**New file layout** (created by 72.8b in `shell-integration/`):
+
+```text
+shell-integration/
+├── bash/
+│   └── freminal-init.bash
+├── zsh/
+│   ├── .zshenv
+│   └── freminal-integration
+├── fish/
+│   └── vendor_conf.d/
+│       └── freminal.fish
+└── README.md
+```
+
+**Each script's responsibilities:**
+
+- **`bash/freminal-init.bash`**: first non-comment line is
+  `set +o posix` (because freminal launched bash with `--posix`). Then
+  source the user's `~/.bashrc` (or `~/.bash_profile` if a login shell)
+  guarded with `[ -f ... ] && source ... 2>/dev/null`. Then install
+  hooks: PROMPT_COMMAND append for D + OSC 7; DEBUG trap for C; PS1
+  wrap for A + B. Every emitted marker carries `freminal=1; fid=$$-<N>`
+  where N is a per-prompt counter.
+- **`zsh/.zshenv`**: the Ghostty-derived `+X`-check dance to restore
+  the user's original `$ZDOTDIR` (or `unset ZDOTDIR`), then source the
+  user's real `.zshenv`, then `source` our `freminal-integration`
+  script.
+- **`zsh/freminal-integration`**: install `precmd_functions` and
+  `preexec_functions` entries (using `add-zsh-hook` if available).
+  Every emitted marker carries `freminal=1; fid=$$-<N>`. PROMPT
+  wrapping with `%{...%}` for A and B markers.
+- **`fish/vendor_conf.d/freminal.fish`**: register
+  `--on-event fish_prompt`, `--on-event fish_preexec`,
+  `--on-event fish_postexec` handlers. The fish-prompt A/B placement
+  caveat from 72.16.b is closed by the
+  `vendor_conf.d` discovery: our integration loads early enough that we
+  can install handlers before user themes do, then chain to user's
+  fish_prompt if it exists.
+- **`README.md`**: updated to document the new architecture — that the
+  scripts are auto-injected, that user edits will be overwritten, and
+  how to opt out by setting `[shell_integration] enabled = false` in
+  config (the existing toggle).
+
+**Each script begins with a version marker:**
+
+```bash
+# freminal-shell-integration v1
+```
+
+Or for README.md:
+
+```markdown
+<!-- freminal-shell-integration v1 -->
+```
+
+The Rust-side constant `FREMINAL_SHELL_INTEGRATION_VERSION: u32 = 1`
+must match. A test invariant enforces this.
+
+**Spawn-time env injection in `run_terminal`:**
+
+Before `pair.slave.spawn_command(cmd)`, detect the shell from
+`cmd`'s program path basename. For each supported shell, set the
+appropriate env vars on the `CommandBuilder`:
+
+```rust
+match detect_shell(&cmd) {
+    Some(Shell::Bash) => {
+        cmd.args(["--posix"])?;
+        cmd.env("ENV", resources.join("bash/freminal-init.bash"));
+    }
+    Some(Shell::Zsh) => {
+        // Preserve user's existing $ZDOTDIR via a sentinel env var
+        // (Ghostty's +X-style approach: if the user had any $ZDOTDIR
+        // set, including empty, we save it. Otherwise we don't set
+        // our sentinel at all.).
+        if let Ok(z) = std::env::var("ZDOTDIR") {
+            cmd.env("__FREMINAL_ZSH_ZDOTDIR", z);
+        }
+        cmd.env("ZDOTDIR", resources.join("zsh"));
+    }
+    Some(Shell::Fish) => {
+        let mut xdg = std::env::var("XDG_DATA_DIRS")
+            .unwrap_or_else(|_| String::from("/usr/local/share:/usr/share"));
+        let our = resources.display().to_string();
+        // Prepend so fish finds our vendor_conf.d first.
+        xdg = format!("{our}:{xdg}");
+        cmd.env("XDG_DATA_DIRS", xdg);
+    }
+    None => {
+        // Unknown shell — no injection. Graceful.
+    }
+}
+```
+
+This block is gated on `config.shell_integration.set_term_program`
+(repurposed: the same flag controls TERM_PROGRAM AND shell-integration
+injection because both are coupled — if the user has set
+`set_term_program = false`, they're opting out of all freminal-side
+shell integration).
+
+If `args.command` is non-empty (user invoked freminal with an explicit
+binary like `freminal vim`), skip injection entirely. The shell-
+integration env vars are irrelevant for non-shell children.
+
+**`sync_to_disk` semantics:**
+
+```rust
+fn sync_to_disk(dir: &Path) -> InstallResult {
+    let mut result = InstallResult::default();
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        result.errors.push((dir.display().to_string(), e.to_string()));
+        return result;
+    }
+    for (relative_path, content) in SCRIPTS {
+        let path = dir.join(relative_path);
+        // Create parent (e.g. `bash/`) if needed.
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            result.errors.push(((*relative_path).to_owned(), e.to_string()));
+            continue;
+        }
+        // Fast path: bytes match → no write.
+        if let Ok(existing) = std::fs::read(&path)
+            && existing == content.as_bytes()
+        {
+            result.skipped.push((*relative_path).to_owned());
+            continue;
+        }
+        match std::fs::write(&path, content) {
+            Ok(()) => result.written.push((*relative_path).to_owned()),
+            Err(e) => result.errors.push(((*relative_path).to_owned(), e.to_string())),
+        }
+    }
+    result
+}
+```
+
+Called from `main.rs` on every launch (gated on
+`config.shell_integration.set_term_program`).
+
+**Settings UI changes:**
+
+- Delete the "Re-install Scripts" button.
+- Delete the "Copy Path" button.
+- Keep the read-only install-path display.
+- Delete `SettingsAction::ReinstallShellScripts` and
+  `CopyShellIntegrationPath(String)` variants from `settings.rs`.
+- Delete the matching match arms in
+  `freminal/src/gui/settings_dispatch.rs`.
+- Delete the `SettingsModal::pending_shell_action` field and its
+  drain logic in `show` / `show_standalone`.
+
+**Verification:**
+
+- `cargo test --all` (workspace).
+- `cargo clippy --all-targets --all-features -- -D warnings`.
+- `cargo-machete`.
+- `bash -n` and `zsh -n` on each script; `shellcheck` clean on
+  bash script.
+- New `every_shipped_script_marker_version_matches_constant` test in
+  `shell_integration.rs::tests`.
+- New `sync_to_disk_writes_when_bytes_differ` test (counterpart to the
+  old `install_if_missing_skips_existing_files`, with reversed
+  semantics).
+- New `sync_to_disk_skips_when_bytes_match` test.
+- New `sync_to_disk_handles_nested_dirs` test (verify `bash/` and
+  `fish/vendor_conf.d/` get created).
+- Manual end-to-end test: launch freminal, run a few commands, verify
+  in a recording that markers carry `freminal=1; fid=<id>` and that
+  `command_blocks` populates correctly.
+
+**Status:** Pending. Sub-agent dispatch comes after 72.8c lands.
 
 #### 72.9 — `WindowCommand::CommandFinished` GUI handling
 
@@ -956,7 +1276,14 @@ implementation. Until 72.11, no user impact.
 **Scheduling:** Must complete before 72.11 (Copy command output
 actions) ships. Tracked as a prerequisite for that subtask.
 
-**Status:** Pending.
+**Status:** ✅ Subsumed by 72.8b (2026-05-18). The fish script is being
+rewritten from scratch for the Ghostty-style spawn-time injection
+architecture (see `Documents/DESIGN_DECISIONS.md` "Shell Integration
+Architecture"). The new fish script lives at
+`shell-integration/fish/vendor_conf.d/freminal.fish` and is auto-loaded
+via `$XDG_DATA_DIRS`, which lets us register hook functions before any
+user `fish_prompt` exists. 72.8b's fish script emits A and B in the
+correct positions; the workaround documented above is no longer needed.
 
 ##### 72.16.c — Remove stale `__FREMINAL_CMD_PENDING` comment in freminal.bash
 
@@ -986,7 +1313,13 @@ filter. No code change needed.
 **Scheduling:** Cosmetic; can land at any time. No subtask blocked by
 this.
 
-**Status:** Pending.
+**Status:** ✅ Subsumed by 72.8b (2026-05-18). The bash script
+(`shell-integration/freminal.bash`) is being rewritten from scratch for
+the Ghostty-style spawn-time injection architecture. The new bash
+script (`shell-integration/bash/freminal-init.bash`) is sourced via the
+`$ENV` env var in POSIX-mode bash and has a different overall structure
+that doesn't include the stale comment block. Removed implicitly when
+the old script is deleted.
 
 ##### 72.16.d — Use workspace `tempfile` in `freminal::shell_integration::tests`
 
@@ -1036,7 +1369,13 @@ fn install_if_missing_writes_all_when_dir_empty() {
 **Scheduling:** Cosmetic / test-hygiene; no subtask blocked by this.
 Can land at any time before the v0.9.0 PR closes.
 
-**Status:** Pending.
+**Status:** ⤳ Folded into 72.8b. 72.8b rewrites the `shell_integration::tests`
+module wholesale (because the `install_if_missing` semantics change from
+"skip if exists" to "skip if bytes match", which invalidates the existing
+`install_if_missing_skips_existing_files` test among others). The 72.8b
+rewrite uses `tempfile::TempDir` from the workspace, which closes 72.16.d
+implicitly. 72.8b adds `tempfile.workspace = true` to
+`freminal/Cargo.toml` `[dev-dependencies]` as part of its scope.
 
 ### 72 Open Questions Resolved
 
@@ -2080,12 +2419,27 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
 1. Read this entire document plus the v0.8.0 close-out notes in
    `MASTER_PLAN.md`.
 2. Branch from `main` to `task-72/osc-133-command-blocks`.
-3. Execute Task 72 subtasks 72.1 → 72.6, then **72.16 (cleanup)**, then
-   72.7 → 72.15, one commit each. Pause after each subtask for user
-   confirmation per the Multi-Step Task Protocol in `agents.md`. The
-   72.16 cleanup section accumulates bugs surfaced during earlier
-   subtasks; revisit the schedule if a 72.16 entry blocks something
-   earlier than 72.7.
+3. Execute Task 72 subtasks in this exact order:
+   - **72.1 → 72.6** ✅ done (commits `f77fc9d` → `46dfbfd`).
+   - **72.16.a** ✅ done (commit `9dd35ca` — OSC 133 numeric-param filter).
+   - **72.7 + 72.8** ✅ done (commits `e43911a` and `91b7a8d`); their
+     architecture was superseded by 72.8c/72.8b after design review
+     (2026-05-18). The scripts and infrastructure they shipped are
+     about to be replaced.
+   - **72.8c** — Parser support for `freminal=1; fid=<id>` markers.
+     Must land before 72.8b so scripts emit a format the parser
+     recognizes.
+   - **72.8b** — Ghostty-style shell-integration injection. Rewrites
+     scripts into a tree layout, simplifies `sync_to_disk`, deletes
+     Settings buttons, adds spawn-time env injection.
+   - **72.9 → 72.15** — remaining subtasks per the rest of this plan.
+
+   Pause after each subtask for user confirmation per the Multi-Step
+   Task Protocol in `agents.md`. The 72.16 cleanup section accumulates
+   bugs surfaced during earlier subtasks; entries can be closed-as-
+   subsumed when later subtasks rewrite the affected code (72.16.b,
+   72.16.c, 72.16.d were all closed-as-subsumed by 72.8b on 2026-05-18).
+
 4. After Task 72 merges, branch `task-73/command-gutters` and repeat.
 5. Continue through Tasks 94, 95, 76, 77, 74, 75 in that order.
 6. After all eight tasks merge, update `MASTER_PLAN.md` status table and
