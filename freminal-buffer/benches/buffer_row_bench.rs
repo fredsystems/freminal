@@ -634,6 +634,27 @@ fn bench_flatten_url_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: command-block record/finish cycle (72.2)
+//
+// Measures the cost of recording 10,000 start/finish command-block cycles.
+// Captures the new VecDeque<CommandBlock> machinery added in 72.2.
+// ---------------------------------------------------------------
+fn bench_command_block_record(c: &mut Criterion) {
+    c.bench_function("command_block_record_10k", |b| {
+        b.iter_batched(
+            || Buffer::new(80, 24),
+            |mut buffer| {
+                for _ in 0..10_000 {
+                    let _id = buffer.start_command_block(None);
+                    let _ = buffer.finish_command_block(Some(0));
+                }
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -657,6 +678,7 @@ criterion_group!(
         bench_erase_display_full,
         bench_lf_heavy_bce,
         bench_erase_display_bce,
+        bench_command_block_record,
 );
 
 criterion_main!(benches);
