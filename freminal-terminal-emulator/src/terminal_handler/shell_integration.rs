@@ -79,7 +79,7 @@ const fn hex_val(b: u8) -> Option<u8> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::buffer_states::{
-        ftcs::{FtcsMarker, FtcsState},
+        ftcs::{FtcsMarker, FtcsState, PromptKind},
         osc::AnsiOscType,
     };
 
@@ -400,6 +400,199 @@ mod tests {
         // b'a' - 1 = b'`' and b'f' + 1 = b'g' should both be None
         assert_eq!(hex_val(b'`'), None);
         assert_eq!(hex_val(b'g'), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // CommandBlock side-effect tests (OSC 133 → Buffer command-block API)
+    // -----------------------------------------------------------------------
+
+    /// Emit OSC 133 A and verify one Running block is created.
+    #[test]
+    fn prompt_start_creates_command_block() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(handler.buffer().command_blocks().len(), 1);
+        assert_eq!(
+            handler.buffer().command_blocks()[0].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Running
+        );
+    }
+
+    /// OSC 7 before OSC 133 A should be captured in the new block's cwd.
+    #[test]
+    fn prompt_start_captures_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::RemoteHost("file:///home/user".to_string()));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert_eq!(
+            handler.buffer().command_blocks()[0].cwd.as_deref(),
+            Some("/home/user")
+        );
+    }
+
+    /// OSC 133 A without prior OSC 7 should produce a block with no cwd.
+    #[test]
+    fn prompt_start_without_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        assert!(handler.buffer().command_blocks()[0].cwd.is_none());
+    }
+
+    /// Full A → B → C → D(0) cycle must produce one fully populated Success block.
+    #[test]
+    fn full_cycle_records_block() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+
+        assert_eq!(handler.buffer().command_blocks().len(), 1);
+        let block = &handler.buffer().command_blocks()[0];
+        assert_eq!(
+            block.status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Success
+        );
+        assert_eq!(block.exit_code, Some(0));
+        assert!(block.end_row.is_some(), "end_row should be set after D");
+        assert!(
+            block.output_start_row.is_some(),
+            "output_start_row should be set after C"
+        );
+        assert!(
+            block.command_start_row.is_some(),
+            "command_start_row should be set after B"
+        );
+
+        // drain_command_events should return one block
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 1);
+
+        // Second drain returns empty
+        let events2 = handler.drain_command_events();
+        assert!(events2.is_empty());
+    }
+
+    /// Full cycle with non-zero exit code records Failure status.
+    #[test]
+    fn full_cycle_non_zero_exit_code() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(127))));
+
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].exit_code, Some(127));
+        assert_eq!(
+            events[0].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Failure(127)
+        );
+    }
+
+    /// A → D (no B or C): `exit_code` is None → `status()` is Unknown.
+    #[test]
+    fn command_finished_without_code() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].exit_code.is_none());
+        assert_eq!(
+            events[0].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Unknown
+        );
+    }
+
+    /// A → A → D(0): two blocks exist; only the second is finished; first is still Running.
+    #[test]
+    fn interrupted_prompt_pushes_two_blocks() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+
+        assert_eq!(
+            handler.buffer().command_blocks().len(),
+            2,
+            "two A markers should produce two blocks"
+        );
+
+        // Only one drained event (the second block was finished)
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 1, "only one D marker was received");
+
+        // First block is still Running
+        assert_eq!(
+            handler.buffer().command_blocks()[0].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Running
+        );
+    }
+
+    /// OSC 133 P (`PromptProperty`) alone must not create a command block.
+    #[test]
+    fn prompt_property_does_not_create_block() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptProperty(
+            PromptKind::Initial,
+        )));
+        assert!(
+            handler.buffer().command_blocks().is_empty(),
+            "PromptProperty alone must not create blocks"
+        );
+        assert!(
+            handler.drain_command_events().is_empty(),
+            "PromptProperty alone must not queue events"
+        );
+    }
+
+    /// A → C → D(0) (skipping B): `command_start_row` is None but `output_start_row` and `end_row` are set.
+    #[test]
+    fn output_start_without_command_start_marks_only_output() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+
+        assert_eq!(handler.buffer().command_blocks().len(), 1);
+        let block = &handler.buffer().command_blocks()[0];
+        assert!(
+            block.command_start_row.is_none(),
+            "B was never sent so command_start_row must be None"
+        );
+        assert!(
+            block.output_start_row.is_some(),
+            "C was sent so output_start_row must be set"
+        );
+        assert!(block.end_row.is_some(), "D was sent so end_row must be set");
+
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 1, "one finished event expected");
+    }
+
+    /// Three A→D cycles; drain returns exit codes in order [0, 1, 2].
+    #[test]
+    fn drain_command_events_returns_oldest_first() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        for code in [0i32, 1, 2] {
+            handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+            handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(code))));
+        }
+
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].exit_code, Some(0));
+        assert_eq!(events[1].exit_code, Some(1));
+        assert_eq!(events[2].exit_code, Some(2));
     }
 
     // -----------------------------------------------------------------------

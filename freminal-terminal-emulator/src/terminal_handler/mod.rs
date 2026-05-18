@@ -9,6 +9,7 @@ use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
+        command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
         ftcs::FtcsState,
@@ -149,6 +150,14 @@ pub struct TerminalHandler {
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
+    /// Finished OSC 133 command blocks queued for the GUI to drain via
+    /// [`Self::drain_command_events`].
+    ///
+    /// Populated by [`Self::handle_osc_ftcs`] when an `OSC 133 D` marker
+    /// arrives.  The GUI consumes these (in subtask 72.9) and routes them to
+    /// the corresponding pane's `recent_commands` and to the notification
+    /// system (Task 76).
+    pending_command_events: Vec<CommandBlock>,
     /// Last graphic character written (for REP — CSI b).
     last_graphic_char: Option<TChar>,
     /// Current working directory reported by the shell via OSC 7.
@@ -342,6 +351,7 @@ impl TerminalHandler {
             saved_character_replace: None,
             write_tx: None,
             window_commands: Vec::new(),
+            pending_command_events: Vec::new(),
             last_graphic_char: None,
             current_working_directory: None,
             ftcs_state: FtcsState::default(),
@@ -449,6 +459,7 @@ impl TerminalHandler {
         self.character_replace = DecSpecialGraphics::default();
         self.saved_character_replace = None;
         self.window_commands.clear();
+        self.pending_command_events.clear();
         self.last_graphic_char = None;
         self.current_working_directory = None;
         self.ftcs_state = FtcsState::default();
@@ -758,6 +769,15 @@ impl TerminalHandler {
     #[must_use]
     pub const fn last_exit_code(&self) -> Option<i32> {
         self.last_exit_code
+    }
+
+    /// Drain and return all pending command-finished events.
+    ///
+    /// Called by the PTY loop after each batch of incoming data is processed.
+    /// Returns events oldest-first; the queue is emptied by this call.
+    #[must_use]
+    pub fn drain_command_events(&mut self) -> Vec<CommandBlock> {
+        std::mem::take(&mut self.pending_command_events)
     }
 
     /// Return the current xterm `modifyOtherKeys` level (0, 1, or 2).

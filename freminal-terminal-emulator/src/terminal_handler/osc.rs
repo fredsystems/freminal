@@ -151,17 +151,27 @@ impl TerminalHandler {
         match marker {
             FtcsMarker::PromptStart => {
                 self.ftcs_state = FtcsState::InPrompt;
+                // mark_prompt_row() powers PrevCommand/NextCommand navigation
+                // and must stay. start_command_block() is a sibling that
+                // opens the new CommandBlock storage introduced in 72.2/72.3.
                 self.buffer.mark_prompt_row();
+                let cwd = self.current_working_directory().map(str::to_owned);
+                let _id = self.buffer.start_command_block(cwd);
             }
             FtcsMarker::CommandStart => {
                 self.ftcs_state = FtcsState::InCommand;
+                self.buffer.mark_command_start_row();
             }
             FtcsMarker::OutputStart => {
                 self.ftcs_state = FtcsState::InOutput;
+                self.buffer.mark_output_start_row();
             }
             FtcsMarker::CommandFinished(exit_code) => {
                 self.last_exit_code = *exit_code;
                 self.ftcs_state = FtcsState::None;
+                if let Some(block) = self.buffer.finish_command_block(*exit_code) {
+                    self.pending_command_events.push(block);
+                }
             }
             FtcsMarker::PromptProperty(_kind) => {
                 // Prompt property is informational metadata — it annotates
