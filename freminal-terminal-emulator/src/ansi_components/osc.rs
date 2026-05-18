@@ -671,8 +671,8 @@ mod tests {
     // ── Lines 245-259: OSC 133 (FTCS) ───────────────────────────────────────
     #[test]
     fn osc133_ftcs_prompt_start() {
-        // OSC 133 ; A BEL — FTCS prompt start
-        let output = feed_osc(b"133;A\x07");
+        // OSC 133 ; A ; freminal=1 ; fid=t1 BEL — FTCS prompt start (freminal format)
+        let output = feed_osc(b"133;A;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -682,8 +682,8 @@ mod tests {
 
     #[test]
     fn osc133_ftcs_command_start() {
-        // OSC 133 ; B BEL — FTCS command start
-        let output = feed_osc(b"133;B\x07");
+        // OSC 133 ; B ; freminal=1 ; fid=t1 BEL — FTCS command start (freminal format)
+        let output = feed_osc(b"133;B;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -693,8 +693,8 @@ mod tests {
 
     #[test]
     fn osc133_ftcs_command_output_start() {
-        // OSC 133 ; C BEL — FTCS command output start
-        let output = feed_osc(b"133;C\x07");
+        // OSC 133 ; C ; freminal=1 ; fid=t1 BEL — FTCS output start (freminal format)
+        let output = feed_osc(b"133;C;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -704,13 +704,33 @@ mod tests {
 
     #[test]
     fn osc133_ftcs_command_done_with_exit_code() {
-        // OSC 133 ; D ; 0 BEL — FTCS command done with exit code 0
-        let output = feed_osc(b"133;D;0\x07");
+        // OSC 133 ; D ; 0 ; freminal=1 ; fid=t1 BEL — FTCS done (freminal format)
+        let output = feed_osc(b"133;D;0;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
             TerminalOutput::OscResponse(AnsiOscType::Ftcs(_))
         ));
+    }
+
+    #[test]
+    fn osc133_ftcs_plain_marker_silently_consumed() {
+        // OSC 133 ; A BEL — plain marker without freminal=1 is silently dropped
+        let output = feed_osc(b"133;A\x07");
+        assert!(
+            output.is_empty(),
+            "plain marker without freminal=1 must produce no output"
+        );
+    }
+
+    #[test]
+    fn osc133_ftcs_foreign_marker_silently_consumed() {
+        // OSC 133 ; A ; aid=12345 BEL — WezTerm-style marker is silently dropped
+        let output = feed_osc(b"133;A;aid=12345\x07");
+        assert!(
+            output.is_empty(),
+            "foreign marker without freminal=1 must produce no output"
+        );
     }
 
     #[test]

@@ -735,7 +735,10 @@ mod tests {
     #[test]
     fn display_ansi_osc_ftcs() {
         use crate::buffer_states::ftcs::FtcsMarker;
-        let s = AnsiOscType::Ftcs(FtcsMarker::PromptStart).to_string();
+        let s = AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        })
+        .to_string();
         assert!(s.contains("Ftcs"), "got: {s}");
     }
 

@@ -242,45 +242,71 @@ mod tests {
     #[test]
     fn ftcs_prompt_start_sets_in_prompt() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
     }
 
     #[test]
     fn ftcs_command_start_sets_in_command() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart {
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
     }
 
     #[test]
     fn ftcs_output_start_sets_in_output() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
     }
 
     #[test]
     fn ftcs_command_finished_resets_to_none() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::None);
     }
 
     #[test]
     fn ftcs_command_finished_captures_exit_code() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(42))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(42),
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), Some(42));
     }
 
     #[test]
     fn ftcs_command_finished_no_exit_code() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: None,
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), None);
     }
 
@@ -289,19 +315,28 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // A → prompt start
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "cycle1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
 
         // B → command start
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart {
+            fid: "cycle1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
 
         // C → output start
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "cycle1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
 
         // D;0 → command finished with exit code 0
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "cycle1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::None);
         assert_eq!(handler.last_exit_code(), Some(0));
     }
@@ -310,21 +345,47 @@ mod tests {
     fn ftcs_exit_code_updated_on_each_d_marker() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "c1".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), Some(0));
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(127))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c2".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(127),
+            fid: "c2".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), Some(127));
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c3".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: None,
+            fid: "c3".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), None);
     }
 
     #[test]
     fn full_reset_clears_ftcs_state() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(1))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(1),
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), Some(1));
 
         handler.full_reset();
@@ -410,7 +471,9 @@ mod tests {
     #[test]
     fn prompt_start_creates_command_block() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.buffer().command_blocks().len(), 1);
         assert_eq!(
             handler.buffer().command_blocks()[0].status(),
@@ -423,7 +486,9 @@ mod tests {
     fn prompt_start_captures_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::RemoteHost("file:///home/user".to_string()));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
         assert_eq!(
             handler.buffer().command_blocks()[0].cwd.as_deref(),
             Some("/home/user")
@@ -434,7 +499,9 @@ mod tests {
     #[test]
     fn prompt_start_without_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
         assert!(handler.buffer().command_blocks()[0].cwd.is_none());
     }
 
@@ -443,10 +510,19 @@ mod tests {
     fn full_cycle_records_block() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "c1".to_owned(),
+        }));
 
         assert_eq!(handler.buffer().command_blocks().len(), 1);
         let block = &handler.buffer().command_blocks()[0];
@@ -479,10 +555,19 @@ mod tests {
     fn full_cycle_non_zero_exit_code() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(127))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(127),
+            fid: "c1".to_owned(),
+        }));
 
         let events = handler.drain_command_events();
         assert_eq!(events.len(), 1);
@@ -498,8 +583,13 @@ mod tests {
     fn command_finished_without_code() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: None,
+            fid: "c1".to_owned(),
+        }));
 
         let events = handler.drain_command_events();
         assert_eq!(events.len(), 1);
@@ -510,14 +600,22 @@ mod tests {
         );
     }
 
-    /// A → A → D(0): two blocks exist; only the second is finished; first is still Running.
+    /// A("a") → A("b") → D("b"): two blocks; only "b" is finished; "a" still Running.
     #[test]
     fn interrupted_prompt_pushes_two_blocks() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "fid-a".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "fid-b".to_owned(),
+        }));
+        // Finish only the second block (fid-b)
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "fid-b".to_owned(),
+        }));
 
         assert_eq!(
             handler.buffer().command_blocks().len(),
@@ -525,11 +623,11 @@ mod tests {
             "two A markers should produce two blocks"
         );
 
-        // Only one drained event (the second block was finished)
+        // Only one drained event (fid-b was finished)
         let events = handler.drain_command_events();
         assert_eq!(events.len(), 1, "only one D marker was received");
 
-        // First block is still Running
+        // First block (fid-a) is still Running
         assert_eq!(
             handler.buffer().command_blocks()[0].status(),
             freminal_common::buffer_states::command_block::CommandStatus::Running
@@ -558,9 +656,16 @@ mod tests {
     fn output_start_without_command_start_marks_only_output() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "c1".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "c1".to_owned(),
+        }));
 
         assert_eq!(handler.buffer().command_blocks().len(), 1);
         let block = &handler.buffer().command_blocks()[0];
@@ -578,14 +683,20 @@ mod tests {
         assert_eq!(events.len(), 1, "one finished event expected");
     }
 
-    /// Three A→D cycles; drain returns exit codes in order [0, 1, 2].
+    /// Three A→D cycles with distinct fids; drain returns exit codes in order [0, 1, 2].
     #[test]
     fn drain_command_events_returns_oldest_first() {
         let mut handler = TerminalHandler::new(80, 24);
 
         for code in [0i32, 1, 2] {
-            handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
-            handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(code))));
+            let fid = format!("cycle-{code}");
+            handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+                fid: fid.clone(),
+            }));
+            handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+                exit_code: Some(code),
+                fid,
+            }));
         }
 
         let events = handler.drain_command_events();
@@ -593,6 +704,51 @@ mod tests {
         assert_eq!(events[0].exit_code, Some(0));
         assert_eq!(events[1].exit_code, Some(1));
         assert_eq!(events[2].exit_code, Some(2));
+    }
+
+    // ── New tests: foreign-marker rejection ─────────────────────────────
+
+    /// Markers without `freminal=1` must produce no state change and no blocks.
+    /// The handler only receives markers that passed [`parse_ftcs_params`], so
+    /// this tests that [`parse_ftcs_params`] correctly rejects them.
+    #[test]
+    fn foreign_marker_rejection_is_handled_at_parse_layer() {
+        // WezTerm-style: A without freminal=1 → parse returns None → handler never called
+        use freminal_common::buffer_states::ftcs::parse_ftcs_params;
+        assert_eq!(parse_ftcs_params(&["A", "aid=12345"]), None);
+        assert_eq!(parse_ftcs_params(&["D", "0", "aid=12345"]), None);
+        // Plain markers (old style)
+        assert_eq!(parse_ftcs_params(&["A"]), None);
+        assert_eq!(parse_ftcs_params(&["D", "0"]), None);
+    }
+
+    /// Completing a block by fid only closes the correct block.
+    #[test]
+    fn finish_by_correct_fid_only() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "first".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "second".to_owned(),
+        }));
+
+        // Finish "first" only.
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "first".to_owned(),
+        }));
+
+        let events = handler.drain_command_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fid, "first");
+
+        // "second" is still running.
+        assert_eq!(
+            handler.buffer().command_blocks()[1].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Running
+        );
     }
 
     // -----------------------------------------------------------------------

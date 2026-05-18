@@ -153,15 +153,16 @@ impl Buffer {
     // ── OSC 133 command-block API ────────────────────────────────────────────
 
     /// Append a fresh [`CommandBlock`] to the end of `command_blocks`, with
-    /// `prompt_start_row = cursor.pos.y` and the given `cwd`.  Allocates a
-    /// new [`CommandBlockId`] via [`CommandBlockId::next`].
+    /// `prompt_start_row = cursor.pos.y`, the given `cwd`, and the given
+    /// freminal correlation `fid`.  Allocates a new [`CommandBlockId`] via
+    /// [`CommandBlockId::next`].
     ///
     /// When the deque has already reached the scrollback cap, the oldest
     /// block is evicted (`pop_front`) before the new one is pushed.
     ///
     /// Returns the id of the new block so callers can correlate events (e.g.
     /// for emitting `WindowCommand::CommandFinished`).
-    pub fn start_command_block(&mut self, cwd: Option<String>) -> CommandBlockId {
+    pub fn start_command_block(&mut self, cwd: Option<String>, fid: String) -> CommandBlockId {
         // Cap command_blocks at the scrollback limit to bound memory.  We use
         // scrollback_limit as the cap because it already governs how many rows
         // (and therefore how many past prompts) the user can scroll back to see.
@@ -171,47 +172,59 @@ impl Buffer {
         if self.command_blocks.len() >= cap {
             self.command_blocks.pop_front();
         }
-        let block = CommandBlock::new_running(self.cursor.pos.y, cwd);
+        let block = CommandBlock::new_running(self.cursor.pos.y, cwd, fid);
         let id = block.id;
         self.command_blocks.push_back(block);
         id
     }
 
-    /// Set `command_start_row` to the current cursor row on the most recent
-    /// block whose `command_start_row` is `None`.  No-op if no such block
-    /// exists (e.g. `B` arrived before `A`).
-    pub fn mark_command_start_row(&mut self) {
+    /// Set `command_start_row` to the current cursor row on the block whose
+    /// `fid` matches and whose `command_start_row` is `None`.  Searches
+    /// newest-to-oldest so that the most recent matching block is updated.
+    /// No-op if no matching block exists (e.g. `B` arrived before `A` from us,
+    /// or a foreign `B` marker slipped through).
+    pub fn mark_command_start_row(&mut self, fid: &str) {
         for block in self.command_blocks.iter_mut().rev() {
-            if block.command_start_row.is_none() {
-                block.command_start_row = Some(self.cursor.pos.y);
+            if block.fid == fid {
+                if block.command_start_row.is_none() {
+                    block.command_start_row = Some(self.cursor.pos.y);
+                }
                 return;
             }
         }
+        // No matching block — silently no-op.
     }
 
-    /// Set `output_start_row` to the current cursor row on the most recent
-    /// block whose `output_start_row` is `None`.  No-op if no such block
-    /// exists.
-    pub fn mark_output_start_row(&mut self) {
+    /// Set `output_start_row` to the current cursor row on the block whose
+    /// `fid` matches and whose `output_start_row` is `None`.  Searches
+    /// newest-to-oldest.  No-op if no matching block exists.
+    pub fn mark_output_start_row(&mut self, fid: &str) {
         for block in self.command_blocks.iter_mut().rev() {
-            if block.output_start_row.is_none() {
-                block.output_start_row = Some(self.cursor.pos.y);
+            if block.fid == fid {
+                if block.output_start_row.is_none() {
+                    block.output_start_row = Some(self.cursor.pos.y);
+                }
                 return;
             }
         }
+        // No matching block — silently no-op.
     }
 
-    /// Finish the most recent open block (one whose `end_row` is `None`) by
-    /// setting `end_row = cursor.pos.y`, `exit_code = exit_code`, and
-    /// `finished_at = Some(SystemTime::now())`.  No-op if no open block
-    /// exists.
+    /// Finish the block whose `fid` matches and whose `end_row` is `None`,
+    /// by setting `end_row = cursor.pos.y`, `exit_code`, and
+    /// `finished_at = Some(SystemTime::now())`.  Searches newest-to-oldest.
+    /// No-op if no matching open block exists.
     ///
     /// Returns a clone of the finished block (so the handler can forward it
     /// via `WindowCommand::CommandFinished`), or `None` if no-op.
     #[must_use]
-    pub fn finish_command_block(&mut self, exit_code: Option<i32>) -> Option<CommandBlock> {
+    pub fn finish_command_block(
+        &mut self,
+        exit_code: Option<i32>,
+        fid: &str,
+    ) -> Option<CommandBlock> {
         for block in self.command_blocks.iter_mut().rev() {
-            if block.end_row.is_none() {
+            if block.fid == fid && block.end_row.is_none() {
                 block.end_row = Some(self.cursor.pos.y);
                 block.exit_code = exit_code;
                 block.finished_at = Some(SystemTime::now());
@@ -366,13 +379,14 @@ mod command_block_tests {
         // Place cursor at row 5.
         buf.cursor.pos.y = 5;
 
-        let _id = buf.start_command_block(Some("/x".to_string()));
+        let _id = buf.start_command_block(Some("/x".to_string()), "fid1".to_owned());
 
         assert_eq!(buf.command_blocks.len(), 1);
         let block = buf.command_blocks.front().unwrap();
         assert_eq!(block.status(), CommandStatus::Running);
         assert_eq!(block.prompt_start_row, 5);
         assert_eq!(block.cwd.as_deref(), Some("/x"));
+        assert_eq!(block.fid, "fid1");
         assert!(block.command_start_row.is_none());
         assert!(block.output_start_row.is_none());
         assert!(block.end_row.is_none());
@@ -383,35 +397,35 @@ mod command_block_tests {
     #[test]
     fn start_command_block_returns_increasing_ids() {
         let mut buf = make_buf();
-        let id1 = buf.start_command_block(None);
-        let id2 = buf.start_command_block(None);
-        let id3 = buf.start_command_block(None);
+        let id1 = buf.start_command_block(None, "fid1".to_owned());
+        let id2 = buf.start_command_block(None, "fid2".to_owned());
+        let id3 = buf.start_command_block(None, "fid3".to_owned());
         assert!(id1 < id2, "ids must be strictly increasing");
         assert!(id2 < id3, "ids must be strictly increasing");
     }
 
-    // ── 3: mark_command_start_row sets field on newest open block ────────
+    // ── 3: mark_command_start_row sets field on matching block ───────────
 
     #[test]
     fn mark_command_start_row_sets_field() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 2;
-        let _id = buf.start_command_block(None);
+        let _id = buf.start_command_block(None, "fid1".to_owned());
 
         buf.cursor.pos.y = 3;
-        buf.mark_command_start_row();
+        buf.mark_command_start_row("fid1");
 
         let block = buf.command_blocks.front().unwrap();
         assert_eq!(block.command_start_row, Some(3));
     }
 
-    // ── 4: mark_command_start_row no-op when no open block ───────────────
+    // ── 4: mark_command_start_row no-op when no matching block ───────────
 
     #[test]
     fn mark_command_start_row_noop_when_empty() {
         let mut buf = make_buf();
         // No blocks at all — must not panic.
-        buf.mark_command_start_row();
+        buf.mark_command_start_row("any-fid");
         assert!(buf.command_blocks.is_empty());
     }
 
@@ -421,10 +435,10 @@ mod command_block_tests {
     fn mark_output_start_row_sets_field() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 4;
-        let _id = buf.start_command_block(None);
+        let _id = buf.start_command_block(None, "fid1".to_owned());
 
         buf.cursor.pos.y = 6;
-        buf.mark_output_start_row();
+        buf.mark_output_start_row("fid1");
 
         let block = buf.command_blocks.front().unwrap();
         assert_eq!(block.output_start_row, Some(6));
@@ -436,16 +450,16 @@ mod command_block_tests {
     fn finish_command_block_full_lifecycle() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 0;
-        let _id = buf.start_command_block(None); // A
+        let _id = buf.start_command_block(None, "fid1".to_owned()); // A
 
         buf.cursor.pos.y = 1;
-        buf.mark_command_start_row(); // B
+        buf.mark_command_start_row("fid1"); // B
 
         buf.cursor.pos.y = 2;
-        buf.mark_output_start_row(); // C
+        buf.mark_output_start_row("fid1"); // C
 
         buf.cursor.pos.y = 5;
-        let finished = buf.finish_command_block(Some(0)).unwrap(); // D
+        let finished = buf.finish_command_block(Some(0), "fid1").unwrap(); // D
 
         assert_eq!(finished.end_row, Some(5));
         assert_eq!(finished.exit_code, Some(0));
@@ -464,32 +478,34 @@ mod command_block_tests {
     #[test]
     fn finish_command_block_noop_when_empty() {
         let mut buf = make_buf();
-        let result = buf.finish_command_block(Some(0));
+        let result = buf.finish_command_block(Some(0), "fid1");
         assert!(result.is_none());
         assert!(buf.command_blocks.is_empty());
     }
 
-    // ── 8: finish_command_block finishes only the most recent open block ─
+    // ── 8: finish_command_block matches by fid, not most-recent ──────────
 
     #[test]
-    fn finish_command_block_finishes_most_recent() {
+    fn finish_command_block_matches_by_fid() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 0;
-        let _id1 = buf.start_command_block(None); // first A — never finished
+        let _id1 = buf.start_command_block(None, "fid-a".to_owned()); // first A
 
         buf.cursor.pos.y = 2;
-        let _id2 = buf.start_command_block(None); // second A
+        let _id2 = buf.start_command_block(None, "fid-b".to_owned()); // second A
 
         buf.cursor.pos.y = 4;
-        let finished = buf.finish_command_block(Some(0)).unwrap();
+        // Finish by fid "fid-b" — the second block, not the first.
+        let finished = buf.finish_command_block(Some(0), "fid-b").unwrap();
 
-        // The returned block must be the second one.
+        // The returned block must be the second one (fid-b).
+        assert_eq!(finished.fid, "fid-b");
         assert_eq!(finished.prompt_start_row, 2);
         assert_eq!(finished.end_row, Some(4));
 
         // The first block must still be Running.
         let first = buf.command_blocks.front().unwrap();
-        assert_eq!(first.prompt_start_row, 0);
+        assert_eq!(first.fid, "fid-a");
         assert_eq!(first.status(), CommandStatus::Running);
     }
 
@@ -499,11 +515,11 @@ mod command_block_tests {
     fn command_blocks_returns_insertion_order() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 0;
-        let id1 = buf.start_command_block(None);
+        let id1 = buf.start_command_block(None, "fid1".to_owned());
         buf.cursor.pos.y = 5;
-        let id2 = buf.start_command_block(None);
+        let id2 = buf.start_command_block(None, "fid2".to_owned());
         buf.cursor.pos.y = 10;
-        let id3 = buf.start_command_block(None);
+        let id3 = buf.start_command_block(None, "fid3".to_owned());
 
         let blocks: Vec<_> = buf.command_blocks().iter().map(|b| b.id).collect();
         assert_eq!(blocks, vec![id1, id2, id3]);
@@ -515,9 +531,9 @@ mod command_block_tests {
     fn adjust_prompt_rows_removes_scrolled_out_blocks() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 5;
-        let _id = buf.start_command_block(None);
+        let _id = buf.start_command_block(None, "fid1".to_owned());
         buf.cursor.pos.y = 10;
-        let _finished = buf.finish_command_block(Some(0));
+        let _finished = buf.finish_command_block(Some(0), "fid1");
 
         // Remove 20 rows from the front — block at rows 5..10 is gone.
         buf.adjust_prompt_rows(20);
@@ -534,11 +550,11 @@ mod command_block_tests {
     fn adjust_prompt_rows_shifts_surviving_blocks() {
         let mut buf = make_buf();
         buf.cursor.pos.y = 30;
-        let _id = buf.start_command_block(None);
+        let _id = buf.start_command_block(None, "fid1".to_owned());
         buf.cursor.pos.y = 35;
-        buf.mark_command_start_row();
+        buf.mark_command_start_row("fid1");
         buf.cursor.pos.y = 40;
-        let _finished = buf.finish_command_block(Some(0));
+        let _finished = buf.finish_command_block(Some(0), "fid1");
 
         // Remove 10 rows — block should survive and shift down by 10.
         buf.adjust_prompt_rows(10);
@@ -555,8 +571,8 @@ mod command_block_tests {
     #[test]
     fn full_reset_clears_command_blocks() {
         let mut buf = make_buf();
-        buf.start_command_block(None);
-        buf.start_command_block(None);
+        buf.start_command_block(None, "fid1".to_owned());
+        buf.start_command_block(None, "fid2".to_owned());
         assert!(!buf.command_blocks.is_empty());
 
         buf.full_reset();
@@ -575,14 +591,94 @@ mod command_block_tests {
         let cap = buf.scrollback_limit;
 
         // Insert cap + 5 blocks without finishing them.
-        for _ in 0..cap + 5 {
-            buf.start_command_block(None);
+        for i in 0..cap + 5 {
+            buf.start_command_block(None, format!("fid-{i}"));
         }
 
         assert_eq!(
             buf.command_blocks.len(),
             cap,
             "deque length must not exceed scrollback_limit"
+        );
+    }
+
+    // ── 14: finish_by_fid_matches_correct_block ───────────────────────────
+
+    #[test]
+    fn finish_by_fid_matches_correct_block() {
+        let mut buf = make_buf();
+        buf.cursor.pos.y = 0;
+        let _id_a = buf.start_command_block(None, "block-a".to_owned());
+        buf.cursor.pos.y = 5;
+        let _id_b = buf.start_command_block(None, "block-b".to_owned());
+
+        buf.cursor.pos.y = 8;
+        // Finish "block-b" explicitly — "block-a" must remain Running.
+        let finished = buf.finish_command_block(Some(0), "block-b").unwrap();
+        assert_eq!(finished.fid, "block-b");
+        assert_eq!(
+            buf.command_blocks[0].status(),
+            CommandStatus::Running,
+            "block-a must still be Running"
+        );
+        assert_eq!(
+            buf.command_blocks[1].status(),
+            CommandStatus::Success,
+            "block-b must be Success"
+        );
+    }
+
+    // ── 15: finish_with_unknown_fid_is_noop ──────────────────────────────
+
+    #[test]
+    fn finish_with_unknown_fid_is_noop() {
+        let mut buf = make_buf();
+        buf.start_command_block(None, "fid-a".to_owned());
+
+        let result = buf.finish_command_block(Some(0), "fid-z");
+        assert!(
+            result.is_none(),
+            "finishing with an unknown fid must return None"
+        );
+        assert_eq!(
+            buf.command_blocks[0].status(),
+            CommandStatus::Running,
+            "block must remain Running"
+        );
+    }
+
+    // ── 16: mark_command_start_row_with_unknown_fid_is_noop ───────────────
+
+    #[test]
+    fn mark_command_start_row_with_unknown_fid_is_noop() {
+        let mut buf = make_buf();
+        buf.cursor.pos.y = 2;
+        buf.start_command_block(None, "fid-a".to_owned());
+
+        buf.cursor.pos.y = 5;
+        buf.mark_command_start_row("fid-z");
+
+        // command_start_row must remain None — the call was a no-op.
+        assert!(
+            buf.command_blocks[0].command_start_row.is_none(),
+            "command_start_row must remain None for an unmatched fid"
+        );
+    }
+
+    // ── 17: mark_output_start_row_with_unknown_fid_is_noop ────────────────
+
+    #[test]
+    fn mark_output_start_row_with_unknown_fid_is_noop() {
+        let mut buf = make_buf();
+        buf.cursor.pos.y = 2;
+        buf.start_command_block(None, "fid-a".to_owned());
+
+        buf.cursor.pos.y = 5;
+        buf.mark_output_start_row("fid-z");
+
+        assert!(
+            buf.command_blocks[0].output_start_row.is_none(),
+            "output_start_row must remain None for an unmatched fid"
         );
     }
 }

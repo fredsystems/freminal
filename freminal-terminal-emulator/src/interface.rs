@@ -1319,12 +1319,11 @@ mod tests {
     fn build_snapshot_populated_command_blocks() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         // Drive one full A → B → C → D;0 cycle via the byte-stream path.
-        // The "D;0" sequence must round-trip the exit code through the OSC
-        // parser — `AnsiOscToken::OscValue(0)` must not be filtered out.
-        emu.handle_incoming_data(b"\x1b]133;A\x07");
-        emu.handle_incoming_data(b"\x1b]133;B\x07");
-        emu.handle_incoming_data(b"\x1b]133;C\x07");
-        emu.handle_incoming_data(b"\x1b]133;D;0\x07");
+        // All markers carry freminal=1 and fid=t1 for correlation.
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;B;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;C;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0;freminal=1;fid=t1\x07");
         let snap = emu.build_snapshot();
         assert_eq!(
             snap.command_blocks.len(),
@@ -1345,14 +1344,18 @@ mod tests {
     #[test]
     fn build_snapshot_command_blocks_ordering() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        // Drive 3 full A → B → C → D cycles with distinct exit codes so that
-        // exit-code round-trip and block ordering are verified together.
+        // Drive 3 full A → B → C → D cycles with distinct fids per cycle so
+        // that fid-based correlation and block ordering are verified together.
         for code in [0u8, 1, 2] {
-            emu.handle_incoming_data(b"\x1b]133;A\x07");
-            emu.handle_incoming_data(b"\x1b]133;B\x07");
-            emu.handle_incoming_data(b"\x1b]133;C\x07");
-            let seq = format!("\x1b]133;D;{code}\x07");
-            emu.handle_incoming_data(seq.as_bytes());
+            let fid = format!("cycle-{code}");
+            let seq_a = format!("\x1b]133;A;freminal=1;fid={fid}\x07");
+            let seq_b = format!("\x1b]133;B;freminal=1;fid={fid}\x07");
+            let seq_c = format!("\x1b]133;C;freminal=1;fid={fid}\x07");
+            let seq_d = format!("\x1b]133;D;{code};freminal=1;fid={fid}\x07");
+            emu.handle_incoming_data(seq_a.as_bytes());
+            emu.handle_incoming_data(seq_b.as_bytes());
+            emu.handle_incoming_data(seq_c.as_bytes());
+            emu.handle_incoming_data(seq_d.as_bytes());
         }
         let snap = emu.build_snapshot();
         assert_eq!(
@@ -1390,14 +1393,40 @@ mod tests {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         // OSC 133 D;127 must round-trip the exit code through the byte-stream
         // OSC parser (regression guard for the bug fixed in 72.16.a).
-        emu.handle_incoming_data(b"\x1b]133;A\x07");
-        emu.handle_incoming_data(b"\x1b]133;D;127\x07");
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;127;freminal=1;fid=t1\x07");
         let snap = emu.build_snapshot();
         assert_eq!(snap.command_blocks.len(), 1);
         assert_eq!(snap.command_blocks[0].exit_code, Some(127));
         assert_eq!(
             snap.command_blocks[0].status(),
             freminal_common::buffer_states::command_block::CommandStatus::Failure(127),
+        );
+    }
+
+    #[test]
+    fn foreign_osc_133_markers_produce_no_command_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // WezTerm-style: A;cl=m;aid=12345, D;0;aid=12345 — no freminal=1
+        emu.handle_incoming_data(b"\x1b]133;A;cl=m;aid=12345\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0;aid=12345\x07");
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.command_blocks.is_empty(),
+            "foreign FTCS markers (no freminal=1) must not produce command blocks"
+        );
+    }
+
+    #[test]
+    fn plain_osc_133_markers_without_freminal_tag_produce_no_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Plain markers (e.g. older freminal recordings, hand-written test fixtures)
+        emu.handle_incoming_data(b"\x1b]133;A\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0\x07");
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.command_blocks.is_empty(),
+            "plain FTCS markers without freminal=1 must not produce command blocks"
         );
     }
 }

@@ -70,6 +70,12 @@ pub struct CommandBlock {
     /// Stable identifier, monotonically increasing for the life of the process.
     pub id: CommandBlockId,
 
+    /// Freminal correlation ID — matches the `fid` carried in the `A` and `D`
+    /// markers emitted by the freminal shell integration scripts.  Used to
+    /// correlate `A`/`B`/`C`/`D` marker pairs explicitly rather than relying
+    /// on "most-recent-open" heuristics.
+    pub fid: String,
+
     /// Row of `OSC 133 A` (prompt start).
     pub prompt_start_row: usize,
 
@@ -101,12 +107,14 @@ pub struct CommandBlock {
 }
 
 impl CommandBlock {
-    /// Construct a fresh block at the given prompt row, with the given cwd,
-    /// started right now (`SystemTime::now()`).  Allocates a new `CommandBlockId`.
+    /// Construct a fresh block at the given prompt row, with the given cwd and
+    /// freminal correlation ID, started right now (`SystemTime::now()`).
+    /// Allocates a new `CommandBlockId`.
     #[must_use]
-    pub fn new_running(prompt_start_row: usize, cwd: Option<String>) -> Self {
+    pub fn new_running(prompt_start_row: usize, cwd: Option<String>, fid: String) -> Self {
         Self {
             id: CommandBlockId::next(),
+            fid,
             prompt_start_row,
             command_start_row: None,
             output_start_row: None,
@@ -202,11 +210,13 @@ mod tests {
     #[test]
     fn new_running_initializes_fields() {
         let before = SystemTime::now();
-        let block = CommandBlock::new_running(7, Some("/home/user".to_string()));
+        let block =
+            CommandBlock::new_running(7, Some("/home/user".to_string()), "test-fid".to_owned());
         let after = SystemTime::now();
 
         assert_eq!(block.prompt_start_row, 7);
         assert_eq!(block.cwd.as_deref(), Some("/home/user"));
+        assert_eq!(block.fid, "test-fid");
         assert!(
             block.started_at >= before && block.started_at <= after,
             "started_at should be recent"
@@ -220,28 +230,34 @@ mod tests {
 
     #[test]
     fn new_running_allocates_unique_ids() {
-        let b1 = CommandBlock::new_running(0, None);
-        let b2 = CommandBlock::new_running(0, None);
+        let b1 = CommandBlock::new_running(0, None, "fid-a".to_owned());
+        let b2 = CommandBlock::new_running(0, None, "fid-b".to_owned());
         assert_ne!(b1.id, b2.id, "each block must get a unique id");
     }
 
     #[test]
     fn new_running_preserves_cwd_none() {
-        let block = CommandBlock::new_running(0, None);
+        let block = CommandBlock::new_running(0, None, "fid-c".to_owned());
         assert!(block.cwd.is_none());
+    }
+
+    #[test]
+    fn new_running_stores_fid() {
+        let block = CommandBlock::new_running(0, None, "my-correlation-id".to_owned());
+        assert_eq!(block.fid, "my-correlation-id");
     }
 
     // ── status() ────────────────────────────────────────────────────────
 
     #[test]
     fn status_fresh_block_is_running() {
-        let block = CommandBlock::new_running(0, None);
+        let block = CommandBlock::new_running(0, None, "f1".to_owned());
         assert_eq!(block.status(), CommandStatus::Running);
     }
 
     #[test]
     fn status_finished_exit_0_is_success() {
-        let mut block = CommandBlock::new_running(0, None);
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = Some(0);
         assert_eq!(block.status(), CommandStatus::Success);
@@ -249,7 +265,7 @@ mod tests {
 
     #[test]
     fn status_finished_exit_1_is_failure() {
-        let mut block = CommandBlock::new_running(0, None);
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = Some(1);
         assert_eq!(block.status(), CommandStatus::Failure(1));
@@ -257,7 +273,7 @@ mod tests {
 
     #[test]
     fn status_finished_exit_negative_is_failure() {
-        let mut block = CommandBlock::new_running(0, None);
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = Some(-1);
         assert_eq!(block.status(), CommandStatus::Failure(-1));
@@ -265,7 +281,7 @@ mod tests {
 
     #[test]
     fn status_finished_no_exit_code_is_unknown() {
-        let mut block = CommandBlock::new_running(0, None);
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = None;
         assert_eq!(block.status(), CommandStatus::Unknown);
@@ -275,13 +291,13 @@ mod tests {
 
     #[test]
     fn duration_running_is_none() {
-        let block = CommandBlock::new_running(0, None);
+        let block = CommandBlock::new_running(0, None, "f1".to_owned());
         assert!(block.duration().is_none());
     }
 
     #[test]
     fn duration_finished_after_start_is_some_positive() {
-        let mut block = CommandBlock::new_running(0, None);
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         block.finished_at = Some(block.started_at + Duration::from_millis(500));
         match block.duration() {
             Some(dur) => {
@@ -294,7 +310,7 @@ mod tests {
 
     #[test]
     fn duration_clock_skew_is_none() {
-        let mut block = CommandBlock::new_running(0, None);
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         // finished_at before started_at — clock skew
         block.finished_at = Some(block.started_at - Duration::from_secs(1));
         assert!(
@@ -307,13 +323,13 @@ mod tests {
 
     #[test]
     fn row_range_running_block() {
-        let block = CommandBlock::new_running(5, None);
+        let block = CommandBlock::new_running(5, None, "f1".to_owned());
         assert_eq!(block.row_range(), (5, None));
     }
 
     #[test]
     fn row_range_finished_block() {
-        let mut block = CommandBlock::new_running(5, None);
+        let mut block = CommandBlock::new_running(5, None, "f1".to_owned());
         block.end_row = Some(12);
         assert_eq!(block.row_range(), (5, Some(12)));
     }

@@ -146,30 +146,35 @@ impl TerminalHandler {
     }
 
     /// Handle an OSC 133 (FTCS) shell integration marker.
+    ///
+    /// Only markers carrying `freminal=1` and a `fid` (parsed upstream by
+    /// [`parse_ftcs_params`]) reach this function.  Foreign markers (`WezTerm`,
+    /// Starship, `iTerm2`) are already filtered out at the parse layer and
+    /// never arrive here.
     pub(super) fn handle_osc_ftcs(&mut self, marker: &FtcsMarker) {
         tracing::debug!("OSC 133 FTCS marker: {marker}");
         match marker {
-            FtcsMarker::PromptStart => {
+            FtcsMarker::PromptStart { fid } => {
                 self.ftcs_state = FtcsState::InPrompt;
                 // mark_prompt_row() powers PrevCommand/NextCommand navigation
                 // and must stay. start_command_block() is a sibling that
                 // opens the new CommandBlock storage introduced in 72.2/72.3.
                 self.buffer.mark_prompt_row();
                 let cwd = self.current_working_directory().map(str::to_owned);
-                let _id = self.buffer.start_command_block(cwd);
+                let _id = self.buffer.start_command_block(cwd, fid.clone());
             }
-            FtcsMarker::CommandStart => {
+            FtcsMarker::CommandStart { fid } => {
                 self.ftcs_state = FtcsState::InCommand;
-                self.buffer.mark_command_start_row();
+                self.buffer.mark_command_start_row(fid);
             }
-            FtcsMarker::OutputStart => {
+            FtcsMarker::OutputStart { fid } => {
                 self.ftcs_state = FtcsState::InOutput;
-                self.buffer.mark_output_start_row();
+                self.buffer.mark_output_start_row(fid);
             }
-            FtcsMarker::CommandFinished(exit_code) => {
+            FtcsMarker::CommandFinished { exit_code, fid } => {
                 self.last_exit_code = *exit_code;
                 self.ftcs_state = FtcsState::None;
-                if let Some(block) = self.buffer.finish_command_block(*exit_code) {
+                if let Some(block) = self.buffer.finish_command_block(*exit_code, fid) {
                     self.pending_command_events.push(block);
                 }
             }

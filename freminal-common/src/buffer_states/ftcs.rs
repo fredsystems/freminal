@@ -8,14 +8,18 @@
 //! These types represent the FTCS markers that shells emit to delineate
 //! prompt, command, and output regions:
 //!
-//! - `OSC 133 ; A ST` — Prompt start
-//! - `OSC 133 ; B ST` — Prompt end / command input start
-//! - `OSC 133 ; C ST` — Command end / output start (pre-execution)
-//! - `OSC 133 ; D [; exitcode] ST` — Command finished (with optional exit code)
+//! - `OSC 133 ; A ; freminal=1 ; fid=<id> ST` — Prompt start
+//! - `OSC 133 ; B ; freminal=1 ; fid=<id> ST` — Prompt end / command input start
+//! - `OSC 133 ; C ; freminal=1 ; fid=<id> ST` — Command end / output start (pre-execution)
+//! - `OSC 133 ; D [; exitcode] ; freminal=1 ; fid=<id> ST` — Command finished
 //! - `OSC 133 ; P ; k=<kind> ST` — Prompt property (kind: `i`=initial, `c`=continuation, `r`=right)
 //!
-//! The terminal stores these as `FtcsMarker` values alongside cursor positions
-//! to track prompt/command/output boundaries.
+//! Markers from foreign emitters (WezTerm, Starship, iTerm2, Kitty) that lack
+//! `freminal=1` are silently dropped by `parse_ftcs_params` to prevent duplicate
+//! command blocks when multiple shell integrations are simultaneously active.
+//!
+//! The `P` (PromptProperty) marker does not require `freminal=1` — it is
+//! informational only and carries no semantic effect on the buffer.
 
 use std::fmt;
 
@@ -40,34 +44,65 @@ impl fmt::Display for PromptKind {
     }
 }
 
-/// A single FTCS marker, as emitted by the shell.
+/// A single FTCS marker, as emitted by the freminal shell integration scripts.
+///
+/// Markers `A`, `B`, `C`, and `D` carry a `fid` (freminal correlation ID) that
+/// allows the parser to match `A` and `D` pairs explicitly even when other
+/// shell integrations (`WezTerm`, Starship, `iTerm2`) are simultaneously emitting
+/// OSC 133 markers.  Markers without `freminal=1` are rejected by
+/// [`parse_ftcs_params`] and produce no buffer side-effects.
+///
+/// The `P` (`PromptProperty`) variant does not carry a `fid` because it is
+/// purely informational and carries no semantic effect on the buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FtcsMarker {
-    /// `A` — Prompt start.  The shell is about to draw the prompt.
-    PromptStart,
+    /// `A` — Prompt start.  Carries the freminal correlation ID for A/D pairing.
+    PromptStart {
+        /// Freminal correlation ID, matching the `fid=` param in the A marker.
+        fid: String,
+    },
 
-    /// `B` — Prompt end / command input start.  The user can now type.
-    CommandStart,
+    /// `B` — Prompt end / command input start.
+    CommandStart {
+        /// Freminal correlation ID, must match the `fid` of the corresponding `A`.
+        fid: String,
+    },
 
     /// `C` — Command end / output start.  The shell is about to execute the
     /// command; everything after this until `D` is command output.
-    OutputStart,
+    OutputStart {
+        /// Freminal correlation ID, must match the `fid` of the corresponding `A`.
+        fid: String,
+    },
 
-    /// `D` — Command finished.  Carries an optional exit code (`0` = success).
-    CommandFinished(Option<i32>),
+    /// `D` — Command finished.  Carries optional exit code and the `fid`
+    /// of the matching `A` marker.
+    CommandFinished {
+        /// Optional exit code from the shell (`0` = success).
+        exit_code: Option<i32>,
+        /// Freminal correlation ID matching the `fid` of the corresponding `A`.
+        fid: String,
+    },
 
     /// `P` — Prompt property.  Annotates the kind of prompt that follows.
+    /// Does not require `freminal=1`; no `fid` is carried.
     PromptProperty(PromptKind),
 }
 
 impl fmt::Display for FtcsMarker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PromptStart => write!(f, "A"),
-            Self::CommandStart => write!(f, "B"),
-            Self::OutputStart => write!(f, "C"),
-            Self::CommandFinished(Some(code)) => write!(f, "D;{code}"),
-            Self::CommandFinished(None) => write!(f, "D"),
+            Self::PromptStart { fid } => write!(f, "A;freminal=1;fid={fid}"),
+            Self::CommandStart { fid } => write!(f, "B;freminal=1;fid={fid}"),
+            Self::OutputStart { fid } => write!(f, "C;freminal=1;fid={fid}"),
+            Self::CommandFinished {
+                exit_code: Some(code),
+                fid,
+            } => write!(f, "D;{code};freminal=1;fid={fid}"),
+            Self::CommandFinished {
+                exit_code: None,
+                fid,
+            } => write!(f, "D;freminal=1;fid={fid}"),
             Self::PromptProperty(kind) => write!(f, "P;k={kind}"),
         }
     }
@@ -110,36 +145,96 @@ impl fmt::Display for FtcsState {
 ///
 /// The input `params` contains the portions after the `133` prefix, split on
 /// `;`.  For example:
-/// - `OSC 133 ; A ST`           → `params = ["A"]`
-/// - `OSC 133 ; D ; 0 ST`       → `params = ["D", "0"]`
-/// - `OSC 133 ; P ; k=i ST`     → `params = ["P", "k=i"]`
+/// - `OSC 133 ; A ; freminal=1 ; fid=x ST` → `params = ["A", "freminal=1", "fid=x"]`
+/// - `OSC 133 ; D ; 0 ; freminal=1 ; fid=x ST` → `params = ["D", "0", "freminal=1", "fid=x"]`
+/// - `OSC 133 ; P ; k=i ST`                    → `params = ["P", "k=i"]`
 ///
-/// Returns `None` for unrecognised or empty parameter lists.
+/// **Freminal tag requirement:** markers `A`, `B`, `C`, and `D` are only
+/// accepted when `freminal=1` is present in the parameter list.  This prevents
+/// duplicate command blocks when other shell integrations (`WezTerm`, Starship,
+/// `iTerm2`, Kitty) emit OSC 133 markers simultaneously.
+///
+/// **`P` exception:** the `P` marker is informational only and does not require
+/// `freminal=1`.  It is accepted from any emitter.
+///
+/// Returns `None` for unrecognised markers, empty parameter lists, or markers
+/// that fail the `freminal=1` / `fid=` requirement.
+///
+/// # Foreign-marker rejection
+///
+/// Markers from foreign shell integrations (`WezTerm`, Starship, `iTerm2`) that
+/// lack `freminal=1` are silently dropped.  This prevents duplicate command
+/// blocks when multiple shell integrations are simultaneously active.
 #[must_use]
 pub fn parse_ftcs_params(params: &[&str]) -> Option<FtcsMarker> {
     let marker_char = params.first()?;
+
+    // Walk the remaining params once, harvesting what we need.
+    // We accept key-value params in any order; unknown params (e.g. `cl=m`,
+    // `aid=12345` from WezTerm/iTerm2) are silently ignored.
+    let mut freminal_tag: Option<&str> = None;
+    let mut fid: Option<&str> = None;
+    let mut prompt_kind: Option<PromptKind> = None;
+    // The first positional (non-key=value) param after the marker letter is
+    // used as the exit code for `D`.  We capture it at position i==1 so that
+    // `D;0;freminal=1;fid=x` and `D;freminal=1;fid=x` are both handled.
+    let mut first_positional: Option<&str> = None;
+
+    for (i, p) in params.iter().enumerate().skip(1) {
+        if let Some(v) = p.strip_prefix("freminal=") {
+            freminal_tag = Some(v);
+        } else if let Some(v) = p.strip_prefix("fid=") {
+            fid = Some(v);
+        } else if let Some(v) = p.strip_prefix("k=") {
+            // P;k=<kind>
+            prompt_kind = Some(match v {
+                "c" => PromptKind::Continuation,
+                "r" => PromptKind::Right,
+                _ => PromptKind::Initial, // "i" and any unknown value → Initial
+            });
+        } else if i == 1 && first_positional.is_none() {
+            // First positional param after the marker letter — exit code for D.
+            first_positional = Some(p);
+        }
+        // Unknown params are intentionally ignored.
+    }
+
     match *marker_char {
-        "A" => Some(FtcsMarker::PromptStart),
-        "B" => Some(FtcsMarker::CommandStart),
-        "C" => Some(FtcsMarker::OutputStart),
+        "A" => {
+            if freminal_tag != Some("1") {
+                return None;
+            }
+            let fid = fid?.to_owned();
+            Some(FtcsMarker::PromptStart { fid })
+        }
+        "B" => {
+            if freminal_tag != Some("1") {
+                return None;
+            }
+            let fid = fid?.to_owned();
+            Some(FtcsMarker::CommandStart { fid })
+        }
+        "C" => {
+            if freminal_tag != Some("1") {
+                return None;
+            }
+            let fid = fid?.to_owned();
+            Some(FtcsMarker::OutputStart { fid })
+        }
         "D" => {
-            let exit_code = params.get(1).and_then(|s| s.parse::<i32>().ok());
-            Some(FtcsMarker::CommandFinished(exit_code))
+            if freminal_tag != Some("1") {
+                return None;
+            }
+            let fid = fid?.to_owned();
+            let exit_code = first_positional.and_then(|s| s.parse::<i32>().ok());
+            Some(FtcsMarker::CommandFinished { exit_code, fid })
         }
         "P" => {
-            // Parse the `k=<kind>` parameter if present.
-            let kind = params.get(1).and_then(|s| {
-                let value = s.strip_prefix("k=")?;
-                match value {
-                    "i" => Some(PromptKind::Initial),
-                    "c" => Some(PromptKind::Continuation),
-                    "r" => Some(PromptKind::Right),
-                    _ => None,
-                }
-            });
-            // Accept `P` even without a recognized `k=` value, defaulting to Initial.
+            // P is informational; no freminal=1 / fid required.
+            // This preserves historical behaviour and means freminal still
+            // recognises P markers from any emitter.
             Some(FtcsMarker::PromptProperty(
-                kind.unwrap_or(PromptKind::Initial),
+                prompt_kind.unwrap_or(PromptKind::Initial),
             ))
         }
         _ => None,
@@ -154,29 +249,75 @@ mod tests {
 
     #[test]
     fn display_prompt_start() {
-        assert_eq!(FtcsMarker::PromptStart.to_string(), "A");
+        assert_eq!(
+            FtcsMarker::PromptStart {
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "A;freminal=1;fid=foo"
+        );
     }
 
     #[test]
     fn display_command_start() {
-        assert_eq!(FtcsMarker::CommandStart.to_string(), "B");
+        assert_eq!(
+            FtcsMarker::CommandStart {
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "B;freminal=1;fid=foo"
+        );
     }
 
     #[test]
     fn display_output_start() {
-        assert_eq!(FtcsMarker::OutputStart.to_string(), "C");
+        assert_eq!(
+            FtcsMarker::OutputStart {
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "C;freminal=1;fid=foo"
+        );
     }
 
     #[test]
     fn display_command_finished_with_code() {
-        assert_eq!(FtcsMarker::CommandFinished(Some(0)).to_string(), "D;0");
-        assert_eq!(FtcsMarker::CommandFinished(Some(127)).to_string(), "D;127");
-        assert_eq!(FtcsMarker::CommandFinished(Some(-1)).to_string(), "D;-1");
+        assert_eq!(
+            FtcsMarker::CommandFinished {
+                exit_code: Some(0),
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "D;0;freminal=1;fid=foo"
+        );
+        assert_eq!(
+            FtcsMarker::CommandFinished {
+                exit_code: Some(127),
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "D;127;freminal=1;fid=foo"
+        );
+        assert_eq!(
+            FtcsMarker::CommandFinished {
+                exit_code: Some(-1),
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "D;-1;freminal=1;fid=foo"
+        );
     }
 
     #[test]
     fn display_command_finished_without_code() {
-        assert_eq!(FtcsMarker::CommandFinished(None).to_string(), "D");
+        assert_eq!(
+            FtcsMarker::CommandFinished {
+                exit_code: None,
+                fid: "foo".to_owned()
+            }
+            .to_string(),
+            "D;freminal=1;fid=foo"
+        );
     }
 
     #[test]
@@ -210,6 +351,65 @@ mod tests {
         assert_eq!(PromptKind::Right.to_string(), "r");
     }
 
+    // ── Display round-trips through parse_ftcs_params ───────────────────
+
+    #[test]
+    fn display_round_trip_prompt_start() {
+        let marker = FtcsMarker::PromptStart {
+            fid: "rt1".to_owned(),
+        };
+        let s = marker.to_string();
+        let parts: Vec<&str> = s.split(';').collect();
+        let parsed = parse_ftcs_params(&parts);
+        assert_eq!(parsed, Some(marker));
+    }
+
+    #[test]
+    fn display_round_trip_command_start() {
+        let marker = FtcsMarker::CommandStart {
+            fid: "rt2".to_owned(),
+        };
+        let s = marker.to_string();
+        let parts: Vec<&str> = s.split(';').collect();
+        let parsed = parse_ftcs_params(&parts);
+        assert_eq!(parsed, Some(marker));
+    }
+
+    #[test]
+    fn display_round_trip_output_start() {
+        let marker = FtcsMarker::OutputStart {
+            fid: "rt3".to_owned(),
+        };
+        let s = marker.to_string();
+        let parts: Vec<&str> = s.split(';').collect();
+        let parsed = parse_ftcs_params(&parts);
+        assert_eq!(parsed, Some(marker));
+    }
+
+    #[test]
+    fn display_round_trip_command_finished_with_code() {
+        let marker = FtcsMarker::CommandFinished {
+            exit_code: Some(42),
+            fid: "rt4".to_owned(),
+        };
+        let s = marker.to_string();
+        let parts: Vec<&str> = s.split(';').collect();
+        let parsed = parse_ftcs_params(&parts);
+        assert_eq!(parsed, Some(marker));
+    }
+
+    #[test]
+    fn display_round_trip_command_finished_no_code() {
+        let marker = FtcsMarker::CommandFinished {
+            exit_code: None,
+            fid: "rt5".to_owned(),
+        };
+        let s = marker.to_string();
+        let parts: Vec<&str> = s.split(';').collect();
+        let parsed = parse_ftcs_params(&parts);
+        assert_eq!(parsed, Some(marker));
+    }
+
     // ── FtcsState Display ───────────────────────────────────────────────
 
     #[test]
@@ -225,70 +425,144 @@ mod tests {
         assert_eq!(FtcsState::default(), FtcsState::None);
     }
 
-    // ── parse_ftcs_params ───────────────────────────────────────────────
+    // ── parse_ftcs_params — A marker ────────────────────────────────────
 
     #[test]
-    fn parse_prompt_start() {
-        assert_eq!(parse_ftcs_params(&["A"]), Some(FtcsMarker::PromptStart));
-    }
-
-    #[test]
-    fn parse_command_start() {
-        assert_eq!(parse_ftcs_params(&["B"]), Some(FtcsMarker::CommandStart));
-    }
-
-    #[test]
-    fn parse_output_start() {
-        assert_eq!(parse_ftcs_params(&["C"]), Some(FtcsMarker::OutputStart));
-    }
-
-    #[test]
-    fn parse_command_finished_with_exit_code() {
+    fn parse_a_with_freminal_tag_returns_prompt_start() {
         assert_eq!(
-            parse_ftcs_params(&["D", "0"]),
-            Some(FtcsMarker::CommandFinished(Some(0)))
-        );
-        assert_eq!(
-            parse_ftcs_params(&["D", "1"]),
-            Some(FtcsMarker::CommandFinished(Some(1)))
-        );
-        assert_eq!(
-            parse_ftcs_params(&["D", "127"]),
-            Some(FtcsMarker::CommandFinished(Some(127)))
+            parse_ftcs_params(&["A", "freminal=1", "fid=foo"]),
+            Some(FtcsMarker::PromptStart {
+                fid: "foo".to_owned()
+            })
         );
     }
 
     #[test]
-    fn parse_command_finished_without_exit_code() {
+    fn parse_a_without_freminal_tag_returns_none() {
+        // WezTerm-style marker: no freminal=1
+        assert_eq!(parse_ftcs_params(&["A", "aid=12345"]), None);
+    }
+
+    #[test]
+    fn parse_a_with_wrong_freminal_value_returns_none() {
+        assert_eq!(parse_ftcs_params(&["A", "freminal=2", "fid=foo"]), None);
+    }
+
+    #[test]
+    fn parse_a_without_fid_returns_none() {
+        assert_eq!(parse_ftcs_params(&["A", "freminal=1"]), None);
+    }
+
+    #[test]
+    fn parse_a_plain_returns_none() {
+        // Old-style plain `A` marker (no params) — must return None.
+        assert_eq!(parse_ftcs_params(&["A"]), None);
+    }
+
+    // ── parse_ftcs_params — B marker ────────────────────────────────────
+
+    #[test]
+    fn parse_b_with_freminal_tag() {
         assert_eq!(
-            parse_ftcs_params(&["D"]),
-            Some(FtcsMarker::CommandFinished(None))
+            parse_ftcs_params(&["B", "freminal=1", "fid=bar"]),
+            Some(FtcsMarker::CommandStart {
+                fid: "bar".to_owned()
+            })
         );
     }
 
     #[test]
-    fn parse_command_finished_with_invalid_exit_code_returns_none_code() {
-        // Non-numeric exit code — treat as D with no code
+    fn parse_b_without_freminal_tag_returns_none() {
+        assert_eq!(parse_ftcs_params(&["B"]), None);
+        assert_eq!(parse_ftcs_params(&["B", "aid=12345"]), None);
+    }
+
+    #[test]
+    fn parse_b_without_fid_returns_none() {
+        assert_eq!(parse_ftcs_params(&["B", "freminal=1"]), None);
+    }
+
+    // ── parse_ftcs_params — C marker ────────────────────────────────────
+
+    #[test]
+    fn parse_c_with_freminal_tag() {
         assert_eq!(
-            parse_ftcs_params(&["D", "abc"]),
-            Some(FtcsMarker::CommandFinished(None))
+            parse_ftcs_params(&["C", "freminal=1", "fid=baz"]),
+            Some(FtcsMarker::OutputStart {
+                fid: "baz".to_owned()
+            })
         );
     }
 
     #[test]
-    fn parse_empty_params() {
-        let empty: &[&str] = &[];
-        assert_eq!(parse_ftcs_params(empty), None);
+    fn parse_c_without_freminal_tag_returns_none() {
+        assert_eq!(parse_ftcs_params(&["C"]), None);
     }
 
     #[test]
-    fn parse_unknown_marker() {
-        assert_eq!(parse_ftcs_params(&["X"]), None);
-        assert_eq!(parse_ftcs_params(&["E"]), None);
-        assert_eq!(parse_ftcs_params(&["a"]), None); // lowercase
+    fn parse_c_without_fid_returns_none() {
+        assert_eq!(parse_ftcs_params(&["C", "freminal=1"]), None);
     }
 
-    // ── parse P (PromptProperty) ────────────────────────────────────────
+    // ── parse_ftcs_params — D marker ────────────────────────────────────
+
+    #[test]
+    fn parse_d_with_freminal_tag_and_exit_code() {
+        assert_eq!(
+            parse_ftcs_params(&["D", "0", "freminal=1", "fid=foo"]),
+            Some(FtcsMarker::CommandFinished {
+                exit_code: Some(0),
+                fid: "foo".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_d_with_freminal_tag_and_failure_code() {
+        assert_eq!(
+            parse_ftcs_params(&["D", "127", "freminal=1", "fid=foo"]),
+            Some(FtcsMarker::CommandFinished {
+                exit_code: Some(127),
+                fid: "foo".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_d_with_freminal_tag_and_no_exit_code() {
+        assert_eq!(
+            parse_ftcs_params(&["D", "freminal=1", "fid=foo"]),
+            Some(FtcsMarker::CommandFinished {
+                exit_code: None,
+                fid: "foo".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_d_without_freminal_returns_none() {
+        // Plain `D;0` — foreign emitter
+        assert_eq!(parse_ftcs_params(&["D", "0"]), None);
+        assert_eq!(parse_ftcs_params(&["D"]), None);
+        assert_eq!(parse_ftcs_params(&["D", "0", "aid=12345"]), None);
+    }
+
+    #[test]
+    fn parse_d_without_fid_returns_none() {
+        assert_eq!(parse_ftcs_params(&["D", "freminal=1"]), None);
+        assert_eq!(parse_ftcs_params(&["D", "0", "freminal=1"]), None);
+    }
+
+    // ── parse_ftcs_params — P marker ────────────────────────────────────
+
+    #[test]
+    fn parse_p_does_not_require_freminal_tag() {
+        // P is informational; accepted from any emitter
+        assert_eq!(
+            parse_ftcs_params(&["P", "k=i"]),
+            Some(FtcsMarker::PromptProperty(PromptKind::Initial))
+        );
+    }
 
     #[test]
     fn parse_prompt_property_initial() {
@@ -338,6 +612,32 @@ mod tests {
         assert_eq!(
             parse_ftcs_params(&["P", "x=1"]),
             Some(FtcsMarker::PromptProperty(PromptKind::Initial))
+        );
+    }
+
+    // ── parse_ftcs_params — edge cases ──────────────────────────────────
+
+    #[test]
+    fn parse_empty_params() {
+        let empty: &[&str] = &[];
+        assert_eq!(parse_ftcs_params(empty), None);
+    }
+
+    #[test]
+    fn parse_unknown_marker() {
+        assert_eq!(parse_ftcs_params(&["X"]), None);
+        assert_eq!(parse_ftcs_params(&["E"]), None);
+        assert_eq!(parse_ftcs_params(&["a"]), None); // lowercase
+    }
+
+    #[test]
+    fn parse_a_with_extra_unknown_params_still_works() {
+        // Unknown params from other integrations are silently ignored
+        assert_eq!(
+            parse_ftcs_params(&["A", "cl=m", "freminal=1", "fid=x", "aid=99"]),
+            Some(FtcsMarker::PromptStart {
+                fid: "x".to_owned()
+            })
         );
     }
 }

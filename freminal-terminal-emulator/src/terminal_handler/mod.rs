@@ -3154,16 +3154,25 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         assert_eq!(handler.ftcs_state(), FtcsState::None);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart {
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::None);
         assert_eq!(handler.last_exit_code(), Some(0));
     }
@@ -3173,7 +3182,13 @@ mod tests {
         use freminal_common::buffer_states::ftcs::FtcsMarker;
 
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: None,
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), None);
     }
 
@@ -3182,7 +3197,9 @@ mod tests {
         use freminal_common::buffer_states::ftcs::{FtcsMarker, FtcsState, PromptKind};
 
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
         handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptProperty(
             PromptKind::Initial,
         )));

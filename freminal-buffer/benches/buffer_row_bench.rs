@@ -644,9 +644,10 @@ fn bench_command_block_record(c: &mut Criterion) {
         b.iter_batched(
             || Buffer::new(80, 24),
             |mut buffer| {
-                for _ in 0..10_000 {
-                    let _id = buffer.start_command_block(None);
-                    let _ = buffer.finish_command_block(Some(0));
+                for i in 0..10_000u32 {
+                    let fid = format!("bench-{i}");
+                    let _id = buffer.start_command_block(None, fid.clone());
+                    let _ = buffer.finish_command_block(Some(0), &fid);
                 }
             },
             criterion::BatchSize::SmallInput,
