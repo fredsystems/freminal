@@ -285,6 +285,34 @@ Some(cursor.pos.y)` on the most recent open block.
   `bench_command_block_record` measuring 10k start/finish cycles. Record
   before/after numbers in the commit message.
 
+**Completion notes (commit `66522f6`, 2026-05-17):**
+
+- `scroll.rs` was read but not modified. `adjust_prompt_rows` is the
+  single trim entry point for `erase_scrollback`, `enforce_scrollback_limit`,
+  and the alt-screen `resize_height` path, so extending it covers all three.
+- Cap policy uses the existing `Buffer::scrollback_limit` field (default
+  4000), not a new constant. One block per prompt is a natural pairing
+  with the row scrollback cap.
+- Alt-screen entry and exit do NOT clear `command_blocks` — exactly
+  matching `prompt_rows`. `SavedPrimaryState` does not carry either field;
+  both persist trivially across alt-screen toggles. Shells emit FTCS
+  markers only at the primary prompt, so full-screen TUIs on the alternate
+  screen do not interact with this storage.
+- `command_blocks()` is `const fn` (clippy nursery `missing_const_for_fn`).
+  `finish_command_block` is `#[must_use]` so callers cannot accidentally
+  drop the returned block needed by 72.3's `WindowCommand::CommandFinished`.
+- 13 unit tests added in `lifecycle.rs::command_block_tests`, all
+  mandatory scenarios plus interrupted A→A and finished-block row
+  shifting.
+- `cargo test -p freminal-buffer` — 490 pass.
+- `cargo clippy --all-targets --all-features -- -D warnings` (workspace) — clean.
+- `cargo-machete` — clean.
+- New `bench_command_block_record_10k` measures ~45 ns per
+  start+finish pair (≈450 µs for 10,000 cycles). No regression on
+  `bench_lf_heavy` once machine variance is accounted for — baseline and
+  72.2 both measure in the 5–10 ms band; `adjust_prompt_rows` iterates an
+  empty deque in this bench so there is no plausible mechanism for slowdown.
+
 #### 72.3 — Wire FTCS markers into Buffer command-block API
 
 **Scope:** `freminal-terminal-emulator/src/terminal_handler/osc.rs`,
