@@ -72,6 +72,42 @@ end
 
 ---
 
+## Compatibility Notes
+
+### OSC 7 double-emission is harmless
+
+Several environments emit `OSC 7` (working-directory updates) independently
+of these scripts:
+
+- **macOS system zsh** (`/etc/zshrc`) sets up `chpwd_functions` that emit
+  OSC 7 unconditionally.
+- **Starship, Powerlevel10k, oh-my-zsh, prezto** and similar prompt
+  frameworks frequently include OSC 7 cwd tracking that fires in any
+  terminal.
+- **GNOME VTE's `/etc/profile.d/vte.sh`** emits OSC 7 when `$VTE_VERSION`
+  is set (Freminal does not set it, so this path is dormant).
+
+When one of these is active alongside Freminal's `freminal.{bash,zsh,fish}`,
+OSC 7 will be emitted twice per prompt. **This is harmless** — OSC 7 is
+idempotent: emitting `file://host/path` twice in a row simply re-sets the
+cwd to the same value. The redundant string parse is microseconds and not
+user-visible.
+
+If you prefer to suppress Freminal's OSC 7 emission entirely (because your
+existing setup already covers it), remove the `OSC 7` `printf` line from
+the relevant script after auto-install — `~/.config/freminal/shell-integration/freminal.{bash,zsh,fish}`.
+
+### OSC 133 has no such conflict
+
+`OSC 133` (FinalTerm/FTCS) prompt markers are only emitted by terminal-
+aware shell integrations: iTerm2's `iterm2_shell_integration.*`, WezTerm's
+`wezterm.sh`, Kitty's `kitty-integration`, and ours. Each of these is
+gated on its respective `$TERM_PROGRAM` value (`iTerm.app`, `WezTerm`,
+`xterm-kitty`, `freminal`) and is dormant outside its host terminal.
+Sourcing multiple sets unconditionally is safe.
+
+---
+
 ## Verifying the Integration
 
 After sourcing the appropriate script, run a command and check that Freminal

@@ -646,6 +646,59 @@ startup-side filesystem setup lives).
 verifying that the three files exist after first launch and are not
 overwritten on second launch.
 
+**Completion notes (commit `91b7a8d`, 2026-05-17):**
+
+- New `freminal_common::config::shell_integration_dir()` mirrors
+  `layout_library_dir()` exactly (same per-OS structure, same
+  `create_dir_if_missing` call).
+- New `freminal/src/shell_integration.rs` module embeds the four
+  bundled files via `include_str!()` (binary self-contained — no
+  runtime filesystem dep on the repo).
+- `install_if_missing(dir) -> InstallResult` (startup path; preserves
+  user-edited scripts) and `reinstall_scripts(dir) -> InstallResult`
+  (Settings button; overwrites) share a single `install_with_policy`
+  implementation gated by an `overwrite: bool` flag.
+- `InstallResult { written, skipped, errors }` carries per-file
+  outcomes so the caller (toast / log) can render rich messages.
+- Startup hook in `main.rs` runs between sections 2 (logging) and 3
+  (`normal_run`). Failures are non-fatal — logged via
+  `tracing::warn!`, no toast (the toast stack does not exist before
+  GUI construction; using stderr/log was the right call).
+- `SettingsAction::ReinstallShellScripts` and
+  `CopyShellIntegrationPath(String)` variants propagate via a new
+  `SettingsModal::pending_shell_action: Option<SettingsAction>` field
+  mirroring the existing `pending_delete_layout` pattern. The
+  modal's `show` and `show_standalone` both drain it.
+- The Settings install-path display now resolves the real path via
+  `shell_integration_dir()`, falling back to a `"(unavailable …)"`
+  monospace string if `None`.
+- Re-install + Copy-Path buttons use `ui.add_enabled` to grey out when
+  the install dir cannot be resolved.
+- `lib.rs` gained a `pub mod shell_integration;` declaration to mirror
+  the existing `pub mod gui;` convention (freminal has both binary and
+  library crate targets).
+- 9 new tests total: 1 in `freminal-common`, 5 in
+  `freminal::shell_integration::tests`, 2 in
+  `freminal::gui::settings::tests`, 1 in
+  `freminal::gui::settings_dispatch` (round-trip variant
+  constructibility implicit).
+- `cargo test --all`: passes (no regressions).
+- `cargo clippy --all-targets --all-features -- -D warnings`: clean
+  after orchestrator added 3 localised `#[allow(clippy::too_many_lines)]`
+  attributes (on `SettingsModal::show`, `show_shell_integration_tab`,
+  and `handle_settings_action`, each pushed past 100 lines by the new
+  code) and 2 `#[must_use]` attributes on `install_if_missing` and
+  `reinstall_scripts`. The sub-agent's session terminated without
+  reporting the verification step, so these clippy issues had to be
+  caught and fixed during orchestrator audit rather than at the
+  sub-agent's stop condition.
+- Filed for cleanup as **72.16.d** below: tests use
+  `std::env::temp_dir()` with fixed name suffixes instead of the
+  workspace `tempfile` crate. `tempfile` IS already a workspace dep
+  (used by `freminal-common` and `freminal-terminal-emulator` tests);
+  the sub-agent missed this when reviewing dev-dependencies and chose
+  the fragile alternative.
+
 #### 72.9 — `WindowCommand::CommandFinished` GUI handling
 
 **Scope:** `freminal/src/gui/app_impl.rs` (the WindowCommand match), and a new
@@ -932,6 +985,56 @@ filter. No code change needed.
 
 **Scheduling:** Cosmetic; can land at any time. No subtask blocked by
 this.
+
+**Status:** Pending.
+
+##### 72.16.d — Use workspace `tempfile` in `freminal::shell_integration::tests`
+
+**Surfaced in:** 72.8 (commit `91b7a8d`, 2026-05-17).
+
+**Bug:** The new tests in `freminal/src/shell_integration.rs::tests`
+use `std::env::temp_dir()` with hard-coded suffix names
+(`writes_all`, `skips_existing`, `overwrites`, `idempotent`) plus
+best-effort `remove_dir_all` cleanup. If a prior test run is
+interrupted between `make_tmp_dir` and `cleanup_tmp_dir`, leftover
+files from the previous run can cause the next run to fail (especially
+`install_if_missing_skips_existing_files`, which checks an exact
+skipped/written count).
+
+**Why it happened:** The sub-agent task instructions said "if
+`tempfile` is NOT a dev-dependency, STOP and report." The sub-agent
+checked `freminal/Cargo.toml` only, saw no `tempfile` line, and
+improvised instead of stopping. `tempfile` IS already in the workspace
+(`Cargo.toml:92`, `tempfile.workspace = true`) and is used by both
+`freminal-common` and `freminal-terminal-emulator` tests. Adding
+`tempfile.workspace = true` to `freminal/Cargo.toml` `[dev-dependencies]`
+is a one-line change with no new dependency surface.
+
+**Impact:** Test reliability. No production-code impact. CI cleanup
+between runs masks the issue most of the time. Local development with
+interrupted test runs can hit it.
+
+**Scope:** `freminal/Cargo.toml` (add one line) +
+`freminal/src/shell_integration.rs::tests` (replace `make_tmp_dir` /
+`cleanup_tmp_dir` helpers with `tempfile::TempDir::new()` and drop the
+manual cleanup calls).
+
+**Suggested approach:**
+
+```rust
+use tempfile::TempDir;
+
+#[test]
+fn install_if_missing_writes_all_when_dir_empty() {
+    let tmp = TempDir::new().expect("create tempdir");
+    let result = install_if_missing(tmp.path());
+    // ... rest unchanged ...
+    // TempDir is automatically cleaned up on drop.
+}
+```
+
+**Scheduling:** Cosmetic / test-hygiene; no subtask blocked by this.
+Can land at any time before the v0.9.0 PR closes.
 
 **Status:** Pending.
 
