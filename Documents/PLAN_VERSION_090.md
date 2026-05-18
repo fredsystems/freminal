@@ -399,6 +399,40 @@ remains untouched in 72.3.
 - Benchmark before/after: `bench_build_snapshot_with_scrollback` must not
   regress by more than 15% per the AGENTS.md regression threshold.
 
+**Completion notes (commit `27fa949`, 2026-05-17):**
+
+- The actual constructor in `snapshot.rs` is `TerminalSnapshot::empty()`,
+  not `Default`. Default-init line was added to `empty()`. Default impl
+  does not exist on this type.
+- No caching layer was added. `command_blocks` is rebuilt every frame
+  from a `Vec → Arc<[T]>` conversion, mirroring the existing pattern
+  used for `prompt_rows`. A previous 72.4 attempt added a
+  `previous_command_blocks` cache field on `TerminalEmulator` plus two
+  helper methods; that attempt was rejected and reverted as scope creep
+  before this commit.
+- `build_snapshot()` gained one local `#[allow(clippy::too_many_lines)]`
+  because the new local pushed it from 96 to 106 counted lines. This is
+  consistent with similar allows in `sgr.rs` and
+  `freminal-windowing/src/event_loop.rs` where a function's bulk is a
+  flat struct literal or a wide match. Preferred over factoring out a
+  helper method.
+- 4 new tests in `interface::tests`. Byte-stream-driven tests do NOT
+  assert on exit_code because of a pre-existing OSC parser bug filed
+  as **72.16** (Cleanup, see below). Handler-direct exit-code coverage
+  is in `shell_integration.rs` from 72.3 and is unaffected.
+- Benchmarks (15% AGENTS.md budget):
+  - `build_snapshot_80x24_dirty`: 31.9 → 31.9 µs (no change)
+  - `build_snapshot_80x24_clean`: 97.0 → 114.8 ns (+10.2% — within budget)
+  - `snapshot_10k_scrollback_dirty`: 1.34 → 1.28 ms (improved)
+  - `snapshot_10k_scrollback_clean`: 95.8 → 116.1 ns (+10.6% — within budget)
+- `cargo test -p freminal-terminal-emulator`: passes (test count +4).
+- `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+- `cargo-machete`: clean.
+
+**Pre-existing bug surfaced (filed as 72.16):** the OSC 133 dispatcher
+filter drops numeric exit-code tokens. See subtask 72.16 below for the
+full report and fix scope.
+
 #### 72.5 — Settings: `[shell_integration]` and `[command_blocks]` config sections
 
 **Scope:** `freminal-common/src/config.rs`, `config_example.toml`,
@@ -634,6 +668,74 @@ the duration-formatting helper.
 
 **Verification:** The two docs must parse without warnings (markdownlint if
 the project runs it) and continue to align with each other.
+
+#### 72.16 — Cleanup: pre-existing bugs surfaced during Task 72
+
+**Convention (project-wide, established 2026-05-17):** when a sub-agent
+surfaces a bug during a subtask that is genuinely out-of-scope for that
+subtask, the bug is filed as a numbered cleanup entry in the host task's
+plan section. The cleanup subtask runs near the end of the task, before
+any user-facing subtask that would expose the bug. The original subtask's
+completion notes link to the cleanup entry by number. This is the
+durable record — informal "known issues" notes are not used.
+
+**Items in 72.16's queue:**
+
+##### 72.16.a — Fix OSC 133 numeric-param filter
+
+**Surfaced in:** 72.4 (commit `27fa949`, 2026-05-17).
+
+**Bug:** `freminal-terminal-emulator/src/ansi_components/osc.rs:251-254`
+— the OSC 133 (FTCS) dispatcher's params filter only keeps
+`AnsiOscToken::String` tokens, silently dropping `AnsiOscToken::OscValue`
+numeric tokens. The `AnsiOscToken::from_str` impl parses any numeric
+substring as `OscValue(u16)`, so `OSC 133 ; D ; 0 ST` arrives at
+`parse_ftcs_params` as `["D"]` rather than `["D", "0"]`, producing
+`CommandFinished(None)` instead of `CommandFinished(Some(0))`.
+
+**Impact:**
+
+- Real shells emitting `OSC 133 ; D ; <code>` (bash, zsh, fish via the
+  shell integration scripts shipping in 72.7) lose the exit code.
+- FREC v2 recordings of OSC 133 streams replay with no exit codes
+  (no observable effect today because no GUI surface consumes
+  `exit_code` yet; matters once 73 ships gutters).
+- All command-block visualization that depends on exit_code (gutters,
+  notifications, copy-on-failure flows).
+- The handler-direct test path in `shell_integration.rs` is UNAFFECTED
+  (it constructs `FtcsMarker::CommandFinished(Some(0))` directly), which
+  is why the bug went undetected through 72.3.
+
+**Scope:** `freminal-terminal-emulator/src/ansi_components/osc.rs` only.
+
+**Suggested approach (revisit at activation):** Build the
+`ftcs_strs: Vec<String>` by mapping each token to its display form
+(`AnsiOscToken::OscValue(n)` → `n.to_string()`,
+`AnsiOscToken::String(s)` → `s.clone()`). Then collect `&str` refs into
+a second `Vec<&str>` from those owned strings and pass to
+`parse_ftcs_params`. Cost: one allocation per numeric token, acceptable
+for OSC dispatch frequency.
+
+**Verification:**
+
+- Add a byte-stream-driven test in `freminal-terminal-emulator/src/interface.rs`
+  (`mod tests`) that emits `OSC 133 D ; 127 ST` via
+  `handle_incoming_data` and verifies the resulting `CommandBlock` has
+  `exit_code == Some(127)` and `status() == Failure(127)`.
+- Tighten the existing 72.4 tests
+  (`build_snapshot_populated_command_blocks`,
+  `build_snapshot_command_blocks_ordering`) to assert exit codes once
+  the filter is fixed.
+- Check whether the same numeric-filter issue affects other OSC
+  handlers in `osc.rs`. If yes, list them here and decide whether to
+  fix in this subtask or file additional 72.16.x entries.
+
+**Scheduling:** Must complete before 72.7 (shell integration scripts).
+Real shells will emit numeric exit codes the moment users source the
+scripts; shipping 72.7 without 72.16.a would mean shipping a known
+broken feature.
+
+**Status:** Pending.
 
 ### 72 Open Questions Resolved
 
@@ -1677,9 +1779,12 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
 1. Read this entire document plus the v0.8.0 close-out notes in
    `MASTER_PLAN.md`.
 2. Branch from `main` to `task-72/osc-133-command-blocks`.
-3. Execute Task 72 subtasks 72.1 → 72.15 in order, one commit each. Pause
-   after each subtask for user confirmation per the Multi-Step Task
-   Protocol in `agents.md`.
+3. Execute Task 72 subtasks 72.1 → 72.6, then **72.16 (cleanup)**, then
+   72.7 → 72.15, one commit each. Pause after each subtask for user
+   confirmation per the Multi-Step Task Protocol in `agents.md`. The
+   72.16 cleanup section accumulates bugs surfaced during earlier
+   subtasks; revisit the schedule if a 72.16 entry blocks something
+   earlier than 72.7.
 4. After Task 72 merges, branch `task-73/command-gutters` and repeat.
 5. Continue through Tasks 94, 95, 76, 77, 74, 75 in that order.
 6. After all eight tasks merge, update `MASTER_PLAN.md` status table and
