@@ -11,6 +11,8 @@
 
 /// Which of the two terminal buffers is currently active.
 pub mod buffer_type;
+/// `CommandBlock` — a single shell command's full lifecycle from OSC 133 markers.
+pub mod command_block;
 /// Cursor state types: position, colors, decorations, and reverse-video.
 pub mod cursor;
 /// Error types for terminal cell and character operations.
