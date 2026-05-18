@@ -93,6 +93,13 @@ pub enum SettingsAction {
     /// The modal was closed without Apply while opacity was being previewed —
     /// revert to the original value.
     RevertOpacity(f32),
+    /// The user clicked "Re-install Scripts" in the Shell Integration tab.
+    /// The caller writes the bundled scripts into the shell-integration
+    /// directory, overwriting any existing files.
+    ReinstallShellScripts,
+    /// The user clicked "Copy Path" in the Shell Integration tab.  The
+    /// contained string is the resolved shell-integration directory.
+    CopyShellIntegrationPath(String),
 }
 
 /// Result of scanning a frame's egui events for a key-binding press.
@@ -209,6 +216,11 @@ pub struct SettingsModal {
     /// `SettingsAction::DeleteLayout`.
     pending_delete_layout: Option<std::path::PathBuf>,
 
+    /// Set by `show_shell_integration_tab` when the user clicks "Re-install
+    /// Scripts" or "Copy Path".  Consumed by `show_standalone` / `show` which
+    /// return it as the appropriate `SettingsAction`.
+    pending_shell_action: Option<SettingsAction>,
+
     /// Serialized TOML of the draft at the moment the modal was opened or the
     /// last successful Apply.  Used by `is_dirty()` to detect unsaved edits
     /// without requiring `PartialEq` on every sub-config struct.
@@ -244,6 +256,7 @@ impl SettingsModal {
             key_recording: KeyRecordingState::Idle,
             discovered_layouts: Vec::new(),
             pending_delete_layout: None,
+            pending_shell_action: None,
             baseline_toml: String::new(),
             pending_close: PendingClose::None,
         }
@@ -511,6 +524,9 @@ impl SettingsModal {
         if let Some(path) = self.pending_delete_layout.take() {
             return SettingsAction::DeleteLayout(path);
         }
+        if let Some(shell_action) = self.pending_shell_action.take() {
+            return shell_action;
+        }
 
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
@@ -540,6 +556,10 @@ impl SettingsModal {
         action
     }
 
+    // The main inline-modal entry point. Dominated by sequential preview /
+    // revert / dirty-state checks; splitting would scatter the apply-flow
+    // logic across opaque helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn show(&mut self, ctx: &egui::Context, os_dark_mode: bool) -> SettingsAction {
         self.os_dark_mode = os_dark_mode;
         if !self.is_open {
@@ -659,6 +679,9 @@ impl SettingsModal {
         // previewed settings to their originals.
         if let Some(path) = self.pending_delete_layout.take() {
             return SettingsAction::DeleteLayout(path);
+        }
+        if let Some(shell_action) = self.pending_shell_action.take() {
+            return shell_action;
         }
 
         if !self.is_open && action != SettingsAction::Applied {
@@ -1198,6 +1221,10 @@ impl SettingsModal {
             });
     }
 
+    // Renders both the Shell Integration section and the Command Blocks
+    // section in one tab (per 72.5's bundling decision). The two sections
+    // share enough thematic context that splitting them obscures intent.
+    #[allow(clippy::too_many_lines)]
     fn show_shell_integration_tab(&mut self, ui: &mut Ui) {
         // ── Shell Integration section ────────────────────────────────────────
         ui.heading("Shell Integration");
@@ -1238,28 +1265,39 @@ impl SettingsModal {
 
         ui.add_space(8.0);
 
-        // Install-path display (read-only). The actual install path lookup
-        // uses the same helper as 72.8 will use to write files; here we just
-        // surface the path. If freminal_common::config::shell_integration_dir()
-        // is not yet defined (it lands in 72.8), fall back to a static label.
+        // Install-path display (read-only).
+        let install_dir = freminal_common::config::shell_integration_dir();
         ui.horizontal(|ui| {
             ui.label("Install path:");
-            // Show the conventional path. The actual install logic lands in 72.8;
-            // we display the canonical location here without implementing the
-            // install. Path display is informational only.
-            ui.monospace("~/.config/freminal/shell-integration/");
+            match &install_dir {
+                Some(dir) => ui.monospace(dir.display().to_string()),
+                None => ui.monospace("(unavailable — could not resolve user data dir)"),
+            };
         });
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            // Both buttons are no-op placeholders. Real wiring lands in 72.8
-            // (re-install) and uses arboard for clipboard (copy path).
-            let _ = ui
-                .button("Re-install Scripts")
-                .on_hover_text("Wired in subtask 72.8 — currently inactive.");
-            let _ = ui
-                .button("Copy Path")
-                .on_hover_text("Wired in subtask 72.8 — currently inactive.");
+            let reinstall_enabled = install_dir.is_some();
+            let reinstall_resp =
+                ui.add_enabled(reinstall_enabled, egui::Button::new("Re-install Scripts"));
+            if reinstall_resp
+                .on_hover_text("Overwrite the on-disk copies with the bundled versions.")
+                .clicked()
+            {
+                self.pending_shell_action = Some(SettingsAction::ReinstallShellScripts);
+            }
+
+            let copy_enabled = install_dir.is_some();
+            let copy_resp = ui.add_enabled(copy_enabled, egui::Button::new("Copy Path"));
+            if let Some(dir) = &install_dir
+                && copy_resp
+                    .on_hover_text("Copy the install path to the clipboard.")
+                    .clicked()
+            {
+                self.pending_shell_action = Some(SettingsAction::CopyShellIntegrationPath(
+                    dir.display().to_string(),
+                ));
+            }
         });
 
         ui.add_space(16.0);
@@ -2348,5 +2386,39 @@ mod tests {
         assert!(startup_layout_is_missing(Some("ghost"), &discovered));
         // Configured but discovered list is empty => missing.
         assert!(startup_layout_is_missing(Some("dev"), &[]));
+    }
+
+    #[test]
+    fn shell_integration_settings_action_variants_constructible() {
+        // Verify both new variants exist and can be constructed and compared.
+        let reinstall = SettingsAction::ReinstallShellScripts;
+        assert_eq!(reinstall, SettingsAction::ReinstallShellScripts);
+
+        let copy = SettingsAction::CopyShellIntegrationPath("/some/path".to_string());
+        assert_eq!(
+            copy,
+            SettingsAction::CopyShellIntegrationPath("/some/path".to_string())
+        );
+
+        // The two variants must not compare equal to each other.
+        assert_ne!(reinstall, copy);
+    }
+
+    #[test]
+    fn pending_shell_action_is_consumed_and_returned() {
+        // Verify the `pending_shell_action` field exists and the consume
+        // logic round-trips correctly without an egui context.
+        let mut modal = SettingsModal::new(None);
+        // Initially None.
+        assert!(modal.pending_shell_action.is_none());
+
+        // Simulate a button click setting the pending action.
+        modal.pending_shell_action = Some(SettingsAction::ReinstallShellScripts);
+        assert!(modal.pending_shell_action.is_some());
+
+        // Taking it should leave None behind.
+        let taken = modal.pending_shell_action.take();
+        assert_eq!(taken, Some(SettingsAction::ReinstallShellScripts));
+        assert!(modal.pending_shell_action.is_none());
     }
 }

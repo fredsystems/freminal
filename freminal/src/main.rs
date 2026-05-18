@@ -57,6 +57,7 @@ use tracing_subscriber::{
 };
 
 pub mod gui;
+mod shell_integration;
 use anyhow::Result;
 use freminal_common::{args::Args, config, config::load_config};
 use freminal_terminal_emulator::recording::{
@@ -269,6 +270,33 @@ fn main() {
         info!("Log directory: {}", dir.display());
     }
     debug!("Loaded config: {:#?}", cfg);
+
+    // ── 2.5. Auto-install shell integration scripts on first launch ─────
+    // Non-fatal: failures are logged via `warn!` but do not abort startup.
+    // The user can always re-install later from the Settings modal.
+    if cfg.shell_integration.auto_install
+        && let Some(dir) = config::shell_integration_dir()
+    {
+        let result = shell_integration::install_if_missing(&dir);
+        if result.has_errors() {
+            for (name, err) in &result.errors {
+                warn!(
+                    "Shell integration: failed to install '{}' into {}: {}",
+                    name,
+                    dir.display(),
+                    err
+                );
+            }
+        } else if !result.written.is_empty() {
+            info!(
+                "Shell integration: installed {} script(s) to {}",
+                result.written.len(),
+                dir.display()
+            );
+        }
+        // skipped files (already present) are not logged — that is the
+        // normal case on subsequent launches.
+    }
 
     // Warn if both a positional command and --shell are specified.
     // The positional command takes precedence (handled in TerminalEmulator::new).

@@ -748,6 +748,52 @@ pub fn layout_library_dir() -> Option<PathBuf> {
     None
 }
 
+/// Per-user directory where Freminal stores shell-integration scripts.
+///
+/// Linux/BSD:  `~/.config/freminal/shell-integration/`
+/// macOS:      `~/Library/Application Support/Freminal/shell-integration/`
+/// Windows:    `%APPDATA%\Freminal\shell-integration\`
+///
+/// Returns `None` if the base directories cannot be determined.
+///
+/// The directory is created on first call (via `create_dir_if_missing`)
+/// so callers can immediately write files into the returned path.
+#[must_use]
+pub fn shell_integration_dir() -> Option<PathBuf> {
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.data_dir().join("Freminal").join("shell-integration");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_dir().join("Freminal").join("shell-integration");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // Linux / BSD
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        let p = base.config_dir().join("freminal").join("shell-integration");
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
 // ------------------------------------------------------------------------------------------------
 //  Keybindings
 // ------------------------------------------------------------------------------------------------
@@ -2675,5 +2721,54 @@ path = "/tmp/my.frag"
 
         let loaded = result.expect("load_config with FREMINAL_CONFIG should succeed");
         assert!((loaded.font.size - 18.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn shell_integration_dir_is_some_on_supported_platforms() {
+        let dir = shell_integration_dir();
+        // On all CI-reachable platforms (Linux, macOS, Windows) a home
+        // directory is always available, so `None` here would indicate a
+        // broken environment rather than incorrect code.
+        assert!(
+            dir.is_some(),
+            "shell_integration_dir() returned None; \
+             check that a home directory is available in the test environment"
+        );
+        let path = dir.unwrap();
+        let mut components: Vec<_> = path.components().collect();
+
+        // Last component must be "shell-integration".
+        let last = components
+            .pop()
+            .expect("path must have at least 2 components");
+        let last_str = last.as_os_str().to_string_lossy();
+        assert_eq!(
+            last_str, "shell-integration",
+            "last path component should be 'shell-integration', got '{last_str}'"
+        );
+
+        // Second-to-last must be "freminal" (Linux/BSD) or "Freminal" (macOS/Windows).
+        let second_last = components
+            .pop()
+            .expect("path must have at least 2 components");
+        let second_last_str = second_last.as_os_str().to_string_lossy();
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        assert_eq!(
+            second_last_str, "freminal",
+            "second-to-last path component should be 'freminal' on Linux/BSD, \
+             got '{second_last_str}'"
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            second_last_str, "Freminal",
+            "second-to-last path component should be 'Freminal' on macOS/Windows, \
+             got '{second_last_str}'"
+        );
     }
 }

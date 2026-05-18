@@ -37,3 +37,4 @@
 extern crate tracing;
 
 pub mod gui;
+pub mod shell_integration;
