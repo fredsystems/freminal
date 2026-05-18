@@ -239,6 +239,9 @@ impl TerminalEmulator {
     ///
     /// # Errors
     ///
+    // 72.6: 8th parameter is the shell-integration TERM_PROGRAM flag,
+    // derived from the GUI's config and forwarded straight to PtySpawnConfig.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         args: &Args,
         scrollback_limit: Option<usize>,
@@ -247,6 +250,7 @@ impl TerminalEmulator {
         extra_env: Option<&std::collections::HashMap<String, String>>,
         shell_override: Option<&str>,
         pane_id: u32,
+        set_term_program: bool,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
@@ -280,6 +284,7 @@ impl TerminalEmulator {
                 shell,
                 cwd,
                 extra_env,
+                set_term_program,
             },
             &initial_size,
             pane_id,

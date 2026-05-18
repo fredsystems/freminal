@@ -212,6 +212,33 @@ pub struct PtySpawnConfig<'a> {
     pub cwd: Option<&'a Path>,
     /// Extra environment variables to set on the child process.
     pub extra_env: Option<&'a HashMap<String, String>>,
+    /// When `true`, set `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION`
+    /// on the child process before applying `extra_env`.  Driven by
+    /// `config.shell_integration.set_term_program` (Task 72.6).
+    pub set_term_program: bool,
+}
+
+/// Build the `(key, value)` pairs Freminal sets on every PTY child to
+/// announce itself via `TERM_PROGRAM` / `TERM_PROGRAM_VERSION`.
+///
+/// The version string is `"<cargo-version> (<git-describe>)"`, matching
+/// what Freminal has emitted since pre-72.6.  Both values are formed at
+/// runtime to keep the `VERGEN_GIT_DESCRIBE` suffix exact, so this
+/// helper returns owned `String`s rather than `&'static str`.
+///
+/// Applied BEFORE per-pane `extra_env` so user/layout env overrides
+/// take precedence (last-write-wins via `cmd.env`).
+#[must_use]
+pub fn term_program_env_pairs() -> [(&'static str, String); 2] {
+    let version = format!(
+        "{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("VERGEN_GIT_DESCRIBE")
+    );
+    [
+        ("TERM_PROGRAM", String::from("freminal")),
+        ("TERM_PROGRAM_VERSION", version),
+    ]
 }
 
 /// Spawn the child process on a new PTY and run the PTY thread event loop.
@@ -242,6 +269,7 @@ pub fn run_terminal(
         shell,
         cwd,
         extra_env,
+        set_term_program,
     } = spawn_cfg;
     let pty_system = NativePtySystem::default();
 
@@ -296,14 +324,14 @@ pub fn run_terminal(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
 
-    // get the version of freminal
-    let version = format!(
-        "{} ({})",
-        env!("CARGO_PKG_VERSION"),
-        env!("VERGEN_GIT_DESCRIBE")
-    );
-    cmd.env("TERM_PROGRAM", "freminal");
-    cmd.env("TERM_PROGRAM_VERSION", version);
+    // Shell integration: announce ourselves to scripts via TERM_PROGRAM.
+    // Applied BEFORE `extra_env` so layout/user env wins on conflict.
+    // Gated on `[shell_integration] set_term_program` (Task 72.6).
+    if set_term_program {
+        for (key, value) in term_program_env_pairs() {
+            cmd.env(key, value);
+        }
+    }
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 
     // NOTE: Some programs (e.g. ohmyposh, zsh) require LANG to be set.  On
@@ -640,6 +668,58 @@ fn normalize_locale(raw: &str) -> String {
             || format!("{normalised}.UTF-8"),
             |m| format!("{normalised}.UTF-8@{m}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod term_program_tests {
+    use super::term_program_env_pairs;
+
+    #[test]
+    fn first_pair_is_term_program_freminal() {
+        let pairs = term_program_env_pairs();
+        assert_eq!(pairs[0].0, "TERM_PROGRAM");
+        assert_eq!(pairs[0].1, "freminal");
+    }
+
+    #[test]
+    fn second_pair_is_term_program_version() {
+        let pairs = term_program_env_pairs();
+        assert_eq!(pairs[1].0, "TERM_PROGRAM_VERSION");
+    }
+
+    #[test]
+    fn version_string_carries_cargo_pkg_version() {
+        let pairs = term_program_env_pairs();
+        // Substring check — the version is formatted as
+        // "<CARGO_PKG_VERSION> (<VERGEN_GIT_DESCRIBE>)", and we want to
+        // verify the cargo version is present without asserting the
+        // exact git-describe string (which varies by checkout).
+        assert!(
+            pairs[1].1.starts_with(env!("CARGO_PKG_VERSION")),
+            "version string {:?} should start with CARGO_PKG_VERSION {:?}",
+            pairs[1].1,
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+
+    #[test]
+    fn version_string_carries_vergen_git_describe_in_parens() {
+        let pairs = term_program_env_pairs();
+        let git_describe = env!("VERGEN_GIT_DESCRIBE");
+        let expected_suffix = format!("({git_describe})");
+        assert!(
+            pairs[1].1.ends_with(&expected_suffix),
+            "version string {:?} should end with VERGEN_GIT_DESCRIBE in parens: {:?}",
+            pairs[1].1,
+            expected_suffix,
+        );
+    }
+
+    #[test]
+    fn returns_exactly_two_pairs() {
+        let pairs = term_program_env_pairs();
+        assert_eq!(pairs.len(), 2);
     }
 }
 

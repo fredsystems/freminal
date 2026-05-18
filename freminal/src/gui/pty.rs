@@ -99,6 +99,9 @@ pub struct PtyTabConfig<'a> {
     pub recording_swap: RecordingSwap,
     /// Pane ID used in FREC v2 recording event payloads.
     pub recording_pane_id: u32,
+    /// When `true`, set `TERM_PROGRAM=freminal` on the child.  Forwarded
+    /// from `config.shell_integration.set_term_program` (Task 72.6).
+    pub set_term_program: bool,
 }
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
@@ -131,6 +134,7 @@ pub fn spawn_pty_tab(
         tab_cfg.extra_env,
         tab_cfg.shell_override,
         tab_cfg.recording_pane_id,
+        tab_cfg.set_term_program,
     )?;
 
     // Apply the configured theme so all snapshots carry the correct palette.

@@ -152,6 +152,7 @@ impl freminal_windowing::App for FreminalGui {
                     extra_env: None,
                     recording_swap: self.recording_swap.clone(),
                     recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                    set_term_program: self.config.shell_integration.set_term_program,
                 },
             ) {
                 Ok(channels) => {
@@ -1617,6 +1618,7 @@ impl FreminalGui {
                 extra_env: None,
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                set_term_program: self.config.shell_integration.set_term_program,
             },
         ) {
             Ok(channels) => channels,
