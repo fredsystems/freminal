@@ -242,19 +242,23 @@ fn dispatch_osc_target(
             )));
         }
         OscTarget::Ftcs => {
-            // Extract the string tokens after "133" and pass
-            // them to the FTCS parser.  E.g. for
-            // `OSC 133 ; D ; 0 ST` → params_strs = ["D", "0"]
-            let ftcs_strs: Vec<&str> = params
+            // Serialize each token to its display form so numeric exit codes
+            // (e.g. "0", "127" — tokenised as `AnsiOscToken::OscValue`) survive
+            // the filter alongside string tokens like "D" or "P".  Owned
+            // `String`s are required because `OscValue` numerics are formatted
+            // at runtime; refs collected into `ftcs_str_refs` for the call.
+            let ftcs_strs: Vec<String> = params
                 .iter()
                 .skip(1) // skip the "133" token
                 .filter_map(|t| match t {
-                    Some(AnsiOscToken::String(s)) => Some(s.as_str()),
-                    _ => None,
+                    Some(AnsiOscToken::String(s)) => Some(s.clone()),
+                    Some(AnsiOscToken::OscValue(n)) => Some(n.to_string()),
+                    None => None,
                 })
                 .collect();
+            let ftcs_str_refs: Vec<&str> = ftcs_strs.iter().map(String::as_str).collect();
 
-            if let Some(marker) = parse_ftcs_params(&ftcs_strs) {
+            if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
                 output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
             } else {
                 tracing::warn!(

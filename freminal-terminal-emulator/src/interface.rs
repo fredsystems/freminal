@@ -1318,16 +1318,13 @@ mod tests {
     #[test]
     fn build_snapshot_populated_command_blocks() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        // Drive one full A → B → C → D cycle via the byte-stream path.
-        // Note: exit-code parsing is covered by shell_integration.rs tests which
-        // call handle_osc() directly.  The byte-stream path has a known parser
-        // limitation in osc.rs:251-254 where AnsiOscToken::OscValue tokens are
-        // filtered out, so "D;0" arrives as CommandFinished(None) instead of
-        // CommandFinished(Some(0)).  We therefore do NOT assert on exit_code here.
+        // Drive one full A → B → C → D;0 cycle via the byte-stream path.
+        // The "D;0" sequence must round-trip the exit code through the OSC
+        // parser — `AnsiOscToken::OscValue(0)` must not be filtered out.
         emu.handle_incoming_data(b"\x1b]133;A\x07");
         emu.handle_incoming_data(b"\x1b]133;B\x07");
         emu.handle_incoming_data(b"\x1b]133;C\x07");
-        emu.handle_incoming_data(b"\x1b]133;D\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0\x07");
         let snap = emu.build_snapshot();
         assert_eq!(
             snap.command_blocks.len(),
@@ -1338,20 +1335,24 @@ mod tests {
             snap.command_blocks[0].end_row.is_some(),
             "end_row should be set after D marker"
         );
+        assert_eq!(
+            snap.command_blocks[0].exit_code,
+            Some(0),
+            "exit_code must be Some(0) — OscValue token must not be dropped"
+        );
     }
 
     #[test]
     fn build_snapshot_command_blocks_ordering() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        // Drive 3 full A → B → C → D cycles.
-        // Note: exit-code parsing has a known limitation on the byte-stream path
-        // (see comment in build_snapshot_populated_command_blocks); we do not
-        // assert on exit codes here.
-        for _ in 0..3 {
+        // Drive 3 full A → B → C → D cycles with distinct exit codes so that
+        // exit-code round-trip and block ordering are verified together.
+        for code in [0u8, 1, 2] {
             emu.handle_incoming_data(b"\x1b]133;A\x07");
             emu.handle_incoming_data(b"\x1b]133;B\x07");
             emu.handle_incoming_data(b"\x1b]133;C\x07");
-            emu.handle_incoming_data(b"\x1b]133;D\x07");
+            let seq = format!("\x1b]133;D;{code}\x07");
+            emu.handle_incoming_data(seq.as_bytes());
         }
         let snap = emu.build_snapshot();
         assert_eq!(
@@ -1366,6 +1367,37 @@ mod tests {
         assert!(
             snap.command_blocks[1].id < snap.command_blocks[2].id,
             "command block IDs must be strictly increasing (oldest first)"
+        );
+        assert_eq!(
+            snap.command_blocks[0].exit_code,
+            Some(0),
+            "first block exit_code must be Some(0)"
+        );
+        assert_eq!(
+            snap.command_blocks[1].exit_code,
+            Some(1),
+            "second block exit_code must be Some(1)"
+        );
+        assert_eq!(
+            snap.command_blocks[2].exit_code,
+            Some(2),
+            "third block exit_code must be Some(2)"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_command_block_preserves_exit_code_127() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // OSC 133 D;127 must round-trip the exit code through the byte-stream
+        // OSC parser (regression guard for the bug fixed in 72.16.a).
+        emu.handle_incoming_data(b"\x1b]133;A\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;127\x07");
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.command_blocks.len(), 1);
+        assert_eq!(snap.command_blocks[0].exit_code, Some(127));
+        assert_eq!(
+            snap.command_blocks[0].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Failure(127),
         );
     }
 }
