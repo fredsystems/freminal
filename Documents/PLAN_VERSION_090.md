@@ -216,7 +216,7 @@ pub enum CommandStatus { Running, Success, Failure(i32), Unknown }
 
 Commit one per subtask. Each subtask leaves `cargo test --all` passing.
 
-#### 72.1 — Define `CommandBlock` types in `freminal-common`
+#### 72.1 — Define `CommandBlock` types in `freminal-common` ✅ 2026-05-17
 
 **Scope:** `freminal-common/src/buffer_states/`.
 
@@ -230,6 +230,22 @@ Commit one per subtask. Each subtask leaves `cargo test --all` passing.
   through `Buffer`; either way the id must be deterministic in tests.
 
 **Verification:** Unit tests for status/duration/row_range. Clippy clean.
+
+**Completion notes (commit `f77fc9d`):**
+
+- Added `freminal-common/src/buffer_states/command_block.rs` with
+  `CommandBlockId`, `CommandStatus`, `CommandBlock`, `CommandBlockId::next()`,
+  `CommandBlock::new_running()`, `status()`, `duration()`, `row_range()`,
+  and `Display` impls for `CommandBlockId` and `CommandStatus`.
+- 19 unit tests cover all seven mandatory scenarios plus id uniqueness and
+  `cwd = None` preservation.
+- `cargo test -p freminal-common`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo fmt --check`, and `cargo-machete`
+  all pass on the full workspace.
+- `status()` is `const fn` (clippy `missing_const_for_fn`); `duration()` is
+  not const-fn because `SystemTime::duration_since` is non-const.
+- No `unwrap()`/`expect()` in production code. Tests use `match` + `panic!`
+  rather than `unwrap()` even though tests are permitted to use it.
 
 #### 72.2 — Add `command_blocks: VecDeque<CommandBlock>` to `Buffer`
 
