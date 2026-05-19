@@ -6,8 +6,10 @@
 //! The `FreminalTerminalWidget` egui widget and GPU render state.
 
 use crate::gui::{
+    folding::{RenderedRow, RowMap, compute_fold_ranges},
     fonts::{FontConfig, setup_font_files},
     mouse::PreviousMouseState,
+    shaping::ShapedLine,
     view_state::{CellCoord, ViewState},
 };
 
@@ -18,7 +20,9 @@ use freminal_common::{
     send_or_log,
     themes::ThemePalette,
 };
-use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
+use freminal_terminal_emulator::{
+    InlineImage, LineWidth, io::InputEvent, snapshot::TerminalSnapshot,
+};
 
 use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
 
@@ -710,6 +714,13 @@ pub struct PaneRenderCache {
     /// Terminal height (rows) from the last full vertex rebuild.  See
     /// `previous_term_width` for rationale.
     pub(super) previous_term_height: usize,
+    /// Hash of the sorted fold-range list from the last full vertex rebuild.
+    ///
+    /// When the user folds or unfolds a command block, the rendered row
+    /// layout shifts (folded ranges collapse to a single placeholder row).
+    /// The cached vertex buffers still encode the *previous* layout, so we
+    /// must force a full rebuild when this epoch changes.
+    pub(super) previous_fold_epoch: u64,
 }
 
 impl PaneRenderCache {
@@ -740,6 +751,7 @@ impl PaneRenderCache {
             scrollbar_dragging: false,
             previous_term_width: 0,
             previous_term_height: 0,
+            previous_fold_epoch: 0,
         }
     }
 
@@ -1214,7 +1226,35 @@ impl FreminalTerminalWidget {
         // - a password prompt is active (echo-off lock icon replaces it), or
         // - this pane is not the active/focused pane (tmux-style: only the
         //   focused pane shows a cursor).
-        let effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
+        let mut effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
+
+        // ── Command-block folding (Task 72.10b) ─────────────────────────────
+        //
+        // Compute the per-frame fold-range list from the snapshot's
+        // `command_blocks` and the GUI-local `folded_blocks` set, then build
+        // a `RowMap` that translates between snapshot-row space (what the
+        // PTY/buffer produced) and rendered-row space (what we actually paint,
+        // with folded ranges collapsed to single placeholder rows).
+        //
+        // For 72.10b-2, a folded range collapses to a *blank* row at its
+        // placeholder slot — the placeholder visual (line count, triangle
+        // glyph) and click-to-unfold land in 72.10b-3.
+        let fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
+        let row_map = RowMap::new(snap.term_height, &fold_ranges);
+        // Per-frame epoch: a stable hash of the sorted, non-overlapping ranges
+        // list.  When the user folds or unfolds a block this changes, and we
+        // use it below to invalidate the vertex cache (the rendered row layout
+        // has shifted).
+        let fold_epoch: u64 = {
+            use std::hash::{Hash, Hasher};
+            let mut h = rustc_hash::FxHasher::default();
+            for r in &fold_ranges {
+                r.command_block_id.hash(&mut h);
+                r.start_row.hash(&mut h);
+                r.end_row.hash(&mut h);
+            }
+            h.finish()
+        };
 
         if !snap.skip_draw {
             // Detect content changes via `Arc::ptr_eq` — this is immune to the
@@ -1236,9 +1276,15 @@ impl FreminalTerminalWidget {
             // right edge.  Force a full rebuild on resize.
             let dims_changed = snap.term_width != cache.previous_term_width
                 || snap.term_height != cache.previous_term_height;
+            // Force a rebuild when the fold-range set changes (user folded or
+            // unfolded a command block): the rendered row layout shifts, so
+            // the cached background/foreground vertex buffers are stale even
+            // if `visible_chars` is byte-identical.
+            let folds_changed = fold_epoch != cache.previous_fold_epoch;
             let content_changed = snap.content_changed
                 || theme_changed
                 || dims_changed
+                || folds_changed
                 || cache
                     .last_rendered_visible
                     .as_ref()
@@ -1325,8 +1371,24 @@ impl FreminalTerminalWidget {
             // Update the animated cursor position.  When trail is enabled, the
             // visual position glides from the previous location to the new one.
             // When disabled, it snaps instantly.
+            //
+            // The animation target is in **rendered-row** space — when a fold
+            // collapses rows above the cursor, the cursor's rendered row index
+            // is less than `snap.cursor_pos.y`.  If the cursor's snapshot row
+            // is *inside* a folded range (which shouldn't happen normally
+            // because the prompt is never folded, but is defensible against
+            // races) we suppress the cursor for this frame.
+            let cursor_rendered_row = row_map.snapshot_to_rendered(snap.cursor_pos.y);
+            let cursor_visible = cursor_rendered_row.is_some();
+            // If the cursor's snapshot row is hidden behind a fold, suppress
+            // it for this frame.  AND-ing here means the cursor-only fast
+            // path and the full rebuild path agree on visibility.
+            effective_show_cursor = effective_show_cursor && cursor_visible;
             let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
-            let target_row = snap.cursor_pos.y.approx_as::<f32>().unwrap_or(0.0);
+            let target_row = cursor_rendered_row
+                .unwrap_or(snap.cursor_pos.y)
+                .approx_as::<f32>()
+                .unwrap_or(0.0);
             let cursor_animating = view_state.update_cursor_animation(
                 target_col,
                 target_row,
@@ -1447,12 +1509,73 @@ impl FreminalTerminalWidget {
                     &snap.visible_line_widths,
                 );
 
+                // ── Apply folding to shaped_lines ─────────────────────────
+                //
+                // The renderer iterates `shaped_lines` by enumerated index
+                // and treats that index as the screen row.  When folds are
+                // active, the rendered row layout differs from the snapshot
+                // row layout: each folded range collapses to a single
+                // *placeholder* row.  Build a new Vec sized to
+                // `rendered_row_count`, mapping each rendered row index back
+                // to its snapshot row (or to a blank placeholder).
+                //
+                // 72.10b-2: placeholder is an empty `ShapedLine`.  The
+                // visual indicator (line count, triangle glyph) lands in
+                // 72.10b-3.  An empty shaped line produces no glyph runs but
+                // still contributes to the row grid for cursor/selection
+                // coordinates.
+                let rendered_shaped_lines: Vec<Arc<ShapedLine>> = if fold_ranges.is_empty() {
+                    shaped_lines
+                } else {
+                    let placeholder = Arc::new(ShapedLine {
+                        runs: Vec::new(),
+                        line_width: LineWidth::Normal,
+                    });
+                    (0..row_map.rendered_row_count().min(snap.term_height))
+                        .map(|rendered| match row_map.rendered_to_snapshot(rendered) {
+                            Some(RenderedRow::Snapshot(snap_row)) => shaped_lines
+                                .get(snap_row)
+                                .cloned()
+                                .unwrap_or_else(|| Arc::clone(&placeholder)),
+                            Some(RenderedRow::Placeholder(_)) | None => Arc::clone(&placeholder),
+                        })
+                        .collect()
+                };
+
                 // Build search match highlights from the current search state.
                 // Only matches within the visible window are included, with
                 // rows converted from buffer-absolute to screen-relative.
                 let win_start = visible_window_start(snap);
-                let search_highlights: Vec<MatchHighlight> =
+                let search_highlights_snap: Vec<MatchHighlight> =
                     matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
+                // Translate from snapshot-row space to rendered-row space and
+                // drop highlights inside folded ranges (they're not visible).
+                let search_highlights: Vec<MatchHighlight> = if fold_ranges.is_empty() {
+                    search_highlights_snap
+                } else {
+                    search_highlights_snap
+                        .into_iter()
+                        .filter_map(|h| {
+                            row_map
+                                .snapshot_to_rendered(h.row)
+                                .map(|rendered| MatchHighlight { row: rendered, ..h })
+                        })
+                        .collect()
+                };
+
+                // Translate the screen selection's row indices from snapshot
+                // to rendered space.  If either endpoint sits inside a folded
+                // range, drop the selection for this frame (it will reappear
+                // when the user unfolds the block).
+                let screen_selection_rendered = if fold_ranges.is_empty() {
+                    screen_selection
+                } else {
+                    screen_selection.and_then(|(sc, sr, ec, er)| {
+                        let sr_r = row_map.snapshot_to_rendered(sr)?;
+                        let er_r = row_map.snapshot_to_rendered(er)?;
+                        Some((sc, sr_r, ec, er_r))
+                    })
+                };
 
                 // Acquire the lock early so all vertex builders can write
                 // directly into the persistent `RenderState` Vecs, reusing
@@ -1467,7 +1590,7 @@ impl FreminalTerminalWidget {
 
                 build_background_instances(
                     &BackgroundFrame {
-                        shaped_lines: &shaped_lines,
+                        shaped_lines: &rendered_shaped_lines,
                         cell_width: cell_w,
                         cell_height: cell_h,
                         ascent: self.font_manager.ascent(),
@@ -1479,7 +1602,7 @@ impl FreminalTerminalWidget {
                         cursor_pixel_pos,
                         cursor_width_scale: cursor_x_scale,
                         cursor_visual_style: &snap.cursor_visual_style,
-                        selection: screen_selection,
+                        selection: screen_selection_rendered,
                         selection_is_block: view_state.selection.is_block,
                         match_highlights: &search_highlights,
                         theme: snap.theme,
@@ -1499,13 +1622,13 @@ impl FreminalTerminalWidget {
                 };
 
                 let fg_opts = FgRenderOptions {
-                    selection: screen_selection,
+                    selection: screen_selection_rendered,
                     selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };
                 build_foreground_instances(
-                    &shaped_lines,
+                    &rendered_shaped_lines,
                     &mut rs_ref.atlas,
                     &self.font_manager,
                     cell_h,
@@ -1545,6 +1668,7 @@ impl FreminalTerminalWidget {
                 cache.previous_search_current_match = search_current_match;
                 cache.previous_term_width = snap.term_width;
                 cache.previous_term_height = snap.term_height;
+                cache.previous_fold_epoch = fold_epoch;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
@@ -1805,18 +1929,34 @@ impl FreminalTerminalWidget {
                 cache.hover_snap_ptr = snap_ptr;
 
                 if cell_changed || content_changed_under_mouse {
-                    // Recompute the hovered URL: convert the mouse's
-                    // display-column position to a flat index into
-                    // `visible_chars`, using the O(1) row-offset table.
-                    let flat_idx =
-                        flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
+                    // Translate the mouse's rendered row to a snapshot row
+                    // (folding-aware).  When the mouse hovers over a fold
+                    // placeholder row, there is no underlying text to match
+                    // against a URL — clear the cache.  When `row` is past
+                    // the bottom of the rendered viewport, `rendered_to_snapshot`
+                    // returns None and we likewise clear.
+                    let snap_row = match row_map.rendered_to_snapshot(row) {
+                        Some(RenderedRow::Snapshot(r)) => Some(r),
+                        Some(RenderedRow::Placeholder(_)) | None => None,
+                    };
+                    cache.cached_hovered_url = snap_row.and_then(|snap_row| {
+                        // Recompute the hovered URL: convert the mouse's
+                        // display-column position to a flat index into
+                        // `visible_chars`, using the O(1) row-offset table.
+                        let flat_idx = flat_index_for_cell(
+                            &snap.visible_chars,
+                            snap_row,
+                            col,
+                            &snap.row_offsets,
+                        );
 
-                    cache.cached_hovered_url = flat_idx.and_then(|idx| {
-                        snap.url_tag_indices
-                            .iter()
-                            .filter_map(|&ti| snap.visible_tags.get(ti))
-                            .find(|tag| tag.start <= idx && idx < tag.end)
-                            .and_then(|tag| tag.url.clone())
+                        flat_idx.and_then(|idx| {
+                            snap.url_tag_indices
+                                .iter()
+                                .filter_map(|&ti| snap.visible_tags.get(ti))
+                                .find(|tag| tag.start <= idx && idx < tag.end)
+                                .and_then(|tag| tag.url.clone())
+                        })
                     });
                 }
 
