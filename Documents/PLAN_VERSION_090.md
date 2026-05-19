@@ -1326,6 +1326,8 @@ puts known text on the clipboard after the action fires.
 
 #### 72.12 — Hover highlight and command-duration overlay
 
+**Status:** COMPLETE (2026-05-19, `cafa890`).
+
 **Scope:** `freminal/src/gui/renderer/`, `freminal/src/gui/mouse.rs`.
 
 - On mouse hover, identify the command block under the cursor by row. Tint
@@ -1340,6 +1342,31 @@ puts known text on the clipboard after the action fires.
 
 **Verification:** Manual visual verification with a recording. Unit test for
 the duration-formatting helper.
+
+**Completion notes:**
+
+- Inline compact formatter (`format_command_duration` in
+  `freminal/src/gui/command_blocks.rs`) — no `humantime` dependency.
+  Output format: `3s`, `2m15s`, `1h3m`, with whole-unit boundaries
+  suppressing the trailing zero unit. 10 unit tests cover sub-second,
+  seconds, minutes-with-seconds, whole-minute, hours-with-minutes,
+  whole-hour, boundaries, and whitespace-free invariant.
+- Hover tint uses full block range `[command_start_row, end_row]` (running
+  blocks skipped — no `end_row`). Tint colour is `theme.selection_bg` at
+  25% alpha via new `command_block_hover_bg_f()` helper. Quad emitted in
+  `build_background_instances` between search highlights and selection so
+  selection overpaints hover and hover overpaints search.
+- Duration label uses `theme.foreground` at ~60% alpha, monospace font at
+  75% of cell height, right-anchored at `terminal_rect.max.x - 4.0` on
+  the first visible rendered row of each qualifying block. Anchors on
+  `command_start_row` falling back to `prompt_start_row`. Skips blocks
+  entirely outside the visible window or hidden inside a fold.
+- Both hover and duration paths go through `RowMap::snapshot_to_rendered`
+  so fold-collapsed blocks degrade gracefully (placeholder rows return
+  `None`).
+- `widget.rs::show()` signature extended with `&CommandBlocksConfig`,
+  threaded from `app_impl.rs`. No new `ViewState` field — hover is read
+  fresh each frame from `view_state.mouse_position`.
 
 #### 72.13 — `ESCAPE_SEQUENCE_COVERAGE.md` and `ESCAPE_SEQUENCE_GAPS.md` updates
 
