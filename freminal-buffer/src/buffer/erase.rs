@@ -234,6 +234,10 @@ impl Buffer {
         }
 
         self.image_cell_count -= remaining_images;
+        // Drop OSC 133 command blocks anchored on the rows we just blanked
+        // so the duration overlay and gutters don't point at empty rows
+        // after `clear`.
+        self.drop_command_blocks_in_visible_window(visible_start, visible_end);
         self.debug_assert_invariants();
     }
 

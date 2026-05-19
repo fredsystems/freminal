@@ -150,6 +150,51 @@ impl Buffer {
         });
     }
 
+    /// Drop prompt-row markers and command blocks whose `prompt_start_row`
+    /// falls within `[visible_start, visible_end)`, and clamp surviving
+    /// blocks whose later row fields fell inside the erased range.
+    ///
+    /// Called from [`Buffer::erase_display`] (CSI 2J) so that the duration
+    /// overlay and command-block gutters do not continue to point at rows
+    /// that the user just blanked with `clear`.
+    ///
+    /// Blocks anchored entirely in scrollback (`prompt_start_row <
+    /// visible_start`) survive untouched.  Blocks anchored on screen are
+    /// dropped wholesale; partial-scrollback / partial-visible blocks have
+    /// their `command_start_row`, `output_start_row`, and `end_row` clamped
+    /// back to the last surviving row when those fields land inside the
+    /// erased range.
+    pub(in crate::buffer) fn drop_command_blocks_in_visible_window(
+        &mut self,
+        visible_start: usize,
+        visible_end: usize,
+    ) {
+        self.prompt_rows
+            .retain(|r| *r < visible_start || *r >= visible_end);
+
+        let last_surviving = visible_start.saturating_sub(1);
+        self.command_blocks.retain_mut(|b| {
+            if b.prompt_start_row >= visible_start && b.prompt_start_row < visible_end {
+                // Block was started on a row that just got blanked.
+                return false;
+            }
+            // Block survives (prompt is in scrollback).  Clamp later fields
+            // that pointed into the erased range so the block's row span
+            // does not include now-blank rows.
+            let clamp = |r: usize| -> usize {
+                if r >= visible_start && r < visible_end {
+                    last_surviving
+                } else {
+                    r
+                }
+            };
+            b.command_start_row = b.command_start_row.map(clamp);
+            b.output_start_row = b.output_start_row.map(clamp);
+            b.end_row = b.end_row.map(clamp);
+            true
+        });
+    }
+
     // ── OSC 133 command-block API ────────────────────────────────────────────
 
     /// Append a fresh [`CommandBlock`] to the end of `command_blocks`, with
@@ -679,6 +724,89 @@ mod command_block_tests {
         assert!(
             buf.command_blocks[0].output_start_row.is_none(),
             "output_start_row must remain None for an unmatched fid"
+        );
+    }
+
+    // ── 14: erase_display drops command_blocks on visible rows ───────────
+
+    #[test]
+    fn erase_display_drops_command_blocks_anchored_on_screen() {
+        // Simulate a finished command block whose prompt was on the visible
+        // screen.  After `clear` (ED 2), the block should be evicted so the
+        // duration overlay does not paint on the now-blank rows.
+        let mut buf = make_buf();
+        // Pre-grow rows so cursor positions are addressable.
+        while buf.rows.len() < buf.height {
+            buf.rows.push(crate::row::Row::new(buf.width));
+            buf.row_cache.push(None);
+        }
+        buf.cursor.pos.y = 3;
+        let _id = buf.start_command_block(None, "fid-clear".to_owned());
+        buf.cursor.pos.y = 3;
+        buf.mark_command_start_row("fid-clear");
+        buf.cursor.pos.y = 4;
+        buf.mark_output_start_row("fid-clear");
+        buf.cursor.pos.y = 6;
+        let _finished = buf.finish_command_block(Some(0), "fid-clear");
+        assert_eq!(buf.command_blocks.len(), 1);
+
+        buf.erase_display();
+
+        assert!(
+            buf.command_blocks.is_empty(),
+            "erase_display must drop blocks anchored on the visible window"
+        );
+        assert!(
+            buf.prompt_rows.is_empty(),
+            "erase_display must drop prompt_rows on the visible window"
+        );
+    }
+
+    #[test]
+    fn erase_display_preserves_blocks_anchored_in_scrollback() {
+        // A block whose prompt_start_row sits in scrollback (below
+        // visible_start) must survive ED 2.  Its end_row, if it lands
+        // inside the now-erased visible window, must be clamped to the
+        // last surviving row.
+        let mut buf = make_buf();
+        // Grow the buffer so there is at least one row of scrollback above
+        // the visible window.  `visible_window_start = total - height`, so
+        // we need total > height to produce a non-zero scrollback.
+        let target_rows = buf.height + 3;
+        while buf.rows.len() < target_rows {
+            buf.rows.push(crate::row::Row::new(buf.width));
+            buf.row_cache.push(None);
+        }
+        let visible_start = buf.visible_window_start(0);
+        assert!(
+            visible_start > 0,
+            "test prerequisite: need a non-empty scrollback"
+        );
+
+        // Manually construct a block straddling scrollback and visible.
+        let block = CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "straddle".to_owned(),
+            prompt_start_row: visible_start - 1,
+            command_start_row: Some(visible_start),
+            output_start_row: Some(visible_start + 1),
+            end_row: Some(visible_start + 3),
+            started_at: SystemTime::now(),
+            finished_at: Some(SystemTime::now()),
+            cwd: None,
+            exit_code: Some(0),
+        };
+        buf.command_blocks.push_back(block);
+
+        buf.erase_display();
+
+        assert_eq!(buf.command_blocks.len(), 1, "scrollback block must survive");
+        let b = &buf.command_blocks[0];
+        assert_eq!(b.prompt_start_row, visible_start - 1);
+        assert_eq!(
+            b.end_row,
+            Some(visible_start - 1),
+            "end_row inside erased range must clamp to last surviving row"
         );
     }
 }
