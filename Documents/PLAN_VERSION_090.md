@@ -1258,6 +1258,33 @@ both clean.
   not touch the snapshot transport path, so no regression is expected
   or observed.
 
+- 72.10c (`FOLLOWUP_HASH`, 2026-05-19) — bug fix surfaced by post-merge
+  testing with the bundled fish shell integration. The original 72.10a
+  `ToggleFoldAtCursor` dispatcher only folded a block when the PTY
+  cursor row fell inside `[command_start_row, end_row]`. In normal
+  interactive use the PTY cursor always lives on the active prompt
+  line, which is _after_ every completed block, so the keybinding
+  silently no-op'd for every realistic scenario. (The plan text at
+  72.10 specified "cursor or topmost visible row" as the selection
+  rule, but the topmost-visible fallback was never implemented and is
+  itself a poor UX choice — the natural intent is "fold the command I
+  just ran.")
+
+  Fix: extracted the selection logic into a pure helper
+  `find_fold_target(snap) -> Option<CommandBlockId>` in
+  `freminal/src/gui/terminal/input.rs` with two passes. Pass 1
+  preserves the original behaviour for the future scrollback-cursor /
+  gutter-click pathways: a completed block containing `cursor_row`
+  wins. Pass 2 is the new fallback: the most recently completed block
+  (last element of the `VecDeque` whose `end_row.is_some()`). Running
+  blocks and blocks missing `command_start_row` are excluded from both
+  passes. Added `mod fold_target_tests` with six unit tests covering
+  cursor-inside selection, recency fallback, running-block exclusion
+  (both as the cursor's containing block and as the most-recent
+  appended block), the empty-and-only-running cases, and the
+  missing-`command_start_row` case. No changes to `ViewState`, the
+  rendering layer, or the keybinding default.
+
 #### 72.11 — Copy command output actions
 
 **Scope:** `freminal-common/src/keybindings.rs`, `freminal/src/gui/actions.rs`,
@@ -2675,7 +2702,8 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      `6ea2808` 72.10b-1 — folding helpers + RowMap; `23faec7` 72.10b-2 —
      wire RowMap into renderer; `e896592` 72.10b-3 —
      placeholder row rendering, click-to-unfold hit-test, hover cursor,
-     benchmark).
+     benchmark; `FOLLOWUP_HASH` 72.10c — bug fix: fall back to most
+     recent completed block when cursor outside any block).
    - **72.11 → 72.15** — remaining subtasks per the rest of this plan.
    - **72.16.e** — XTGETTCAP unknown-capability log noise (cosmetic;
      land any time before v0.9.0 ships).

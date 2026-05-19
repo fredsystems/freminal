@@ -16,7 +16,7 @@ use crate::gui::{
 use conv2::ConvUtil;
 use crossbeam_channel::Sender;
 use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
-use freminal_common::buffer_states::command_block::CommandBlockId;
+use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
@@ -182,6 +182,51 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
     }
 }
 
+/// Resolve which command block (if any) the `ToggleFoldAtCursor` action
+/// should operate on.
+///
+/// Selection order:
+///
+/// 1. If the PTY cursor row falls inside a completed block's
+///    `[command_start_row, end_row]` range, that block is chosen.  This is
+///    the future-facing path for when scrollback-cursor navigation (Task
+///    72.x) or pane gutter clicks (Task 73) let the user point at a
+///    specific historical block.
+/// 2. Otherwise, the most recently completed block is chosen — i.e. the
+///    last block in `command_blocks` whose `end_row` is set.  In normal
+///    interactive use the PTY cursor lives on the active prompt line,
+///    which is always *after* every completed block, so case 1 never
+///    matches and this fallback is the path users actually exercise.
+///
+/// Running blocks (`end_row.is_none()`) and blocks that never saw an OSC
+/// 133 `C` marker (`command_start_row.is_none()`) are not foldable and
+/// are excluded from both passes.
+///
+/// Returns `None` only if no completed block exists in the snapshot at
+/// all, in which case the keybinding silently no-ops.
+fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
+    let cursor_row = snap.cursor_pos.y;
+    let is_completed = |b: &&CommandBlock| b.command_start_row.is_some() && b.end_row.is_some();
+
+    // Pass 1: cursor inside a completed block's body.
+    if let Some(block) = snap.command_blocks.iter().filter(is_completed).find(|b| {
+        match (b.command_start_row, b.end_row) {
+            (Some(start), Some(end)) => cursor_row >= start && cursor_row <= end,
+            _ => false,
+        }
+    }) {
+        return Some(block.id);
+    }
+
+    // Pass 2: most recent completed block (VecDeque pushes back, so newest
+    // is last → iterate in reverse).
+    snap.command_blocks
+        .iter()
+        .rev()
+        .find(is_completed)
+        .map(|b| b.id)
+}
+
 /// Dispatch a [`KeyAction`] that was resolved from the binding map.
 ///
 /// Handles the subset of actions that can be executed inside
@@ -328,21 +373,8 @@ pub(super) fn dispatch_binding_action(
             );
         }
         KeyAction::ToggleFoldAtCursor => {
-            // Find the completed block whose [command_start_row, end_row]
-            // range contains the cursor row. Running blocks
-            // (`end_row.is_none()`) are not foldable. If no command_start_row
-            // has been emitted yet (OSC 133 C not seen) the block has no
-            // foldable body, so skip it as well.
-            let cursor_row = snap.cursor_pos.y;
-            if let Some(block) =
-                snap.command_blocks
-                    .iter()
-                    .find(|b| match (b.command_start_row, b.end_row) {
-                        (Some(start), Some(end)) => cursor_row >= start && cursor_row <= end,
-                        _ => false,
-                    })
-            {
-                view_state.toggle_fold(block.id);
+            if let Some(id) = find_fold_target(snap) {
+                view_state.toggle_fold(id);
             }
         }
         KeyAction::FoldAll => {
@@ -1740,4 +1772,121 @@ pub(super) fn write_input_to_terminal(
         clipboard_pending,
         deferred_actions,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod fold_target_tests {
+    //! Tests for [`find_fold_target`].
+    //!
+    //! These cover the selection logic in isolation from the dispatcher and
+    //! from PTY/clipboard side effects.  The dispatcher itself requires a
+    //! live `Sender<InputEvent>` and is exercised by integration tests; the
+    //! interesting behaviour here is purely "given a snapshot, which block
+    //! should we fold?".
+
+    use super::*;
+    use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::buffer_states::cursor::CursorPos;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    /// Build a completed command block occupying rows `[prompt..=end]`.
+    fn completed(id: u64, prompt: usize, end: usize) -> CommandBlock {
+        CommandBlock {
+            id: CommandBlockId(id),
+            fid: format!("test-{id}"),
+            prompt_start_row: prompt,
+            command_start_row: Some(prompt),
+            output_start_row: Some(prompt + 1),
+            end_row: Some(end),
+            exit_code: Some(0),
+            cwd: None,
+            started_at: SystemTime::UNIX_EPOCH,
+            finished_at: Some(SystemTime::UNIX_EPOCH),
+        }
+    }
+
+    /// Build a running (still-open) block — no `end_row`.
+    fn running(id: u64, prompt: usize) -> CommandBlock {
+        CommandBlock {
+            id: CommandBlockId(id),
+            fid: format!("test-{id}"),
+            prompt_start_row: prompt,
+            command_start_row: Some(prompt),
+            output_start_row: Some(prompt + 1),
+            end_row: None,
+            exit_code: None,
+            cwd: None,
+            started_at: SystemTime::UNIX_EPOCH,
+            finished_at: None,
+        }
+    }
+
+    fn snap_with(blocks: Vec<CommandBlock>, cursor_row: usize) -> TerminalSnapshot {
+        let mut s = TerminalSnapshot::empty();
+        s.command_blocks = Arc::from(blocks);
+        s.cursor_pos = CursorPos {
+            x: 0,
+            y: cursor_row,
+        };
+        s
+    }
+
+    #[test]
+    fn cursor_inside_completed_block_selects_that_block() {
+        // Cursor lives at row 7, which is inside block 1's [5..=10].  The
+        // most-recent fallback would pick block 2 (rows 15..=20) — but the
+        // cursor-inside rule wins.
+        let snap = snap_with(vec![completed(1, 5, 10), completed(2, 15, 20)], 7);
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+    }
+
+    #[test]
+    fn cursor_outside_all_blocks_falls_back_to_most_recent_completed() {
+        // The realistic case: cursor sits on the active prompt line (row
+        // 25), which is past every completed block.  We expect the
+        // newest-appended completed block (id 2).
+        let snap = snap_with(vec![completed(1, 5, 10), completed(2, 15, 20)], 25);
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(2)));
+    }
+
+    #[test]
+    fn running_block_is_never_selected() {
+        // Cursor is inside the running block's rows, but running blocks
+        // are not foldable.  The fallback picks the completed block.
+        let snap = snap_with(vec![completed(1, 5, 10), running(2, 15)], 17);
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+    }
+
+    #[test]
+    fn running_block_does_not_shadow_completed_in_recency_fallback() {
+        // Even when the most recently *appended* block is still running,
+        // the recency fallback must skip it and return the most recent
+        // *completed* block.
+        let snap = snap_with(vec![completed(1, 5, 10), running(2, 15)], 25);
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+    }
+
+    #[test]
+    fn no_completed_blocks_returns_none() {
+        // A snapshot with only running blocks (or none at all) yields
+        // no fold target — the keybinding silently no-ops.
+        let snap = snap_with(vec![running(1, 5)], 7);
+        assert_eq!(find_fold_target(&snap), None);
+
+        let snap = snap_with(vec![], 0);
+        assert_eq!(find_fold_target(&snap), None);
+    }
+
+    #[test]
+    fn block_missing_command_start_row_is_skipped() {
+        // A block that saw `A` (prompt_start_row) but never `C`
+        // (command_start_row) has no foldable body and must be excluded
+        // from both passes.  The next completed block wins.
+        let mut partial = completed(2, 15, 20);
+        partial.command_start_row = None;
+        let snap = snap_with(vec![completed(1, 5, 10), partial], 25);
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+    }
 }
