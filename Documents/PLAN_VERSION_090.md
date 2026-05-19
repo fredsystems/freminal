@@ -1050,7 +1050,67 @@ Called from `main.rs` on every launch (gated on
   in a recording that markers carry `freminal=1; fid=<id>` and that
   `command_blocks` populates correctly.
 
-**Status:** Pending. Sub-agent dispatch comes after 72.8c lands.
+**Status:** ✅ Complete (commit `fd45441`, 2026-05-19).
+
+**Completion notes:**
+
+- Spawn-time env injection replaces the user-sources-scripts model. When
+  `[shell_integration] set_term_program = true` (default) and freminal is
+  launching a bare interactive shell, `inject_shell_integration_env`
+  detects bash/zsh/fish from the program basename and mutates the spawn
+  environment:
+  - **bash:** launched with `--posix` + `ENV=<resources>/bash/freminal-init.bash`.
+    The init script cancels POSIX mode (`set +o posix`), chains to the
+    user's normal startup files (`.bash_profile`/`.bash_login`/`.profile`
+    for login, `.bashrc` for non-login), then installs the OSC 133 hooks.
+  - **zsh:** `ZDOTDIR=<resources>/zsh`. The bundled `.zshenv` stashes the
+    user's real ZDOTDIR in `__FREMINAL_ZSH_ZDOTDIR`, restores it, then
+    sources the integration body.
+  - **fish:** prepend `<resources>` to `XDG_DATA_DIRS` so fish loads
+    `vendor_conf.d/freminal.fish` automatically.
+- Injection is skipped entirely when a positional command is passed
+  (`freminal -- htop`) so non-shell children inherit a clean env.
+- `auto_install`, `Re-install Scripts`, `Copy Path` UI surface and the
+  related `SettingsAction` variants, `pending_shell_action` field, and
+  dispatch arms are all deleted. Scripts are now sync-to-disk on every
+  launch (already implemented in 72.8a); the UI no longer exposes
+  installation as a user concern.
+- `FREMINAL_SHELL_INTEGRATION_VERSION: u32 = 1` constant added; each
+  script carries a matching `# freminal-shell-integration v1` header.
+  `sync_to_disk` parses the header and rewrites stale copies in place.
+- All three scripts gained a `TERM_PROGRAM != "freminal"` early-return
+  guard so a user manually sourcing a persisted copy under another
+  terminal (ghostty, wezterm, kitty, iTerm) does NOT install hooks or
+  emit OSC sequences that those parsers might mishandle.
+- Per-command-lifecycle `fid` rolling: each script maintains a private
+  counter (`$$-N` for bash/zsh, `$fish_pid-N` for fish). A/B/C/D for one
+  command share one fid; the next command's precmd/fish_prompt rolls
+  forward. Critical detail: in bash and zsh, the rolling function
+  (`__freminal_fid_next`) must be called as a plain command (not in
+  `$(…)`) so the parent shell's counter actually mutates — earlier
+  drafts that used command-substitution pinned every emission to
+  `fid=$$-1`.
+- Bash PS1 wrap-stripping required glob escaping: PS1 stores the literal
+  four-character sequences `\[`, `\033`, `\007`, `\]`, and bash's
+  `${var//pat/repl}` treats `pat` as a glob where `[` is special. The
+  pattern uses `\\\[` and `\\\]` so the glob matches `\` + `[` literally.
+  Without this, PS1 wraps stacked one extra A/B pair per prompt cycle.
+- `__freminal_strip_ps1_wrap` and the zsh equivalent are called inside
+  precmd before re-wrapping, defending against prompt frameworks
+  (oh-my-posh, Starship, p10k) that mutate PROMPT/PS1 from their own
+  hooks.
+- Verified across three real recordings under Starship (zsh), fish's
+  built-in OSC 133 emitter, and vanilla bash. A/B/C/D fid pairing
+  correct in all three; foreign markers (`aid=`, `click_events=1`,
+  `cmdline_url=ls`, bare `;D;0`) correctly rejected by the strict
+  `freminal=1` gate; multi-pane independence confirmed (split-pane
+  recording shows two distinct PID-prefixed fid streams).
+- `cargo test --all`, `cargo clippy --all-targets --all-features
+-- -D warnings`, `cargo-machete`, `cargo fmt --check`: all clean.
+  ShellCheck clean on the bash script (three intentional patterns
+  suppressed inline with explanatory comments: SC2317 ×2 for the
+  dual-mode `return ... || exit/true` guards, SC2016 ×2 for the
+  single-quoted glob marker literals that must NOT interpolate).
 
 #### 72.9 — `WindowCommand::CommandFinished` GUI handling
 
@@ -1409,6 +1469,63 @@ module wholesale (because the `install_if_missing` semantics change from
 rewrite uses `tempfile::TempDir` from the workspace, which closes 72.16.d
 implicitly. 72.8b adds `tempfile.workspace = true` to
 `freminal/Cargo.toml` `[dev-dependencies]` as part of its scope.
+
+##### 72.16.e — XTGETTCAP unknown-capability log noise under fish
+
+**Surface point:** Surfaced during 72.8b manual end-to-end testing
+(2026-05-19). Fish's startup queries `indn` and `query-os-name` via
+XTGETTCAP, producing warn-level log spam on every shell launch:
+
+```bash
+WARN freminal_terminal_emulator::terminal_handler::dcs:639:
+  XTGETTCAP: unknown capability: indn
+WARN freminal_terminal_emulator::terminal_handler::dcs:639:
+  XTGETTCAP: unknown capability: query-os-name
+```
+
+**Impact:** Cosmetic. Every fish session produces two WARN-level lines
+in freminal's stderr/log file at startup. The protocol-level response
+is correct (`0+r<hex>` "capability not known"), so fish handles the
+refusal gracefully. There is no functional bug. The noise just makes
+the log harder to scan and creates false alarm signal for users who
+read logs to diagnose other problems.
+
+**Scope of fix:** `freminal-terminal-emulator/src/terminal_handler/dcs.rs`
+line 639. Two options:
+
+1. **Drop the warn level for unknown capabilities.** Demote to
+   `tracing::debug!` so it's silent at default log levels but still
+   discoverable when debugging. Capability queries from any reasonable
+   client are not errors; the protocol explicitly defines the
+   "unknown" response (`0+r<hex>`) as the well-formed reply.
+2. **Add `indn` and `query-os-name` to the known set.** `indn` is the
+   "indent N lines" capability — equivalent to ESC D repeated N times.
+   `query-os-name` is a Kitty-protocol extension for reporting the OS
+   name. Both are legitimate terminfo entries; declining them with
+   `0+r…` is correct behavior for now, but supporting them would be a
+   small future improvement.
+
+**Suggested approach:** Apply option 1 immediately (one-line change:
+`warn!` → `debug!`). Defer option 2 to a future XTGETTCAP capability
+expansion subtask; track it in `Documents/ESCAPE_SEQUENCE_GAPS.md`
+under the XTGETTCAP row.
+
+**Verification:**
+
+- Launch freminal with fish; verify no WARN lines about `indn` or
+  `query-os-name` appear in stderr at default log level.
+- `RUST_LOG=freminal_terminal_emulator=debug freminal` still surfaces
+  the messages for diagnostic purposes.
+- Existing dcs unit tests in `terminal_handler::dcs::tests` continue
+  to pass (the response payload is unchanged; only the log level
+  changes).
+
+**Scheduling:** Cosmetic; no subtask blocked by this. Can land
+opportunistically before or after the Task 72 PR, but should land
+**before** v0.9.0 ships so users' first fish launch doesn't dump
+warn-level noise into the log.
+
+**Status:** Pending.
 
 ### 72 Open Questions Resolved
 
@@ -2459,13 +2576,13 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      architecture was superseded by 72.8c/72.8b after design review
      (2026-05-18). The scripts and infrastructure they shipped are
      about to be replaced.
-   - **72.8c** — Parser support for `freminal=1; fid=<id>` markers.
-     Must land before 72.8b so scripts emit a format the parser
-     recognizes.
-   - **72.8b** — Ghostty-style shell-integration injection. Rewrites
-     scripts into a tree layout, simplifies `sync_to_disk`, deletes
-     Settings buttons, adds spawn-time env injection.
+   - **72.8c** ✅ done (commit `4702b1a`, 2026-05-18). Parser support
+     for `freminal=1; fid=<id>` markers.
+   - **72.8b** ✅ done (commit `fd45441`, 2026-05-19). Ghostty-style
+     spawn-time shell-integration injection.
    - **72.9 → 72.15** — remaining subtasks per the rest of this plan.
+   - **72.16.e** — XTGETTCAP unknown-capability log noise (cosmetic;
+     land any time before v0.9.0 ships).
 
    Pause after each subtask for user confirmation per the Multi-Step
    Task Protocol in `agents.md`. The 72.16 cleanup section accumulates
