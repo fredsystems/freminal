@@ -21,7 +21,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | #   | Feature                                 | Scope        | Status  | Depends On      | Branch                           |
 | --- | --------------------------------------- | ------------ | ------- | --------------- | -------------------------------- |
 | 72  | OSC 133 Command Blocks                  | Large        | Pending | v0.8.0          | `task-72/osc-133-command-blocks` |
-| 73  | Command Gutters (exit-status indicator) | Small        | Pending | Task 72         | `task-73/command-gutters`        |
+| 73  | Command Gutters (exit-status indicator) | Medium       | Pending | Task 72         | `task-73/command-gutters`        |
 | 74  | Broadcast Input to Panes                | Medium       | Pending | v0.8.0, Task 58 | `task-74/broadcast-input`        |
 | 75  | Verify per-pane env round-trip          | Small        | Pending | v0.8.0          | `task-75/pane-env-roundtrip`     |
 | 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending | v0.8.0, Task 72 | `task-76/notifications`          |
@@ -1329,6 +1329,13 @@ puts known text on the clipboard after the action fires.
 **Status:** COMPLETE (2026-05-19, `cafa890`; follow-up fix `1289863` — drop
 blocks erased by CSI 2J so duration overlays don't paint on blank rows).
 
+**Note:** The hover model and duration-label placement implemented here are
+superseded by Task 73 subtasks 73.5 (move hover trigger onto the gutter)
+and 73.6 (move duration label into the gutter). The in-buffer overlay and
+inline label introduced by 72.12 are interim until 73.5/73.6 land. 73.7
+covers a suspected duration-reporting bug (e.g. `ls` reported as taking
+seconds) surfaced while testing 72.12.
+
 **Scope:** `freminal/src/gui/renderer/`, `freminal/src/gui/mouse.rs`.
 
 - On mouse hover, identify the command block under the cursor by row. Tint
@@ -1713,6 +1720,9 @@ A 4-pixel left gutter rendered inside the terminal area, left of the cell
 grid. Each command block's row range is filled with a status color: green
 (success), red (failure), yellow (running), gray (unknown). The gutter is
 clickable (toggles fold, see 72.10) and hover-able (highlights the block).
+The gutter also owns the command-duration label (moved out of the in-buffer
+overlay introduced in 72.12) and is the sole hover trigger for the
+block-highlight overlay.
 
 ### 73 Decisions (fixed)
 
@@ -1787,6 +1797,143 @@ events.
   position (`Left` / `Off`).
 
 **Verification:** Toggle persists via TOML round-trip.
+
+#### 73.5 — Move hover trigger from buffer to gutter
+
+**Scope:** `freminal/src/gui/mouse.rs`, `freminal/src/gui/renderer/`
+(whichever module currently owns the 72.12 hover overlay), and the view-
+state struct that tracks `hovered_block_id` (or equivalent).
+
+**Motivation:** 72.12 made the entire row range of a command block emit the
+hover highlight whenever the mouse hovered any cell in the block. This
+causes the overlay to fire constantly during normal terminal use (text
+selection, mouse-tracking apps, even passive cursor motion across the
+output area), which is visually noisy and conflicts with mouse-reporting
+modes. The correct model — now that the gutter exists — is that the gutter
+is the dedicated affordance for "this is a command block, here is its
+metadata, click to fold". Hovering output text should do nothing
+block-related.
+
+- Remove the in-buffer hover hit-test added in 72.12. Cells in the terminal
+  area no longer participate in block-hover detection.
+- Move the hover trigger entirely to the gutter strip (the 4px column
+  defined in 73.2). Hovering anywhere in the gutter rows belonging to a
+  block highlights the block's row range with the existing
+  selection-tint-at-25%-alpha overlay.
+- The overlay rendering itself (the tinted row range across the cell grid)
+  is unchanged — only the trigger surface moves.
+- Hover is still purely view-state; no snapshot mutation.
+- Hover is disabled when `config.command_blocks.enabled == false` or when
+  `config.command_blocks.gutter == "off"` (no gutter, no hover trigger).
+- Mouse-reporting modes: the gutter intercepts events before the cell-
+  coordinate router (already specified by 73.3), so DEC mouse modes are
+  unaffected — the application never sees gutter hover/clicks.
+
+**Verification:** Update or replace the 72.12 hover unit tests. New
+integration test: hovering output cells does not set
+`hovered_block_id`; hovering gutter rows belonging to a block does.
+
+#### 73.6 — Move command-duration label into the gutter
+
+**Scope:** Same renderer module as 73.2 (the gutter draw pass) and the
+duration-formatting helper introduced in 72.12.
+
+**Motivation:** 72.12 renders the duration label (e.g. `"1.3s"`) right-
+aligned on the command's first row inside the terminal cell grid. For
+commands that scroll, this means the label is painted on the prompt line
+which then scrolls out of view almost immediately — the label is
+effectively invisible for any non-trivial command. The gutter is anchored
+to the visible window and follows the block as it scrolls, so the duration
+label belongs there.
+
+- Remove the in-buffer duration label rendered by 72.12 (the right-aligned
+  text on the command's first row).
+- Render the duration label inside the gutter strip, vertically anchored to
+  the block's last visible row in the current viewport (so the label
+  follows the block as it scrolls and is always next to the gutter color
+  bar). If the block extends below the viewport, anchor to the last
+  on-screen row of the block.
+- The 4px gutter is too narrow for inline text. Two options — implementer
+  picks during 73.6:
+  - **(a)** Render the label as a small overlay tooltip that appears
+    immediately adjacent to (right of) the gutter, on the block's last
+    visible row. No cell-grid intrusion: drawn as a floating egui label
+    layer above the cell content.
+  - **(b)** Widen the gutter to a configurable
+    `[command_blocks] gutter_width_px` (default 4, raises to e.g. 24 only
+    when duration display is enabled) and render the label inside.
+  - Default recommendation: (a). Keep the gutter thin; render label as a
+    floating layer. Decision logged in commit message.
+- Threshold gating is unchanged: only render when
+  `duration() >= config.command_blocks.duration_threshold_secs`.
+- Label is hidden for the currently-running block (no `finished_at` yet).
+
+**Verification:** Visual verification via a recorded `.frec`. The
+duration-formatting unit test from 72.12 still applies; add a placement
+test (the label coordinate is computed against the block's last on-screen
+row, not its first row).
+
+#### 73.7 — Investigate spurious long duration for instant commands
+
+**Scope:** Investigation first; fix scope determined by findings.
+Likely surfaces: `CommandBlock::started_at` / `finished_at`
+(`freminal-common/src/buffer_states/command_block.rs`), the OSC 133 prompt
+handler that opens a block, the OSC 133 post-exec handler that closes it
+(`freminal-terminal-emulator/src/...`), and the duration-formatting helper
+introduced in 72.12.
+
+**Symptom (reported during 72.12 testing):** A trivial `ls` command (which
+runs in single-digit milliseconds) sometimes renders with a multi-second
+duration label. Two hypotheses to investigate:
+
+1. **Time-unit / format mismatch.** `started_at: SystemTime`,
+   `finished_at: Option<SystemTime>`, and the duration formatter may be
+   handling units inconsistently — e.g. mixing seconds and milliseconds,
+   or formatting `duration_since(UNIX_EPOCH)` instead of
+   `finished_at.duration_since(started_at)`. Audit the full chain:
+   - Where `started_at` is stamped (OSC 133 C / `prompt_start` handler).
+   - Where `finished_at` is stamped (OSC 133 D / `post_exec` handler).
+   - The `duration()` accessor on `CommandBlock`.
+   - The formatter that turns `Duration` into the displayed string.
+2. **Block-boundary confusion.** Multiple `CommandBlock` entries are being
+   conflated — e.g. the prompt for command N is being matched against the
+   `finished_at` of command N-1, so the displayed duration is actually
+   "time the user spent reading the previous output before pressing
+   Enter". This is plausible if the OSC 133 sequences are being grouped
+   into the wrong block (off-by-one in `command_blocks` `VecDeque`
+   indexing, or `prompt_start` opening a new block when it should close
+   the previous one first, or `post_exec` closing the wrong block).
+
+**Investigation steps:**
+
+- Add temporary `tracing::debug!` logs at every `CommandBlock` field
+  mutation: capture `id`, `fid`, the `SystemTime` value, and a Rust
+  source location. Confirm:
+  - Exactly one `started_at` stamp per command, at the correct moment.
+  - Exactly one `finished_at` stamp per command, at the correct moment.
+  - `finished_at - started_at` matches wall-clock time as measured
+    externally (`time ls`).
+- Reproduce by recording a `.frec` of a slow shell-init scenario
+  (`bash -i` with a heavy `~/.bashrc`) and a fast scenario (`sh -c`
+  without rc files), running `ls` in each, and comparing the captured
+  block lifecycle events.
+- If hypothesis 1: fix the unit/format bug and add a unit test asserting
+  `Duration::from_millis(5)` formats as `"5ms"`, not `"5s"`.
+- If hypothesis 2: fix the block-boundary handling and add an integration
+  test feeding a hand-crafted OSC 133 sequence stream
+  (`A` → text → `B` → text → `C` → output → `D;0`) and asserting one
+  `CommandBlock` is produced with `finished_at - started_at` matching
+  the `C`-to-`D` delta only.
+
+**Verification:** Both hypotheses must be ruled out or fixed. Unit test
+for the duration formatter. Integration test for the OSC 133 lifecycle.
+Manual `.frec` re-test of the original `ls` reproducer showing the label
+either absent (below threshold) or correctly reporting milliseconds.
+
+**Note:** This subtask can run independently of 73.1–73.6 — it touches the
+duration computation, not the gutter rendering. Schedule it early in
+Task 73 so the fix is in place before 73.6 moves the label into the
+gutter, otherwise the bug just relocates with the label.
 
 ### 73 Open Questions Resolved
 
