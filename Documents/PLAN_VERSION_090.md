@@ -1285,7 +1285,22 @@ both clean.
   missing-`command_start_row` case. No changes to `ViewState`, the
   rendering layer, or the keybinding default.
 
-#### 72.11 — Copy command output actions
+#### 72.11 — Copy command output actions — COMPLETE
+
+**Completed:** 2026-05-19 (commit `43f0d3c`)
+
+**Summary:** Added `CopyLastCommandOutput` (default `Ctrl+Shift+Y`) and
+`CopyCommandOutputAtCursor` (unbound; surfaced via right-click menu) as
+new `KeyAction` variants. Both actions resolve a target block, derive its
+`[output_start_row, end_row]` full-width range, and route through the
+existing `InputEvent::ExtractSelection` → `clipboard_rx` → arboard path.
+Skips running blocks and blocks missing the OSC 133 `C` marker. The
+terminal right-click context menu gained a "Copy Command Output" entry
+that appears when the clicked cell falls inside a completed block; it
+uses the same context-menu copy flow as the existing URL/selection
+entries (synchronous `recv_timeout`). Nine unit tests cover
+`find_last_copyable_block`, `find_block_containing_row`, and the
+boundary / running / missing-marker cases.
 
 **Scope:** `freminal-common/src/keybindings.rs`, `freminal/src/gui/actions.rs`,
 `freminal/src/gui/clipboard.rs` (or wherever clipboard writes happen today).
