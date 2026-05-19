@@ -1283,6 +1283,7 @@ impl freminal_windowing::App for FreminalGui {
                             bg_opacity,
                             self.config.ui.background_image_opacity,
                             self.config.ui.background_image_mode,
+                            &self.config.command_blocks,
                             &self.binding_map,
                             is_echo_off,
                             is_active,

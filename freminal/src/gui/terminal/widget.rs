@@ -1075,6 +1075,7 @@ impl FreminalTerminalWidget {
         bg_opacity: f32,
         bg_image_opacity: f32,
         bg_image_mode: freminal_common::config::BackgroundImageMode,
+        command_blocks_config: &freminal_common::config::CommandBlocksConfig,
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
@@ -1743,6 +1744,68 @@ impl FreminalTerminalWidget {
                     })
                 };
 
+                // ── Command-block hover-row range (current frame) ──
+                //
+                // Determine which OSC 133 block (if any) the mouse is
+                // hovering over and compute its rendered-row span.  The
+                // result is passed into `BackgroundFrame` so the tint
+                // is drawn alongside selection / search highlights in
+                // the same vertex batch.  Disabled when the feature is
+                // off, when no blocks exist, or when the mouse is not
+                // inside the terminal area.
+                let command_block_hover_rows: Option<(usize, usize)> = if command_blocks_config
+                    .enabled
+                    && !snap.command_blocks.is_empty()
+                    && let Some(mouse_position) = view_state.mouse_position
+                    && terminal_rect.contains(mouse_position)
+                {
+                    let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
+                        mouse_position,
+                        (logical_cell_w, logical_cell_h),
+                        terminal_rect.min,
+                    );
+                    // Translate to a snapshot (buffer-absolute) row via the
+                    // fold-aware row map; placeholder / out-of-range rows
+                    // never hover-tint a block.
+                    let snap_screen_row = match row_map.rendered_to_snapshot(rendered_row) {
+                        Some(RenderedRow::Snapshot(r)) => Some(r),
+                        Some(RenderedRow::Placeholder(_)) | None => None,
+                    };
+                    snap_screen_row.and_then(|screen_row| {
+                        let buffer_row = win_start + screen_row;
+                        // Find the block containing this absolute row.
+                        // Skips running blocks (no end_row) and blocks
+                        // missing `command_start_row`.
+                        let block = snap.command_blocks.iter().find(|b| {
+                            match (b.command_start_row, b.end_row) {
+                                (Some(s), Some(e)) => buffer_row >= s && buffer_row <= e,
+                                _ => false,
+                            }
+                        })?;
+                        let start = block.command_start_row?;
+                        let end = block.end_row?;
+                        // Clip the block's [start, end] to the visible
+                        // window, then convert each endpoint into
+                        // rendered-row space.  Endpoints inside a fold
+                        // are snapped to the placeholder's surviving
+                        // row via the row-map lookup; if the entire
+                        // block sits inside a fold the result is None.
+                        let win_end = win_start + snap.term_height;
+                        if end < win_start || start >= win_end {
+                            return None;
+                        }
+                        let s_screen = start.saturating_sub(win_start);
+                        let e_screen = end
+                            .saturating_sub(win_start)
+                            .min(snap.term_height.saturating_sub(1));
+                        let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
+                        let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
+                        Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
+                    })
+                } else {
+                    None
+                };
+
                 // Acquire the lock early so all vertex builders can write
                 // directly into the persistent `RenderState` Vecs, reusing
                 // their heap allocations (clear+extend pattern) instead of
@@ -1771,6 +1834,7 @@ impl FreminalTerminalWidget {
                         selection: screen_selection_rendered,
                         selection_is_block: view_state.selection.is_block,
                         match_highlights: &search_highlights,
+                        command_block_hover_rows,
                         theme: snap.theme,
                         cursor_color_override: snap.cursor_color_override,
                     },
@@ -2036,6 +2100,61 @@ impl FreminalTerminalWidget {
                 egui::FontId::proportional(logical_cell_h),
                 egui::Color32::from_rgb(255, 200, 50),
             );
+        }
+
+        // ── Command-block duration overlay ───────────────────────────
+        // For each finished command block whose duration meets the
+        // configured threshold, paint a compact right-aligned label on
+        // the block's first visible rendered row.  Running blocks have
+        // no `finished_at` and are skipped.  Blocks entirely outside
+        // the visible window or hidden inside a fold are also skipped
+        // (the row-map lookup yields `None`).
+        if command_blocks_config.enabled
+            && command_blocks_config.show_duration
+            && !snap.command_blocks.is_empty()
+        {
+            let threshold =
+                Duration::from_secs_f32(command_blocks_config.duration_threshold_secs.max(0.0));
+            let win_start = visible_window_start(snap);
+            let win_end = win_start + snap.term_height;
+            let (fg_r, fg_g, fg_b) = snap.theme.foreground;
+            // Muted: ~60% alpha so the label reads without overpowering
+            // the underlying cell content.
+            let label_color = egui::Color32::from_rgba_unmultiplied(fg_r, fg_g, fg_b, 153);
+            let font_id = egui::FontId::monospace(logical_cell_h * 0.75);
+            for block in snap.command_blocks.iter() {
+                let Some(finished_at) = block.finished_at else {
+                    continue;
+                };
+                let Ok(elapsed) = finished_at.duration_since(block.started_at) else {
+                    continue;
+                };
+                if elapsed < threshold {
+                    continue;
+                }
+                // Anchor on `command_start_row` when available, else
+                // fall back to `prompt_start_row` (very early blocks
+                // that finished before any output line).
+                let anchor_buffer_row = block.command_start_row.unwrap_or(block.prompt_start_row);
+                if anchor_buffer_row < win_start || anchor_buffer_row >= win_end {
+                    continue;
+                }
+                let screen_row = anchor_buffer_row - win_start;
+                let Some(rendered_row) = row_map.snapshot_to_rendered(screen_row) else {
+                    continue;
+                };
+                let rendered_f = rendered_row.approx_as::<f32>().unwrap_or(0.0);
+                let y = rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                let pos = egui::pos2(terminal_rect.max.x - 4.0, y);
+                let label = crate::gui::command_blocks::format_command_duration(elapsed);
+                ui.painter().text(
+                    pos,
+                    egui::Align2::RIGHT_TOP,
+                    label,
+                    font_id.clone(),
+                    label_color,
+                );
+            }
         }
 
         // ── Search overlay ───────────────────────────────────────────

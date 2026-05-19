@@ -20,8 +20,8 @@ use std::sync::Arc;
 use super::super::{
     atlas::{GlyphAtlas, GlyphKey},
     colors::{
-        cursor_f, internal_color_to_gl, search_current_bg_f, search_match_bg_f, selection_bg_f,
-        selection_fg_f,
+        command_block_hover_bg_f, cursor_f, internal_color_to_gl, search_current_bg_f,
+        search_match_bg_f, selection_bg_f, selection_fg_f,
     },
     font_manager::FontManager,
     shaping::{ShapedGlyph, ShapedLine},
@@ -196,6 +196,11 @@ pub struct BackgroundFrame<'a> {
     pub selection: Option<(usize, usize, usize, usize)>,
     pub selection_is_block: bool,
     pub match_highlights: &'a [MatchHighlight],
+    /// Inclusive rendered-row range `[start, end]` for the OSC 133
+    /// command block currently under the mouse, if any.  Drawn full
+    /// width between search highlights and selection so the underlying
+    /// text remains readable.
+    pub command_block_hover_rows: Option<(usize, usize)>,
     pub theme: &'a ThemePalette,
     pub cursor_color_override: Option<(u8, u8, u8)>,
 }
@@ -237,6 +242,7 @@ pub fn build_background_instances(
     let selection = frame.selection;
     let selection_is_block = frame.selection_is_block;
     let match_highlights = frame.match_highlights;
+    let command_block_hover_rows = frame.command_block_hover_rows;
     let theme = frame.theme;
     let cursor_color_override = frame.cursor_color_override;
     // Reuse existing heap allocations — clear but keep capacity.
@@ -362,6 +368,44 @@ pub fn build_background_instances(
             } else {
                 search_match_bg_f()
             };
+            push_quad(deco, x0, y0, x1, y1, color);
+        }
+    }
+
+    // --- Command-block hover tint (full-width rows, drawn between search and selection) ---
+    //
+    // Rendered after search highlights so it overpaints them, but
+    // before selection so an active selection inside the hovered block
+    // remains crisply visible.  Uses the theme's selection color at
+    // 25% alpha so the indicator is recognisable as "the same family"
+    // as selection without looking like a real selection.
+    if let Some((hover_start, hover_end)) = command_block_hover_rows
+        && hover_start <= hover_end
+    {
+        let cw = gl_f32_u32(cell_width);
+        let ch = gl_f32_u32(cell_height);
+        let last_row = shaped_lines.len().saturating_sub(1);
+        let clamped_end = hover_end.min(last_row);
+        let color = command_block_hover_bg_f(theme);
+        for row in hover_start..=clamped_end {
+            if row >= shaped_lines.len() {
+                break;
+            }
+            let row_scale = x_scale(shaped_lines[row].line_width);
+            // Use the full terminal width: ignore per-row column count
+            // so the tint visually marks the entire block regardless of
+            // how short individual lines are.
+            let term_cols = shaped_lines[row]
+                .runs
+                .last()
+                .map_or(0, |r| r.col_start + run_col_count(r));
+            if term_cols == 0 {
+                continue;
+            }
+            let x0 = 0.0;
+            let x1 = gl_f32(term_cols) * cw * row_scale;
+            let y0 = gl_f32(row) * ch;
+            let y1 = y0 + ch;
             push_quad(deco, x0, y0, x1, y1, color);
         }
     }
@@ -1230,6 +1274,7 @@ mod tests {
                 selection: None,
                 selection_is_block: false,
                 match_highlights: &[],
+                command_block_hover_rows: None,
                 theme: &themes::CATPPUCCIN_MOCHA,
                 cursor_color_override: None,
             },

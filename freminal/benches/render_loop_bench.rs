@@ -471,6 +471,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                             selection: None,
                             selection_is_block: false,
                             match_highlights: &[],
+                            command_block_hover_rows: None,
                             theme: &CATPPUCCIN_MOCHA,
                             cursor_color_override: None,
                         },
