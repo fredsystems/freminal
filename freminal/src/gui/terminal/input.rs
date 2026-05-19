@@ -325,6 +325,30 @@ pub(super) fn dispatch_binding_action(
                 "Failed to send ClearScrollback to PTY consumer"
             );
         }
+        KeyAction::ToggleFoldAtCursor => {
+            // Find the completed block whose [command_start_row, end_row]
+            // range contains the cursor row. Running blocks
+            // (`end_row.is_none()`) are not foldable. If no command_start_row
+            // has been emitted yet (OSC 133 C not seen) the block has no
+            // foldable body, so skip it as well.
+            let cursor_row = snap.cursor_pos.y;
+            if let Some(block) =
+                snap.command_blocks
+                    .iter()
+                    .find(|b| match (b.command_start_row, b.end_row) {
+                        (Some(start), Some(end)) => cursor_row >= start && cursor_row <= end,
+                        _ => false,
+                    })
+            {
+                view_state.toggle_fold(block.id);
+            }
+        }
+        KeyAction::FoldAll => {
+            view_state.fold_all(snap.command_blocks.iter());
+        }
+        KeyAction::UnfoldAll => {
+            view_state.unfold_all();
+        }
         // All other actions (zoom, settings, tabs, etc.) require GUI state
         // not available here.  Defer them to the GUI layer.
         other => deferred_actions.push(other),

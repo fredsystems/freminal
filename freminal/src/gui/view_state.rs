@@ -12,13 +12,14 @@
 //! See `Documents/PERFORMANCE_PLAN.md`, Section 4.5 for the architecture context.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use conv2::ConvUtil;
 use egui;
-use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::buffer_states::{command_block::CommandBlockId, tchar::TChar};
 
 use super::mouse::PreviousMouseState;
 
@@ -333,6 +334,19 @@ pub struct ViewState {
     /// while mouse tracking is off (no mouse-aware TUI application running).
     pub selection: SelectionState,
 
+    /// Set of OSC 133 command blocks the user has folded in this pane.
+    ///
+    /// Folding is a pure view-layer concept — the underlying buffer is
+    /// unchanged. The render loop consults this set every frame to skip
+    /// the rows in each folded block's range and synthesise a single
+    /// placeholder row in their place.
+    ///
+    /// Only completed blocks (those with an end row recorded by OSC 133 D)
+    /// can be folded. The set is keyed by stable `CommandBlockId`, so IDs
+    /// for blocks that have since scrolled out of scrollback remain in the
+    /// set harmlessly until a fold/unfold action prunes them.
+    pub folded_blocks: HashSet<CommandBlockId>,
+
     // ── Text blink state ─────────────────────────────────────────────
     /// Current position in the 6-tick blink cycle (0–5).
     ///
@@ -462,6 +476,7 @@ impl Default for ViewState {
             previous_scroll_amount: 0.0,
             previous_mouse_state: None,
             selection: SelectionState::default(),
+            folded_blocks: HashSet::new(),
             text_blink_cycle: 0,
             text_blink_last_tick: Instant::now(),
             text_blink_slow_visible: true,
@@ -489,6 +504,71 @@ impl ViewState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // ── Command-block folding (OSC 133) ───────────────────────────────
+
+    /// Returns `true` if `id` is currently folded.
+    #[must_use]
+    pub fn is_folded(&self, id: CommandBlockId) -> bool {
+        self.folded_blocks.contains(&id)
+    }
+
+    /// Fold a single block. Clears any active selection because the row
+    /// indices the selection refers to may no longer be visible after the
+    /// fold collapses rows.
+    ///
+    /// The caller is responsible for ensuring `id` refers to a completed
+    /// block; this method does not validate against the snapshot.
+    pub fn fold(&mut self, id: CommandBlockId) {
+        if self.folded_blocks.insert(id) {
+            self.selection.clear();
+        }
+    }
+
+    /// Unfold a single block. Clears the active selection on a state change
+    /// for the same reason as [`fold`](Self::fold).
+    pub fn unfold(&mut self, id: CommandBlockId) {
+        if self.folded_blocks.remove(&id) {
+            self.selection.clear();
+        }
+    }
+
+    /// Toggle a block's fold state. Returns the new state (`true` = folded).
+    pub fn toggle_fold(&mut self, id: CommandBlockId) -> bool {
+        if self.folded_blocks.remove(&id) {
+            self.selection.clear();
+            false
+        } else {
+            self.folded_blocks.insert(id);
+            self.selection.clear();
+            true
+        }
+    }
+
+    /// Fold every completed block in `blocks`. Running blocks (those without
+    /// a recorded `end_row`) are skipped.
+    pub fn fold_all<'a, I>(&mut self, blocks: I)
+    where
+        I: IntoIterator<Item = &'a freminal_common::buffer_states::command_block::CommandBlock>,
+    {
+        let before = self.folded_blocks.len();
+        for block in blocks {
+            if block.end_row.is_some() {
+                self.folded_blocks.insert(block.id);
+            }
+        }
+        if self.folded_blocks.len() != before {
+            self.selection.clear();
+        }
+    }
+
+    /// Unfold every currently folded block.
+    pub fn unfold_all(&mut self) {
+        if !self.folded_blocks.is_empty() {
+            self.folded_blocks.clear();
+            self.selection.clear();
+        }
     }
 
     // ── Font zoom helpers ────────────────────────────────────────────
@@ -839,6 +919,91 @@ pub(crate) fn line_boundaries(visible_chars: &[TChar], screen_row: usize) -> (us
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+
+    // ── Command-block folding ──────────────────────────────────────────
+
+    fn make_block(
+        id: u64,
+        prompt: usize,
+        cmd_start: Option<usize>,
+        end: Option<usize>,
+    ) -> CommandBlock {
+        let mut b = CommandBlock::new_running(prompt, None, String::new());
+        b.id = CommandBlockId(id);
+        b.command_start_row = cmd_start;
+        b.end_row = end;
+        b
+    }
+
+    #[test]
+    fn fold_unfold_roundtrip() {
+        let mut vs = ViewState::new();
+        let id = CommandBlockId(1);
+        assert!(!vs.is_folded(id));
+        vs.fold(id);
+        assert!(vs.is_folded(id));
+        vs.unfold(id);
+        assert!(!vs.is_folded(id));
+    }
+
+    #[test]
+    fn toggle_fold_returns_new_state() {
+        let mut vs = ViewState::new();
+        let id = CommandBlockId(7);
+        assert!(vs.toggle_fold(id));
+        assert!(vs.is_folded(id));
+        assert!(!vs.toggle_fold(id));
+        assert!(!vs.is_folded(id));
+    }
+
+    #[test]
+    fn fold_all_skips_running_blocks() {
+        let mut vs = ViewState::new();
+        let blocks = [
+            make_block(1, 0, Some(1), Some(5)),    // completed
+            make_block(2, 6, Some(7), None),       // running — must not fold
+            make_block(3, 10, Some(11), Some(15)), // completed
+        ];
+        vs.fold_all(blocks.iter());
+        assert!(vs.is_folded(CommandBlockId(1)));
+        assert!(!vs.is_folded(CommandBlockId(2)));
+        assert!(vs.is_folded(CommandBlockId(3)));
+    }
+
+    #[test]
+    fn unfold_all_clears_set() {
+        let mut vs = ViewState::new();
+        vs.fold(CommandBlockId(1));
+        vs.fold(CommandBlockId(2));
+        vs.unfold_all();
+        assert!(vs.folded_blocks.is_empty());
+    }
+
+    #[test]
+    fn fold_clears_selection() {
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(CellCoord { row: 0, col: 0 });
+        vs.selection.end = Some(CellCoord { row: 2, col: 5 });
+        vs.fold(CommandBlockId(1));
+        assert!(
+            vs.selection.anchor.is_none(),
+            "fold must clear selection anchor"
+        );
+        assert!(vs.selection.end.is_none(), "fold must clear selection end");
+    }
+
+    #[test]
+    fn unfold_noop_does_not_clear_selection() {
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(CellCoord { row: 0, col: 0 });
+        vs.selection.end = Some(CellCoord { row: 2, col: 5 });
+        // Unfolding a block that was never folded is a no-op and must not
+        // disturb the user's selection.
+        vs.unfold(CommandBlockId(99));
+        assert!(vs.selection.anchor.is_some());
+        assert!(vs.selection.end.is_some());
+    }
 
     #[test]
     fn blink_cycle_slow_visibility() {

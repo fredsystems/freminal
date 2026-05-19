@@ -739,6 +739,25 @@ pub enum KeyAction {
     /// drops the off-screen history. Useful for cleaning up a session's
     /// accumulated history without clearing the current prompt context.
     ClearScrollback,
+    /// Toggle the folded/collapsed state of the OSC 133 command block
+    /// containing the cursor.
+    ///
+    /// Only applies to completed blocks (those with a recorded end row).
+    /// Running commands cannot be folded. Folding hides every row from the
+    /// command's start row through its end row inclusive; the prompt line
+    /// itself remains visible. Clicking the placeholder row produced by a
+    /// folded block unfolds it.
+    ///
+    /// Unbound by default to avoid conflicting with `OpenSearch`
+    /// (`Ctrl+Shift+F`). Users who want a fold shortcut should add a binding
+    /// in `[keybindings]`.
+    ToggleFoldAtCursor,
+    /// Fold every completed OSC 133 command block in the current pane.
+    ///
+    /// Running blocks are skipped. Unbound by default.
+    FoldAll,
+    /// Unfold every folded OSC 133 command block in the current pane.
+    UnfoldAll,
     /// Start or stop recording the current session to a `.frec` file.
     ///
     /// Toggle-on captures the current topology (all windows, tabs, pane
@@ -835,6 +854,9 @@ impl KeyAction {
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
             Self::ClearScrollback => "clear_scrollback",
+            Self::ToggleFoldAtCursor => "toggle_fold_at_cursor",
+            Self::FoldAll => "fold_all",
+            Self::UnfoldAll => "unfold_all",
             Self::ToggleRecording => "toggle_recording",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
@@ -899,6 +921,9 @@ impl KeyAction {
             Self::ScrollLineUp => "Scroll Line Up",
             Self::ScrollLineDown => "Scroll Line Down",
             Self::ClearScrollback => "Clear Scrollback",
+            Self::ToggleFoldAtCursor => "Toggle Fold at Cursor",
+            Self::FoldAll => "Fold All Commands",
+            Self::UnfoldAll => "Unfold All Commands",
             Self::ToggleRecording => "Toggle Recording",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
@@ -960,6 +985,9 @@ impl KeyAction {
         Self::ScrollLineUp,
         Self::ScrollLineDown,
         Self::ClearScrollback,
+        Self::ToggleFoldAtCursor,
+        Self::FoldAll,
+        Self::UnfoldAll,
         Self::ToggleRecording,
         Self::SplitVertical,
         Self::SplitHorizontal,
@@ -1033,6 +1061,9 @@ impl FromStr for KeyAction {
             "scroll_line_up" => Ok(Self::ScrollLineUp),
             "scroll_line_down" => Ok(Self::ScrollLineDown),
             "clear_scrollback" => Ok(Self::ClearScrollback),
+            "toggle_fold_at_cursor" => Ok(Self::ToggleFoldAtCursor),
+            "fold_all" => Ok(Self::FoldAll),
+            "unfold_all" => Ok(Self::UnfoldAll),
             "toggle_recording" => Ok(Self::ToggleRecording),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
@@ -1313,6 +1344,16 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::Backspace, BindingModifiers::CTRL_SHIFT),
         KeyAction::ClearScrollback,
+    );
+
+    // Unfold every folded OSC 133 command block in the current pane.
+    // `ToggleFoldAtCursor` and `FoldAll` are intentionally unbound by default
+    // — `Ctrl+Shift+F` is already bound to `OpenSearch` and there is no
+    // obvious free combo for a one-shot "fold the block at the cursor"
+    // action. Users who want one should add a binding in `[keybindings]`.
+    map.bind(
+        KeyCombo::new(BindingKey::U, BindingModifiers::CTRL_SHIFT),
+        KeyAction::UnfoldAll,
     );
 
     // Toggle session recording on/off. Ctrl+Shift+R is free on all
@@ -1723,7 +1764,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            53,
+            56,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2086,11 +2127,11 @@ mod tests {
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
         //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
-        //        + ToggleRecording(1) = 43
+        //        + ToggleRecording(1) + UnfoldAll(1) = 44
         assert_eq!(
             map.len(),
-            43,
-            "default binding map should have exactly 43 bindings"
+            44,
+            "default binding map should have exactly 44 bindings"
         );
     }
 
@@ -2107,6 +2148,8 @@ mod tests {
             KeyAction::SearchNext,
             KeyAction::SearchPrev,
             KeyAction::ToggleMenuBar,
+            KeyAction::ToggleFoldAtCursor,
+            KeyAction::FoldAll,
         ];
         for action in unbound {
             assert!(

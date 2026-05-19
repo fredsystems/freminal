@@ -353,6 +353,11 @@ limit = 4000
 #     scroll_line_down = "Shift+Down"
 #     clear_scrollback = "Ctrl+Shift+Backspace"  (erase scrollback; leaves visible display)
 #
+#   Command-block folding (OSC 133):
+#     toggle_fold_at_cursor = ""              (unbound — no default to avoid conflicting with open_search)
+#     fold_all              = ""              (unbound — opt-in)
+#     unfold_all            = "Ctrl+Shift+U"  (unfold every folded command block in this pane)
+#
 #   Pane management:
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)
 #     split_horizontal = "Ctrl+Shift+Minus"  (split focused pane top / bottom)
