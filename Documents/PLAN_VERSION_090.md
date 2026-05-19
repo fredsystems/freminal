@@ -1226,7 +1226,7 @@ both clean.
 - 72.10b-2 (`23faec7`, 2026-05-19) — wired `RowMap` into the widget render
   path so folded rows are skipped and a one-row gap is inserted; the gap
   was visually blank in this subtask.
-- 72.10b-3 (`05ff96d`, 2026-05-19) — replaced the blank gap with
+- 72.10b-3 (`e896592`, 2026-05-19) — replaced the blank gap with
   a real placeholder line ("▶ N lines hidden — click to unfold") shaped
   via the new `shape_placeholder_line` helper in
   `freminal/src/gui/shaping.rs`, recorded per-frame placeholder hit-rects
@@ -2673,7 +2673,7 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      with per-tab pending-event flag for unfocused tabs.
    - **72.10** ✅ done (commits `c107a21` 72.10a — view state + keybindings;
      `6ea2808` 72.10b-1 — folding helpers + RowMap; `23faec7` 72.10b-2 —
-     wire RowMap into renderer; `05ff96d` 72.10b-3 —
+     wire RowMap into renderer; `e896592` 72.10b-3 —
      placeholder row rendering, click-to-unfold hit-test, hover cursor,
      benchmark).
    - **72.11 → 72.15** — remaining subtasks per the rest of this plan.
