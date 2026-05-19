@@ -227,6 +227,86 @@ fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
         .map(|b| b.id)
 }
 
+/// Return the output row range `[output_start_row, end_row]` for a
+/// command block, if both bounds are present.
+///
+/// Blocks without an OSC 133 `C` marker (`output_start_row == None`) or
+/// still-running blocks (`end_row == None`) cannot have their output
+/// copied and return `None`.
+const fn block_output_range(block: &CommandBlock) -> Option<(usize, usize)> {
+    match (block.output_start_row, block.end_row) {
+        (Some(start), Some(end)) if start <= end => Some((start, end)),
+        _ => None,
+    }
+}
+
+/// Find the most recently completed command block (newest first that has
+/// a finished `end_row` *and* a captured `output_start_row`).
+///
+/// "Completed" here is stricter than [`find_fold_target`]'s notion: copy
+/// actions require the C marker to have fired so we know where the
+/// output region begins. Blocks missing `output_start_row` are skipped
+/// even if `end_row` is set.
+pub(super) fn find_last_copyable_block(snap: &TerminalSnapshot) -> Option<&CommandBlock> {
+    snap.command_blocks
+        .iter()
+        .rev()
+        .find(|b| block_output_range(b).is_some())
+}
+
+/// Find the command block whose `[command_start_row, end_row]` row range
+/// contains `row`.
+///
+/// Used by the right-click "Copy Command Output" menu entry and by
+/// `CopyCommandOutputAtCursor` to map a visible row back to a block.
+/// Running blocks (no `end_row`) and blocks missing
+/// `command_start_row` are skipped. If multiple blocks cover the same
+/// row (which should not happen for well-formed OSC 133 streams), the
+/// first match in insertion order wins.
+pub(super) fn find_block_containing_row(
+    snap: &TerminalSnapshot,
+    row: usize,
+) -> Option<&CommandBlock> {
+    snap.command_blocks
+        .iter()
+        .find(|b| match (b.command_start_row, b.end_row) {
+            (Some(start), Some(end)) => row >= start && row <= end,
+            _ => false,
+        })
+}
+
+/// Send an `ExtractSelection` event covering the full-width rows
+/// `[start_row, end_row]` to the PTY consumer.
+///
+/// `end_col` is set to `term_width.saturating_sub(1)` so each row is
+/// captured edge-to-edge; the buffer's `extract_text` impl already
+/// clamps per-row to actual cell length, so trailing empty columns
+/// don't produce spurious whitespace.
+///
+/// Returns `true` if the send succeeded. Failure is logged at error
+/// level and the caller should leave `clipboard_pending` untouched.
+fn send_extract_output_range(
+    input_tx: &Sender<InputEvent>,
+    snap: &TerminalSnapshot,
+    start_row: usize,
+    end_row: usize,
+) -> bool {
+    let end_col = snap.term_width.saturating_sub(1);
+    match input_tx.send(InputEvent::ExtractSelection {
+        start_row,
+        start_col: 0,
+        end_row,
+        end_col,
+        is_block: false,
+    }) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Failed to send ExtractSelection (command output): {e}");
+            false
+        }
+    }
+}
+
 /// Dispatch a [`KeyAction`] that was resolved from the binding map.
 ///
 /// Handles the subset of actions that can be executed inside
@@ -382,6 +462,23 @@ pub(super) fn dispatch_binding_action(
         }
         KeyAction::UnfoldAll => {
             view_state.unfold_all();
+        }
+        KeyAction::CopyLastCommandOutput => {
+            if let Some(block) = find_last_copyable_block(snap)
+                && let Some((start_row, end_row)) = block_output_range(block)
+                && send_extract_output_range(input_tx, snap, start_row, end_row)
+            {
+                *clipboard_pending = true;
+            }
+        }
+        KeyAction::CopyCommandOutputAtCursor => {
+            let cursor_row = snap.cursor_pos.y;
+            if let Some(block) = find_block_containing_row(snap, cursor_row)
+                && let Some((start_row, end_row)) = block_output_range(block)
+                && send_extract_output_range(input_tx, snap, start_row, end_row)
+            {
+                *clipboard_pending = true;
+            }
         }
         // All other actions (zoom, settings, tabs, etc.) require GUI state
         // not available here.  Defer them to the GUI layer.
@@ -1888,5 +1985,104 @@ mod fold_target_tests {
         partial.command_start_row = None;
         let snap = snap_with(vec![completed(1, 5, 10), partial], 25);
         assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+    }
+
+    // ---- find_last_copyable_block ----
+
+    #[test]
+    fn last_copyable_picks_newest_completed_block() {
+        // Two completed blocks; the most recently appended (id 2) wins.
+        let snap = snap_with(vec![completed(1, 5, 10), completed(2, 15, 20)], 0);
+        assert_eq!(
+            find_last_copyable_block(&snap).map(|b| b.id),
+            Some(CommandBlockId(2))
+        );
+    }
+
+    #[test]
+    fn last_copyable_skips_running_blocks() {
+        // The newest block is still running (no end_row); we must fall
+        // back to the previous completed block.
+        let snap = snap_with(vec![completed(1, 5, 10), running(2, 15)], 0);
+        assert_eq!(
+            find_last_copyable_block(&snap).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+    }
+
+    #[test]
+    fn last_copyable_skips_block_missing_output_start_row() {
+        // A completed block that never saw the `C` marker has no
+        // copyable output range and must be skipped.
+        let mut partial = completed(2, 15, 20);
+        partial.output_start_row = None;
+        let snap = snap_with(vec![completed(1, 5, 10), partial], 0);
+        assert_eq!(
+            find_last_copyable_block(&snap).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+    }
+
+    #[test]
+    fn last_copyable_empty_snapshot_returns_none() {
+        let snap = snap_with(vec![], 0);
+        assert!(find_last_copyable_block(&snap).is_none());
+
+        let snap = snap_with(vec![running(1, 5)], 0);
+        assert!(find_last_copyable_block(&snap).is_none());
+    }
+
+    // ---- find_block_containing_row ----
+
+    #[test]
+    fn containing_row_inside_block_returns_that_block() {
+        let snap = snap_with(vec![completed(1, 5, 10), completed(2, 15, 20)], 0);
+        assert_eq!(
+            find_block_containing_row(&snap, 7).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+        assert_eq!(
+            find_block_containing_row(&snap, 18).map(|b| b.id),
+            Some(CommandBlockId(2))
+        );
+    }
+
+    #[test]
+    fn containing_row_on_boundary_is_inclusive() {
+        // Both the command_start_row and end_row endpoints belong to
+        // the block.
+        let snap = snap_with(vec![completed(1, 5, 10)], 0);
+        assert_eq!(
+            find_block_containing_row(&snap, 5).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+        assert_eq!(
+            find_block_containing_row(&snap, 10).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+    }
+
+    #[test]
+    fn containing_row_outside_all_blocks_returns_none() {
+        let snap = snap_with(vec![completed(1, 5, 10), completed(2, 15, 20)], 0);
+        assert!(find_block_containing_row(&snap, 12).is_none());
+        assert!(find_block_containing_row(&snap, 25).is_none());
+    }
+
+    #[test]
+    fn containing_row_skips_running_block() {
+        // The cursor row falls within the running block's prompt..end
+        // span, but running blocks have no end_row and must be excluded.
+        let snap = snap_with(vec![running(1, 5)], 0);
+        assert!(find_block_containing_row(&snap, 7).is_none());
+    }
+
+    #[test]
+    fn containing_row_skips_block_missing_command_start_row() {
+        // Blocks without a `C` marker have no usable start row.
+        let mut partial = completed(1, 5, 10);
+        partial.command_start_row = None;
+        let snap = snap_with(vec![partial], 0);
+        assert!(find_block_containing_row(&snap, 7).is_none());
     }
 }

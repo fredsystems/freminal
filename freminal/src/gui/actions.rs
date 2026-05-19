@@ -380,7 +380,9 @@ impl super::FreminalGui {
             | KeyAction::ClearScrollback
             | KeyAction::ToggleFoldAtCursor
             | KeyAction::FoldAll
-            | KeyAction::UnfoldAll => {}
+            | KeyAction::UnfoldAll
+            | KeyAction::CopyLastCommandOutput
+            | KeyAction::CopyCommandOutputAtCursor => {}
             KeyAction::NextTab => {
                 win.tabs.next_tab();
                 if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {

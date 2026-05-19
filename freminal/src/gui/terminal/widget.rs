@@ -310,6 +310,12 @@ enum ContextMenuAction {
     SelectAll,
     OpenUrl(String),
     NewTerminal,
+    /// Copy the output range `[start_row, end_row]` of the command block
+    /// the right-click occurred inside, full-width per row.
+    CopyCommandOutput {
+        start_row: usize,
+        end_row: usize,
+    },
 }
 
 /// Render the right-click context menu when `view_state.context_menu_pos`
@@ -414,6 +420,18 @@ fn render_context_menu_area(
         )
     });
 
+    // Look up whether the right-clicked cell sits inside a completed
+    // OSC 133 command block.  Returns `(start_row, end_row)` of the
+    // block's output region if the click was inside a block with a
+    // captured C marker and a recorded D marker.
+    let command_output_range = view_state.context_menu_cell.and_then(|cell| {
+        let block = super::input::find_block_containing_row(snap, cell.row)?;
+        match (block.output_start_row, block.end_row) {
+            (Some(start), Some(end)) if start <= end => Some((start, end)),
+            _ => None,
+        }
+    });
+
     egui::Area::new(area_id)
         .order(egui::Order::Foreground)
         .fixed_pos(menu_pos)
@@ -457,6 +475,19 @@ fn render_context_menu_area(
                     let label = format!("Open {}", truncate_url(url, 40));
                     if ui.button(label).clicked() {
                         *action = Some(ContextMenuAction::OpenUrl(url.clone()));
+                        *close = true;
+                    }
+                }
+
+                // "Copy Command Output" — only shown when the clicked
+                // cell is inside a completed OSC 133 command block
+                // (`OutputStart` and `CommandFinished` markers both
+                // recorded).  Running and incomplete blocks suppress
+                // the entry entirely.
+                if let Some((start_row, end_row)) = command_output_range {
+                    ui.separator();
+                    if ui.button("Copy Command Output").clicked() {
+                        *action = Some(ContextMenuAction::CopyCommandOutput { start_row, end_row });
                         *close = true;
                     }
                 }
@@ -566,6 +597,27 @@ fn dispatch_context_menu_action(
         }
         ContextMenuAction::NewTerminal => {
             deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
+        }
+        ContextMenuAction::CopyCommandOutput { start_row, end_row } => {
+            // Full-width per-row extraction.  `extract_text` clamps per
+            // row to the actual cell count, so passing
+            // `term_width - 1` as `end_col` gives us "to end of row"
+            // without spurious trailing whitespace.
+            let end_col = snap.term_width.saturating_sub(1);
+            if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
+                start_row,
+                start_col: 0,
+                end_row,
+                end_col,
+                is_block: false,
+            }) {
+                error!("Context menu Copy Command Output: failed to send ExtractSelection: {e}");
+            } else if let Ok(text) =
+                clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                && !text.is_empty()
+            {
+                ui.ctx().copy_text(text);
+            }
         }
     }
 }

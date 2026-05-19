@@ -758,6 +758,25 @@ pub enum KeyAction {
     FoldAll,
     /// Unfold every folded OSC 133 command block in the current pane.
     UnfoldAll,
+    /// Copy the output of the most recently completed OSC 133 command
+    /// block to the clipboard.
+    ///
+    /// "Output" is the row range `[output_start_row, end_row]` — i.e.
+    /// the text the command produced after the C marker fired, up to and
+    /// including the row where D was received. Running blocks (no
+    /// `end_row`) and blocks missing `output_start_row` are skipped.
+    ///
+    /// Default binding: `Ctrl+Shift+Y`. When `command_blocks.enabled`
+    /// is `false` the action is a no-op.
+    CopyLastCommandOutput,
+    /// Copy the output of the OSC 133 command block containing the
+    /// right-clicked or cursor row.
+    ///
+    /// Unbound by default; surfaced primarily via the right-click
+    /// context menu entry "Copy Command Output". Users who want a
+    /// keybinding for it should add one in `[keybindings]`. When
+    /// `command_blocks.enabled` is `false` the action is a no-op.
+    CopyCommandOutputAtCursor,
     /// Start or stop recording the current session to a `.frec` file.
     ///
     /// Toggle-on captures the current topology (all windows, tabs, pane
@@ -857,6 +876,8 @@ impl KeyAction {
             Self::ToggleFoldAtCursor => "toggle_fold_at_cursor",
             Self::FoldAll => "fold_all",
             Self::UnfoldAll => "unfold_all",
+            Self::CopyLastCommandOutput => "copy_last_command_output",
+            Self::CopyCommandOutputAtCursor => "copy_command_output_at_cursor",
             Self::ToggleRecording => "toggle_recording",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
@@ -924,6 +945,8 @@ impl KeyAction {
             Self::ToggleFoldAtCursor => "Toggle Fold at Cursor",
             Self::FoldAll => "Fold All Commands",
             Self::UnfoldAll => "Unfold All Commands",
+            Self::CopyLastCommandOutput => "Copy Last Command Output",
+            Self::CopyCommandOutputAtCursor => "Copy Command Output at Cursor",
             Self::ToggleRecording => "Toggle Recording",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
@@ -988,6 +1011,8 @@ impl KeyAction {
         Self::ToggleFoldAtCursor,
         Self::FoldAll,
         Self::UnfoldAll,
+        Self::CopyLastCommandOutput,
+        Self::CopyCommandOutputAtCursor,
         Self::ToggleRecording,
         Self::SplitVertical,
         Self::SplitHorizontal,
@@ -1064,6 +1089,8 @@ impl FromStr for KeyAction {
             "toggle_fold_at_cursor" => Ok(Self::ToggleFoldAtCursor),
             "fold_all" => Ok(Self::FoldAll),
             "unfold_all" => Ok(Self::UnfoldAll),
+            "copy_last_command_output" => Ok(Self::CopyLastCommandOutput),
+            "copy_command_output_at_cursor" => Ok(Self::CopyCommandOutputAtCursor),
             "toggle_recording" => Ok(Self::ToggleRecording),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
@@ -1268,6 +1295,14 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT),
         KeyAction::Paste,
+    );
+    // Copy the last completed command's output (OSC 133 D-bounded region).
+    // Ctrl+Shift+Y is free on all platforms — bash readline binds Ctrl+Y to
+    // yank but only without Shift. Mnemonic: "Y is for Yank a command's
+    // output to the clipboard".
+    map.bind(
+        KeyCombo::new(BindingKey::Y, BindingModifiers::CTRL_SHIFT),
+        KeyAction::CopyLastCommandOutput,
     );
 
     // -- Font zoom --
@@ -1764,7 +1799,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            56,
+            58,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2127,11 +2162,12 @@ mod tests {
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
         //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
-        //        + ToggleRecording(1) + UnfoldAll(1) = 44
+        //        + ToggleRecording(1) + UnfoldAll(1)
+        //        + CopyLastCommandOutput(1) = 45
         assert_eq!(
             map.len(),
-            44,
-            "default binding map should have exactly 44 bindings"
+            45,
+            "default binding map should have exactly 45 bindings"
         );
     }
 
@@ -2150,6 +2186,7 @@ mod tests {
             KeyAction::ToggleMenuBar,
             KeyAction::ToggleFoldAtCursor,
             KeyAction::FoldAll,
+            KeyAction::CopyCommandOutputAtCursor,
         ];
         for action in unbound {
             assert!(
