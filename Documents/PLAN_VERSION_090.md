@@ -1213,6 +1213,51 @@ both clean.
   rendering 100 blocks with 50% folded. Acceptable regression budget per
   AGENTS.md: 15%.
 
+**Completion notes (72.10):**
+
+- 72.10a (`c107a21`, 2026-05-19) — added `ViewState::folded_blocks`,
+  `fold` / `unfold` / `toggle_fold` / `unfold_all`, three `KeyAction`
+  variants (`ToggleFoldAtCursor`, `FoldAll`, `UnfoldAll`) with default
+  bindings, and unit tests for the fold round-trip.
+- 72.10b-1 (`6ea2808`, 2026-05-19) — `freminal/src/gui/folding.rs`:
+  `FoldRange`, `RowMap`, `RenderedRow::{Snapshot, Placeholder}` and the
+  `rendered_to_snapshot` lookup, with exhaustive unit tests for
+  RowMap construction and lookup behavior.
+- 72.10b-2 (`23faec7`, 2026-05-19) — wired `RowMap` into the widget render
+  path so folded rows are skipped and a one-row gap is inserted; the gap
+  was visually blank in this subtask.
+- 72.10b-3 (`05ff96d`, 2026-05-19) — replaced the blank gap with
+  a real placeholder line ("▶ N lines hidden — click to unfold") shaped
+  via the new `shape_placeholder_line` helper in
+  `freminal/src/gui/shaping.rs`, recorded per-frame placeholder hit-rects
+  on `PaneRenderCache`, added click consumption in
+  `write_input_to_terminal` that calls `view_state.unfold(id)` and skips
+  selection/PTY-mouse-report, and added a `CursorIcon::PointingHand`
+  override when the pointer hovers a placeholder rect (runs
+  unconditionally, not gated on `snap.has_urls`). New unit tests cover
+  `format_placeholder_text` (singular/plural/zero/truncation/very-narrow/
+  zero-width) and `hit_test_placeholder` (inside, outside, empty,
+  multiple rects). Added `bench_shape_placeholder_line` to
+  `freminal/benches/render_loop_bench.rs` exercising typical (w=80) and
+  wide (w=200) placeholder text.
+
+  Benchmark results (release, criterion):
+
+  | Benchmark                                     | Before | After     | Change |
+  | --------------------------------------------- | ------ | --------- | ------ |
+  | `render_terminal_text_arcswap/store_and_load` | n/a    | 67.48 ns  | —      |
+  | `render_terminal_text_arcswap/load_only`      | n/a    | 7.83 ns   | —      |
+  | `shape_placeholder_line/typical_w80`          | n/a    | 433.58 us | new    |
+  | `shape_placeholder_line/wide_w200`            | n/a    | 486.66 us | new    |
+
+  Note: the `shape_placeholder_line` benchmark wall-time is dominated by
+  the `FontManager::new()` call in `iter_batched`'s setup closure (font
+  enumeration + face loading), not the shaping work itself. A future
+  improvement is to reuse a single `FontManager` across iterations.
+  The arcswap baseline is included for reference; this subtask does
+  not touch the snapshot transport path, so no regression is expected
+  or observed.
+
 #### 72.11 — Copy command output actions
 
 **Scope:** `freminal-common/src/keybindings.rs`, `freminal/src/gui/actions.rs`,
@@ -2626,7 +2671,12 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
    - **72.9** ✅ done (commit `731180a`, 2026-05-19). CommandFinishedEvent
      transport from PTY consumer thread to per-pane recent-command ring,
      with per-tab pending-event flag for unfocused tabs.
-   - **72.10 → 72.15** — remaining subtasks per the rest of this plan.
+   - **72.10** ✅ done (commits `c107a21` 72.10a — view state + keybindings;
+     `6ea2808` 72.10b-1 — folding helpers + RowMap; `23faec7` 72.10b-2 —
+     wire RowMap into renderer; `05ff96d` 72.10b-3 —
+     placeholder row rendering, click-to-unfold hit-test, hover cursor,
+     benchmark).
+   - **72.11 → 72.15** — remaining subtasks per the rest of this plan.
    - **72.16.e** — XTGETTCAP unknown-capability log noise (cosmetic;
      land any time before v0.9.0 ships).
 

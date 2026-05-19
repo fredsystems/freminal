@@ -51,6 +51,67 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::error;
 
+// ─── Fold-placeholder helpers (Task 72.10b-3) ────────────────────────────
+
+/// Format the placeholder text shown on a collapsed fold-row.
+///
+/// Examples (assuming `width_cols` is generous):
+///
+/// - `format_placeholder_text(1, 80)` → `"▶ 1 line hidden — click to unfold"`
+/// - `format_placeholder_text(7, 80)` → `"▶ 7 lines hidden — click to unfold"`
+///
+/// When `width_cols` cannot fit the full string, the result is truncated
+/// to `width_cols.saturating_sub(1)` characters and an ellipsis (`…`) is
+/// appended.  When `width_cols` is too small to fit even the minimal
+/// `"▶ N lines…"` form, the helper falls back to `"▶…"` (or `""` if the
+/// width is zero).
+#[must_use]
+pub fn format_placeholder_text(hidden_rows: usize, width_cols: usize) -> String {
+    let suffix = if hidden_rows == 1 { "line" } else { "lines" };
+    let full = format!("▶ {hidden_rows} {suffix} hidden — click to unfold");
+
+    if width_cols == 0 {
+        return String::new();
+    }
+
+    // Count *characters* (not bytes) to compare against terminal columns.
+    // This is a rough match: wide chars actually take 2 cols, but the
+    // placeholder string is overwhelmingly ASCII so the over-approximation
+    // is acceptable for truncation purposes.
+    if full.chars().count() <= width_cols {
+        return full;
+    }
+
+    if width_cols < 2 {
+        return "▶".to_string();
+    }
+
+    // Take `width_cols - 1` chars, then append the ellipsis.
+    let kept: String = full.chars().take(width_cols.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Hit-test a pointer position against a list of fold-placeholder rects.
+///
+/// Returns the `CommandBlockId` of the first rect that contains `pos`, or
+/// `None` if the pointer is not over any placeholder.  Rects are checked
+/// in insertion order; placeholder rows do not overlap by construction
+/// (each occupies one rendered row), so order does not matter for
+/// correctness — but it is well-defined for testability.
+#[must_use]
+pub fn hit_test_placeholder(
+    rects: &[(
+        Rect,
+        freminal_common::buffer_states::command_block::CommandBlockId,
+    )],
+    pos: Pos2,
+) -> Option<freminal_common::buffer_states::command_block::CommandBlockId> {
+    rects
+        .iter()
+        .find(|(rect, _)| rect.contains(pos))
+        .map(|(_, id)| *id)
+}
+
 ///
 /// The scrollbar is shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
@@ -721,6 +782,18 @@ pub struct PaneRenderCache {
     /// The cached vertex buffers still encode the *previous* layout, so we
     /// must force a full rebuild when this epoch changes.
     pub(super) previous_fold_epoch: u64,
+    /// Per-frame list of fold-placeholder click targets in window/logical
+    /// pixel coordinates, paired with the `CommandBlockId` to unfold when
+    /// the user clicks them.
+    ///
+    /// Rebuilt every frame inside the render path (cheap — at most one
+    /// entry per folded block) and consumed by [`super::input::write_input_to_terminal`]
+    /// to convert clicks on placeholder rows into `view_state.unfold()`
+    /// calls.  Empty when no folds are active.
+    pub(super) placeholder_hit_rects: Vec<(
+        Rect,
+        freminal_common::buffer_states::command_block::CommandBlockId,
+    )>,
 }
 
 impl PaneRenderCache {
@@ -752,6 +825,7 @@ impl PaneRenderCache {
             previous_term_width: 0,
             previous_term_height: 0,
             previous_fold_epoch: 0,
+            placeholder_hit_rects: Vec::new(),
         }
     }
 
@@ -1097,6 +1171,7 @@ impl FreminalTerminalWidget {
                     binding_map,
                     is_active_pane,
                     recording_ctx,
+                    &cache.placeholder_hit_rects,
                 )
             });
             left_mouse_button_pressed = left_mouse_button_pressed_inner;
@@ -1519,27 +1594,66 @@ impl FreminalTerminalWidget {
                 // `rendered_row_count`, mapping each rendered row index back
                 // to its snapshot row (or to a blank placeholder).
                 //
-                // 72.10b-2: placeholder is an empty `ShapedLine`.  The
-                // visual indicator (line count, triangle glyph) lands in
-                // 72.10b-3.  An empty shaped line produces no glyph runs but
-                // still contributes to the row grid for cursor/selection
-                // coordinates.
+                // 72.10b-3: each placeholder row carries a shaped line of
+                // `"▶ {N} lines hidden — click to unfold"` rendered in a
+                // dim foreground colour (BrightBlack from the active
+                // palette).  Per-placeholder hit rects are recorded into
+                // `cache.placeholder_hit_rects` so the input handler can
+                // turn primary clicks on those rows into `view_state.unfold()`.
+                cache.placeholder_hit_rects.clear();
                 let rendered_shaped_lines: Vec<Arc<ShapedLine>> = if fold_ranges.is_empty() {
                     shaped_lines
                 } else {
-                    let placeholder = Arc::new(ShapedLine {
+                    let empty_placeholder = Arc::new(ShapedLine {
                         runs: Vec::new(),
                         line_width: LineWidth::Normal,
                     });
-                    (0..row_map.rendered_row_count().min(snap.term_height))
-                        .map(|rendered| match row_map.rendered_to_snapshot(rendered) {
-                            Some(RenderedRow::Snapshot(snap_row)) => shaped_lines
-                                .get(snap_row)
-                                .cloned()
-                                .unwrap_or_else(|| Arc::clone(&placeholder)),
-                            Some(RenderedRow::Placeholder(_)) | None => Arc::clone(&placeholder),
-                        })
-                        .collect()
+                    let dim_fg = freminal_common::colors::TerminalColor::BrightBlack;
+                    let row_count = row_map.rendered_row_count().min(snap.term_height);
+                    let mut out: Vec<Arc<ShapedLine>> = Vec::with_capacity(row_count);
+                    for rendered in 0..row_count {
+                        match row_map.rendered_to_snapshot(rendered) {
+                            Some(RenderedRow::Snapshot(snap_row)) => {
+                                out.push(
+                                    shaped_lines
+                                        .get(snap_row)
+                                        .cloned()
+                                        .unwrap_or_else(|| Arc::clone(&empty_placeholder)),
+                                );
+                            }
+                            Some(RenderedRow::Placeholder(range)) => {
+                                let text = format_placeholder_text(range.len(), snap.term_width);
+                                let shaped = crate::gui::shaping::shape_placeholder_line(
+                                    &text,
+                                    dim_fg,
+                                    &mut self.font_manager,
+                                    cell_w_f,
+                                    self.ligatures,
+                                );
+                                out.push(Arc::new(shaped));
+
+                                // Record the placeholder's hit rect in
+                                // logical pixel coordinates so the input
+                                // handler (which sees pointer positions in
+                                // window coordinates) can hit-test against
+                                // it directly.
+                                let rendered_f = rendered.approx_as::<f32>().unwrap_or(0.0);
+                                let row_top =
+                                    rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                                let rect = Rect::from_min_size(
+                                    egui::pos2(terminal_rect.min.x, row_top),
+                                    egui::vec2(terminal_rect.width(), logical_cell_h),
+                                );
+                                cache
+                                    .placeholder_hit_rects
+                                    .push((rect, range.command_block_id));
+                            }
+                            None => {
+                                out.push(Arc::clone(&empty_placeholder));
+                            }
+                        }
+                    }
+                    out
                 };
 
                 // Build search match highlights from the current search state.
@@ -2037,6 +2151,20 @@ impl FreminalTerminalWidget {
             });
         }
 
+        // Fold placeholder hover: override the cursor icon to a pointing
+        // hand whenever the mouse is over a placeholder row, regardless
+        // of URL or OSC 22 shape state. Runs every frame because egui
+        // resets `output.cursor_icon` to Default at the start of each
+        // frame, so the override must be reapplied.
+        if !cache.placeholder_hit_rects.is_empty()
+            && let Some(mouse_position) = view_state.mouse_position
+            && hit_test_placeholder(&cache.placeholder_hit_rects, mouse_position).is_some()
+        {
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = CursorIcon::PointingHand;
+            });
+        }
+
         // ── Drag-and-drop ────────────────────────────────────────────
         handle_file_drop(ui, terminal_rect, input_tx);
 
@@ -2454,5 +2582,89 @@ mod shell_escape_tests {
     fn empty_path() {
         let result = shell_escape_path(Path::new(""));
         assert_eq!(result, "''");
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::{format_placeholder_text, hit_test_placeholder};
+    use egui::{Pos2, Rect, pos2, vec2};
+    use freminal_common::buffer_states::command_block::CommandBlockId;
+
+    #[test]
+    fn format_singular() {
+        assert_eq!(
+            format_placeholder_text(1, 80),
+            "▶ 1 line hidden — click to unfold"
+        );
+    }
+
+    #[test]
+    fn format_plural() {
+        assert_eq!(
+            format_placeholder_text(7, 80),
+            "▶ 7 lines hidden — click to unfold"
+        );
+    }
+
+    #[test]
+    fn format_zero_is_plural() {
+        assert_eq!(
+            format_placeholder_text(0, 80),
+            "▶ 0 lines hidden — click to unfold"
+        );
+    }
+
+    #[test]
+    fn format_truncates_when_narrow() {
+        let result = format_placeholder_text(123, 10);
+        // 10 chars total, last is the ellipsis
+        assert_eq!(result.chars().count(), 10);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn format_falls_back_when_very_narrow() {
+        assert_eq!(format_placeholder_text(5, 1), "▶");
+    }
+
+    #[test]
+    fn format_empty_when_zero_width() {
+        assert_eq!(format_placeholder_text(5, 0), "");
+    }
+
+    #[test]
+    fn hit_test_inside() {
+        let id = CommandBlockId(42);
+        let rects = vec![(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0)), id)];
+        assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 10.0)), Some(id));
+    }
+
+    #[test]
+    fn hit_test_outside() {
+        let id = CommandBlockId(42);
+        let rects = vec![(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0)), id)];
+        assert_eq!(hit_test_placeholder(&rects, pos2(200.0, 200.0)), None);
+    }
+
+    #[test]
+    fn hit_test_empty_list() {
+        assert_eq!(hit_test_placeholder(&[], Pos2::new(10.0, 10.0)), None);
+    }
+
+    #[test]
+    fn hit_test_multiple_rects_returns_first_containing() {
+        let id_a = CommandBlockId(1);
+        let id_b = CommandBlockId(2);
+        let rects = vec![
+            (Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0)), id_a),
+            (
+                Rect::from_min_size(pos2(0.0, 40.0), vec2(100.0, 20.0)),
+                id_b,
+            ),
+        ];
+        assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 50.0)), Some(id_b));
+        assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 10.0)), Some(id_a));
     }
 }

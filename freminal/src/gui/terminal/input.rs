@@ -16,6 +16,7 @@ use crate::gui::{
 use conv2::ConvUtil;
 use crossbeam_channel::Sender;
 use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
+use freminal_common::buffer_states::command_block::CommandBlockId;
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
@@ -33,6 +34,7 @@ use freminal_terminal_emulator::{
 use std::borrow::Cow;
 
 use super::coords::{encode_egui_mouse_pos_as_usize, visible_window_start};
+use super::widget::hit_test_placeholder;
 
 /// Convert egui [`Modifiers`] to the terminal-emulator's [`KeyModifiers`].
 ///
@@ -731,6 +733,7 @@ pub(super) fn write_input_to_terminal(
     binding_map: &BindingMap,
     is_active_pane: bool,
     recording_ctx: Option<&RecordingContext<'_>>,
+    placeholder_rects: &[(Rect, CommandBlockId)],
 ) -> (
     bool,
     Option<PreviousMouseState>,
@@ -1408,6 +1411,21 @@ pub(super) fn write_input_to_terminal(
 
                 if *button == PointerButton::Primary && *pressed {
                     left_mouse_button_pressed = true;
+                }
+
+                // Fold placeholder click: if this primary press landed on a
+                // fold placeholder row, unfold it and consume the event so
+                // it does not start a text selection or get reported to the
+                // PTY via mouse tracking. Active-pane gating is respected by
+                // the surrounding event loop (inactive panes only reach this
+                // point for click-to-focus, but unfolding on focus-click is
+                // acceptable and matches user intent).
+                if *button == PointerButton::Primary
+                    && *pressed
+                    && let Some(block_id) = hit_test_placeholder(placeholder_rects, *pos)
+                {
+                    view_state.unfold(block_id);
+                    continue;
                 }
 
                 if let Some(response) = response {
