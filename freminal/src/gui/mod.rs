@@ -19,6 +19,7 @@ use window::PerWindowState;
 
 pub mod atlas;
 pub mod colors;
+pub mod folding;
 pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
