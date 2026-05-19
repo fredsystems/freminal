@@ -99,6 +99,8 @@ impl FreminalGui {
                     child_pid: channels.child_pid,
                     render_state: terminal::new_render_state(Arc::clone(&win.window_post)),
                     render_cache: terminal::PaneRenderCache::new(),
+                    command_event_rx: channels.command_event_rx,
+                    recent_commands: std::collections::VecDeque::new(),
                 };
                 let tab = tabs::Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
@@ -254,6 +256,8 @@ impl FreminalGui {
                 child_pid: channels.child_pid,
                 render_state: terminal::new_render_state(Arc::clone(&win.window_post)),
                 render_cache: terminal::PaneRenderCache::new(),
+                command_event_rx: channels.command_event_rx,
+                recent_commands: std::collections::VecDeque::new(),
             };
             match tab.pane_tree.split_with_id(target_id, direction, new_pane) {
                 Ok(id) => id,
@@ -391,6 +395,8 @@ impl FreminalGui {
             child_pid: channels.child_pid,
             render_state: terminal::new_render_state(Arc::clone(window_post)),
             render_cache: terminal::PaneRenderCache::new(),
+            command_event_rx: channels.command_event_rx,
+            recent_commands: std::collections::VecDeque::new(),
         })
     }
 }

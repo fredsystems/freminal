@@ -174,6 +174,8 @@ impl freminal_windowing::App for FreminalGui {
                         child_pid: channels.child_pid,
                         render_state: new_render_state(Arc::clone(&window_post)),
                         render_cache: super::terminal::PaneRenderCache::new(),
+                        command_event_rx: channels.command_event_rx,
+                        recent_commands: std::collections::VecDeque::new(),
                     };
                     let tab_id = super::tabs::TabId::first();
                     let tab = Tab::new(tab_id, pane);
@@ -595,6 +597,30 @@ impl freminal_windowing::App for FreminalGui {
                         );
                     }
                 }
+            }
+        }
+
+        // ── Drain CommandFinishedEvent from each pane (Task 72.9) ─────────────
+        // The PTY consumer thread forwards completed CommandBlocks here via a
+        // dedicated channel. Append each block to the owning pane's
+        // recent_commands ring (cap RECENT_COMMANDS_CAP) and set the tab's
+        // has_pending_event flag if the event arrived on a non-active tab.
+        //
+        // TODO(Task 76): dispatch CommandFinishedEvent to the notification
+        // subsystem here (OSC 9 / OSC 777) before the badge is set.
+        let active_tab_idx = win.tabs.active_index();
+        for (tab_idx, tab) in win.tabs.iter_mut().enumerate() {
+            let mut tab_received_event = false;
+            if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                for pane in panes {
+                    while let Ok(event) = pane.command_event_rx.try_recv() {
+                        pane.push_recent_command(event.block);
+                        tab_received_event = true;
+                    }
+                }
+            }
+            if tab_received_event && tab_idx != active_tab_idx {
+                tab.has_pending_event = true;
             }
         }
 
@@ -1653,6 +1679,8 @@ impl FreminalGui {
             child_pid: channels.child_pid,
             render_state: new_render_state(Arc::clone(&window_post)),
             render_cache: super::terminal::PaneRenderCache::new(),
+            command_event_rx: channels.command_event_rx,
+            recent_commands: std::collections::VecDeque::new(),
         };
 
         let tab = Tab::new(super::tabs::TabId::first(), pane);

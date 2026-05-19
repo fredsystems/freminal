@@ -18,6 +18,7 @@
 //! the tree structure — they just own their `TerminalEmulator` and publish
 //! snapshots via `ArcSwap`.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -25,14 +26,25 @@ use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use egui::Rect;
+use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
+use super::pty::CommandFinishedEvent;
 use super::terminal::PaneRenderCache;
 use super::terminal::RenderState;
 use super::view_state::ViewState;
+
+/// Maximum number of completed command blocks retained per pane.
+///
+/// `Pane::recent_commands` is a bounded ring buffer; once it reaches this cap,
+/// the oldest entry is dropped each time a new finished-command event arrives.
+/// The cap exists so a long-running shell cannot grow GUI memory without
+/// bound, and matches the per-pane history quota called out in
+/// `Documents/PLAN_VERSION_090.md` Task 72.9.
+pub const RECENT_COMMANDS_CAP: usize = 64;
 
 // ── PaneId ───────────────────────────────────────────────────────────
 
@@ -200,6 +212,38 @@ pub struct Pane {
     /// Tracks the previous frame's cursor, theme, selection, and content pointers
     /// to detect what changed and enable fast-path (cursor-only) updates.
     pub(crate) render_cache: PaneRenderCache,
+
+    /// Receiver for [`CommandFinishedEvent`]s emitted by this pane's PTY
+    /// consumer thread (Task 72.9).
+    ///
+    /// Drained once per frame by the GUI; new events are pushed onto
+    /// [`Self::recent_commands`] and, when the owning tab is not active,
+    /// flip the tab's pending-event indicator.
+    pub command_event_rx: Receiver<CommandFinishedEvent>,
+
+    /// Bounded ring buffer of recently finished commands for this pane.
+    ///
+    /// Capped at [`RECENT_COMMANDS_CAP`]; the oldest entry is dropped when the
+    /// cap is reached. Populated by draining
+    /// [`Self::command_event_rx`] each frame. Consumed by Task 76 (notification
+    /// formatting), Task 72.10 (fold/collapse UI), and a future command-palette
+    /// task.
+    pub recent_commands: VecDeque<CommandBlock>,
+}
+
+impl Pane {
+    /// Push a finished `CommandBlock` onto [`Self::recent_commands`],
+    /// enforcing the [`RECENT_COMMANDS_CAP`] bound.
+    ///
+    /// When the ring is at capacity, the oldest entry is dropped before the
+    /// new block is appended. Used by both the per-frame command-event drain
+    /// in the GUI (Task 72.9) and by unit tests.
+    pub fn push_recent_command(&mut self, block: CommandBlock) {
+        if self.recent_commands.len() >= RECENT_COMMANDS_CAP {
+            self.recent_commands.pop_front();
+        }
+        self.recent_commands.push_back(block);
+    }
 }
 
 impl std::fmt::Debug for Pane {
@@ -1364,6 +1408,7 @@ mod tests {
         let (_search_buffer_tx, search_buffer_rx) =
             crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 
         Pane {
             id,
@@ -1385,6 +1430,8 @@ mod tests {
                 crate::gui::renderer::WindowPostRenderer::new(),
             ))),
             render_cache: crate::gui::terminal::PaneRenderCache::new(),
+            command_event_rx,
+            recent_commands: VecDeque::new(),
         }
     }
 
@@ -1420,6 +1467,59 @@ mod tests {
         pane1.view_state.scroll_offset = 42;
         assert_eq!(pane1.view_state.scroll_offset, 42);
         assert_eq!(pane2.view_state.scroll_offset, 0);
+    }
+
+    // ── recent_commands ring buffer (Task 72.9) ──────────────────────
+
+    #[test]
+    fn push_recent_command_below_cap_appends_in_order() {
+        let mut pane = dummy_pane(PaneId(0), "p");
+        for _ in 0..5 {
+            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        }
+        assert_eq!(pane.recent_commands.len(), 5);
+    }
+
+    #[test]
+    fn push_recent_command_enforces_cap_dropping_oldest() {
+        let mut pane = dummy_pane(PaneId(0), "p");
+        // Push CAP + 10 blocks; the first 10 must be evicted.
+        let total = RECENT_COMMANDS_CAP + 10;
+        let mut ids = Vec::with_capacity(total);
+        for _ in 0..total {
+            let block = CommandBlock::new_running(0, None, String::new());
+            ids.push(block.id);
+            pane.push_recent_command(block);
+        }
+
+        assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
+
+        // The remaining blocks must be the last RECENT_COMMANDS_CAP pushed,
+        // in insertion order.
+        let expected_first = ids[total - RECENT_COMMANDS_CAP];
+        let expected_last = ids[total - 1];
+        assert_eq!(
+            pane.recent_commands.front().unwrap().id,
+            expected_first,
+            "oldest retained entry should be ids[total - CAP]"
+        );
+        assert_eq!(
+            pane.recent_commands.back().unwrap().id,
+            expected_last,
+            "newest entry should be the last pushed"
+        );
+    }
+
+    #[test]
+    fn push_recent_command_at_exact_cap_does_not_evict() {
+        let mut pane = dummy_pane(PaneId(0), "p");
+        for _ in 0..RECENT_COMMANDS_CAP {
+            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        }
+        assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
+        // The next push must evict exactly one entry.
+        pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
     }
 
     // ── PaneTree: single pane ────────────────────────────────────────

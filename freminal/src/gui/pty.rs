@@ -17,6 +17,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use freminal_common::args::Args;
+use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
@@ -27,6 +28,50 @@ use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_windowing::{RepaintProxy, WindowId};
+
+/// A finished-command event delivered from a PTY consumer thread to the GUI.
+///
+/// Produced by Task 72.3 when the terminal handler sees an `OSC 133 D` marker,
+/// queued onto the handler's `pending_command_events` vector, and drained by
+/// the PTY consumer thread after each batch (Task 72.9). One event per
+/// completed shell command. The GUI uses these to populate per-pane recent
+/// command history and to set the unfocused-tab pending-event indicator
+/// (visual indicator is rendered in Task 72.10).
+///
+/// `pane_id` is the `recording_pane_id` (`PaneId.raw() as u32`) of the
+/// originating pane, which the GUI maps back to its [`super::panes::PaneId`]
+/// to locate the receiving pane.
+#[derive(Debug, Clone)]
+pub struct CommandFinishedEvent {
+    /// The originating pane's `recording_pane_id` (`PaneId.raw() as u32`).
+    pub pane_id: u32,
+    /// The completed command block produced by the terminal handler.
+    pub block: CommandBlock,
+}
+
+/// Wrap each `CommandBlock` in a [`CommandFinishedEvent`] tagged with
+/// `pane_id` and forward it on `tx`.
+///
+/// Extracted from the PTY consumer thread's `post_event` closure (Task 72.9)
+/// so the transport contract — "drained blocks become events tagged with the
+/// originating pane" — is unit-testable without spinning up a real shell.
+///
+/// Send failures are logged but not propagated; a closed receiver indicates
+/// the GUI has already shut down, which is a benign race with the consumer
+/// thread's own shutdown path.
+pub(crate) fn forward_command_events(
+    blocks: Vec<CommandBlock>,
+    pane_id: u32,
+    tx: &Sender<CommandFinishedEvent>,
+) {
+    for block in blocks {
+        send_or_log!(
+            tx,
+            CommandFinishedEvent { pane_id, block },
+            "Failed to send command-finished event to GUI"
+        );
+    }
+}
 
 /// The GUI-side endpoints needed to communicate with a single PTY tab.
 ///
@@ -63,6 +108,15 @@ pub struct TabChannels {
     /// process exits or the PTY read channel closes.  The GUI polls this
     /// to close the tab (or the whole app if it was the last tab).
     pub pty_dead_rx: Receiver<()>,
+
+    /// Receiver for [`CommandFinishedEvent`]s produced by OSC 133 D markers.
+    ///
+    /// The PTY consumer thread drains `TerminalHandler::drain_command_events`
+    /// after each batch and forwards every finished `CommandBlock` here,
+    /// tagged with this pane's `recording_pane_id`. The GUI uses this to
+    /// populate per-pane recent-command history (Task 72.9) and ultimately
+    /// to drive Task 76 notifications and Task 72.10 visual indicators.
+    pub command_event_rx: Receiver<CommandFinishedEvent>,
 
     /// Shared atomic flag reflecting whether the PTY slave currently has
     /// `ECHO` disabled (i.e. a password prompt is active).
@@ -165,6 +219,7 @@ pub fn spawn_pty_tab(
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
     let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
+    let (command_event_tx, command_event_rx) = unbounded::<CommandFinishedEvent>();
 
     let repaint_handle_pty = Arc::clone(repaint_handle);
 
@@ -181,6 +236,7 @@ pub fn spawn_pty_tab(
         pty_dead_tx,
         tab_cfg.recording_swap,
         tab_cfg.recording_pane_id,
+        command_event_tx,
     );
 
     Ok(TabChannels {
@@ -193,6 +249,7 @@ pub fn spawn_pty_tab(
         pty_dead_rx,
         echo_off,
         child_pid,
+        command_event_rx,
     })
 }
 
@@ -222,6 +279,7 @@ fn spawn_pty_consumer_thread(
     pty_dead_tx: Sender<()>,
     recording_swap: RecordingSwap,
     recording_pane_id: u32,
+    command_event_tx: Sender<CommandFinishedEvent>,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
     if let Err(e) = std::thread::Builder::new()
@@ -231,7 +289,8 @@ fn spawn_pty_consumer_thread(
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
-            // Helper closure: drain window commands, publish snapshot, request repaint.
+            // Helper closure: drain window commands and command-finished
+            // events, publish snapshot, request repaint.
             let post_event =
                 |emulator: &mut TerminalEmulator,
                  window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
@@ -253,6 +312,12 @@ fn spawn_pty_consumer_thread(
                         };
                         send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
                     }
+
+                    // Drain finished-command events queued by the FTCS OSC 133 D
+                    // handler (Task 72.3) and forward them to the GUI tagged with
+                    // this pane's recording_pane_id (Task 72.9).
+                    let events = emulator.internal.handler.drain_command_events();
+                    forward_command_events(events, recording_pane_id, &command_event_tx);
 
                     let snap = emulator.build_snapshot();
                     arc_swap.store(Arc::new(snap));
@@ -406,5 +471,61 @@ fn spawn_pty_consumer_thread(
         })
     {
         error!("Failed to spawn PTY consumer thread: {e}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a fresh `CommandBlock` with the given fid.
+    fn block_with_fid(fid: &str) -> CommandBlock {
+        CommandBlock::new_running(0, None, fid.to_owned())
+    }
+
+    #[test]
+    fn forward_command_events_empty_input_sends_nothing() {
+        let (tx, rx) = crossbeam_channel::unbounded::<CommandFinishedEvent>();
+        forward_command_events(Vec::new(), 42, &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "no events should be sent for an empty input"
+        );
+    }
+
+    #[test]
+    fn forward_command_events_preserves_order_and_pane_id() {
+        let (tx, rx) = crossbeam_channel::unbounded::<CommandFinishedEvent>();
+        let blocks = vec![
+            block_with_fid("a"),
+            block_with_fid("b"),
+            block_with_fid("c"),
+        ];
+        let original_ids: Vec<_> = blocks.iter().map(|b| b.id).collect();
+
+        forward_command_events(blocks, 7, &tx);
+
+        // All three events must arrive, in order, tagged with pane_id 7.
+        for (i, expected_id) in original_ids.iter().enumerate() {
+            let ev = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("expected event #{i}"));
+            assert_eq!(ev.pane_id, 7, "event #{i} pane_id mismatch");
+            assert_eq!(ev.block.id, *expected_id, "event #{i} block id mismatch");
+        }
+        assert!(rx.try_recv().is_err(), "no extra events should be sent");
+    }
+
+    #[test]
+    fn forward_command_events_with_closed_receiver_does_not_panic() {
+        // The GUI may have shut down before the consumer thread's final
+        // drain. A closed receiver must be a benign no-op (logged, not
+        // propagated) — this matches the consumer thread's own shutdown
+        // semantics.
+        let (tx, rx) = crossbeam_channel::unbounded::<CommandFinishedEvent>();
+        drop(rx);
+        forward_command_events(vec![block_with_fid("x")], 1, &tx);
+        // No assertion needed: not panicking is the contract.
     }
 }
