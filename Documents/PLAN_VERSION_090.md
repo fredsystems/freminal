@@ -1112,10 +1112,56 @@ Called from `main.rs` on every launch (gated on
   dual-mode `return ... || exit/true` guards, SC2016 ×2 for the
   single-quoted glob marker literals that must NOT interpolate).
 
-#### 72.9 — `WindowCommand::CommandFinished` GUI handling
+#### 72.9 — CommandFinishedEvent GUI handling ✅ 2026-05-19
 
-**Scope:** `freminal/src/gui/app_impl.rs` (the WindowCommand match), and a new
-small per-pane data structure for the GUI's view of finished commands.
+**Status:** ✅ Complete (commit `731180a`, 2026-05-19).
+
+**Scope:** `freminal/src/gui/app_impl.rs` (per-frame drain), `freminal/src/gui/panes/mod.rs`
+(per-pane ring), `freminal/src/gui/tabs.rs` (per-tab pending-event flag, focus clearing),
+`freminal/src/gui/pty.rs` (consumer-thread forwarding + extracted helper).
+
+**Design deviation from the original spec:** the transport was implemented as a dedicated
+`Sender<CommandFinishedEvent>` per pane rather than a `WindowCommand::CommandFinished`
+variant. Rationale: avoids coupling `CommandBlock` and `pane_id` into the `WindowCommand`
+enum (which is otherwise dominated by viewport/report variants), keeps the per-pane channel
+mirroring the existing `pty_dead_rx` / `clipboard_rx` patterns, and isolates the new event
+type for clean Task 76 hand-off.
+
+**Completion notes:**
+
+- Added `pub const RECENT_COMMANDS_CAP: usize = 64;` and
+  `Pane::push_recent_command(&mut self, CommandBlock)` enforcing the cap by
+  popping the oldest entry. Used by both the GUI drain and unit tests.
+- Added `Pane::recent_commands: VecDeque<CommandBlock>` and
+  `Pane::command_event_rx: Receiver<CommandFinishedEvent>`.
+- Added `Tab::has_pending_event: bool`, initialized `false` in `Tab::new`.
+- `TabManager::switch_to`, `next_tab`, and `prev_tab` now clear
+  `has_pending_event` on the newly-active tab; they are no longer `const fn`
+  since they index `self.tabs` mutably.
+- `app_impl.rs` `update()` drains every pane's `command_event_rx` per frame.
+  When the receiving tab is not the active tab, sets `tab.has_pending_event = true`.
+  Includes a `TODO(Task 76)` marker at the drain site for the future
+  notification dispatch.
+- `pty.rs` defines `pub struct CommandFinishedEvent { pane_id: u32, block: CommandBlock }`
+  and `pub(crate) fn forward_command_events(...)` extracted from the consumer-thread
+  `post_event` closure. `spawn_pty_consumer_thread` calls
+  `forward_command_events(handler.drain_command_events(), recording_pane_id, &command_event_tx)`
+  after each batch.
+
+**Verification:** Six new unit tests covering the ring-buffer cap and the
+forwarding transport contract:
+
+- `gui::panes::tests::push_recent_command_below_cap_appends_in_order`
+- `gui::panes::tests::push_recent_command_enforces_cap_dropping_oldest`
+- `gui::panes::tests::push_recent_command_at_exact_cap_does_not_evict`
+- `gui::pty::tests::forward_command_events_empty_input_sends_nothing`
+- `gui::pty::tests::forward_command_events_preserves_order_and_pane_id`
+- `gui::pty::tests::forward_command_events_with_closed_receiver_does_not_panic`
+
+`cargo test --all` and `cargo clippy --all-targets --all-features -- -D warnings`
+both clean.
+
+**Original spec (retained for reference):**
 
 - Add a new field on `Pane` (or `Tab`):
   `recent_commands: VecDeque<CommandBlock>` capped at e.g. 64 entries.
@@ -1127,9 +1173,6 @@ small per-pane data structure for the GUI's view of finished commands.
     refresh the tab bar. (Visual indicator handled in 72.10.)
   - Hand off to Task 76's notification path. Task 76 implementation may add
     the dispatch here behind a feature check.
-
-**Verification:** Unit test of the recent_commands ring buffer. Integration
-test verifying that a CommandFinished event reaches the GUI thread.
 
 #### 72.10 — Fold/collapse view state
 
@@ -2580,7 +2623,10 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      for `freminal=1; fid=<id>` markers.
    - **72.8b** ✅ done (commit `fd45441`, 2026-05-19). Ghostty-style
      spawn-time shell-integration injection.
-   - **72.9 → 72.15** — remaining subtasks per the rest of this plan.
+   - **72.9** ✅ done (commit `731180a`, 2026-05-19). CommandFinishedEvent
+     transport from PTY consumer thread to per-pane recent-command ring,
+     with per-tab pending-event flag for unfocused tabs.
+   - **72.10 → 72.15** — remaining subtasks per the rest of this plan.
    - **72.16.e** — XTGETTCAP unknown-capability log noise (cosmetic;
      land any time before v0.9.0 ships).
 
