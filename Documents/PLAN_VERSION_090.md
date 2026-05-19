@@ -1258,7 +1258,7 @@ both clean.
   not touch the snapshot transport path, so no regression is expected
   or observed.
 
-- 72.10c (`FOLLOWUP_HASH`, 2026-05-19) — bug fix surfaced by post-merge
+- 72.10c (`1ffb9b0`, 2026-05-19) — bug fix surfaced by post-merge
   testing with the bundled fish shell integration. The original 72.10a
   `ToggleFoldAtCursor` dispatcher only folded a block when the PTY
   cursor row fell inside `[command_start_row, end_row]`. In normal
@@ -2702,7 +2702,7 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      `6ea2808` 72.10b-1 — folding helpers + RowMap; `23faec7` 72.10b-2 —
      wire RowMap into renderer; `e896592` 72.10b-3 —
      placeholder row rendering, click-to-unfold hit-test, hover cursor,
-     benchmark; `FOLLOWUP_HASH` 72.10c — bug fix: fall back to most
+     benchmark; `1ffb9b0` 72.10c — bug fix: fall back to most
      recent completed block when cursor outside any block).
    - **72.11 → 72.15** — remaining subtasks per the rest of this plan.
    - **72.16.e** — XTGETTCAP unknown-capability log noise (cosmetic;
