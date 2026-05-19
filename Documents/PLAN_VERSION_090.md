@@ -1326,7 +1326,8 @@ puts known text on the clipboard after the action fires.
 
 #### 72.12 — Hover highlight and command-duration overlay
 
-**Status:** COMPLETE (2026-05-19, `cafa890`).
+**Status:** COMPLETE (2026-05-19, `cafa890`; follow-up fix `1289863` — drop
+blocks erased by CSI 2J so duration overlays don't paint on blank rows).
 
 **Scope:** `freminal/src/gui/renderer/`, `freminal/src/gui/mouse.rs`.
 
