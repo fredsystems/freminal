@@ -3,49 +3,75 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Auto-install of Freminal's shell-integration scripts.
+//! Sync of Freminal's bundled shell-integration scripts to the on-disk
+//! resources directory.
 //!
-//! On first launch (when `config.shell_integration.auto_install == true`),
-//! Freminal copies the bundled `freminal.{bash,zsh,fish}` scripts and the
-//! companion `README.md` to the platform-specific shell-integration
-//! directory.  Existing files are NOT overwritten so user customisations
-//! are preserved.
+//! On every launch (when `config.shell_integration.set_term_program ==
+//! true`), Freminal synchronises the bundled
+//! `shell-integration/{bash,zsh,fish}/...` tree to the platform-specific
+//! shell-integration directory.  Files whose on-disk bytes already match
+//! the embedded copy are left untouched (no rewrite, no mtime bump).
+//! Files that differ are overwritten.
 //!
-//! The "Re-install Scripts" button in the Settings modal calls
-//! [`reinstall_scripts`] which DOES overwrite existing files —
-//! semantically "reset the user's local copies to the freminal-shipped
-//! versions".
+//! The scripts are NOT meant to be sourced by users — they are loaded
+//! automatically when Freminal spawns a child shell via shell-specific
+//! injection (bash: `--posix` + `ENV`; zsh: `ZDOTDIR`; fish:
+//! `XDG_DATA_DIRS`).  See
+//! `freminal-terminal-emulator/src/io/pty.rs::run_terminal` and
+//! `Documents/DESIGN_DECISIONS.md` for the rationale.
 //!
 //! All scripts are embedded at compile time via [`include_str!`] so the
 //! binary is self-contained.
 
 use std::path::Path;
 
-/// The bundled bash script.
-pub const FREMINAL_BASH: &str = include_str!("../../shell-integration/freminal.bash");
-/// The bundled zsh script.
-pub const FREMINAL_ZSH: &str = include_str!("../../shell-integration/freminal.zsh");
-/// The bundled fish script.
-pub const FREMINAL_FISH: &str = include_str!("../../shell-integration/freminal.fish");
+/// Version of the shell-integration script set.  Every shipped script
+/// begins with a version marker comment that must match this value; the
+/// [`every_shipped_script_marker_version_matches_constant`] test enforces
+/// the invariant.
+///
+/// Bump this when making incompatible changes to the script protocol
+/// (e.g. payload format, marker semantics) so downstream tooling can
+/// detect mismatched on-disk copies.
+#[cfg(test)]
+const FREMINAL_SHELL_INTEGRATION_VERSION: u32 = 1;
+
+/// The bundled bash init script (loaded via `ENV=`).
+pub const FREMINAL_BASH_INIT: &str =
+    include_str!("../../shell-integration/bash/freminal-init.bash");
+/// The bundled zsh `.zshenv` (loaded via `ZDOTDIR=`).
+pub const FREMINAL_ZSH_ZSHENV: &str = include_str!("../../shell-integration/zsh/.zshenv");
+/// The bundled zsh integration body (sourced by our `.zshenv`).
+pub const FREMINAL_ZSH_INTEGRATION: &str =
+    include_str!("../../shell-integration/zsh/freminal-integration");
+/// The bundled fish vendor-confd integration (autoloaded via `XDG_DATA_DIRS`).
+pub const FREMINAL_FISH_VENDOR_CONF: &str =
+    include_str!("../../shell-integration/fish/vendor_conf.d/freminal.fish");
 /// The bundled README.
 pub const FREMINAL_README: &str = include_str!("../../shell-integration/README.md");
 
-/// File-name → content table.  Used by [`install_if_missing`] and
-/// [`reinstall_scripts`] so the file set is defined in one place.
+/// Relative-path → content table.  Used by [`sync_to_disk`] so the file
+/// set is defined in one place.  Paths use forward slashes; they are
+/// translated to platform-native separators by `Path::join`.
 const SCRIPTS: &[(&str, &str)] = &[
-    ("freminal.bash", FREMINAL_BASH),
-    ("freminal.zsh", FREMINAL_ZSH),
-    ("freminal.fish", FREMINAL_FISH),
+    ("bash/freminal-init.bash", FREMINAL_BASH_INIT),
+    ("zsh/.zshenv", FREMINAL_ZSH_ZSHENV),
+    ("zsh/freminal-integration", FREMINAL_ZSH_INTEGRATION),
+    (
+        "fish/vendor_conf.d/freminal.fish",
+        FREMINAL_FISH_VENDOR_CONF,
+    ),
     ("README.md", FREMINAL_README),
 ];
 
-/// Result of [`install_if_missing`] or [`reinstall_scripts`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of [`sync_to_disk`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstallResult {
-    /// Files that were written successfully.
+    /// Files that were written this call (either created or rewritten
+    /// because the on-disk bytes differed from the embedded copy).
     pub written: Vec<String>,
-    /// Files that already existed and were not overwritten (only meaningful
-    /// for `install_if_missing`).
+    /// Files that already existed with the exact embedded content and
+    /// were not rewritten.
     pub skipped: Vec<String>,
     /// File names whose write failed, paired with the IO error message.
     pub errors: Vec<(String, String)>,
@@ -61,51 +87,55 @@ impl InstallResult {
     }
 }
 
-/// Install the bundled scripts into `dir`, skipping any file that already
-/// exists.  Creates `dir` if it does not exist.
+/// Synchronise the bundled scripts to `dir`.
 ///
-/// Used by the startup auto-install path so existing user-edited scripts
-/// are preserved across upgrades.
-#[must_use]
-pub fn install_if_missing(dir: &Path) -> InstallResult {
-    install_with_policy(dir, /* overwrite = */ false)
-}
-
-/// Re-install all bundled scripts into `dir`, overwriting any existing
-/// files.  Creates `dir` if it does not exist.
+/// Files whose on-disk bytes already match the embedded copy are left
+/// untouched; files that differ or do not yet exist are written.  Creates
+/// `dir` and any required subdirectories (`bash/`, `zsh/`,
+/// `fish/vendor_conf.d/`) as needed.
 ///
-/// Used by the "Re-install Scripts" button in the Settings modal —
-/// semantically "reset to ship defaults".
+/// Called on every launch from `main.rs` (gated on
+/// `config.shell_integration.set_term_program`).  User edits to these
+/// files are intentionally NOT preserved — the scripts are part of the
+/// freminal install, not user configuration.
 #[must_use]
-pub fn reinstall_scripts(dir: &Path) -> InstallResult {
-    install_with_policy(dir, /* overwrite = */ true)
-}
-
-fn install_with_policy(dir: &Path, overwrite: bool) -> InstallResult {
-    let mut result = InstallResult {
-        written: Vec::new(),
-        skipped: Vec::new(),
-        errors: Vec::new(),
-    };
+pub fn sync_to_disk(dir: &Path) -> InstallResult {
+    let mut result = InstallResult::default();
 
     if let Err(e) = std::fs::create_dir_all(dir) {
-        // If we can't even create the directory, all scripts fail.  Record
-        // a single combined error so the caller can surface one message.
+        // If we can't even create the root directory, all scripts fail.
         result
             .errors
             .push((dir.display().to_string(), e.to_string()));
         return result;
     }
 
-    for (name, content) in SCRIPTS {
-        let path = dir.join(name);
-        if !overwrite && path.exists() {
-            result.skipped.push((*name).to_owned());
+    for (relative_path, content) in SCRIPTS {
+        let path = dir.join(relative_path);
+        // Ensure the parent directory exists (e.g. `bash/`,
+        // `fish/vendor_conf.d/`).
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            result
+                .errors
+                .push(((*relative_path).to_owned(), e.to_string()));
             continue;
         }
+
+        // Fast path: bytes match → no write, no mtime bump.
+        if let Ok(existing) = std::fs::read(&path)
+            && existing == content.as_bytes()
+        {
+            result.skipped.push((*relative_path).to_owned());
+            continue;
+        }
+
         match std::fs::write(&path, content) {
-            Ok(()) => result.written.push((*name).to_owned()),
-            Err(e) => result.errors.push(((*name).to_owned(), e.to_string())),
+            Ok(()) => result.written.push((*relative_path).to_owned()),
+            Err(e) => result
+                .errors
+                .push(((*relative_path).to_owned(), e.to_string())),
         }
     }
 
@@ -116,80 +146,68 @@ fn install_with_policy(dir: &Path, overwrite: bool) -> InstallResult {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    /// Create a unique temporary directory for the duration of a test.
-    /// The caller is responsible for calling `cleanup_tmp_dir` when done.
-    fn make_tmp_dir(suffix: &str) -> PathBuf {
-        let base = std::env::temp_dir();
-        let dir = base.join(format!("freminal_shell_integ_test_{suffix}"));
-        std::fs::create_dir_all(&dir).expect("create test temp dir");
-        dir
-    }
-
-    fn cleanup_tmp_dir(dir: &PathBuf) {
-        // Best-effort cleanup; ignore errors.
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    use tempfile::TempDir;
 
     #[test]
-    fn install_if_missing_writes_all_when_dir_empty() {
-        let tmp = make_tmp_dir("writes_all");
-        let result = install_if_missing(&tmp);
+    fn sync_to_disk_writes_all_when_dir_empty() {
+        let tmp = TempDir::new().expect("create tempdir");
+        let result = sync_to_disk(tmp.path());
         assert_eq!(result.written.len(), SCRIPTS.len());
         assert!(result.skipped.is_empty());
-        assert!(result.errors.is_empty());
-        // Verify each file is present.
-        for (name, _) in SCRIPTS {
-            assert!(tmp.join(name).exists());
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        for (relative_path, _) in SCRIPTS {
+            assert!(
+                tmp.path().join(relative_path).exists(),
+                "missing: {relative_path}"
+            );
         }
-        cleanup_tmp_dir(&tmp);
     }
 
     #[test]
-    fn install_if_missing_skips_existing_files() {
-        let tmp = make_tmp_dir("skips_existing");
-        // Pre-populate one file with custom content.
-        let bash_path = tmp.join("freminal.bash");
-        std::fs::write(&bash_path, "# user-customised content").expect("write");
-        let original = std::fs::read_to_string(&bash_path).expect("read");
-
-        let result = install_if_missing(&tmp);
-        assert_eq!(result.skipped, vec!["freminal.bash".to_owned()]);
-        assert_eq!(result.written.len(), SCRIPTS.len() - 1);
-        // User content must NOT be overwritten.
-        let after = std::fs::read_to_string(&bash_path).expect("read");
-        assert_eq!(after, original);
-        cleanup_tmp_dir(&tmp);
+    fn sync_to_disk_handles_nested_dirs() {
+        // Fresh tempdir — the subdirectories `bash/`, `zsh/`, and
+        // `fish/vendor_conf.d/` must be created automatically.
+        let tmp = TempDir::new().expect("create tempdir");
+        let result = sync_to_disk(tmp.path());
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(tmp.path().join("bash").is_dir());
+        assert!(tmp.path().join("zsh").is_dir());
+        assert!(tmp.path().join("fish").join("vendor_conf.d").is_dir());
     }
 
     #[test]
-    fn reinstall_scripts_overwrites_existing_files() {
-        let tmp = make_tmp_dir("overwrites");
-        let bash_path = tmp.join("freminal.bash");
-        std::fs::write(&bash_path, "# user-customised content").expect("write");
-
-        let result = reinstall_scripts(&tmp);
-        assert_eq!(result.written.len(), SCRIPTS.len());
-        assert!(result.skipped.is_empty());
-        assert!(result.errors.is_empty());
-        // User content MUST be overwritten with the ship version.
-        let after = std::fs::read_to_string(&bash_path).expect("read");
-        assert_eq!(after, FREMINAL_BASH);
-        cleanup_tmp_dir(&tmp);
-    }
-
-    #[test]
-    fn install_if_missing_idempotent_on_second_call() {
-        let tmp = make_tmp_dir("idempotent");
-        let first = install_if_missing(&tmp);
+    fn sync_to_disk_skips_when_bytes_match() {
+        let tmp = TempDir::new().expect("create tempdir");
+        let first = sync_to_disk(tmp.path());
         assert_eq!(first.written.len(), SCRIPTS.len());
 
-        let second = install_if_missing(&tmp);
-        assert_eq!(second.written.len(), 0);
+        let second = sync_to_disk(tmp.path());
+        assert!(second.written.is_empty(), "written: {:?}", second.written);
         assert_eq!(second.skipped.len(), SCRIPTS.len());
         assert!(second.errors.is_empty());
-        cleanup_tmp_dir(&tmp);
+    }
+
+    #[test]
+    fn sync_to_disk_writes_when_bytes_differ() {
+        // Counterpart to `_skips_when_bytes_match`: pre-populate a file
+        // with content that differs from the embedded copy and verify it
+        // gets rewritten.
+        let tmp = TempDir::new().expect("create tempdir");
+        std::fs::create_dir_all(tmp.path().join("bash")).expect("mkdir bash");
+        let bash_path = tmp.path().join("bash").join("freminal-init.bash");
+        std::fs::write(&bash_path, "# user-customised content").expect("write");
+
+        let result = sync_to_disk(tmp.path());
+        assert!(
+            result
+                .written
+                .iter()
+                .any(|p| p == "bash/freminal-init.bash"),
+            "expected bash/freminal-init.bash to be rewritten; written: {:?}",
+            result.written
+        );
+        let after = std::fs::read_to_string(&bash_path).expect("read");
+        assert_eq!(after, FREMINAL_BASH_INIT);
     }
 
     #[test]
@@ -207,5 +225,23 @@ mod tests {
             errors: vec![("a".to_owned(), "io error".to_owned())],
         };
         assert!(result.has_errors());
+    }
+
+    /// Every shipped script's `v<N>` version marker must agree with the
+    /// Rust-side [`FREMINAL_SHELL_INTEGRATION_VERSION`] constant.  This
+    /// invariant lets downstream tooling rely on a single source of
+    /// truth when reasoning about protocol versions.
+    #[test]
+    fn every_shipped_script_marker_version_matches_constant() {
+        let expected = format!("v{FREMINAL_SHELL_INTEGRATION_VERSION}");
+        let needle = format!("freminal-shell-integration {expected}");
+        for (path, content) in SCRIPTS {
+            assert!(
+                content.contains(&needle),
+                "script `{path}` is missing version marker `{needle}`. \
+                 First 200 bytes: {}",
+                &content[..content.len().min(200)]
+            );
+        }
     }
 }

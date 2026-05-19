@@ -232,18 +232,13 @@ limit = 4000
 ## ##############################################################################
 [shell_integration]
 # When true, Freminal sets TERM_PROGRAM=freminal and TERM_PROGRAM_VERSION
-# in the PTY environment so shell scripts can detect Freminal and emit
-# OSC 133 prompt/command markers.
+# in the PTY environment so shell scripts can detect Freminal, AND injects
+# the env needed to auto-load Freminal's bundled bash/zsh/fish integration
+# scripts at PTY spawn time.  The scripts emit OSC 133 prompt/command markers
+# so the terminal can render command blocks, gutters, and notifications.
+# No manual sourcing is required.
 # Default: true.
 # set_term_program = true
-
-# When true, Freminal auto-installs shell integration scripts to
-# ~/.config/freminal/shell-integration/ on first launch.
-# Existing files in the target directory are NOT overwritten so user
-# customisations are preserved.  To re-install scripts after editing them
-# upstream, use the "Re-install Scripts" button in the Settings modal.
-# Default: true.
-# auto_install = true
 
 ## ##############################################################################
 # COMMAND BLOCKS (OSC 133 visualization)

@@ -271,17 +271,25 @@ fn main() {
     }
     debug!("Loaded config: {:#?}", cfg);
 
-    // ── 2.5. Auto-install shell integration scripts on first launch ─────
+    // ── 2.5. Sync shell-integration scripts to disk on every launch ─────
+    // The scripts are loaded automatically by Freminal-spawned shells via
+    // shell-specific injection (see freminal-terminal-emulator/src/io/pty.rs).
+    // We sync on every launch so the on-disk copies always match the
+    // bundled versions — user edits are intentionally not preserved.
+    // Files whose bytes already match are skipped (no mtime bump).
+    //
     // Non-fatal: failures are logged via `warn!` but do not abort startup.
-    // The user can always re-install later from the Settings modal.
-    if cfg.shell_integration.auto_install
+    // Gated on `set_term_program` since that flag controls the whole
+    // shell-integration feature (TERM_PROGRAM announcement + script
+    // injection are coupled).
+    if cfg.shell_integration.set_term_program
         && let Some(dir) = config::shell_integration_dir()
     {
-        let result = shell_integration::install_if_missing(&dir);
+        let result = shell_integration::sync_to_disk(&dir);
         if result.has_errors() {
             for (name, err) in &result.errors {
                 warn!(
-                    "Shell integration: failed to install '{}' into {}: {}",
+                    "Shell integration: failed to sync '{}' into {}: {}",
                     name,
                     dir.display(),
                     err
@@ -289,13 +297,13 @@ fn main() {
             }
         } else if !result.written.is_empty() {
             info!(
-                "Shell integration: installed {} script(s) to {}",
+                "Shell integration: synced {} script(s) to {}",
                 result.written.len(),
                 dir.display()
             );
         }
-        // skipped files (already present) are not logged — that is the
-        // normal case on subsequent launches.
+        // skipped files (already up to date) are not logged — that is
+        // the normal case on subsequent launches.
     }
 
     // Warn if both a positional command and --shell are specified.

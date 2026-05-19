@@ -1,0 +1,139 @@
+# freminal-shell-integration v1
+#
+# Freminal zsh integration body — sourced by our `.zshenv` after the user's
+# own zsh startup files have run.
+#
+# Emits OSC 133 (FinalTerm/FTCS) prompt + command markers and OSC 7 cwd
+# updates so Freminal can render command blocks, exit-status gutters, and
+# command-aware navigation.  Every emitted marker carries
+# `freminal=1;fid=$$-<N>` where N is a per-prompt counter.
+#
+# This file is overwritten on every freminal launch — do NOT edit it.
+
+# Guard: only run under Freminal.  Freminal sets TERM_PROGRAM=freminal at
+# spawn (when [shell_integration] set_term_program = true, which is the
+# default).  If this script is ever sourced under a different terminal
+# (ghostty, wezterm, kitty, iTerm, etc.) — for example because a user
+# manually sourced the persisted copy in ~/.local/share/freminal — we must
+# not install hooks or emit OSC 133 sequences, since those terminals'
+# parsers may treat unrecognised tokens as errors.
+if [[ "${TERM_PROGRAM:-}" != "freminal" ]]; then
+	return 0
+fi
+
+# Guard: only install hooks once per shell session, even if sourced again.
+if [[ -n "${__FREMINAL_SHELL_INTEGRATION_LOADED:-}" ]]; then
+	return 0
+fi
+typeset -g __FREMINAL_SHELL_INTEGRATION_LOADED=1
+
+# Per-command counter used to give each command lifecycle a unique `fid`
+# (A→B→C→D all share one fid; the next command gets a fresh one).
+#
+# Why split into `next` + a stored payload, rather than echoing from a
+# function?  The natural `$(__freminal_fid_payload)` invocation runs in a
+# subshell and cannot mutate parent state — so the counter would reset to
+# 0 on every call.  Instead, the parent shell calls `__freminal_fid_next`
+# as a plain command (no subshell) to roll the counter forward at command
+# boundaries, and any consumer reads `${__FREMINAL_FID_PAYLOAD}` directly.
+#
+# The fid identifies a *command lifecycle*, not an individual marker
+# emission.  All four FTCS markers for the same command (A from PROMPT
+# start, B from PROMPT end, C from preexec, D from the next precmd) carry
+# the same fid; the buffer keys the start/output/end rows on that fid to
+# stitch the block back together.  Nested or concurrent shells get unique
+# fids via the `$$` prefix (different PIDs).
+typeset -g __FREMINAL_FID_COUNTER=0
+typeset -g __FREMINAL_FID_PAYLOAD="freminal=1;fid=$$-0"
+
+# Roll the counter forward and refresh __FREMINAL_FID_PAYLOAD.  Must be
+# called as a plain command (not inside `$(…)`) so the assignments stick.
+__freminal_fid_next() {
+	__FREMINAL_FID_COUNTER=$((__FREMINAL_FID_COUNTER + 1))
+	__FREMINAL_FID_PAYLOAD="freminal=1;fid=$$-${__FREMINAL_FID_COUNTER}"
+}
+
+# ── precmd hook (D marker + OSC 7 cwd + PROMPT re-wrap for A and B) ──────────
+# precmd runs just before the prompt is drawn.  $? at the top of the function
+# reflects the exit status of the last user command.
+#
+# We deliberately re-wrap PROMPT every cycle (rather than once at startup)
+# because prompt frameworks like oh-my-posh, Starship, and Powerlevel10k
+# overwrite PROMPT from their own precmd hooks.  By re-wrapping every cycle
+# from a precmd that re-adds itself to the *end* of precmd_functions, we
+# guarantee our A/B wrap survives any framework that runs earlier in the
+# chain.  zsh requires `setopt PROMPT_SUBST` for the `${__FREMINAL_FID_PAYLOAD}`
+# inside PROMPT to expand at draw time; we set it here.
+setopt PROMPT_SUBST
+
+# Strip any prior freminal A/B wrap from PROMPT (defensive: avoids stacking
+# wraps if precmd runs twice for the same cycle).  The wrap is inserted as a
+# literal substring containing `${__FREMINAL_FID_PAYLOAD}` (unexpanded inside
+# single quotes at assignment), so we match that literal here.
+__freminal_strip_prompt_wrap() {
+	emulate -L zsh
+	local a_marker=$'%{\033]133;A;${__FREMINAL_FID_PAYLOAD}\007%}'
+	local b_marker=$'%{\033]133;B;${__FREMINAL_FID_PAYLOAD}\007%}'
+	PROMPT="${PROMPT//${a_marker}/}"
+	PROMPT="${PROMPT//${b_marker}/}"
+}
+
+__freminal_precmd() {
+	local __freminal_exit=$?
+
+	# D marker closes the *previous* command, so it uses the current
+	# (about-to-be-replaced) fid payload.
+	printf '\033]133;D;%s;%s\007' "${__freminal_exit}" "${__FREMINAL_FID_PAYLOAD}"
+
+	# Roll the fid forward for the upcoming command lifecycle.  The new
+	# fid is shared by A (prompt start), B (prompt end), C (preexec when
+	# the user runs a command), and the next precmd's D.
+	__freminal_fid_next
+
+	# OSC 7 cwd notification.
+	local __freminal_hostname
+	__freminal_hostname="$(hostname 2>/dev/null || echo localhost)"
+	printf '\033]7;file://%s%s\007' "${__freminal_hostname}" "${PWD}"
+
+	# Re-wrap PROMPT with A and B markers.  Strip any existing wrap first so
+	# we don't stack.  `${__FREMINAL_FID_PAYLOAD}` is re-expanded each draw
+	# under PROMPT_SUBST, picking up the value just set above (and any
+	# subsequent rolls — but no further rolls happen until the next precmd).
+	__freminal_strip_prompt_wrap
+	PROMPT='%{'$'\033'']133;A;${__FREMINAL_FID_PAYLOAD}'$'\007''%}'"${PROMPT}"'%{'$'\033'']133;B;${__FREMINAL_FID_PAYLOAD}'$'\007''%}'
+
+	# Re-arm: ensure we're the LAST entry in precmd_functions so that
+	# frameworks (oh-my-posh, Starship, p10k) that set PROMPT from their
+	# own precmd have already run by the time we re-wrap.
+	__freminal_rearm_precmd
+}
+
+# Move __freminal_precmd to the end of precmd_functions if it isn't already
+# last.  Idempotent and cheap.
+__freminal_rearm_precmd() {
+	emulate -L zsh
+	if [[ "${precmd_functions[-1]:-}" != "__freminal_precmd" ]]; then
+		precmd_functions=("${(@)precmd_functions:#__freminal_precmd}")
+		precmd_functions+=(__freminal_precmd)
+	fi
+}
+
+if (( ${+functions[add-zsh-hook]} )); then
+	add-zsh-hook precmd __freminal_precmd
+else
+	precmd_functions+=(__freminal_precmd)
+fi
+
+# ── preexec hook (C marker) ───────────────────────────────────────────────────
+# C marks the start of command execution; it shares the fid established at
+# the most recent precmd (and embedded in the A/B markers of the prompt
+# the user just submitted).  No fid roll here.
+__freminal_preexec() {
+	printf '\033]133;C;%s\007' "${__FREMINAL_FID_PAYLOAD}"
+}
+
+if (( ${+functions[add-zsh-hook]} )); then
+	add-zsh-hook preexec __freminal_preexec
+else
+	preexec_functions+=(__freminal_preexec)
+fi

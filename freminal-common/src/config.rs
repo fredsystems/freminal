@@ -487,40 +487,34 @@ impl Default for SecurityConfig {
 /// Configuration for OSC 133 (FinalTerm/FTCS) shell integration.
 ///
 /// Freminal sets `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION=<crate version>`
-/// in the PTY environment so shell scripts can detect us, and (optionally)
-/// auto-installs prompt-hook scripts to `~/.config/freminal/shell-integration/`
-/// on first launch.  The shell scripts emit OSC 133 A/B/C/D markers so the
-/// terminal can render command blocks, gutters (Task 73), and notifications
-/// (Task 76).
+/// in the PTY environment so shell scripts can detect us.  When enabled,
+/// freminal also injects the necessary env at PTY spawn time so the bundled
+/// bash/zsh/fish integration scripts auto-load — no manual sourcing required.
+/// The scripts emit OSC 133 A/B/C/D markers so the terminal can render
+/// command blocks, gutters (Task 73), and notifications (Task 76).
 ///
 /// ```toml
 /// [shell_integration]
 /// set_term_program = true
-/// auto_install = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellIntegrationConfig {
     /// When `true`, freminal sets `TERM_PROGRAM=freminal` and
-    /// `TERM_PROGRAM_VERSION` in the PTY environment.
+    /// `TERM_PROGRAM_VERSION` in the PTY environment, and injects the env
+    /// needed for spawn-time auto-loading of the bundled shell-integration
+    /// scripts.
     ///
     /// Default: `true`.  Disable only if you have an external workflow that
-    /// relies on the inherited `TERM_PROGRAM` from the parent process.
+    /// conflicts with either the inherited `TERM_PROGRAM` or with our shell
+    /// hooks.
     pub set_term_program: bool,
-
-    /// When `true`, freminal auto-installs shell integration scripts to
-    /// `~/.config/freminal/shell-integration/` on first launch.
-    ///
-    /// Existing files in the target directory are NOT overwritten (user
-    /// customisations are preserved).  Default: `true`.
-    pub auto_install: bool,
 }
 
 impl Default for ShellIntegrationConfig {
     fn default() -> Self {
         Self {
             set_term_program: true,
-            auto_install: true,
         }
     }
 }
@@ -750,16 +744,55 @@ pub fn layout_library_dir() -> Option<PathBuf> {
 
 /// Per-user directory where Freminal stores shell-integration scripts.
 ///
-/// Linux/BSD:  `~/.config/freminal/shell-integration/`
-/// macOS:      `~/Library/Application Support/Freminal/shell-integration/`
-/// Windows:    `%APPDATA%\Freminal\shell-integration\`
+/// Resolution order:
 ///
-/// Returns `None` if the base directories cannot be determined.
+/// 1. `$FREMINAL_RESOURCES_DIR` if set — used by packaging / Nix setups
+///    that want to override the location entirely.
+/// 2. Any directory in `$XDG_DATA_DIRS` that already contains a
+///    `freminal/shell-integration/` subtree — supports system-wide
+///    installs (e.g. /usr/share, /usr/local/share).  The first match
+///    wins.
+/// 3. Platform-default per-user data directory:
+///    - Linux/BSD:  `~/.config/freminal/shell-integration/`
+///    - macOS:      `~/Library/Application Support/Freminal/shell-integration/`
+///    - Windows:    `%APPDATA%\Freminal\shell-integration\`
+///
+/// Returns `None` only if base directories cannot be determined AND none
+/// of the override paths above resolved.
 ///
 /// The directory is created on first call (via `create_dir_if_missing`)
 /// so callers can immediately write files into the returned path.
 #[must_use]
 pub fn shell_integration_dir() -> Option<PathBuf> {
+    // 1. Explicit override via $FREMINAL_RESOURCES_DIR.
+    if let Ok(custom) = std::env::var("FREMINAL_RESOURCES_DIR")
+        && !custom.is_empty()
+    {
+        let p = PathBuf::from(custom);
+        create_dir_if_missing(&p);
+        return Some(p);
+    }
+
+    // 2. System-wide install via $XDG_DATA_DIRS.  We only return a hit if
+    //    the directory already exists — otherwise an unrelated XDG entry
+    //    would shadow the per-user default.
+    if let Ok(xdg_data_dirs) = std::env::var("XDG_DATA_DIRS")
+        && !xdg_data_dirs.is_empty()
+    {
+        for entry in xdg_data_dirs.split(':') {
+            if entry.is_empty() {
+                continue;
+            }
+            let candidate = PathBuf::from(entry)
+                .join("freminal")
+                .join("shell-integration");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 3. Platform-default per-user data directory.
     let base = BaseDirs::new()?;
 
     #[cfg(target_os = "macos")]
@@ -1423,7 +1456,6 @@ size = 14.0
     fn shell_integration_and_command_blocks_round_trip_through_toml() {
         let mut cfg = Config::default();
         cfg.shell_integration.set_term_program = false;
-        cfg.shell_integration.auto_install = false;
         cfg.command_blocks.enabled = false;
         cfg.command_blocks.show_duration = false;
         cfg.command_blocks.duration_threshold_secs = 5.5;
@@ -1432,7 +1464,6 @@ size = 14.0
         let parsed: Config = toml::from_str(&toml).expect("re-parse");
 
         assert!(!parsed.shell_integration.set_term_program);
-        assert!(!parsed.shell_integration.auto_install);
         assert!(!parsed.command_blocks.enabled);
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);

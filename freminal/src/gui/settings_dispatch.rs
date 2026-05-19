@@ -326,52 +326,6 @@ impl FreminalGui {
                     .unwrap_or_default();
                 self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
             }
-            SettingsAction::ReinstallShellScripts => {
-                let Some(dir) = freminal_common::config::shell_integration_dir() else {
-                    error!("Re-install Scripts: cannot resolve shell-integration dir");
-                    self.push_error_toast(
-                        "Cannot re-install shell scripts",
-                        Some(
-                            "Could not determine the user data directory. \
-                             Check that XDG_CONFIG_HOME or platform equivalent is set."
-                                .to_owned(),
-                        ),
-                    );
-                    return;
-                };
-                let result = crate::shell_integration::reinstall_scripts(&dir);
-                if result.has_errors() {
-                    let detail = result
-                        .errors
-                        .iter()
-                        .map(|(name, err)| format!("{name}: {err}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.push_error_toast(
-                        format!("{} script(s) failed to re-install", result.errors.len()),
-                        Some(detail),
-                    );
-                } else {
-                    self.push_info_toast(
-                        format!("Re-installed {} shell script(s)", result.written.len()),
-                        Some(dir.display().to_string()),
-                    );
-                }
-            }
-            SettingsAction::CopyShellIntegrationPath(path) => {
-                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(path.clone())) {
-                    Ok(()) => {
-                        self.push_info_toast("Path copied", Some(path.clone()));
-                    }
-                    Err(e) => {
-                        error!("Copy Path: clipboard write failed: {e}");
-                        self.push_error_toast(
-                            "Failed to copy path to clipboard",
-                            Some(e.to_string()),
-                        );
-                    }
-                }
-            }
         }
     }
 }

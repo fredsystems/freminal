@@ -243,6 +243,7 @@
                 pkgs.cargo-llvm-cov
                 pkgs.cachix
                 pkgs.perf
+                pkgs.fish
               ];
 
               # Extra dev packages provided by mkCheck (includes rustToolchain)

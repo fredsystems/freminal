@@ -261,8 +261,13 @@ fn dispatch_osc_target(
             if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
                 output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
             } else {
-                tracing::warn!(
-                    "OSC 133: unrecognised FTCS params: recent='{}'",
+                // Foreign FTCS markers (e.g. Apple Terminal's `/etc/bashrc`
+                // emitting `133;A;cl=m;aid=$$` before our PS1 wraps) are
+                // intentionally dropped to avoid duplicate command blocks.
+                // Logged at debug to aid diagnosis without flooding the
+                // log on systems where a foreign integration is active.
+                tracing::debug!(
+                    "OSC 133: ignored foreign or unrecognised FTCS params: recent='{}'",
                     seq_trace.as_str()
                 );
             }

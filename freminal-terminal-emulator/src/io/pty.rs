@@ -241,6 +241,83 @@ pub fn term_program_env_pairs() -> [(&'static str, String); 2] {
     ]
 }
 
+/// Shell flavour recognised by Freminal's spawn-time shell-integration
+/// injection.  Anything else is treated as "unknown" — no injection
+/// happens and the child is spawned with the default environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+/// Detect the shell flavour from a program path.  Matches on the file
+/// basename so paths like `/usr/local/bin/bash` and `/bin/bash` both
+/// resolve to `Shell::Bash`.  Returns `None` for unrecognised shells.
+fn detect_shell(program: &str) -> Option<Shell> {
+    let basename = Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program);
+    // Strip an optional `.exe` suffix for Windows.
+    let stem = basename.strip_suffix(".exe").unwrap_or(basename);
+    match stem {
+        "bash" => Some(Shell::Bash),
+        "zsh" => Some(Shell::Zsh),
+        "fish" => Some(Shell::Fish),
+        _ => None,
+    }
+}
+
+/// Apply shell-integration env injection to `cmd` for `shell`, using
+/// `resources` as the shell-integration resources directory.  Called
+/// from [`run_terminal`] when (a) no explicit positional command was
+/// passed, (b) `set_term_program` is enabled, and (c) the program path
+/// matches a recognised shell.
+///
+/// Returns the list of additional args (if any) that must be appended
+/// to `cmd` BEFORE spawning — currently only bash needs this (`--posix`).
+/// Args are returned rather than applied directly so callers retain
+/// control over `cmd.args()` error propagation.
+fn inject_shell_integration_env(
+    cmd: &mut CommandBuilder,
+    shell: Shell,
+    resources: &Path,
+) -> &'static [&'static str] {
+    match shell {
+        Shell::Bash => {
+            // bash sources `$ENV` when invoked in POSIX mode but not in
+            // its normal interactive mode.  We launch with `--posix` so
+            // the file is sourced; the script's first action is to
+            // disable POSIX mode again.
+            cmd.env("ENV", resources.join("bash").join("freminal-init.bash"));
+            &["--posix"]
+        }
+        Shell::Zsh => {
+            // Preserve any existing $ZDOTDIR via a sentinel env var.
+            // The `.zshenv` we ship restores it before sourcing the
+            // user's real `.zshenv`.  We only set the sentinel if
+            // ZDOTDIR is currently set (including to empty); if it's
+            // unset, leaving the sentinel unset tells our script to
+            // `unset ZDOTDIR` rather than restore an empty value.
+            if let Ok(existing) = std::env::var("ZDOTDIR") {
+                cmd.env("__FREMINAL_ZSH_ZDOTDIR", existing);
+            }
+            cmd.env("ZDOTDIR", resources.join("zsh"));
+            &[]
+        }
+        Shell::Fish => {
+            // Prepend our resources directory to $XDG_DATA_DIRS so fish
+            // finds our `fish/vendor_conf.d/freminal.fish` first.
+            let existing = std::env::var("XDG_DATA_DIRS")
+                .unwrap_or_else(|_| String::from("/usr/local/share:/usr/share"));
+            let combined = format!("{}:{existing}", resources.display());
+            cmd.env("XDG_DATA_DIRS", combined);
+            &[]
+        }
+    }
+}
+
 /// Spawn the child process on a new PTY and run the PTY thread event loop.
 ///
 /// Integrates the PTY reader, GUI input channel, and window-command dispatch
@@ -287,6 +364,18 @@ pub fn run_terminal(
             PtyInitError::Spawn(e.to_string())
         })?;
 
+    // Remember whether we're spawning a bare shell (no positional command).
+    // Shell-integration env injection is only valid in that case — running an
+    // explicit program (e.g. `freminal -- htop`) must not have its env mutated.
+    let spawning_shell = command.is_none();
+    // Resolve the shell program path used for `detect_shell` later.  When
+    // `shell` was `None` we fall back to `$SHELL`; if that's also unset we
+    // can't detect anything and skip injection.
+    let shell_program: Option<String> = if spawning_shell {
+        shell.clone().or_else(|| std::env::var("SHELL").ok())
+    } else {
+        None
+    };
     let mut cmd = if let Some((prog, args)) = command {
         let mut c = CommandBuilder::new(prog);
         c.args(args)
@@ -331,6 +420,36 @@ pub fn run_terminal(
         for (key, value) in term_program_env_pairs() {
             cmd.env(key, value);
         }
+    }
+    // Spawn-time shell-integration env injection (Task 72.8b).
+    //
+    // When we're spawning a bare interactive shell (no positional command)
+    // and `set_term_program` is enabled, detect the shell flavour and inject
+    // the env that makes our shipped integration scripts auto-load.  The
+    // scripts emit OSC 133 markers tagged `freminal=1; fid=<id>` so the
+    // command-block tracker can recognise them.
+    //
+    // Falls back silently when the resources directory can't be resolved
+    // (e.g. unusual platforms or stripped installs).
+    let injected_extra_args: &'static [&'static str] = if spawning_shell && set_term_program {
+        if let (Some(prog), Some(resources)) = (
+            shell_program.as_deref(),
+            freminal_common::config::shell_integration_dir(),
+        ) {
+            if let Some(shell) = detect_shell(prog) {
+                inject_shell_integration_env(&mut cmd, shell, &resources)
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    for arg in injected_extra_args {
+        cmd.arg(arg)
+            .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
     }
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 

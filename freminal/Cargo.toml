@@ -69,6 +69,7 @@ sysinfo.workspace = true
 # dev dependencies
 [dev-dependencies]
 criterion.workspace = true
+tempfile.workspace = true
 
 [features]
 default = []
