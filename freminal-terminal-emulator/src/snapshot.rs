@@ -221,6 +221,7 @@ pub struct TerminalSnapshot {
     /// Backarrow key mode (`DECBKM` / `?67`).
     ///
     /// Controls whether the Backspace key sends BS (0x08) or DEL (0x7F).
+    /// Default is DEL (reset), matching xterm and modern terminals.
     pub backarrow_sends_bs: Decbkm,
 
     /// Line Feed / New Line mode (`LNM` / mode 20).
@@ -361,7 +362,7 @@ impl TerminalSnapshot {
             skip_draw: false,
             modify_other_keys: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
-            backarrow_sends_bs: Decbkm::BackarrowSendsBs,
+            backarrow_sends_bs: Decbkm::BackarrowSendsDel,
             line_feed_mode: Lnm::LineFeed,
             kitty_keyboard_flags: 0,
             alternate_scroll: AlternateScroll::Disabled,

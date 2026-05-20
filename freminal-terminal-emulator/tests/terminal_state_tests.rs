@@ -425,14 +425,18 @@ fn test_decnkm_decrqm_after_set_is_application() {
 
 // ─── DECBKM (?67) — Backarrow Key Mode ──────────────────────────────────────
 
-/// Default backarrow key mode is `BackarrowSendsBs` (set state).
+/// Default backarrow key mode is `BackarrowSendsDel` (reset state).
+///
+/// Matches xterm's documented default and the `xterm-256color` terminfo
+/// `kbs=\177` (DEL) capability, so readline / ZLE / TUI programs correctly
+/// recognize Backspace.
 #[test]
-fn test_decbkm_default_is_bs() {
+fn test_decbkm_default_is_del() {
     let (state, _rx) = make_state();
     assert_eq!(
         state.modes.backarrow_key_mode,
-        Decbkm::BackarrowSendsBs,
-        "Default backarrow key mode must be BackarrowSendsBs"
+        Decbkm::BackarrowSendsDel,
+        "Default backarrow key mode must be BackarrowSendsDel"
     );
 }
 
@@ -468,9 +472,9 @@ fn test_decbkm_reset_sends_del() {
     );
 }
 
-/// DECRQM query for ?67 returns Ps=1 in default (set/BS) state.
+/// DECRQM query for ?67 returns Ps=2 in default (reset/DEL) state.
 #[test]
-fn test_decbkm_decrqm_default_is_set() {
+fn test_decbkm_decrqm_default_is_reset() {
     let (mut state, rx) = make_state();
     drain(&rx);
 
@@ -479,8 +483,8 @@ fn test_decbkm_decrqm_default_is_set() {
     let bytes = unwrap_write(msg);
     let resp = String::from_utf8(bytes).unwrap();
     assert_eq!(
-        resp, "\x1b[?67;1$y",
-        "DECRQM ?67 in default (BS) state must return Ps=1 (set)"
+        resp, "\x1b[?67;2$y",
+        "DECRQM ?67 in default (DEL) state must return Ps=2 (reset)"
     );
 }
 

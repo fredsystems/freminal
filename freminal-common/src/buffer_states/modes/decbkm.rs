@@ -15,13 +15,19 @@ use super::ReportMode;
 /// - Set (`CSI ? 67 h`): Backspace sends `BS` (0x08).
 /// - Reset (`CSI ? 67 l`): Backspace sends `DEL` (0x7F).
 ///
-/// Default is `BackarrowSendsBs` (set), matching Freminal's historical behavior.
+/// Default is `BackarrowSendsDel` (reset), matching xterm's documented default
+/// and the convention used by every modern terminal (xterm, `WezTerm`,
+/// Alacritty, kitty, iTerm2, foot). The `xterm-256color` terminfo entry
+/// advertises `kbs=\177` (DEL), so readline, zsh ZLE, bash, and TUI
+/// applications all expect Backspace to deliver DEL (0x7F). Sending BS (0x08)
+/// confuses these programs into echoing `^H` instead of erasing the character
+/// to the left.
 #[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum Decbkm {
-    #[default]
-    /// Backarrow sends BS (0x08) — DECSET ?67 (default)
+    /// Backarrow sends BS (0x08) — DECSET ?67
     BackarrowSendsBs,
-    /// Backarrow sends DEL (0x7F) — DECRST ?67
+    #[default]
+    /// Backarrow sends DEL (0x7F) — DECRST ?67 (default)
     BackarrowSendsDel,
     /// DECRQM query
     Query,

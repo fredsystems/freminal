@@ -855,7 +855,7 @@ fn ctrl_a_with_aek_and_mok0() {
 // DECBKM (?67) — Backarrow Key Mode
 // ---------------------------------------------------------------------------
 
-/// Backspace with DECBKM set (default): sends BS (0x08).
+/// Backspace with DECBKM set: sends BS (0x08).
 #[test]
 fn backspace_decbkm_set_sends_bs() {
     match TerminalInput::Backspace.to_payload(

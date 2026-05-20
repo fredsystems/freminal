@@ -1365,6 +1365,27 @@ mod tests {
         assert_eq!(p, TerminalInputPayload::Single(0x7F));
     }
 
+    /// Regression test: `Decbkm::default()` must be `BackarrowSendsDel` so that
+    /// Backspace produces DEL (0x7F) by default. This matches xterm and every
+    /// modern terminal, and is required for readline / zsh ZLE / vi mode /
+    /// any TUI keyed off the `xterm-256color` terminfo `kbs=\177` capability.
+    /// Inverting this default causes shells to echo `^H` on Backspace.
+    #[test]
+    fn backspace_default_decbkm_sends_del() {
+        assert_eq!(Decbkm::default(), Decbkm::BackarrowSendsDel);
+        let p = TerminalInput::Backspace.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::default(),
+            Lnm::LineFeed,
+            0,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(p, TerminalInputPayload::Single(0x7F));
+    }
+
     #[test]
     fn backspace_decbkm_bs_sends_bs() {
         let p = TerminalInput::Backspace.to_payload(

@@ -390,12 +390,12 @@ test_mode_type!(
     "Query Keypad Mode (DECNKM)"
 );
 
-// Decbkm (?67): default=BackarrowSendsBs, Set=BackarrowSendsBs, Reset=BackarrowSendsDel
+// Decbkm (?67): default=BackarrowSendsDel, Set=BackarrowSendsBs, Reset=BackarrowSendsDel
 test_mode_type!(
     decbkm_tests,
     Decbkm,
     67,
-    Decbkm::BackarrowSendsBs,
+    Decbkm::BackarrowSendsDel,
     Decbkm::BackarrowSendsBs,
     Decbkm::BackarrowSendsDel,
     Decbkm::Query,
