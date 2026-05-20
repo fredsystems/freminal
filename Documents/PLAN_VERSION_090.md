@@ -28,6 +28,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 77  | Smart Paste Guard                       | Small–Medium | Pending | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Pending | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Pending | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
+| 98  | Block Close on Running Commands         | Small–Medium | Pending | Task 72         | `task-98/block-close-on-running` |
 
 ### Execution order
 
@@ -41,6 +42,8 @@ Sequential, one feature branch per task. Recommended ordering:
 6. **Task 77** — paste guard (independent)
 7. **Task 74** — broadcast input (independent)
 8. **Task 75** — pane env round-trip verification (smallest, can also run in parallel)
+9. **Task 98** — block close on running commands (depends on Task 72's `CommandBlock`
+   status; lands any time after Task 72)
 
 Each task gets its own PR. Each subtask within a task is committed individually per
 `agents.md` ("Plan Subtask Commits"). `--no-verify` is forbidden.
@@ -2867,6 +2870,256 @@ The following ideas surfaced during planning but are explicitly deferred:
 
 ---
 
+## Task 98 — Block Close on Running Commands
+
+### 98 Summary
+
+When the user attempts to close a pane, tab, or window — or quit the
+application — while one or more shells in the affected scope have a running
+foreground command (as reported by OSC 133 prompt/command markers), surface
+a confirmation dialog listing what is running. The user can cancel, force
+close, or wait. Enabled by default; configurable.
+
+This task builds directly on Task 72's `CommandBlock` infrastructure. A
+pane has a "running command" iff its most recent `CommandBlock` has
+`status() == CommandStatus::Running` (i.e. an `OSC 133;C` marker was
+emitted with no subsequent `OSC 133;D` to close it).
+
+### 98 Decisions (fixed)
+
+- **Default behavior:** Block close, with a confirmation dialog. Users
+  who find this annoying can disable it in config or per-action via a
+  "Force Close" button in the dialog.
+- **Scope of "what is running":**
+  - **Close pane:** check that pane only.
+  - **Close tab:** check every pane in the tab.
+  - **Close window / app quit:** check every pane in every tab of that
+    window (or all windows for app quit).
+- **Detection mechanism:** OSC 133 `CommandBlock::status()` only. We do
+  not introspect `/proc/<pid>/...` or query child processes. Shells
+  without OSC 133 integration appear as "no running command" — this is
+  acceptable because v0.9.0 ships shell integration by default
+  (Task 72.8b).
+- **Grace period:** A pane that has never received any OSC 133 prompt
+  marker (e.g. `cat`, `vim` launched directly, raw `sh` without shell
+  integration) is treated as "unknown". Configurable: by default,
+  unknown panes do **not** block close (matches existing v0.7.0
+  behavior). Users who want maximum safety can set
+  `unknown_blocks = true`.
+- **Bypass via keybinding:** The existing close keybindings
+  (`CloseTab`, `ClosePane`, app-quit shortcut) trigger the guard. A new
+  `KeyAction::ForceClose` variant skips the guard entirely — useful
+  when the user knows the shell is stuck.
+- **App quit behavior:** When the OS sends a quit request (Cmd-Q on
+  macOS, Alt-F4 on Windows, etc.), the guard runs across all windows.
+  If any window has running commands and the user cancels, the quit is
+  vetoed (return `false` from `on_close_requested`). If the user
+  confirms, all windows close.
+- **Dialog placement:** One dialog per affected window. For app quit
+  with running commands in multiple windows, surface the dialog in the
+  focused window first; cancelling there cancels the entire quit.
+  Confirming there proceeds to close that window, then the next, etc.
+- **No timer / auto-confirm.** The dialog blocks until the user
+  responds. (Future: optional "auto-confirm after N seconds" deferred
+  to v0.10.0.)
+
+### 98 Pre-existing Infrastructure (Do Not Re-Implement)
+
+| Concern                      | Where it lives today                                                        |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `CommandBlock` storage       | `freminal-buffer/src/buffer/command_block.rs` (Task 72)                     |
+| `CommandStatus::Running`     | `freminal-common/src/buffer_states/command_block.rs` (Task 72)              |
+| Snapshot transport           | `freminal-terminal-emulator/src/snapshot.rs` `command_blocks` field         |
+| Per-pane access              | `freminal/src/gui/panes/mod.rs:816,828` `PaneTree::iter_panes(_mut)`        |
+| Close-tab path               | `freminal/src/gui/actions.rs:13` `close_tab`                                |
+| Close-pane path              | `PaneTree::close_pane` (TODO: confirm exact location during 98.1 audit)     |
+| Window close veto            | `freminal/src/gui/app_impl.rs:272` `on_close_requested` (returns `bool`)    |
+| Toast / modal infrastructure | `freminal/src/gui/toast.rs`, `freminal/src/gui/settings.rs` (modal pattern) |
+| `KeyAction` registry         | `freminal-common/src/keybindings.rs`                                        |
+| Existing close keybindings   | `KeyAction::CloseTab`, `ClosePane`, etc. in `keybindings.rs`                |
+
+### 98 Subtasks
+
+#### 98.1 — Audit close paths
+
+**Scope:** Read-only audit of every code path that closes a pane, tab,
+or window, and every path that triggers app quit.
+
+- Enumerate every call site of `Tabs::close_tab`,
+  `PaneTree::close_pane` (or equivalent), window close via
+  `on_close_requested`, and app-quit via keybinding or menu.
+- For each, record: trigger source (keybinding, OS event, menu),
+  current cleanup logic, whether veto is currently possible.
+- Produce a written report in this plan document under 98.1
+  completion notes before writing any code.
+
+**Verification:** Report posted; no code changes.
+
+#### 98.2 — Config schema
+
+**Scope:** `freminal-common/src/config.rs`, `config_example.toml`.
+
+- Add a new section `[close_guard]`:
+
+  ```toml
+  [close_guard]
+  # Master switch.  When false, no close-guard checks run.  Default true.
+  enabled = true
+
+  # When true, also block close for panes whose command status is unknown
+  # (no OSC 133 markers ever received).  Default false.
+  unknown_blocks = false
+
+  # When true, the app-quit shortcut runs the guard across all windows.
+  # When false, app quit bypasses the guard and only individual
+  # close-window / close-tab / close-pane actions are guarded.  Default true.
+  guard_app_quit = true
+  ```
+
+- Add `CloseGuardConfig` struct with `#[serde(default)]`.
+- Document in the inline doc comments which `CommandStatus` values
+  count as "running" (only `Running`; `Success`, `Failure`, `Unknown`
+  do not).
+
+**Verification:** Round-trip TOML test in `config.rs` tests.
+
+#### 98.3 — Running-command detection helper
+
+**Scope:** New module `freminal/src/gui/close_guard.rs`.
+
+- Pure function `panes_with_running_commands(panes: &[&Pane]) ->
+Vec<RunningCommandInfo>` where `RunningCommandInfo` carries:
+  - Pane id.
+  - Tab id (for display).
+  - Window id (for display).
+  - Command string (from the open `CommandBlock`'s captured command
+    line, if available; otherwise `"<unknown command>"`).
+  - Elapsed runtime.
+- `unknown_command_panes(panes: &[&Pane]) -> Vec<PaneId>` — panes
+  that have never received any OSC 133 prompt.
+- Read state from the latest `TerminalSnapshot` (loaded via
+  `ArcSwap` per the post-refactor architecture in `agents.md`). Do
+  not lock or mutate emulator state.
+
+**Verification:** Unit tests with synthetic snapshots covering: no
+running commands; one running; multiple in one tab; mix of
+running/unknown/idle.
+
+#### 98.4 — Confirmation dialog
+
+**Scope:** `freminal/src/gui/close_guard.rs` (UI).
+
+- An egui modal titled "Close — Running Commands":
+  - Top: a one-line banner ("3 panes have running commands. Close
+    anyway?").
+  - Middle: a scrollable list of `RunningCommandInfo` entries
+    formatted as `"<tab name> · <pane label> · <command> (<elapsed>)"`.
+  - Bottom: "Cancel" (default, ESC), "Force Close" (focused-but-not-
+    default, Ctrl+Enter), and — for tab/window close only — "Close
+    Other Panes" (closes only panes without running commands).
+- Modal state lives on the GUI thread; the close action is suspended
+  until the user resolves the dialog.
+- One dialog per affected window. App quit posts the dialog to the
+  focused window first.
+
+**Verification:** Manual visual test. Snapshot tests of the dialog
+content formatting given synthetic `RunningCommandInfo` vectors.
+
+#### 98.5 — Wire into pane close
+
+**Scope:** `freminal/src/gui/panes/mod.rs` (or wherever
+`PaneTree::close_pane` lives, confirmed by 98.1) and the call sites.
+
+- Before executing the close, call
+  `close_guard::panes_with_running_commands(&[pane])`.
+- If empty (and `unknown_blocks=false` or the pane is not unknown),
+  close as today.
+- Otherwise, set a `pending_close_dialog` field on the window state
+  and suspend the close. When resolved with Force Close, proceed.
+
+**Verification:** Integration test: simulate OSC 133;C (no D),
+trigger close-pane, verify dialog appears and Force Close proceeds.
+
+#### 98.6 — Wire into tab close
+
+**Scope:** `freminal/src/gui/actions.rs` `close_tab`.
+
+- Same pattern. Use `iter_panes` to gather all panes in the tab.
+- Support the "Close Other Panes" option: close all leaves whose
+  status is not `Running` (and, if `unknown_blocks=true`, not
+  unknown).
+
+**Verification:** Integration test: tab with two panes, one
+running, trigger close-tab, dialog appears with both options.
+
+#### 98.7 — Wire into window close + app quit
+
+**Scope:** `freminal/src/gui/app_impl.rs` `on_close_requested`,
+plus any app-quit dispatch path identified in 98.1.
+
+- Window close: gather panes from the window's `PaneTree`. If
+  running commands present, set `pending_close_dialog` and return
+  `false` from `on_close_requested` to veto the OS close. When the
+  user confirms Force Close, programmatically close the window via
+  the windowing crate API.
+- App quit (when `guard_app_quit=true`): gather panes from all
+  windows. Post the dialog to the focused window. Cancel → veto
+  quit. Force Close → close all windows in sequence.
+
+**Verification:** Integration test: open two windows, one with a
+running command, trigger app quit, verify dialog appears and
+cancel preserves both windows.
+
+#### 98.8 — `KeyAction::ForceClose`
+
+**Scope:** `freminal-common/src/keybindings.rs`, dispatch.
+
+- Add a new `KeyAction::ForceClose` variant per the keybinding
+  convention.
+- No default binding (force close should be deliberate; users opt
+  in by binding it themselves).
+- Dispatch: if a `pending_close_dialog` exists, resolve it as Force
+  Close. Otherwise, no-op.
+
+**Verification:** Round-trip keybinding test; manual test of the
+key path.
+
+#### 98.9 — Settings UI
+
+**Scope:** Security settings tab (`freminal/src/gui/settings.rs`).
+
+- Add a "Close Guard" section with three toggles matching the
+  config keys.
+- Follow the existing toggle/persistence pattern used elsewhere in
+  the Security tab.
+
+**Verification:** Round-trip persistence; modal opens and reflects
+config state.
+
+### 98 Open Questions Resolved
+
+All resolved.
+
+### 98 Benchmarks
+
+None required. `panes_with_running_commands` reads from already-
+loaded snapshots and the per-window pane count is bounded by the
+user's screen real estate (tens, not thousands). No new benchmark.
+
+### 98 Risks
+
+- **False positives from buggy shell integration.** If a shell
+  emits `OSC 133;C` and crashes before `OSC 133;D`, the pane will
+  appear "running" forever. Mitigation: Force Close is one
+  Ctrl+Enter away, and the dialog clearly labels the elapsed time
+  so users can identify stuck markers.
+- **App-quit confusion when guard runs across windows.** Posting
+  the dialog only in the focused window may surprise users with
+  multiple monitors. Mitigation: the dialog explicitly lists
+  affected tabs/panes across all windows.
+
+---
+
 ## Activation Checklist
 
 When v0.9.0 is activated (after v0.8.0 merges), follow this order:
@@ -2905,8 +3158,8 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
    72.16.c, 72.16.d were all closed-as-subsumed by 72.8b on 2026-05-18).
 
 4. After Task 72 merges, branch `task-73/command-gutters` and repeat.
-5. Continue through Tasks 94, 95, 76, 77, 74, 75 in that order.
-6. After all eight tasks merge, update `MASTER_PLAN.md` status table and
+5. Continue through Tasks 94, 95, 76, 77, 74, 75, 98 in that order.
+6. After all nine tasks merge, update `MASTER_PLAN.md` status table and
    release v0.9.0.
 
 ---

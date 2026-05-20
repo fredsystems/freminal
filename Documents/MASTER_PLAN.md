@@ -10,19 +10,19 @@ and plan document maintenance rules.
 
 ### Version Roadmap
 
-| Version | Codename                   | Plan Document                                                         | Tasks        | Status        |
-| ------- | -------------------------- | --------------------------------------------------------------------- | ------------ | ------------- |
-| v0.2.0  | —                          | (Tasks 1–35 below)                                                    | 35           | Done          |
-| v0.3.0  | Daily Driver               | (retired — see DESIGN_DECISIONS.md)                                   | 36–44        | Complete      |
-| v0.4.0  | Search & Protocol          | (retired — see DESIGN_DECISIONS.md)                                   | 45–52        | Complete      |
-| v0.5.0  | Multi-Instance & Visual    | (retired — see DESIGN_DECISIONS.md)                                   | 53–58        | Complete      |
-| v0.6.0  | Foundation                 | (retired — see DESIGN_DECISIONS.md)                                   | 62–67        | Complete      |
-| v0.7.0  | Recording & Layouts        | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69  | Complete      |
-| v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md`                                                 | 70–71        | Pending merge |
-| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95 | Stub          |
-| v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md`                                                 | 78–83, 96–97 | Stub          |
-| v0.11.0 | Platform Play              | `PLAN_VERSION_110.md`                                                 | 84–87        | Stub          |
-| v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md`                                                 | 88–93        | Stub          |
+| Version | Codename                   | Plan Document                                                         | Tasks            | Status        |
+| ------- | -------------------------- | --------------------------------------------------------------------- | ---------------- | ------------- |
+| v0.2.0  | —                          | (Tasks 1–35 below)                                                    | 35               | Done          |
+| v0.3.0  | Daily Driver               | (retired — see DESIGN_DECISIONS.md)                                   | 36–44            | Complete      |
+| v0.4.0  | Search & Protocol          | (retired — see DESIGN_DECISIONS.md)                                   | 45–52            | Complete      |
+| v0.5.0  | Multi-Instance & Visual    | (retired — see DESIGN_DECISIONS.md)                                   | 53–58            | Complete      |
+| v0.6.0  | Foundation                 | (retired — see DESIGN_DECISIONS.md)                                   | 62–67            | Complete      |
+| v0.7.0  | Recording & Layouts        | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69      | Complete      |
+| v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md`                                                 | 70–71            | Pending merge |
+| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | Stub          |
+| v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md`                                                 | 78–83, 96–97     | Stub          |
+| v0.11.0 | Platform Play              | `PLAN_VERSION_110.md`                                                 | 84–87            | Stub          |
+| v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md`                                                 | 88–93            | Stub          |
 
 **v0.8.0 is a hard gate.** No work on v0.9.0 or later begins until v0.8.0 (Tasks 70 and 71)
 is complete. v0.8.0 closes every correctness and hygiene gap identified in the post-v0.7.0
@@ -129,6 +129,7 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 | 95  | Persist Custom Tab Names in Layouts      | `PLAN_VERSION_090.md` (Task 95)               | Stub          | v0.8.0 (71.1), Task 61 |
 | 96  | Per-Pane Title Bar                       | `PLAN_VERSION_100.md` (Task 96)               | Stub          | Task 58                |
 | 97  | Dynamic Tab Width & Overflow             | `PLAN_VERSION_100.md` (Task 97)               | Stub          | v0.8.0 (71.1)          |
+| 98  | Block Close on Running Commands          | `PLAN_VERSION_090.md` (Task 98)               | Stub          | Task 72                |
 
 ---
 
