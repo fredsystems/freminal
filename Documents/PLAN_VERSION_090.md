@@ -234,7 +234,7 @@ Commit one per subtask. Each subtask leaves `cargo test --all` passing.
 
 **Verification:** Unit tests for status/duration/row_range. Clippy clean.
 
-**Completion notes (commit `f77fc9d`):**
+**Completion notes (commit `965aacf`):**
 
 - Added `freminal-common/src/buffer_states/command_block.rs` with
   `CommandBlockId`, `CommandStatus`, `CommandBlock`, `CommandBlockId::next()`,
@@ -250,7 +250,7 @@ Commit one per subtask. Each subtask leaves `cargo test --all` passing.
 - No `unwrap()`/`expect()` in production code. Tests use `match` + `panic!`
   rather than `unwrap()` even though tests are permitted to use it.
 
-#### 72.2 — Add `command_blocks: VecDeque<CommandBlock>` to `Buffer`
+#### 72.2 — Add `command_blocks: VecDeque<CommandBlock>` to `Buffer` ✅
 
 **Scope:** `freminal-buffer/src/buffer/mod.rs`, `lifecycle.rs`, `scroll.rs`,
 `resize_and_alt.rs`.
@@ -288,7 +288,7 @@ Some(cursor.pos.y)` on the most recent open block.
   `bench_command_block_record` measuring 10k start/finish cycles. Record
   before/after numbers in the commit message.
 
-**Completion notes (commit `66522f6`, 2026-05-17):**
+**Completion notes (commit `cbda480`, 2026-05-17):**
 
 - `scroll.rs` was read but not modified. `adjust_prompt_rows` is the
   single trim entry point for `erase_scrollback`, `enforce_scrollback_limit`,
@@ -316,7 +316,7 @@ Some(cursor.pos.y)` on the most recent open block.
   72.2 both measure in the 5–10 ms band; `adjust_prompt_rows` iterates an
   empty deque in this bench so there is no plausible mechanism for slowdown.
 
-#### 72.3 — Wire FTCS markers into Buffer command-block API
+#### 72.3 — Wire FTCS markers into Buffer command-block API ✅
 
 **Scope:** `freminal-terminal-emulator/src/terminal_handler/osc.rs`,
 `terminal_handler/mod.rs`.
@@ -362,7 +362,7 @@ remains untouched in 72.3.
 - A test that drain_command_events returns the finished blocks in FIFO
   order and empties the queue.
 
-**Completion notes (commit `2880d3a`, 2026-05-17):**
+**Completion notes (commit `4950f3f`, 2026-05-17):**
 
 - `pending_command_events: Vec<CommandBlock>` added as a sibling to
   `window_commands` on `TerminalHandler`. Same visibility (bare), same
@@ -380,7 +380,7 @@ remains untouched in 72.3.
 - `cargo-machete` clean.
 - freminal-terminal-emulator test count: 2310 → 2320 (+10).
 
-#### 72.4 — Expose `command_blocks` through `TerminalSnapshot`
+#### 72.4 — Expose `command_blocks` through `TerminalSnapshot` ✅
 
 **Scope:** `freminal-terminal-emulator/src/snapshot.rs`,
 `freminal-terminal-emulator/src/interface.rs` (the snapshot builder).
@@ -402,7 +402,7 @@ remains untouched in 72.3.
 - Benchmark before/after: `bench_build_snapshot_with_scrollback` must not
   regress by more than 15% per the AGENTS.md regression threshold.
 
-**Completion notes (commit `27fa949`, 2026-05-17):**
+**Completion notes (commit `d690064`, 2026-05-17):**
 
 - The actual constructor in `snapshot.rs` is `TerminalSnapshot::empty()`,
   not `Default`. Default-init line was added to `empty()`. Default impl
@@ -436,7 +436,7 @@ remains untouched in 72.3.
 filter drops numeric exit-code tokens. See subtask 72.16 below for the
 full report and fix scope.
 
-#### 72.5 — Settings: `[shell_integration]` and `[command_blocks]` config sections
+#### 72.5 — Settings: `[shell_integration]` and `[command_blocks]` config sections ✅
 
 **Scope:** `freminal-common/src/config.rs`, `config_example.toml`,
 `freminal/src/gui/settings.rs` and `settings_dispatch.rs`.
@@ -488,7 +488,7 @@ full report and fix scope.
 Snapshot test that disabling `command_blocks.enabled` makes
 `snap.command_blocks` empty.
 
-**Completion notes (commit `467ca40`, 2026-05-17):**
+**Completion notes (commit `0434bfb`, 2026-05-17):**
 
 - The plan originally said Command Blocks should go inside a
   "Behavior" tab. That tab does not exist in the current Settings UI.
@@ -520,7 +520,7 @@ Snapshot test that disabling `command_blocks.enabled` makes
   do not require live broadcast; they take effect on next PTY spawn
   (72.6) or first launch (72.8).
 
-#### 72.6 — TERM_PROGRAM environment variables
+#### 72.6 — TERM_PROGRAM environment variables ✅
 
 **Scope:** `freminal/src/gui/pty.rs`, `tab_spawning.rs`.
 
@@ -533,7 +533,7 @@ Snapshot test that disabling `command_blocks.enabled` makes
 **Verification:** Unit test on the env-merge helper (existing or new). Manual
 verification by running `echo $TERM_PROGRAM` in a freminal session.
 
-**Completion notes (commit `46dfbfd`, 2026-05-17):**
+**Completion notes (commit `14d1cad`, 2026-05-17):**
 
 - **Scope correction:** The plan listed the scope as `freminal/src/gui/pty.rs`
   and `tab_spawning.rs` only. In practice, `TERM_PROGRAM` was already set
@@ -571,7 +571,7 @@ verification by running `echo $TERM_PROGRAM` in a freminal session.
 - `cargo-machete` clean.
 - `freminal-terminal-emulator` test count: 2324 → 2329.
 
-#### 72.7 — Ship shell integration scripts
+#### 72.7 — Ship shell integration scripts ✅
 
 **Scope:** New top-level directory `shell-integration/`.
 
@@ -608,7 +608,7 @@ verification by running `echo $TERM_PROGRAM` in a freminal session.
 - Manual end-to-end test: source the script, run a few commands, verify
   freminal builds `CommandBlock`s with correct exit codes.
 
-**Completion notes (commit `e43911a`, 2026-05-17):**
+**Completion notes (commit `f6c6237`, 2026-05-17):**
 
 - Created `shell-integration/freminal.{bash,zsh,fish}` plus a
   `shell-integration/README.md` (367 lines total).
@@ -641,7 +641,7 @@ the scripts for the new mechanism. The flat-file layout
 layout described in 72.8b. The 72.7 scripts and README are deleted as
 part of 72.8b.
 
-#### 72.8 — Auto-install shell integration scripts on first launch
+#### 72.8 — Auto-install shell integration scripts on first launch ✅
 
 **Scope:** `freminal/src/main.rs` or `freminal/src/gui/run.rs` (wherever
 startup-side filesystem setup lives).
@@ -662,7 +662,7 @@ startup-side filesystem setup lives).
 verifying that the three files exist after first launch and are not
 overwritten on second launch.
 
-**Completion notes (commit `91b7a8d`, 2026-05-17):**
+**Completion notes (commit `168c364`, 2026-05-17):**
 
 - New `freminal_common::config::shell_integration_dir()` mirrors
   `layout_library_dir()` exactly (same per-OS structure, same
@@ -740,7 +740,7 @@ What changes in 72.8b:
   `# freminal-shell-integration v<N>` marker matches the
   `FREMINAL_SHELL_INTEGRATION_VERSION: u32` Rust constant.
 
-#### 72.8c — Parser: `freminal=1; fid=<id>` marker support
+#### 72.8c — Parser: `freminal=1; fid=<id>` marker support ✅
 
 **Why this subtask exists:** post-72.8 design review (2026-05-18)
 concluded that freminal must coexist with other FTCS emitters (WezTerm
@@ -815,7 +815,7 @@ directly (e.g. tests in `shell_integration.rs`) needs to supply a
 a `fid: "test".to_owned()` or similar) but touches many existing
 tests. Sub-agent budget should include time for that.
 
-**Status:** ✅ Complete (commit `4702b1a`, 2026-05-18).
+**Status:** ✅ Complete (commit `94db3c2`, 2026-05-18).
 
 **Completion notes:**
 
@@ -851,7 +851,7 @@ tests. Sub-agent budget should include time for that.
 - `cargo test --all`: 5118 tests pass. Workspace clippy clean.
   `cargo-machete` clean. `cargo fmt --check` clean.
 
-#### 72.8b — Ghostty-style shell-integration injection
+#### 72.8b — Ghostty-style shell-integration injection ✅
 
 **Why this subtask exists:** see 72.8c rationale and
 `Documents/DESIGN_DECISIONS.md` "Shell Integration Architecture".
@@ -1053,7 +1053,7 @@ Called from `main.rs` on every launch (gated on
   in a recording that markers carry `freminal=1; fid=<id>` and that
   `command_blocks` populates correctly.
 
-**Status:** ✅ Complete (commit `fd45441`, 2026-05-19).
+**Status:** ✅ Complete (commit `3e80e6d`, 2026-05-19).
 
 **Completion notes:**
 
@@ -1117,7 +1117,7 @@ Called from `main.rs` on every launch (gated on
 
 #### 72.9 — CommandFinishedEvent GUI handling ✅ 2026-05-19
 
-**Status:** ✅ Complete (commit `731180a`, 2026-05-19).
+**Status:** ✅ Complete (commit `d11ccf9`, 2026-05-19).
 
 **Scope:** `freminal/src/gui/app_impl.rs` (per-frame drain), `freminal/src/gui/panes/mod.rs`
 (per-pane ring), `freminal/src/gui/tabs.rs` (per-tab pending-event flag, focus clearing),
@@ -1177,7 +1177,7 @@ both clean.
   - Hand off to Task 76's notification path. Task 76 implementation may add
     the dispatch here behind a feature check.
 
-#### 72.10 — Fold/collapse view state
+#### 72.10 — Fold/collapse view state ✅
 
 **Scope:** `freminal/src/gui/view_state.rs`, the terminal renderer
 (`freminal/src/gui/renderer/` or `terminal/widget.rs`).
@@ -1218,18 +1218,18 @@ both clean.
 
 **Completion notes (72.10):**
 
-- 72.10a (`c107a21`, 2026-05-19) — added `ViewState::folded_blocks`,
+- 72.10a (`e3c3996`, 2026-05-19) — added `ViewState::folded_blocks`,
   `fold` / `unfold` / `toggle_fold` / `unfold_all`, three `KeyAction`
   variants (`ToggleFoldAtCursor`, `FoldAll`, `UnfoldAll`) with default
   bindings, and unit tests for the fold round-trip.
-- 72.10b-1 (`6ea2808`, 2026-05-19) — `freminal/src/gui/folding.rs`:
+- 72.10b-1 (`f5798bb`, 2026-05-19) — `freminal/src/gui/folding.rs`:
   `FoldRange`, `RowMap`, `RenderedRow::{Snapshot, Placeholder}` and the
   `rendered_to_snapshot` lookup, with exhaustive unit tests for
   RowMap construction and lookup behavior.
-- 72.10b-2 (`23faec7`, 2026-05-19) — wired `RowMap` into the widget render
+- 72.10b-2 (`a9f368f`, 2026-05-19) — wired `RowMap` into the widget render
   path so folded rows are skipped and a one-row gap is inserted; the gap
   was visually blank in this subtask.
-- 72.10b-3 (`e896592`, 2026-05-19) — replaced the blank gap with
+- 72.10b-3 (`d0c7098`, 2026-05-19) — replaced the blank gap with
   a real placeholder line ("▶ N lines hidden — click to unfold") shaped
   via the new `shape_placeholder_line` helper in
   `freminal/src/gui/shaping.rs`, recorded per-frame placeholder hit-rects
@@ -1261,7 +1261,7 @@ both clean.
   not touch the snapshot transport path, so no regression is expected
   or observed.
 
-- 72.10c (`1ffb9b0`, 2026-05-19) — bug fix surfaced by post-merge
+- 72.10c (`bf6a2b4`, 2026-05-19) — bug fix surfaced by post-merge
   testing with the bundled fish shell integration. The original 72.10a
   `ToggleFoldAtCursor` dispatcher only folded a block when the PTY
   cursor row fell inside `[command_start_row, end_row]`. In normal
@@ -1288,9 +1288,9 @@ both clean.
   missing-`command_start_row` case. No changes to `ViewState`, the
   rendering layer, or the keybinding default.
 
-#### 72.11 — Copy command output actions — COMPLETE
+#### 72.11 — Copy command output actions ✅
 
-**Completed:** 2026-05-19 (commit `43f0d3c`)
+**Completed:** 2026-05-19 (commit `8c3cd77`)
 
 **Summary:** Added `CopyLastCommandOutput` (default `Ctrl+Shift+Y`) and
 `CopyCommandOutputAtCursor` (unbound; surfaced via right-click menu) as
@@ -1327,9 +1327,9 @@ boundary / running / missing-marker cases.
 **Verification:** Unit test for block-by-row lookup. Integration test that
 puts known text on the clipboard after the action fires.
 
-#### 72.12 — Hover highlight and command-duration overlay
+#### 72.12 — Hover highlight and command-duration overlay ✅
 
-**Status:** COMPLETE (2026-05-19, `cafa890`; follow-up fix `1289863` — drop
+**Status:** COMPLETE (2026-05-19, `238e903`; follow-up fix `8d95ad3` — drop
 blocks erased by CSI 2J so duration overlays don't paint on blank rows).
 
 **Note:** The hover model and duration-label placement implemented here are
@@ -1393,7 +1393,7 @@ the duration-formatting helper.
 **Verification:** The two docs must parse without warnings (markdownlint if
 the project runs it) and continue to align with each other.
 
-**Status:** ✅ Complete (commit `PENDING_72_13`). COVERAGE.md was already
+**Status:** ✅ Complete (commit `603001b`). COVERAGE.md was already
 accurate after Task 72.8c (OSC 133 row marked ✅ with the freminal=1
 extension documented); only the "Last updated" line needed bumping.
 GAPS.md had three stale references claiming OSC 133 gutter/jump-to-prompt
@@ -1417,7 +1417,7 @@ durable record — informal "known issues" notes are not used.
 
 ##### 72.16.a — Fix OSC 133 numeric-param filter
 
-**Surfaced in:** 72.4 (commit `27fa949`, 2026-05-17).
+**Surfaced in:** 72.4 (commit `d690064`, 2026-05-17).
 
 **Bug:** `freminal-terminal-emulator/src/ansi_components/osc.rs:251-254`
 — the OSC 133 (FTCS) dispatcher's params filter only keeps
@@ -1469,7 +1469,7 @@ Real shells will emit numeric exit codes the moment users source the
 scripts; shipping 72.7 without 72.16.a would mean shipping a known
 broken feature.
 
-**Status:** ✅ Complete (2026-05-17, commit `9dd35ca`).
+**Status:** ✅ Complete (2026-05-17, commit `703e998`).
 
 **Completion notes:**
 
@@ -1496,7 +1496,7 @@ broken feature.
 
 ##### 72.16.b — Fix fish_prompt A/B placement around visual prompt text
 
-**Surfaced in:** 72.7 (commit `e43911a`, 2026-05-17).
+**Surfaced in:** 72.7 (commit `f6c6237`, 2026-05-17).
 
 **Bug:** `shell-integration/freminal.fish` registers an
 `--on-event fish_prompt` handler that emits BOTH `OSC 133 A` and
@@ -1558,7 +1558,7 @@ correct positions; the workaround documented above is no longer needed.
 
 ##### 72.16.c — Remove stale `__FREMINAL_CMD_PENDING` comment in freminal.bash
 
-**Surfaced in:** 72.7 (commit `e43911a`, 2026-05-17).
+**Surfaced in:** 72.7 (commit `f6c6237`, 2026-05-17).
 
 **Bug:** `shell-integration/freminal.bash` lines 79-89 (approximately)
 contain a comment block describing a `__FREMINAL_CMD_PENDING` state
@@ -1594,7 +1594,7 @@ the old script is deleted.
 
 ##### 72.16.d — Use workspace `tempfile` in `freminal::shell_integration::tests`
 
-**Surfaced in:** 72.8 (commit `91b7a8d`, 2026-05-17).
+**Surfaced in:** 72.8 (commit `168c364`, 2026-05-17).
 
 **Bug:** The new tests in `freminal/src/shell_integration.rs::tests`
 use `std::env::temp_dir()` with hard-coded suffix names
@@ -3146,28 +3146,37 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
    `MASTER_PLAN.md`.
 2. Branch from `main` to `task-72/osc-133-command-blocks`.
 3. Execute Task 72 subtasks in this exact order:
-   - **72.1 → 72.6** ✅ done (commits `f77fc9d` → `46dfbfd`).
-   - **72.16.a** ✅ done (commit `9dd35ca` — OSC 133 numeric-param filter).
-   - **72.7 + 72.8** ✅ done (commits `e43911a` and `91b7a8d`); their
+   - **72.1 → 72.6** ✅ done (commits `965aacf` → `14d1cad`).
+   - **72.16.a** ✅ done (commit `703e998` — OSC 133 numeric-param filter).
+   - **72.7 + 72.8** ✅ done (commits `f6c6237` and `168c364`); their
      architecture was superseded by 72.8c/72.8b after design review
      (2026-05-18). The scripts and infrastructure they shipped are
      about to be replaced.
-   - **72.8c** ✅ done (commit `4702b1a`, 2026-05-18). Parser support
+   - **72.8c** ✅ done (commit `94db3c2`, 2026-05-18). Parser support
      for `freminal=1; fid=<id>` markers.
-   - **72.8b** ✅ done (commit `fd45441`, 2026-05-19). Ghostty-style
+   - **72.8b** ✅ done (commit `3e80e6d`, 2026-05-19). Ghostty-style
      spawn-time shell-integration injection.
-   - **72.9** ✅ done (commit `731180a`, 2026-05-19). CommandFinishedEvent
+   - **72.9** ✅ done (commit `d11ccf9`, 2026-05-19). CommandFinishedEvent
      transport from PTY consumer thread to per-pane recent-command ring,
      with per-tab pending-event flag for unfocused tabs.
-   - **72.10** ✅ done (commits `c107a21` 72.10a — view state + keybindings;
-     `6ea2808` 72.10b-1 — folding helpers + RowMap; `23faec7` 72.10b-2 —
-     wire RowMap into renderer; `e896592` 72.10b-3 —
+   - **72.10** ✅ done (commits `e3c3996` 72.10a — view state + keybindings;
+     `f5798bb` 72.10b-1 — folding helpers + RowMap; `a9f368f` 72.10b-2 —
+     wire RowMap into renderer; `d0c7098` 72.10b-3 —
      placeholder row rendering, click-to-unfold hit-test, hover cursor,
-     benchmark; `1ffb9b0` 72.10c — bug fix: fall back to most
+     benchmark; `bf6a2b4` 72.10c — bug fix: fall back to most
      recent completed block when cursor outside any block).
-   - **72.11 → 72.15** — remaining subtasks per the rest of this plan.
-   - **72.16.e** — XTGETTCAP unknown-capability log noise (cosmetic;
-     land any time before v0.9.0 ships).
+   - **72.11** ✅ done (commit `8c3cd77`, 2026-05-19). Copy command output
+     actions: `CopyLastCommandOutput` keybinding + `CopyCommandOutputAtCursor`
+     right-click menu item.
+   - **72.12** ✅ done (commit `238e903`, 2026-05-19; follow-up `8d95ad3`
+     72.12a — drop command blocks erased by CSI 2J). Hover highlight and
+     command-duration overlay.
+   - **72.13** ✅ done (commit `603001b`, 2026-06-03). Refreshed OSC 133
+     status across ESCAPE_SEQUENCE_COVERAGE.md and ESCAPE_SEQUENCE_GAPS.md.
+   - **72.16.e** ✅ done (commit `b27539d`, 2026-06-03). Demoted XTGETTCAP
+     unknown-capability log to debug.
+   - **72.14, 72.15** — remaining subtasks per the rest of this plan
+     (Ctrl+click hyperlinks + Quick Command History Palette).
 
    Pause after each subtask for user confirmation per the Multi-Step
    Task Protocol in `agents.md`. The 72.16 cleanup section accumulates
