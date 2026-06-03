@@ -378,7 +378,7 @@ impl super::FreminalGui {
             // deferred-action work.
             KeyAction::CloseTab
             | KeyAction::ClearScrollback
-            | KeyAction::ToggleFoldAtCursor
+            | KeyAction::FoldPreviousCommand
             | KeyAction::FoldAll
             | KeyAction::UnfoldAll
             | KeyAction::CopyLastCommandOutput

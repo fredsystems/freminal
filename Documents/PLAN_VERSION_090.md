@@ -155,7 +155,7 @@ PTY thread (TerminalHandler)
 GUI thread
   ├── ViewState::folded_blocks: HashSet<BlockId>
   ├── Renderer skips rows belonging to folded blocks
-  ├── New KeyActions: ToggleFoldAtCursor, FoldAll, UnfoldAll,
+  ├── New KeyActions: FoldPreviousCommand, FoldAll, UnfoldAll,
   │        CopyLastCommandOutput, CopySelectedCommandOutput
   ├── New mouse: hover highlight, click-gutter-to-select, click-gutter-to-fold
   └── On WindowCommand::CommandFinished:
@@ -1199,8 +1199,9 @@ both clean.
     `"  N lines hidden"` with a unicode triangle. The placeholder is mouse-
     clickable to unfold.
 - New `KeyAction` variants (per AGENTS.md keybinding convention):
-  - `ToggleFoldAtCursor` — fold/unfold the block at the active pane's cursor
-    or topmost visible row. Default binding: `Ctrl+Shift+F`.
+  - `FoldPreviousCommand` — fold/unfold the most recent completed command
+    block (or the block containing the cursor, if the cursor is inside one).
+    No default binding to avoid conflicting with `OpenSearch` (`Ctrl+Shift+F`).
   - `FoldAll` — fold every block in `recent_commands`. Default binding: none.
   - `UnfoldAll` — clear `folded_blocks`. Default binding: `Ctrl+Shift+U`.
 - Mouse: clicking on a command's gutter (Task 73 surface) also toggles fold.
@@ -1220,7 +1221,7 @@ both clean.
 
 - 72.10a (`e3c3996`, 2026-05-19) — added `ViewState::folded_blocks`,
   `fold` / `unfold` / `toggle_fold` / `unfold_all`, three `KeyAction`
-  variants (`ToggleFoldAtCursor`, `FoldAll`, `UnfoldAll`) with default
+  variants (`FoldPreviousCommand`, `FoldAll`, `UnfoldAll`) with default
   bindings, and unit tests for the fold round-trip.
 - 72.10b-1 (`f5798bb`, 2026-05-19) — `freminal/src/gui/folding.rs`:
   `FoldRange`, `RowMap`, `RenderedRow::{Snapshot, Placeholder}` and the
@@ -1263,7 +1264,7 @@ both clean.
 
 - 72.10c (`bf6a2b4`, 2026-05-19) — bug fix surfaced by post-merge
   testing with the bundled fish shell integration. The original 72.10a
-  `ToggleFoldAtCursor` dispatcher only folded a block when the PTY
+  `FoldPreviousCommand` dispatcher only folded a block when the PTY
   cursor row fell inside `[command_start_row, end_row]`. In normal
   interactive use the PTY cursor always lives on the active prompt
   line, which is _after_ every completed block, so the keybinding
@@ -1802,7 +1803,7 @@ session. Benchmark: `render_loop_bench` should not regress > 15%.
 - Mouse events whose `x` coordinate falls within the gutter (0..4px) are
   intercepted before the usual cell-coordinate routing.
 - Single click on a finished block: toggle fold (same path as 72.10's
-  `ToggleFoldAtCursor` keybinding).
+  `FoldPreviousCommand` keybinding).
 - Single click on a running block: no-op (cannot fold).
 - Hover within the gutter: emit the same hover-highlight overlay as 72.12
   (entire block tinted).
@@ -2827,7 +2828,7 @@ FREC format change is required.
 
 | KeyAction                   | Default             | Task  |
 | --------------------------- | ------------------- | ----- |
-| `ToggleFoldAtCursor`        | `Ctrl+Shift+F`      | 72.10 |
+| `FoldPreviousCommand`       | (none)              | 72.10 |
 | `FoldAll`                   | (none)              | 72.10 |
 | `UnfoldAll`                 | `Ctrl+Shift+U`      | 72.10 |
 | `CopyLastCommandOutput`     | `Ctrl+Shift+Y`      | 72.11 |

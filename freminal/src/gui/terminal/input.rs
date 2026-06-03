@@ -182,7 +182,7 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
     }
 }
 
-/// Resolve which command block (if any) the `ToggleFoldAtCursor` action
+/// Resolve which command block (if any) the `FoldPreviousCommand` action
 /// should operate on.
 ///
 /// Selection order:
@@ -452,7 +452,7 @@ pub(super) fn dispatch_binding_action(
                 "Failed to send ClearScrollback to PTY consumer"
             );
         }
-        KeyAction::ToggleFoldAtCursor => {
+        KeyAction::FoldPreviousCommand => {
             if let Some(id) = find_fold_target(snap) {
                 view_state.toggle_fold(id);
             }

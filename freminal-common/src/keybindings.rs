@@ -751,7 +751,7 @@ pub enum KeyAction {
     /// Unbound by default to avoid conflicting with `OpenSearch`
     /// (`Ctrl+Shift+F`). Users who want a fold shortcut should add a binding
     /// in `[keybindings]`.
-    ToggleFoldAtCursor,
+    FoldPreviousCommand,
     /// Fold every completed OSC 133 command block in the current pane.
     ///
     /// Running blocks are skipped. Unbound by default.
@@ -873,7 +873,7 @@ impl KeyAction {
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
             Self::ClearScrollback => "clear_scrollback",
-            Self::ToggleFoldAtCursor => "toggle_fold_at_cursor",
+            Self::FoldPreviousCommand => "fold_previous_command",
             Self::FoldAll => "fold_all",
             Self::UnfoldAll => "unfold_all",
             Self::CopyLastCommandOutput => "copy_last_command_output",
@@ -942,7 +942,7 @@ impl KeyAction {
             Self::ScrollLineUp => "Scroll Line Up",
             Self::ScrollLineDown => "Scroll Line Down",
             Self::ClearScrollback => "Clear Scrollback",
-            Self::ToggleFoldAtCursor => "Toggle Fold at Cursor",
+            Self::FoldPreviousCommand => "Fold Previous Command",
             Self::FoldAll => "Fold All Commands",
             Self::UnfoldAll => "Unfold All Commands",
             Self::CopyLastCommandOutput => "Copy Last Command Output",
@@ -1008,7 +1008,7 @@ impl KeyAction {
         Self::ScrollLineUp,
         Self::ScrollLineDown,
         Self::ClearScrollback,
-        Self::ToggleFoldAtCursor,
+        Self::FoldPreviousCommand,
         Self::FoldAll,
         Self::UnfoldAll,
         Self::CopyLastCommandOutput,
@@ -1086,7 +1086,7 @@ impl FromStr for KeyAction {
             "scroll_line_up" => Ok(Self::ScrollLineUp),
             "scroll_line_down" => Ok(Self::ScrollLineDown),
             "clear_scrollback" => Ok(Self::ClearScrollback),
-            "toggle_fold_at_cursor" => Ok(Self::ToggleFoldAtCursor),
+            "fold_previous_command" => Ok(Self::FoldPreviousCommand),
             "fold_all" => Ok(Self::FoldAll),
             "unfold_all" => Ok(Self::UnfoldAll),
             "copy_last_command_output" => Ok(Self::CopyLastCommandOutput),
@@ -1382,7 +1382,7 @@ fn register_misc_bindings(map: &mut BindingMap) {
     );
 
     // Unfold every folded OSC 133 command block in the current pane.
-    // `ToggleFoldAtCursor` and `FoldAll` are intentionally unbound by default
+    // `FoldPreviousCommand` and `FoldAll` are intentionally unbound by default
     // — `Ctrl+Shift+F` is already bound to `OpenSearch` and there is no
     // obvious free combo for a one-shot "fold the block at the cursor"
     // action. Users who want one should add a binding in `[keybindings]`.
@@ -2184,7 +2184,7 @@ mod tests {
             KeyAction::SearchNext,
             KeyAction::SearchPrev,
             KeyAction::ToggleMenuBar,
-            KeyAction::ToggleFoldAtCursor,
+            KeyAction::FoldPreviousCommand,
             KeyAction::FoldAll,
             KeyAction::CopyCommandOutputAtCursor,
         ];

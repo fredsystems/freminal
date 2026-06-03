@@ -354,7 +354,7 @@ limit = 4000
 #     clear_scrollback = "Ctrl+Shift+Backspace"  (erase scrollback; leaves visible display)
 #
 #   Command-block folding (OSC 133):
-#     toggle_fold_at_cursor = ""              (unbound — no default to avoid conflicting with open_search)
+#     fold_previous_command = ""              (unbound — no default to avoid conflicting with open_search)
 #     fold_all              = ""              (unbound — opt-in)
 #     unfold_all            = "Ctrl+Shift+U"  (unfold every folded command block in this pane)
 #
