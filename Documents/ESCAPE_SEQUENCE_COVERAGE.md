@@ -2,7 +2,9 @@
 
 ## Last updated
 
-Last updated: 2026-05-18 — Documented OSC 133 `freminal=1; fid=<id>` extension and foreign-marker rejection (Task 72.8c)
+Last updated: 2026-06-03 — Task 72.13: cross-checked OSC 133 coverage against the
+shipped Task 72 surface (storage, navigation, fold, copy, hover, duration) and
+confirmed full support. No new entries; the existing OSC 133 row is already accurate.
 (Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72)
 
 ## Overview

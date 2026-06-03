@@ -1379,7 +1379,7 @@ the duration-formatting helper.
   threaded from `app_impl.rs`. No new `ViewState` field — hover is read
   fresh each frame from `view_state.mouse_position`.
 
-#### 72.13 — `ESCAPE_SEQUENCE_COVERAGE.md` and `ESCAPE_SEQUENCE_GAPS.md` updates
+#### 72.13 — `ESCAPE_SEQUENCE_COVERAGE.md` and `ESCAPE_SEQUENCE_GAPS.md` updates ✅
 
 **Scope:** `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
 
@@ -1392,6 +1392,16 @@ the duration-formatting helper.
 
 **Verification:** The two docs must parse without warnings (markdownlint if
 the project runs it) and continue to align with each other.
+
+**Status:** ✅ Complete (commit `PENDING_72_13`). COVERAGE.md was already
+accurate after Task 72.8c (OSC 133 row marked ✅ with the freminal=1
+extension documented); only the "Last updated" line needed bumping.
+GAPS.md had three stale references claiming OSC 133 gutter/jump-to-prompt
+was outstanding under Task 72 -- updated to reflect that storage,
+navigation, fold/copy/hover/duration shipped under Task 72 and only the
+gutter rendering remains under Task 73. Also added a Priority 2 polish
+entry for XTGETTCAP capability expansion (`indn`, `query-os-name`)
+covering the deferred half of 72.16.e.
 
 #### 72.16 — Cleanup: pre-existing bugs surfaced during Task 72
 
@@ -1693,7 +1703,7 @@ opportunistically before or after the Task 72 PR, but should land
 **before** v0.9.0 ships so users' first fish launch doesn't dump
 warn-level noise into the log.
 
-**Status:** ✅ Complete (commit `PENDING_72_16_E`). Demoted
+**Status:** ✅ Complete (commit `b27539d`). Demoted
 `tracing::warn!` to `tracing::debug!` at
 `freminal-terminal-emulator/src/terminal_handler/dcs.rs:639`. The
 protocol response (`0+r<hex>`) is unchanged; only the log level
