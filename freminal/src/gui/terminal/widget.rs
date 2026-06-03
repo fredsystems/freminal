@@ -309,6 +309,11 @@ enum ContextMenuAction {
     Paste,
     SelectAll,
     OpenUrl(String),
+    /// Copy the URL string to the clipboard. Distinct from `Copy` (which
+    /// copies the current selection) and from `OpenUrl` (which launches the
+    /// browser). Surfaced only when the right-click cell is inside an
+    /// OSC 8 hyperlink.
+    CopyUrl(String),
     NewTerminal,
     /// Copy the output range `[start_row, end_row]` of the command block
     /// the right-click occurred inside, full-width per row.
@@ -477,6 +482,10 @@ fn render_context_menu_area(
                         *action = Some(ContextMenuAction::OpenUrl(url.clone()));
                         *close = true;
                     }
+                    if ui.button("Copy URL").clicked() {
+                        *action = Some(ContextMenuAction::CopyUrl(url.clone()));
+                        *close = true;
+                    }
                 }
 
                 // "Copy Command Output" — only shown when the clicked
@@ -594,6 +603,9 @@ fn dispatch_context_menu_action(
             {
                 error!("Failed to spawn URL-open thread: {e}");
             }
+        }
+        ContextMenuAction::CopyUrl(url) => {
+            ui.ctx().copy_text(url);
         }
         ContextMenuAction::NewTerminal => {
             deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
