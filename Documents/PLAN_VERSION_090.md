@@ -1638,7 +1638,7 @@ rewrite uses `tempfile::TempDir` from the workspace, which closes 72.16.d
 implicitly. 72.8b adds `tempfile.workspace = true` to
 `freminal/Cargo.toml` `[dev-dependencies]` as part of its scope.
 
-##### 72.16.e — XTGETTCAP unknown-capability log noise under fish
+##### 72.16.e — XTGETTCAP unknown-capability log noise under fish ✅
 
 **Surface point:** Surfaced during 72.8b manual end-to-end testing
 (2026-05-19). Fish's startup queries `indn` and `query-os-name` via
@@ -1693,7 +1693,15 @@ opportunistically before or after the Task 72 PR, but should land
 **before** v0.9.0 ships so users' first fish launch doesn't dump
 warn-level noise into the log.
 
-**Status:** Pending.
+**Status:** ✅ Complete (commit `PENDING_72_16_E`). Demoted
+`tracing::warn!` to `tracing::debug!` at
+`freminal-terminal-emulator/src/terminal_handler/dcs.rs:639`. The
+protocol response (`0+r<hex>`) is unchanged; only the log level
+changes. No new tests added — the existing 1224 dcs/terminal_handler
+unit tests pass unchanged, and there were no tests asserting on the
+message text. Option 2 (advertise `indn` / `query-os-name` capabilities)
+deferred per the plan; tracked under XTGETTCAP expansion in
+`Documents/ESCAPE_SEQUENCE_GAPS.md`.
 
 ### 72 Open Questions Resolved
 

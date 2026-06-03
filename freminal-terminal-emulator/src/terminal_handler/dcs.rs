@@ -636,7 +636,7 @@ impl TerminalHandler {
                 let hex_value = Self::hex_encode(value);
                 self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
             } else {
-                tracing::warn!("XTGETTCAP: unknown capability: {cap_name}");
+                tracing::debug!("XTGETTCAP: unknown capability: {cap_name}");
                 self.write_dcs_response(&format!("0+r{hex_name}"));
             }
         }
