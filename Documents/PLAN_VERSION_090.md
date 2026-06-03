@@ -2799,7 +2799,7 @@ high-value adds tangent to the main v0.9.0 work. They are scoped as
 discrete subtasks inside the host task indicated, not as new top-level
 tasks.
 
-### T1 — OSC 8 Hyperlink Action Menu (lands in Task 72)
+### T1 — OSC 8 Hyperlink Action Menu (lands in Task 72) ✅
 
 **Scope:** ~1 day. `freminal/src/gui/mouse.rs`, context-menu rendering.
 
@@ -2812,6 +2812,27 @@ tasks.
 - Land as **Task 72.14** (separate commit, even though it's unrelated to
   command blocks topically — it fits the same UX-polish theme and the
   branch is open).
+
+**Completion notes (72.14):**
+
+- Ctrl+click (Cmd+click on macOS) to open URL: implemented earlier as
+  part of the URL hover work in `freminal/src/gui/terminal/widget.rs`
+  (the click detector runs unconditionally when a URL is cached as the
+  hovered cell; `open::that` is spawned on a dedicated
+  `freminal-open-url` thread to avoid blocking the GUI on the OS
+  default-browser handler).
+- "Open URL" right-click menu item: implemented earlier as
+  `ContextMenuAction::OpenUrl(String)` in the same file. Shown only
+  when the right-clicked cell is inside an OSC 8 hyperlink. Label is
+  `"Open <url>"` with the URL truncated to 40 chars via
+  `truncate_url`.
+- "Copy URL" right-click menu item (`31c1b1a`, 2026-06-03): new
+  `ContextMenuAction::CopyUrl(String)` variant; menu button rendered
+  immediately after "Open <url>" in the URL conditional block;
+  dispatcher calls `ui.ctx().copy_text(url)` (egui's clipboard API,
+  same path the existing `Copy` / `CopyCommandOutput` actions use).
+  Verification: 103/103 suites green, clippy clean. Visual
+  confirmation of clipboard contents is end-user manual.
 
 ### T2 — Command Duration Display (already in Task 72.12)
 
@@ -3231,8 +3252,12 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      status across ESCAPE_SEQUENCE_COVERAGE.md and ESCAPE_SEQUENCE_GAPS.md.
    - **72.16.e** ✅ done (commit `b27539d`, 2026-06-03). Demoted XTGETTCAP
      unknown-capability log to debug.
-   - **72.14, 72.15** — remaining subtasks per the rest of this plan
-     (Ctrl+click hyperlinks + Quick Command History Palette).
+   - **72.14** ✅ done (commit `31c1b1a`, 2026-06-03 — completed the
+     OSC 8 hyperlink action menu with the "Copy URL" right-click item;
+     Ctrl+click + "Open URL" were already shipped as part of the
+     earlier URL hover work).
+   - **72.15** — remaining subtask per the rest of this plan
+     (Quick Command History Palette).
 
    Pause after each subtask for user confirmation per the Multi-Step
    Task Protocol in `agents.md`. The 72.16 cleanup section accumulates
