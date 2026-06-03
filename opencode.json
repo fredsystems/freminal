@@ -5,6 +5,9 @@
     "Documents/PERFORMANCE_PLAN.md",
     "Documents/MASTER_PLAN.md"
   ],
+  "skills": {
+    "paths": [".opencode/skills"]
+  },
   "formatter": {
     "rustfmt": {
       "command": ["rustfmt", "--edition", "2024", "$FILE"],

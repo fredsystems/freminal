@@ -1,612 +1,269 @@
-# AGENTS.md — Freminal Workspace
+# AGENTS.md -- Freminal Workspace
+
+This document is the always-on orientation for AI coding agents working
+in the Freminal workspace. **Operational procedures are no longer
+inlined here** -- they live as opencode skills (sourced from fred's
+nixos config repo at `~/GitHub/nixos/.opencode/skills/`, wired in via
+this repo's `opencode.json`) and are loaded on demand. This document
+gives you the map; the skills give you the moves.
+
+---
 
 ## Project Overview
 
-Freminal is a modern terminal emulator written in Rust (Edition 2024, MSRV 1.95.0). It targets
-deep ANSI/DEC/xterm escape sequence compatibility, sub-millisecond frame times, and pixel-perfect
+Freminal is a modern terminal emulator written in Rust (Edition 2024,
+MSRV 1.95.0). It targets deep ANSI/DEC/xterm escape-sequence
+compatibility, sub-millisecond frame times, and pixel-perfect
 rendering via egui/glow.
 
-The workspace contains five crates:
+### Workspace layout
 
 ```text
-freminal (binary — GUI application)
+freminal (binary -- GUI application)
   ├── freminal-terminal-emulator (terminal emulation logic)
   │   ├── freminal-buffer (cell-based terminal buffer model)
   │   │   └── freminal-common (shared types and utilities)
   │   └── freminal-common
   └── freminal-common
 
-xtask (build/CI orchestration — not production code)
+xtask (build/CI orchestration -- not production code)
 ```
 
-### Architecture (Post-Refactor)
+### Architecture, in one paragraph
 
-The `FairMutex` has been eliminated. There is no shared mutable state between the GUI thread and
-the PTY-processing thread at steady state.
-
-```text
-PTY Processing Thread (owns TerminalEmulator exclusively)
-  ├── Receives PtyRead from OS PTY reader thread
-  ├── Receives InputEvent from GUI (keyboard, resize, focus)
-  ├── After each batch: publishes Arc<TerminalSnapshot> via ArcSwap
-  └── Sends WindowCommand to GUI for Report*/Viewport handling
-
-GUI Thread (eframe update() — pure render, no mutation)
-  ├── Loads TerminalSnapshot from ArcSwap (atomic, lock-free)
-  ├── Sends InputEvent through crossbeam channel
-  ├── Sends PtyWrite directly for Report* responses
-  └── Owns ViewState (scroll offset, mouse, focus — never shared)
-```
-
-See `Documents/PERFORMANCE_PLAN.md` Sections 4-6 for detailed architecture diagrams and the
-full implementation history.
+The `FairMutex` has been eliminated. The PTY-processing thread owns
+`TerminalEmulator` exclusively and publishes `Arc<TerminalSnapshot>` via
+`ArcSwap`. The GUI thread is a pure read of that snapshot and sends
+input via a `crossbeam` channel. `ViewState` (scroll, mouse, focus)
+lives entirely on the GUI side and is never shared. Crate dependencies
+point one direction: `freminal` -> `freminal-terminal-emulator` ->
+`freminal-buffer` -> `freminal-common`. **Full invariants and the
+"don't accidentally regress this" rules are in the
+`freminal-architecture` skill.** See also `Documents/PERFORMANCE_PLAN.md`
+sections 4-6 for the historical context.
 
 ---
 
 ## Non-Negotiable Rules
 
-- No unsafe code unless explicitly requested
-- Prefer clarity over cleverness
-- No public APIs without tests
-- No breaking changes without explanation
-- All observable behavior must be testable
-- Correctness always takes precedence over performance
-- AGENTS.md is authoritative — agents must not reinterpret, weaken, or "improve" rules found here
-- If a rule appears inconsistent with the codebase, stop and ask
-- Changes must not break the lock-free architecture (ArcSwap snapshot model, channel-based input)
-- Respect crate dependency boundaries — never introduce upward dependencies
+These are always-on. The expanded forms live in skills, but the
+headlines:
 
-### Panic-Free Production Code
+- No unsafe code unless explicitly requested.
+- Prefer clarity over cleverness.
+- No public APIs without tests.
+- No breaking changes without explanation.
+- All observable behavior must be testable.
+- Correctness > performance.
+- AGENTS.md and skills are authoritative -- agents must not
+  reinterpret, weaken, or "improve" rules.
+- If a rule appears inconsistent with the codebase, stop and ask.
+- Changes must not break the lock-free architecture.
+- Respect crate dependency boundaries.
+- **Panic-free production code**: `unwrap()` / `expect()` forbidden
+  outside `#[cfg(test)]` / `tests/`. Enforced by
+  `#![deny(clippy::unwrap_used, clippy::expect_used)]`.
+- **Errors must be explicit, typed, and structured.** No `anyhow` in
+  library crates (`freminal-common`, `freminal-buffer`,
+  `freminal-terminal-emulator`); `anyhow` / `color-eyre` OK in
+  `xtask`. Error variants encode what went wrong, not what to do.
+- **No `#[allow(dead_code)]` in production modules.** Acceptable only
+  for test-only helpers and temporary refactors with an explicit
+  TODO.
 
-- `unwrap()` and `expect()` are forbidden in all production code
-- Panics must never be used to enforce invariants
-- All invariant violations must surface as typed, recoverable errors
-- The only permitted use of `unwrap()` / `expect()` is in test code (`#[cfg(test)]` or `tests/`)
-- Any production `unwrap` / `expect` is a correctness bug
-- Enforced via: `#![deny(clippy::unwrap_used, clippy::expect_used)]`
-
-### Error Handling
-
-- Errors must be explicit, typed, and structured
-- Prefer domain-specific error enums over generic errors
-- Errors must be testable
-- Do NOT use `anyhow` in library code (freminal-common, freminal-buffer, freminal-terminal-emulator)
-- Error variants should encode what went wrong, not what to do
-
-### Dead Code Policy
-
-- `#[allow(dead_code)]` is forbidden in production modules
-- Acceptable uses: test-only helpers, temporary refactors with an explicit TODO
-- If code exists in production, it must be reachable or intentionally gated
+The `rust-best-practices` skill expands the panic/dead-code/cast rules.
+The `freminal-numeric-conversions` skill expands the `as`-casts /
+`conv2` policy.
 
 ---
 
-## Crate-Specific Guidance
+## Skills you will need in this repo
 
-### freminal-common
-
-Shared types and utilities only. No business logic. No platform-specific dependencies beyond what
-is needed for type definitions. No terminal semantics. Changes here affect all downstream crates.
-
-### Terminal Mode Representation
-
-If a terminal mode has a corresponding enum in `freminal-common/src/buffer_states/modes/`, that
-enum must be used for storage, transport, and function parameters — never a raw `bool`. This
-applies to struct fields on `TerminalHandler`, `Buffer`, `FreminalAnsiParser`,
-`SnapshotModeFields`, `TerminalSnapshot`, and function signatures like `to_payload()` and
-`send_terminal_inputs()`. If no enum exists for a flag, `bool` is fine.
-
-### Keybinding Convention
-
-Every feature that introduces or modifies a keyboard shortcut must:
-
-1. Add a `KeyAction` variant in `freminal-common/src/keybindings.rs` (with `name()`,
-   `display_label()`, `FromStr`, and inclusion in `ALL`).
-2. Add a default binding in `BindingMap::default()` (in `register_*_bindings()` helpers).
-3. Handle the action in `dispatch_binding_action()` in `freminal/src/gui/terminal/input.rs`
-   (or at a higher level in `gui/mod.rs` for actions requiring full GUI state).
-4. Document the default combo in `config_example.toml` under `[keybindings]`.
-
-Hardcoded keyboard shortcuts outside the `BindingMap` system are forbidden. All shortcuts must
-be discoverable and configurable through `[keybindings]` in the config and the Settings Modal.
-
-### freminal-buffer
-
-Pure data model for terminal content. Responsible for cells, rows, cursor tracking, wrapping, and
-producing explicit mutation results (damage/diffs). Does NOT parse escape sequences, implement
-terminal semantics, perform rendering, interact with UI frameworks, or access OS/platform APIs.
-No global state. All state transitions must be explicit, localized, observable, and testable.
-Hidden side effects are forbidden.
-
-#### Buffer Invariants
-
-- A `Cell` is the smallest addressable unit — always valid, empty cells are explicit
-- Rows own cells, have a fixed width, wrapping produces new rows (not hidden overflow)
-- Logical vs physical rows must be explicit
-- Cursor movement does not mutate cells — mutations happen through explicit operations
-- All mutations must return a structured description of what changed
-
-### freminal-terminal-emulator
-
-ANSI parser and terminal state machine. Owns the `TerminalState` and `TerminalHandler` which drive
-buffer mutations. Produces `TerminalSnapshot` for the GUI via `build_snapshot()`. Owns the
-`FreminalAnsiParser`. Does NOT render, interact with egui, or hold GUI state.
-
-### freminal (binary)
-
-GUI application using eframe/egui. The render loop in `update()` must be a pure read of
-`TerminalSnapshot` — no terminal state mutation. All input goes through `Sender<InputEvent>`.
-`ViewState` (scroll offset, mouse position, focus, etc.) is owned entirely by the GUI and never
-shared with the PTY thread.
-
-### xtask
-
-Build and CI orchestration tool. Not production code. `anyhow` / `color-eyre` are acceptable here.
-Provides subcommands: `ci`, `build`, `check`, `lint`, `test`, `coverage`, `deny`, `machete`.
+| Skill                            | When it fires                                                                                                                                 |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `freminal-architecture`          | Architecture-affecting changes (GUI/PTY split, snapshot transport, crate boundaries).                                                         |
+| `freminal-orchestrator-protocol` | About to spawn sub-agents. The action-class / scope / stop-condition discipline is mandatory.                                                 |
+| `freminal-bench-table`           | Touching render / PTY / buffer / parser / `build_snapshot`. Names which bench file covers what (procedure lives in `performance-benchmarks`). |
+| `freminal-frec-decoder`          | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                    |
+| `freminal-escape-sequence-docs`  | Adding / removing / altering escape sequence support. Dual-doc update required.                                                               |
+| `freminal-numeric-conversions`   | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                           |
+| `rust-best-practices`            | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                |
+| `performance-benchmarks`         | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                              |
+| `flake-dev-shell-discipline`     | About to need a system tool not in the dev shell. Add to `flake.nix`, stop, wait for `nix develop`.                                           |
+| `precommit-fix-loop`             | When a commit is rejected by pre-commit hooks.                                                                                                |
+| `commit-discipline`              | Before any commit / PR. Plan-subtask numbering convention is freminal-specific.                                                               |
+| `testing-mandate`                | Before declaring any task done.                                                                                                               |
+| `no-summary-documents`           | Before creating any new markdown file (no PHASE_X_SUMMARY.md, no IMPLEMENTATION_PROGRESS.md, etc.).                                           |
+| `markdown-lint-discipline`       | Before writing or editing any `.md` file. Common markdownlint pitfalls (MD031, MD040, table widths).                                          |
+| `flaky-tests-are-bugs`           | A test fails sporadically. Root-cause it; no retries / `#[ignore]` / longer timeouts.                                                         |
 
 ---
 
-## Branch & Commit Workflow
+## Crate-specific guidance (one-paragraph each)
 
-### Feature Branches
+The full architecture invariants and what-not-to-leak rules live in the
+`freminal-architecture` skill. Quick reference:
 
-- All implementation work MUST be done on feature branches, never directly on `main`.
-- Branch naming convention: `task-NN/short-description` (e.g., `task-02/cli-config`,
-  `task-06/test-gaps`).
-- Each major task (as defined in `Documents/MASTER_PLAN.md`) gets its own branch.
-- Subtasks within a task are committed to that task's branch.
-- Branches are merged to `main` via pull request after the task is complete.
+- **`freminal-common`** -- shared types and utilities only. No business
+  logic. Changes here affect every downstream crate.
+- **`freminal-buffer`** -- pure data model. No escape parsing, no
+  rendering, no UI, no OS APIs. All mutations return a structured
+  description of what changed.
+- **`freminal-terminal-emulator`** -- ANSI parser and terminal state
+  machine. Owns `TerminalState` / `TerminalHandler` / `FreminalAnsiParser`.
+  Produces `TerminalSnapshot` via `build_snapshot()`. No rendering, no
+  egui, no GUI state.
+- **`freminal` (binary)** -- the GUI. `update()` is a pure read of the
+  snapshot. All input flows through `Sender<InputEvent>`. `ViewState`
+  is owned here, never shared.
+- **`xtask`** -- build/CI orchestration. Subcommands: `ci`, `build`,
+  `check`, `lint`, `test`, `coverage`, `deny`, `machete`.
 
-### Pre-Commit Hooks
+### Terminal mode representation
 
-- The `--no-verify` flag is **FORBIDDEN** on commits. All commits must pass pre-commit hooks.
-- Pre-commit hooks enforce formatting, linting, and other quality checks.
-- If a pre-commit hook fails, the agent MUST fix the issue and commit again — not skip the hook.
-- The only exception is if the user explicitly requests `--no-verify` for a specific commit.
+If a mode has an enum in `freminal-common/src/buffer_states/modes/`,
+that enum is the type used everywhere -- never a raw `bool`. See
+`freminal-architecture` for the full surface.
 
-### Commit Discipline
+### Keybindings
 
-- Commits should be atomic: one logical change per commit.
-- Commit messages follow conventional commits format (e.g., `feat:`, `fix:`, `test:`, `docs:`).
-- Each commit must leave `cargo test --all` passing (no broken intermediate states).
-
-### Plan Subtask Commits
-
-When executing a plan document (`Documents/PLAN_XX_*.md`), each completed subtask must be
-committed before moving to the next. This ensures:
-
-- Clear traceability from commits to plan subtasks.
-- Safe rollback points if a later subtask introduces problems.
-- Clean `git bisect` history.
-
-**Default rule:** One commit per plan subtask. The commit message should reference the subtask
-number (e.g., `refactor: 30.3 — replace casting suppressions in freminal-common`).
-
-**Merging small or interleaved subtasks:** It is acceptable to combine multiple subtasks into a
-single commit when:
-
-- The subtasks are small enough that separating them adds noise rather than clarity.
-- Multiple sub-agents worked on separate subtasks that modify the same files, and splitting
-  the commits into fully atomic units would cause merge conflicts or broken intermediate states.
-- The subtasks are tightly intertwined (e.g., a type change in one subtask requires a signature
-  change tracked by another subtask in the same file).
-
-When merging subtasks into one commit, the commit message must list all subtask numbers covered
-(e.g., `refactor: 25.4 + 25.5 — inline data.rs and remove dead Theme enum`).
+Every keyboard shortcut goes through the `BindingMap` system. The
+four-step ritual (KeyAction variant, default binding, dispatch,
+documentation in `config_example.toml`) is in `freminal-architecture`.
+Hardcoded shortcuts outside `BindingMap` are forbidden.
 
 ---
 
 ## Development Environment & Verification
 
-### Build & Test Commands
+### Build & test commands
 
 | Command                                                    | Purpose                                                       |
 | ---------------------------------------------------------- | ------------------------------------------------------------- |
 | `cargo xtask ci`                                           | Full CI: lint + deny + machete + build + test + bench compile |
 | `cargo test --all`                                         | Run all unit and integration tests                            |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Lint with strict warnings                                     |
-| `cargo-machete`                                            | Detect unused dependencies                                    |
+| `cargo machete`                                            | Detect unused dependencies                                    |
 | `cargo bench --all`                                        | Run all benchmarks (Criterion)                                |
 | `cargo bench --no-run --all`                               | Compile benchmarks without running                            |
 | `cargo xtask coverage`                                     | Generate coverage report (lcov)                               |
 | `cargo fmt --all -- --check`                               | Check formatting                                              |
 
-### Full Verification Suite
+### Verification suite (mandatory before "done")
 
-All agents must run the following before reporting completion:
+1. `cargo test --all`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo machete`
 
-1. `cargo test --all` — all tests pass
-2. `cargo clippy --all-targets --all-features -- -D warnings` — no warnings
-3. `cargo-machete` — no unused dependencies
+If any step fails, fix it. Don't ship around it. The `testing-mandate`
+skill expands the "what done means" definition.
 
-If any step fails, fix the issue before proceeding.
+### Tooling
 
-### Tooling Notes
-
-- Missing tools indicate an incomplete environment, not broken code
-- Agents must not work around missing tools by modifying logic
-- If additional tooling is required, stop and ask
-- Nix devshell is the preferred environment (`nix develop` or `direnv allow`)
-
----
-
-## Orchestrator Protocol
-
-When acting as an orchestrator (decomposing a task into sub-agent work), follow this protocol:
-
-### MANDATORY: Explicit Sub-Agent Intent Scoping
-
-**THIS IS THE SINGLE MOST IMPORTANT RULE IN THIS DOCUMENT.**
-
-Every sub-agent prompt MUST explicitly state the agent's **permitted action class**. A sub-agent
-that is told to "understand the code" will decide on its own to start writing code, committing,
-and moving to the next task. This has happened repeatedly and is unacceptable.
-
-**Action classes** (use these exact words in every sub-agent prompt):
-
-| Action Class       | What the agent MAY do                             | What the agent MUST NOT do                                        |
-| ------------------ | ------------------------------------------------- | ----------------------------------------------------------------- |
-| **READ-ONLY**      | Read files, search, analyze, report findings      | Edit files, write files, run cargo/git commands that mutate state |
-| **CODE-REVIEW**    | Read files, analyze diffs, report issues          | Edit files, write files, commit, run tests                        |
-| **IMPLEMENTATION** | Read + edit + write files within the stated scope | Touch files outside scope, commit, push, move to the next subtask |
-| **COMMIT**         | Stage and commit specified changes                | Edit code, start new work                                         |
-
-**Every sub-agent prompt MUST include ALL of the following:**
-
-1. **Action class** — One of the four above, stated at the top of the prompt in bold/caps.
-2. **Exact scope** — Which files/modules the agent may read or modify. Be specific.
-3. **Deliverable** — What the agent must return. "A summary of X" or "Modified files A, B, C
-   with change Y."
-4. **Explicit prohibitions** — What the agent must NOT do. Always include at minimum:
-   "Do NOT edit any files" (for read-only), or "Do NOT commit" (for implementation), or
-   "Do NOT proceed to the next subtask" (always).
-5. **Stop condition** — When to stop. "Stop after reporting findings." or "Stop after the
-   verification suite passes."
-
-**Example — read-only exploration:**
-
-```text
-ACTION CLASS: READ-ONLY. Do NOT edit, write, or create any files. Do NOT run git commit.
-
-Read the following files and report back:
-- freminal/src/gui/mod.rs (lines 1600-1720)
-- freminal/src/gui/terminal/input.rs (the write_input_to_terminal function)
-
-Return: The full function signatures, how keyboard input flows from key press to PTY,
-and how mouse events are currently routed.
-
-Stop after reporting. Do NOT write code. Do NOT proceed to implementation.
-```
-
-**Example — scoped implementation:**
-
-```text
-ACTION CLASS: IMPLEMENTATION. You may edit files listed below. Do NOT commit.
-Do NOT proceed to the next subtask. Do NOT touch files outside this list.
-
-Scope: freminal/src/gui/terminal/input.rs, freminal/src/gui/terminal/widget.rs
-
-Task: Add an `is_active_pane: bool` parameter to `write_input_to_terminal`. When false,
-suppress all events except primary left-click. Thread the parameter through from
-`show()` in widget.rs.
-
-Verification: Run `cargo test --all` and `cargo clippy --all-targets --all-features -- -D warnings`.
-
-Stop condition: Report back with files modified, summary of changes, and verification results.
-Do NOT commit. Do NOT update plan documents. Do NOT start the next subtask.
-```
-
-**If a sub-agent prompt does not contain an explicit action class and stop condition, the
-orchestrator has failed.** The resulting sub-agent behavior is undefined and the orchestrator
-is solely responsible for any damage.
-
-### Task Decomposition
-
-1. **Analyze scope** — Identify which crates and files are affected
-2. **Identify parallelism** — Tasks touching different crates or independent features can run in
-   parallel. Tasks with data dependencies must be sequential.
-3. **Define sub-tasks** — Each sub-task must specify:
-   - Exact scope (which files/modules to modify)
-   - Clear success criteria
-   - Verification steps
-   - What NOT to touch (scope boundaries)
-4. **Launch sub-agents** — Use parallel sub-agents for independent work. Chain sequential
-   sub-agents for dependent work.
-5. **Verify integration** — After all sub-agents report, run the full verification suite to
-   confirm the combined changes work together.
-
-### Parallelism Patterns
-
-**Crate-level:** Different sub-agents work on different crates simultaneously. Safe when changes
-do not cross crate boundaries in incompatible ways.
-
-**Task-type:** One sub-agent implements, another writes tests, another reviews. The implementation
-sub-agent must complete before the test sub-agent starts if tests depend on new APIs.
-
-**Feature-level:** Different sub-agents implement independent features. Safe when features do not
-modify the same files.
-
-### Scope Enforcement
-
-- Sub-agents must not modify files outside their assigned scope
-- If a sub-agent discovers it needs to modify files outside scope, it must stop and report back
-- The orchestrator resolves cross-scope dependencies by reassigning or sequencing work
+- Nix devshell is the preferred environment (`nix develop` or
+  `direnv allow`).
+- Missing tools indicate an incomplete environment, not broken code.
+  Don't work around missing tools by modifying logic. Full rule in
+  the `flake-dev-shell-discipline` skill: add to `flake.nix`, then
+  stop and wait for the user to run `nix develop`.
 
 ---
 
-## Sub-Agent Execution Protocol
+## Branch & Commit Workflow
 
-When executing a focused task assigned by an orchestrator (or directly by the user):
-
-1. **Read the full task description** before starting any work
-2. **Execute only the assigned scope** — do not refactor unrelated code
-3. **Keep diffs minimal and focused** — one concern per change
-4. **Run the verification suite** before reporting completion:
-   - `cargo test --all`
-   - `cargo clippy --all-targets --all-features -- -D warnings`
-   - `cargo-machete`
-5. **Report back** with:
-   - Summary of changes made
-   - Files modified
-   - Verification results
-   - Any issues or questions discovered
-6. **If blocked or unclear, stop and report** — do not guess
-
----
-
-## Multi-Step Task Protocol
-
-For tasks with ordered dependencies (e.g., multi-phase refactors), follow this protocol. This is
-generalized from the protocol used successfully in `Documents/PERFORMANCE_PLAN.md`.
-
-1. Read the entire task document before doing anything
-2. Find the first incomplete step
-3. Execute that one step and nothing else
-4. Run the verification suite — confirm it passes
-5. Update the tracking document: mark the step complete, add a brief completion note
-6. Stop and post a summary — wait for user confirmation before continuing
-
-**Do not execute multiple steps in one session, even if they seem small.**
-**Do not proceed to the next step without explicit user confirmation.**
-**Each step must leave `cargo test --all` passing.**
-
----
-
-## Mandatory Testing & Benchmarking Rules
-
-These rules apply to ALL agents and ALL implementation work going forward.
-
-### Testing Is Mandatory
-
-- Every new feature, bug fix, or refactor MUST include tests that cover the new/changed behavior.
-- "It compiles and existing tests pass" is insufficient — new code must have NEW tests.
-- If an area has no existing tests, the implementing agent must create the test infrastructure
-  (test module, test helpers, fixtures) as part of the task.
-- Task completion is contingent on all tests passing. A task is NOT complete until
-  `cargo test --all` passes with zero failures.
-
-### Benchmarking for Performance-Sensitive Code
-
-- If changes touch the **rendering pipeline**, **PTY I/O**, or **buffer operations**, the agent
-  MUST capture benchmark numbers **before and after** the change and include them in the
-  completion report.
-- Relevant benchmark suites:
-  - Rendering: `freminal/benches/render_loop_bench.rs`
-  - Buffer: `freminal-buffer/benches/buffer_row_bench.rs`
-  - Emulator/Parser: `freminal-terminal-emulator/benches/buffer_benches.rs`
-- If no appropriate benchmark exists for the code being changed, the agent MUST create a new
-  benchmark as part of the task before proceeding with the change.
-- Performance regressions must be justified and documented, or the change must be revised.
-
-#### Benchmark Lookup Table
-
-Use this table to determine which benchmarks are relevant for a given change area:
-
-| Change Area                             | Benchmark File                                         | Key Benchmarks                                                                 |
-| --------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| Buffer insert / cell ops                | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_insert_*`, `bench_cursor_ops`, `bench_lf_heavy`                         |
-| Buffer resize / reflow                  | `freminal-buffer/benches/buffer_row_bench.rs`          | `buffer_resize`, `softwrap_heavy`                                              |
-| Buffer flatten / visible rows           | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_visible_flatten`, `bench_scrollback_flatten`, `bench_scrollback_render` |
-| Alternate screen                        | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_alternate_screen_switch`                                                |
-| Erase operations                        | `freminal-buffer/benches/buffer_row_bench.rs`          | `bench_erase_display`, `bench_erase_display_full`                              |
-| ANSI parser                             | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_parse_plain_text`, `bench_parse_sgr_heavy`, `bench_parse_cup_writes`    |
-| `handle_incoming_data` / UTF-8 assembly | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_handle_incoming_data`, `bench_parse_bursty`                             |
-| Snapshot building                       | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_build_snapshot`, `bench_build_snapshot_with_scrollback`                 |
-| Data flatten for GUI                    | `freminal-terminal-emulator/benches/buffer_benches.rs` | `bench_data_and_format_for_gui`                                                |
-| Rendering pipeline / shaping            | `freminal/benches/render_loop_bench.rs`                | `feed_data_*`, `build_snapshot_*`, `shaping_ligatures`                         |
-| ArcSwap / snapshot transport            | `freminal/benches/render_loop_bench.rs`                | `render_terminal_text_arcswap`                                                 |
-
-#### Benchmark Recording Rule
-
-Agents modifying performance-sensitive code must record before/after benchmark numbers in
-their completion report using this format:
-
-```text
-| Benchmark | Before | After | Change |
-| --- | --- | --- | --- |
-```
-
-#### Regression Threshold
-
-Any regression > 15% on a relevant benchmark must be justified in the completion report or
-the change must be revised. Regressions <= 15% may be acceptable if the change provides
-correctness or maintainability benefits that outweigh the performance cost.
-
-### Plan Document Maintenance
-
-- Each major task has a planning document in `Documents/PLAN_XX_*.md`.
-- The agent executing a task MUST update its plan document with:
-  - Subtask completion status (mark completed items, add completion dates)
-  - Any deviations from the plan with justification
-  - Benchmark results if applicable
-  - Issues discovered during implementation
-- The master plan (`Documents/MASTER_PLAN.md`) must also be updated when a major task
-  changes status (started, blocked, completed).
-
-### Task Completion Criteria
-
-A task is complete ONLY when ALL of the following are true:
-
-1. All subtasks in the plan document are marked complete
-2. `cargo test --all` passes
-3. `cargo clippy --all-targets --all-features -- -D warnings` passes
-4. `cargo-machete` passes
-5. Benchmarks show no unexplained regressions (for render/PTY/buffer changes)
-6. Plan document is updated with completion status and notes
+- All implementation work happens on feature branches, never directly
+  on `main`.
+- Branch naming: `task-NN/short-description` (e.g. `task-02/cli-config`,
+  `task-06/test-gaps`). One branch per major plan task.
+- Commits follow conventional-commits format. Plan-subtask commits
+  reference the subtask number: `refactor: 30.3 -- replace casting
+suppressions in freminal-common`. Combining multiple subtasks into
+  one commit is acceptable under specific conditions; see
+  `commit-discipline`.
+- Each commit must leave `cargo test --all` passing. No broken
+  intermediate states.
+- `--no-verify` is forbidden on commits. See `precommit-fix-loop` if a
+  hook rejects.
 
 ---
 
 ## Working Modes
 
-Agents may be instructed to operate in one of the following modes:
+Agents may be instructed to operate in one of:
 
-### READ_ONLY_AUDIT
+- **READ_ONLY_AUDIT** -- no code changes; find broken invariants, dead
+  code, inconsistencies.
+- **DESIGN_CRITIQUE** -- compare implementation to intended
+  architecture; identify drift.
+- **TEST_GAP_ANALYSIS** -- find missing test coverage; describe
+  untested scenarios.
+- **PATCH_PROPOSAL** -- describe intended changes; explain why
+  correct; identify risks.
+- **PATCH_IMPLEMENTATION** -- implement only the approved proposal;
+  minimal diffs; update tests.
 
-- No code changes
-- Identify broken invariants, dead code, or inconsistencies
-
-### DESIGN_CRITIQUE
-
-- Compare implementation to intended architecture
-- Identify architectural drift or unclear responsibilities
-
-### TEST_GAP_ANALYSIS
-
-- Identify missing test coverage
-- Describe untested scenarios
-
-### PATCH_PROPOSAL
-
-- Describe intended changes
-- Explain why they are correct
-- Identify risks
-
-### PATCH_IMPLEMENTATION
-
-- Implement only the approved proposal
-- Keep diffs minimal
-- Update tests as needed
+The orchestrator spawning sub-agents uses the more granular
+**READ-ONLY / CODE-REVIEW / IMPLEMENTATION / COMMIT** action classes
+documented in `freminal-orchestrator-protocol`. Use that when
+decomposing.
 
 ---
 
-## Testing Philosophy
+## Multi-Step Task Protocol
 
-Testing is first-class code.
+For tasks with ordered dependencies (e.g. multi-phase refactors):
 
-- Every non-trivial behavior must be tested
-- Tests must document a specific invariant
-- Success and failure cases are required unless impossible
-- Bug fixes must include regression tests
+1. Read the entire task document before doing anything.
+2. Find the first incomplete step.
+3. Execute that one step and nothing else.
+4. Run the verification suite -- confirm it passes.
+5. Update the tracking document: mark the step complete, add a brief
+   note.
+6. Stop and post a summary in chat -- wait for user confirmation
+   before continuing.
 
-Tests must be:
+Do NOT execute multiple steps in one session, even if they seem
+small. Do NOT proceed to the next step without explicit user
+confirmation. Each step must leave `cargo test --all` passing.
 
-- Hermetic
-- Order-independent
-- Focused on observable behavior
-- Written for humans first
-
-Duplication in tests is acceptable if it improves clarity.
-
-Coverage target: 100% across crates.
-
----
-
-## Code Style
-
-- Idiomatic, clippy-clean Rust
-- Prefer small, composable functions
-- Avoid macros unless clearly justified
-- Document public types and functions
-- Prefer explicit types for clarity
-- Follow standard Rust naming conventions
-
-### Numeric Conversions
-
-- Raw `as` casts are forbidden for numeric type conversions in production code
-- Use `conv2` crate traits for all numeric conversions:
-  - `ValueFrom` / `ValueInto` for lossless conversions that may fail (e.g., `usize` -> `i32`)
-  - `ApproxFrom` / `ApproxInto` with `RoundToZero` for float conversions (e.g., `usize` -> `f32`)
-  - `ConvUtil::value_as` and `ConvUtil::approx_as` for inline conversions
-- `as` casts are permitted only for:
-  - Casts that are guaranteed lossless by the type system (e.g., `u8` -> `u32`)
-  - Test code (`#[cfg(test)]` or `tests/`)
-  - Benchmark code
-- When a conversion can fail, handle the error explicitly — do not use `.unwrap()` on the
-  conversion result in production code
+Pre-existing bugs surfaced mid-task become numbered cleanup entries in
+the host task's plan document (see Task 72.16 in
+`Documents/PLAN_VERSION_090.md` for the convention). Full procedure in
+`freminal-orchestrator-protocol`.
 
 ---
 
-## AI-Specific Rules
+## Testing Philosophy (headlines)
 
-- Do NOT invent APIs
-- Do NOT guess terminal semantics
-- Do NOT silently change behavior
-- Do NOT refactor unrelated code
-- Do NOT create new markdown files unless explicitly requested
-- If intent is unclear, stop and ask
-
-### FREC Recording Analysis
-
-When analyzing FREC recording files (`.frec`, `.bin`, or any file produced by `--recording-path`),
-agents MUST use `sequence_decoder.py` in the repository root. Do NOT write ad-hoc parsers,
-one-off Python scripts, or inline binary parsing code to read FREC files. The decoder supports
-filtering by pane, window, and event type, escape sequence decoding, and timing analysis.
-
-Usage:
-
-```sh
-# Basic decode
-python3 sequence_decoder.py --recording-path=path/to/file
-
-# With escape sequence conversion and timing
-python3 sequence_decoder.py --recording-path=path/to/file --convert-escape --show-timing
-
-# Filter to a specific pane (v2 only)
-python3 sequence_decoder.py --recording-path=path/to/file --pane 0
-
-# Show only topology/lifecycle events (v2 only)
-python3 sequence_decoder.py --recording-path=path/to/file --events-only
-
-# Show recording summary (v2 only)
-python3 sequence_decoder.py --recording-path=path/to/file --summary
-```
-
-If the decoder lacks a feature needed for the current task, extend the decoder rather than
-working around it.
+Testing is first-class code. Tests must be hermetic, order-independent,
+focused on observable behavior, written for humans first. Coverage
+target: 100% across crates. Duplication in tests is acceptable if it
+improves clarity. Full mandate in `testing-mandate`; benchmark
+procedure in `performance-benchmarks` + freminal-specific catalog in
+`freminal-bench-table`; flake rules in `flaky-tests-are-bugs`.
 
 ---
 
 ## Documentation Rules
 
-- Do NOT create new markdown files by default
-- Documentation must serve a clear, durable purpose
-- Propose documentation changes before creating files
-- Avoid duplicating information already present
+- Do NOT create new markdown files by default. (See
+  `no-summary-documents` for the full prohibition list.)
+- Documentation must serve a clear, durable purpose.
+- Propose documentation changes before creating files.
+- Avoid duplicating information already present.
+- **Escape-sequence changes have a mandatory dual-document update** --
+  see `freminal-escape-sequence-docs`.
 
-### Escape Sequence Documentation
+---
 
-Any change to the parser, terminal handler, or renderer that adds, removes, or alters support
-for an escape sequence (C0/C1, ESC, CSI, OSC, DCS, APC, DEC mode, standard mode, charset, or
-renderer-side consumption of a sequence) MUST update both:
+## AI-Specific Rules
 
-- `Documents/ESCAPE_SEQUENCE_COVERAGE.md` — the authoritative coverage table
-- `Documents/ESCAPE_SEQUENCE_GAPS.md` — the gap/roadmap document
-
-Checklist for every escape-sequence change:
-
-1. Update the relevant row in `ESCAPE_SEQUENCE_COVERAGE.md` (status icon, notes, task reference).
-2. Add or remove the corresponding row in `ESCAPE_SEQUENCE_GAPS.md`. If newly implemented,
-   remove the gap entry entirely. If newly discovered as unsupported, add it with an
-   Importance, Type, and Planned column entry.
-3. Populate the `Planned` column in `ESCAPE_SEQUENCE_GAPS.md` with the version/task that will
-   close the gap (e.g. `v0.9.0 Task 72`) or `—` if unscheduled.
-4. Update the "Last updated" header line in both files with the current date and a brief note
-   on which task(s) prompted the update.
-5. If the change affects the Specification Coverage Summary table in `ESCAPE_SEQUENCE_COVERAGE.md`,
-   update that row as well.
-
-These two documents are the source of truth for outside contributors judging terminal
-compatibility. Letting them drift is a correctness bug in the documentation itself.
+- Do NOT invent APIs.
+- Do NOT guess terminal semantics.
+- Do NOT silently change behavior.
+- Do NOT refactor unrelated code.
+- Do NOT create new markdown files unless explicitly requested.
+- If intent is unclear, stop and ask.
 
 ---
 
@@ -614,11 +271,11 @@ compatibility. Letting them drift is a correctness bug in the documentation itse
 
 Stop and ask if:
 
-- Requirements are ambiguous
-- A change would weaken invariants
-- Behavior is unclear or under-specified
-- The agent is tempted to "fill in" missing semantics
-- The agent feels unsure but thinks it can guess
-- A sub-task requires modifying files outside its assigned scope
+- Requirements are ambiguous.
+- A change would weaken invariants.
+- Behavior is unclear or under-specified.
+- You're tempted to "fill in" missing semantics.
+- You feel unsure but think you can guess.
+- A sub-task requires modifying files outside its assigned scope.
 
 Correctness > completeness > speed.
