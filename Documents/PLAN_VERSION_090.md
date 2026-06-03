@@ -1289,6 +1289,56 @@ both clean.
   missing-`command_start_row` case. No changes to `ViewState`, the
   rendering layer, or the keybinding default.
 
+- 72.10d (`5b029a4`, 2026-06-03) — three renderer bugs surfaced by
+  visual testing with bash/zsh/fish under the 72.8b spawn-time
+  injection:
+  1. **Buffer-absolute vs snapshot-relative row coordinate mismatch.**
+     `CommandBlock` row fields are stored in buffer-absolute space (e.g.
+     46..=79 for a block 46 rows into the scrollback), but
+     `RowMap::new(term_height=17, ...)` expects rows in snapshot-row
+     space `[0, term_height)`. Ranges with `start_row >= term_height`
+     were silently dropped, producing an identity row_map and no
+     visible fold. Fix: new pure helper
+     `translate_ranges_to_snapshot(ranges, visible_window_start)` in
+     `freminal/src/gui/folding.rs`; widget pipeline is now
+     `compute_fold_ranges → translate → RowMap::new`.
+     `visible_window_start` is computed in `coords.rs` as
+     `total_rows.saturating_sub(term_height).saturating_sub(scroll_offset)`.
+  2. **Placeholder line count fluctuated across scroll.** `FoldRange::len()`
+     reflected the per-frame clipped range rather than the full block,
+     so "5 lines hidden" became "3 lines hidden" as you scrolled the
+     top edge of the block off-screen. Fix: added a
+     `block_total_rows: usize` field to `FoldRange`, populated from
+     `compute_fold_ranges` (full block height), preserved through
+     `translate_ranges_to_snapshot` and `RowMap::new`'s clamp pass; the
+     widget reads `range.block_total_rows` for the placeholder text
+     rather than `range.snapshot_end_row - range.snapshot_start_row + 1`.
+  3. **Fold hid the prompt and command line.** `compute_fold_ranges`
+     used `command_start_row` (OSC 133 B = start of typing) as the
+     fold start, but all three bundled shells emit OSC 133 C and set
+     `output_start_row`. Folding from B collapses the entire prompt
+     plus the typed command into the placeholder — the user can no
+     longer see what command was folded. Fix: `compute_fold_ranges`
+     now prefers `output_start_row.or(command_start_row)`. The
+     `command_start_row` fallback preserves behavior for any future
+     shell integration that emits B but not C.
+
+  Verification: 7 new tests added in `freminal/src/gui/folding.rs`
+  (5 covering `translate_ranges_to_snapshot`, 1 for
+  `block_total_rows` stability across scroll, 1 for the
+  `output_start_row` precedence, 1 for the `command_start_row`
+  fallback). All 32 folding tests pass; 103/103 suites green; clippy
+  clean. User confirmed visually with bash/zsh/fish.
+
+- 72.10e (`8d1056e`, 2026-06-03) — straight rename
+  `ToggleFoldAtCursor` → `FoldPreviousCommand`. The old name implied
+  the cursor location selected the fold target, but as documented in
+  72.10c the cursor is almost always on the active prompt (block N+1)
+  and the dispatcher actually folds the most recent _completed_ block.
+  `FoldPreviousCommand` describes the real behaviour. No backward-
+  compat alias for the `toggle_fold_at_cursor` TOML key — pre-release
+  code; existing configs are expected to be updated manually.
+
 #### 72.11 — Copy command output actions ✅
 
 **Completed:** 2026-05-19 (commit `8c3cd77`)
@@ -3165,7 +3215,12 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      wire RowMap into renderer; `d0c7098` 72.10b-3 —
      placeholder row rendering, click-to-unfold hit-test, hover cursor,
      benchmark; `bf6a2b4` 72.10c — bug fix: fall back to most
-     recent completed block when cursor outside any block).
+     recent completed block when cursor outside any block;
+     `5b029a4` 72.10d — three renderer bug fixes: buffer-absolute /
+     snapshot-relative row translation, stable placeholder count
+     across scroll, prefer `output_start_row` (OSC 133 C) over
+     `command_start_row` (OSC 133 B); `8d1056e` 72.10e — rename
+     `ToggleFoldAtCursor` → `FoldPreviousCommand`).
    - **72.11** ✅ done (commit `8c3cd77`, 2026-05-19). Copy command output
      actions: `CopyLastCommandOutput` keybinding + `CopyCommandOutputAtCursor`
      right-click menu item.
