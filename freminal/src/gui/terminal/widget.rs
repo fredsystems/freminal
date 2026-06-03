@@ -1367,7 +1367,17 @@ impl FreminalTerminalWidget {
         // For 72.10b-2, a folded range collapses to a *blank* row at its
         // placeholder slot — the placeholder visual (line count, triangle
         // glyph) and click-to-unfold land in 72.10b-3.
-        let fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
+        // `compute_fold_ranges` produces ranges in **buffer-absolute** row
+        // space (because `CommandBlock` row fields are buffer-absolute).
+        // `RowMap` works in **snapshot-row** space `[0, term_height)`.
+        // Translate before constructing the map; otherwise ranges with
+        // `start_row >= term_height` are silently dropped and the fold
+        // becomes a visual no-op.
+        let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
+        let fold_ranges = crate::gui::folding::translate_ranges_to_snapshot(
+            &raw_fold_ranges,
+            visible_window_start(snap),
+        );
         let row_map = RowMap::new(snap.term_height, &fold_ranges);
         // Per-frame epoch: a stable hash of the sorted, non-overlapping ranges
         // list.  When the user folds or unfolds a block this changes, and we
@@ -1675,7 +1685,10 @@ impl FreminalTerminalWidget {
                                 );
                             }
                             Some(RenderedRow::Placeholder(range)) => {
-                                let text = format_placeholder_text(range.len(), snap.term_width);
+                                let text = format_placeholder_text(
+                                    range.block_total_rows,
+                                    snap.term_width,
+                                );
                                 let shaped = crate::gui::shaping::shape_placeholder_line(
                                     &text,
                                     dim_fg,

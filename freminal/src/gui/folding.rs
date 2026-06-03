@@ -22,12 +22,17 @@
 //!
 //! ## Invariants
 //!
-//! - A [`FoldRange`] is only emitted for command blocks where **both**
-//!   `command_start_row` and `end_row` are `Some` (i.e. fully completed
-//!   blocks) AND whose `CommandBlockId` is currently in `folded_blocks`.
+//! - A [`FoldRange`] is only emitted for command blocks where `end_row`
+//!   is `Some` (i.e. completed) AND at least one of `output_start_row`
+//!   (preferred) or `command_start_row` is `Some` AND whose
+//!   `CommandBlockId` is currently in `folded_blocks`.
+//! - The fold range starts at `output_start_row` when present so the
+//!   prompt and command line stay visible above the placeholder.
+//!   Shells that don't emit OSC 133 C fall back to `command_start_row`
+//!   (the pre-fix behaviour: command line is folded with the output).
 //! - Running blocks (`end_row.is_none()`) cannot be folded, matching the
 //!   spec in `PLAN_VERSION_090.md` §72.10.
-//! - Degenerate ranges where `command_start_row > end_row` are dropped.
+//! - Degenerate ranges where `start > end_row` are dropped.
 //!   They should never occur in well-formed OSC 133 streams; we treat them
 //!   as data corruption and silently ignore them rather than panicking.
 //! - The returned `Vec<FoldRange>` is sorted ascending by `start_row` and
@@ -54,11 +59,11 @@ use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId
 /// single placeholder row in the rendered view.
 ///
 /// Both `start_row` and `end_row` are **inclusive** indices in
-/// snapshot-row space. `start_row` is the block's `command_start_row`
-/// (the row after the prompt line); `end_row` is the block's `end_row`
-/// (the row of the `OSC 133 D` marker). The prompt line itself is **not**
-/// part of the fold — folding preserves the prompt and command so the
-/// user can still see what was run.
+/// snapshot-row space. `start_row` is the block's `output_start_row`
+/// (the row where output begins, immediately after the command line);
+/// `end_row` is the block's `end_row` (the row of the `OSC 133 D`
+/// marker). The prompt and command line are **not** part of the fold —
+/// folding preserves them so the user can still see what was run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoldRange {
     /// Stable id of the command block this fold belongs to.
@@ -67,6 +72,16 @@ pub struct FoldRange {
     pub start_row: usize,
     /// Last folded snapshot row, inclusive.
     pub end_row: usize,
+    /// Total number of rows in the underlying command block, **before**
+    /// any clipping for partial visibility or scrollback eviction.
+    ///
+    /// `start_row` / `end_row` describe the *visible* rows currently
+    /// collapsed (which may be a subset of the block when scrolling has
+    /// brought only part of it on-screen). This field is preserved
+    /// unchanged through [`translate_ranges_to_snapshot`] and
+    /// [`RowMap::new`] so the renderer can display a stable
+    /// "*N* lines hidden" placeholder regardless of scroll position.
+    pub block_total_rows: usize,
 }
 
 impl FoldRange {
@@ -99,8 +114,10 @@ impl FoldRange {
 /// A block contributes a [`FoldRange`] iff:
 ///
 /// - its `CommandBlockId` is present in `folded_blocks`, AND
-/// - both `command_start_row` and `end_row` are `Some`, AND
-/// - `command_start_row <= end_row`.
+/// - `end_row` is `Some`, AND
+/// - at least one of `output_start_row` (preferred) or
+///   `command_start_row` is `Some`, AND
+/// - the resolved start row `<= end_row`.
 ///
 /// IDs in `folded_blocks` that do not correspond to any block in
 /// `command_blocks` (e.g. because the block has scrolled out of
@@ -124,7 +141,13 @@ pub fn compute_fold_ranges<S: BuildHasher>(
         .iter()
         .filter(|b| folded_blocks.contains(&b.id))
         .filter_map(|b| {
-            let start = b.command_start_row?;
+            // Fold the *output* of a block, leaving the prompt and command
+            // line visible. Prefer `output_start_row` (OSC 133 C) so the
+            // collapsed range starts on the first output row. Fall back to
+            // `command_start_row` for shell integrations that don't emit
+            // OSC 133 C; in that case the command line is folded with the
+            // output (the pre-fix behaviour) rather than refusing to fold.
+            let start = b.output_start_row.or(b.command_start_row)?;
             let end = b.end_row?;
             if start > end {
                 return None;
@@ -133,6 +156,7 @@ pub fn compute_fold_ranges<S: BuildHasher>(
                 command_block_id: b.id,
                 start_row: start,
                 end_row: end,
+                block_total_rows: end.saturating_sub(start).saturating_add(1),
             })
         })
         .collect();
@@ -154,6 +178,50 @@ pub fn compute_fold_ranges<S: BuildHasher>(
         }
     }
     deduped
+}
+
+/// Translate a slice of [`FoldRange`] values from **buffer-absolute** row
+/// space into **snapshot-row** space (the row space [`RowMap`] consumes).
+///
+/// `CommandBlock` rows are stored in buffer-absolute coordinates (the
+/// total scrollback-buffer row indices), while the renderer's snapshot
+/// row space is `[0, term_height)` indexed from the top of the *visible*
+/// window. The two spaces differ by `visible_window_start =
+/// total_rows.saturating_sub(term_height).saturating_sub(scroll_offset)`.
+///
+/// Behaviour:
+///
+/// - Ranges entirely in scrollback (`end_row < visible_window_start`)
+///   are dropped — they have no visible placeholder. The fold persists
+///   in `view_state.folded_blocks` and will re-emerge when the user
+///   scrolls back into them.
+/// - Ranges whose `start_row < visible_window_start` (block straddles
+///   scrollback / visible boundary) are clamped to start at snapshot
+///   row 0 via saturating subtraction.
+/// - `end_row` is translated unchanged (saturating sub); [`RowMap::new`]
+///   subsequently clamps it to `snapshot_row_count - 1`.
+///
+/// Input is expected to be sorted and non-overlapping (as produced by
+/// [`compute_fold_ranges`]); the output preserves both invariants.
+#[must_use]
+pub fn translate_ranges_to_snapshot(
+    ranges: &[FoldRange],
+    visible_window_start: usize,
+) -> Vec<FoldRange> {
+    ranges
+        .iter()
+        .filter_map(|r| {
+            if r.end_row < visible_window_start {
+                return None;
+            }
+            Some(FoldRange {
+                command_block_id: r.command_block_id,
+                start_row: r.start_row.saturating_sub(visible_window_start),
+                end_row: r.end_row.saturating_sub(visible_window_start),
+                block_total_rows: r.block_total_rows,
+            })
+        })
+        .collect()
 }
 
 /// A single row in rendered-row space, as produced by
@@ -217,6 +285,7 @@ impl RowMap {
                 command_block_id: r.command_block_id,
                 start_row: r.start_row,
                 end_row: end,
+                block_total_rows: r.block_total_rows,
             };
             folded_hidden_rows = folded_hidden_rows.saturating_add(clamped_range.len());
             placeholder_rows = placeholder_rows.saturating_add(1);
@@ -356,6 +425,19 @@ mod tests {
         b
     }
 
+    /// Builder used by tests that exercise `output_start_row` precedence.
+    fn make_block_with_output(
+        id: u64,
+        prompt: usize,
+        cmd_start: Option<usize>,
+        output_start: Option<usize>,
+        end: Option<usize>,
+    ) -> CommandBlock {
+        let mut b = make_block(id, prompt, cmd_start, end);
+        b.output_start_row = output_start;
+        b
+    }
+
     fn set(ids: &[u64]) -> HashSet<CommandBlockId> {
         ids.iter().copied().map(CommandBlockId).collect()
     }
@@ -416,6 +498,39 @@ mod tests {
         let ranges = compute_fold_ranges(&blocks, &folded);
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].command_block_id, CommandBlockId(1));
+        assert_eq!(ranges[0].start_row, 1);
+        assert_eq!(ranges[0].end_row, 5);
+    }
+
+    #[test]
+    fn compute_prefers_output_start_row_over_command_start_row() {
+        // A typical block: prompt + command on row 1 (command_start_row=1),
+        // output starts on row 2 (output_start_row=2), ends on row 5.
+        // Folding should hide rows 2..=5, leaving the prompt+command on
+        // row 1 visible above the placeholder.
+        let blocks = [make_block_with_output(1, 1, Some(1), Some(2), Some(5))];
+        let folded = set(&[1]);
+        let ranges = compute_fold_ranges(&blocks, &folded);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            ranges[0].start_row, 2,
+            "fold must start at output_start_row, not command_start_row"
+        );
+        assert_eq!(ranges[0].end_row, 5);
+        // block_total_rows reflects the (output-only) fold size: 4 rows.
+        assert_eq!(ranges[0].block_total_rows, 4);
+    }
+
+    #[test]
+    fn compute_falls_back_to_command_start_row_when_output_unset() {
+        // Legacy shells that don't emit OSC 133 C leave output_start_row
+        // as None. We must still allow folding — falling back to
+        // command_start_row (the pre-fix behaviour) is the documented
+        // contract.
+        let blocks = [make_block_with_output(1, 0, Some(1), None, Some(5))];
+        let folded = set(&[1]);
+        let ranges = compute_fold_ranges(&blocks, &folded);
+        assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].start_row, 1);
         assert_eq!(ranges[0].end_row, 5);
     }
@@ -495,6 +610,7 @@ mod tests {
             command_block_id: CommandBlockId(id),
             start_row: start,
             end_row: end,
+            block_total_rows: end.saturating_sub(start).saturating_add(1),
         }
     }
 
@@ -757,6 +873,98 @@ mod tests {
         let r = fold(1, 4, 4);
         assert_eq!(r.len(), 1);
         assert!(r.contains(4));
+    }
+
+    // ── translate_ranges_to_snapshot ────────────────────────────────────
+
+    #[test]
+    fn translate_identity_when_win_start_zero() {
+        let ranges = [fold(1, 3, 6), fold(2, 10, 14)];
+        let out = translate_ranges_to_snapshot(&ranges, 0);
+        assert_eq!(out, ranges);
+    }
+
+    #[test]
+    fn translate_drops_range_entirely_in_scrollback() {
+        // win_start=65, range 46..=60 is wholly in scrollback (end < win_start).
+        let ranges = [fold(1, 46, 60)];
+        let out = translate_ranges_to_snapshot(&ranges, 65);
+        assert!(out.is_empty(), "wholly-scrollback range must be dropped");
+    }
+
+    #[test]
+    fn translate_clamps_straddling_range_to_zero() {
+        // The bug-trigger case from the field: block 1 spans 46..=79,
+        // visible_window_start=65, term_height=17 (visible rows 65..=81).
+        // The visible portion is rows 65..=79 → snapshot rows 0..=14.
+        let ranges = [fold(1, 46, 79)];
+        let out = translate_ranges_to_snapshot(&ranges, 65);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].start_row, 0);
+        assert_eq!(out[0].end_row, 14);
+        assert_eq!(out[0].command_block_id, CommandBlockId(1));
+    }
+
+    #[test]
+    fn translate_wholly_visible_range_shifts_uniformly() {
+        // Range 70..=75 with win_start=65 → snapshot rows 5..=10.
+        let ranges = [fold(1, 70, 75)];
+        let out = translate_ranges_to_snapshot(&ranges, 65);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].start_row, 5);
+        assert_eq!(out[0].end_row, 10);
+    }
+
+    #[test]
+    fn translate_then_rowmap_collapses_straddling_block() {
+        // Full pipeline regression for the field bug.
+        let raw = [fold(1, 46, 79)];
+        let translated = translate_ranges_to_snapshot(&raw, 65);
+        let map = RowMap::new(17, &translated);
+        // 15 visible folded rows → 1 placeholder; rendered = 17 - 15 + 1 = 3.
+        assert_eq!(map.rendered_row_count(), 3);
+        assert_eq!(
+            map.rendered_to_snapshot(0),
+            Some(RenderedRow::Placeholder(translated[0]))
+        );
+        assert_eq!(map.rendered_to_snapshot(1), Some(RenderedRow::Snapshot(15)));
+    }
+
+    #[test]
+    fn block_total_rows_is_stable_across_scroll() {
+        // Block 1 is 34 rows of buffer-absolute output (46..=79). As the
+        // user scrolls, the *visible portion* of the fold shrinks/grows,
+        // but the placeholder text must always report the full 34 lines
+        // so the user is not misled about how much content is hidden.
+        let raw = compute_fold_ranges(&[make_block(1, 45, Some(46), Some(79))], &set(&[1]));
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].block_total_rows, 34);
+
+        // No scroll (block partially in scrollback, partially visible).
+        let t0 = translate_ranges_to_snapshot(&raw, 65);
+        assert_eq!(t0[0].block_total_rows, 34);
+        let m0 = RowMap::new(17, &t0);
+        assert_eq!(m0.ranges()[0].block_total_rows, 34);
+
+        // Scrolled up so the block fully covers the visible window.
+        let t1 = translate_ranges_to_snapshot(&raw, 55);
+        assert_eq!(t1[0].block_total_rows, 34);
+        let m1 = RowMap::new(17, &t1);
+        assert_eq!(m1.ranges()[0].block_total_rows, 34);
+
+        // Scrolled up so only the top of the block is visible.
+        let t2 = translate_ranges_to_snapshot(&raw, 40);
+        assert_eq!(t2[0].block_total_rows, 34);
+
+        // Scrolled past the block entirely (visible window above it).
+        let t3 = translate_ranges_to_snapshot(&raw, 5);
+        assert_eq!(t3[0].block_total_rows, 34);
+        // RowMap drops the range because its translated start is past
+        // term_height — no placeholder rendered, pre-command scrollback
+        // is fully visible.
+        let m3 = RowMap::new(17, &t3);
+        assert_eq!(m3.rendered_row_count(), 17);
+        assert!(m3.ranges().is_empty());
     }
 
     // ── end-to-end: compute_fold_ranges feeding RowMap ──────────────────
