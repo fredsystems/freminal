@@ -251,7 +251,9 @@ limit = 4000
 # enabled = true
 
 # Display the duration of long-running commands next to the gutter
-# (e.g. "1.3s", "15ms").
+# (e.g. "3s", "2m15s", "1h5m").  Sub-second commands always show as
+# "1s"; durations are truncated to whole seconds — fractional and
+# millisecond labels are never emitted.
 # Default: true.
 # show_duration = true
 

@@ -85,11 +85,12 @@ fn handle_shell_info_histfile(
         return;
     }
 
-    // Paths from the shell are typically UTF-8 (Linux/macOS).  On exotic
-    // filesystems they may be arbitrary bytes; we accept lossy decoding
-    // here because (a) the alternative is dropping the message entirely,
-    // and (b) the env-derived fallback path in the GUI loader already
-    // exists for the unhappy path.
+    // Paths from the shell are typically UTF-8 (Linux/macOS).  On
+    // exotic filesystems they may be arbitrary bytes; we drop the
+    // message in that case rather than lossy-decoding, because the
+    // U+FFFD replacement bytes would produce a PathBuf that no longer
+    // round-trips to an openable file on disk.  The env-derived
+    // fallback path in the GUI loader already covers the unhappy path.
     let Ok(s) = std::str::from_utf8(value) else {
         tracing::warn!(
             "OSC 1338 HISTFILE=: non-UTF-8 path: recent='{}'",

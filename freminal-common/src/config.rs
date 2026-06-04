@@ -546,7 +546,10 @@ pub struct CommandBlocksConfig {
     pub enabled: bool,
 
     /// Display the duration of long-running commands next to the gutter
-    /// (e.g. `"1.3s"`).  Default: `true`.
+    /// (e.g. `"3s"`, `"2m15s"`, `"1h5m"`).  Sub-second commands always
+    /// show as `"1s"`; durations are truncated to whole seconds —
+    /// fractional and millisecond labels are never emitted.  Default:
+    /// `true`.
     pub show_duration: bool,
 
     /// Minimum command duration (in seconds) before a duration label is

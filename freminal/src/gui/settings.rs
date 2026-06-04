@@ -1241,8 +1241,10 @@ impl SettingsModal {
         ui.add_space(4.0);
         ui.colored_label(
             egui::Color32::GRAY,
-            "Visual treatment of OSC 133 command blocks. Requires shell \
-             integration scripts to be sourced in your shell rc file.",
+            "Visual treatment of OSC 133 command blocks. Requires the \
+             \"Set TERM_PROGRAM=freminal\" option above to be enabled so \
+             that the bundled shell-integration scripts auto-load on \
+             shell spawn.",
         );
         ui.add_space(8.0);
 
