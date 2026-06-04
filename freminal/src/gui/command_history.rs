@@ -500,7 +500,12 @@ fn render_entry(ui: &mut Ui, entry: &PaletteEntry, selected: bool) -> egui::Resp
                 // Status badge -- live entries only.
                 let badge = entry_badge(&entry.kind);
                 ui.label(badge);
-                ui.label(&entry.text);
+                // Truncate with ellipsis so a single very long history
+                // entry (e.g. a one-line megabyte JSON payload from a
+                // real `.zsh_history`) cannot expand the row's
+                // horizontal layout past the popup's max width and push
+                // every other entry off-screen to the right.
+                ui.add(egui::Label::new(&entry.text).truncate());
             });
         })
         .response
