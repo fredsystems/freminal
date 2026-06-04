@@ -161,19 +161,65 @@ pub fn parse_bash_history(content: &str) -> Vec<String> {
 ///
 /// Supports both the plain format (one command per line) and the extended
 /// format (`: <timestamp>:<duration>;<command>`) selected by
-/// `setopt extended_history`.  Multi-line commands escape newlines with
-/// backslash continuations in the file; we preserve the on-disk form.
+/// `setopt extended_history`.
+///
+/// Multi-line commands are reassembled.  zsh stores a multi-line command
+/// as several physical lines where every line except the last ends with
+/// an unescaped backslash; without reassembly, each continuation line
+/// would appear in the palette as a phantom entry the user does not
+/// recognise.  Continuations are joined with a single space so the
+/// reassembled command displays compactly and is suitable to re-inject
+/// at the prompt verbatim (matching the wezterm / iTerm2 Recall
+/// convention).
 #[must_use]
 pub fn parse_zsh_history(content: &str) -> Vec<String> {
-    content
-        .lines()
+    // Phase 1: collapse trailing-backslash continuations into single
+    // logical lines.
+    let mut logical_lines: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in content.lines() {
+        if let Some(stripped) = line.strip_suffix('\\') {
+            // Continuation marker.  Drop the trailing backslash and any
+            // whitespace immediately before it so the joined form does
+            // not carry a stray space at the seam.
+            let part = stripped.trim_end();
+            match current.as_mut() {
+                Some(buf) => {
+                    buf.push(' ');
+                    buf.push_str(part);
+                }
+                None => current = Some(part.to_owned()),
+            }
+        } else {
+            let combined = current.take().map_or_else(
+                || line.to_owned(),
+                |mut buf| {
+                    buf.push(' ');
+                    buf.push_str(line.trim_start());
+                    buf
+                },
+            );
+            logical_lines.push(combined);
+        }
+    }
+    if let Some(buf) = current {
+        // File ended mid-continuation; salvage what we have so the user
+        // still sees the start of the command.
+        logical_lines.push(buf);
+    }
+
+    // Phase 2: parse each logical line according to format.
+    logical_lines
+        .into_iter()
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            line.strip_prefix(": ").map_or_else(
-                || Some(line.to_owned()),
-                // Extended format: ": <ts>:<dur>;<cmd>" -- find first ";"
-                |rest| rest.split_once(';').map(|(_, cmd)| cmd.to_owned()),
-            )
+            if line.starts_with(": ") {
+                // Extended format: ": <ts>:<dur>;<cmd>" -- everything after
+                // the first ";" is the command.
+                line.split_once(';').map(|(_, cmd)| cmd.to_owned())
+            } else {
+                Some(line)
+            }
         })
         .filter(|s| !s.is_empty())
         .collect()
@@ -507,6 +553,44 @@ mod tests {
         // ": <ts>:<dur>;" with no command after the semicolon
         let content = ": 1700000000:0;\n: 1700000005:0;real cmd\n";
         assert_eq!(parse_zsh_history(content), vec!["real cmd"]);
+    }
+
+    #[test]
+    fn zsh_multi_line_command_reassembled_in_extended_format() {
+        // zsh stores `echo first \<NL>second` as two physical lines where
+        // the first ends with an unescaped backslash.  Without reassembly
+        // `second` shows up as a phantom history entry.
+        let content = ": 1700000000:0;echo first \\\nsecond\n";
+        assert_eq!(parse_zsh_history(content), vec!["echo first second"]);
+    }
+
+    #[test]
+    fn zsh_multi_line_command_three_lines_reassembled() {
+        // Chained continuations: every line except the last ends with
+        // a backslash.  All three pieces should collapse into one entry
+        // joined by single spaces.
+        let content = ": 1700000000:0;for i in 1 2 3\\\ndo echo $i\\\ndone\n";
+        assert_eq!(
+            parse_zsh_history(content),
+            vec!["for i in 1 2 3 do echo $i done"]
+        );
+    }
+
+    #[test]
+    fn zsh_multi_line_command_eof_mid_continuation_salvaged() {
+        // File ends with a trailing-backslash line and no follow-up.
+        // Rather than discard the partial command, salvage what we have
+        // so the user still sees the start in the palette.
+        let content = ": 1700000000:0;echo unfinished\\\n";
+        assert_eq!(parse_zsh_history(content), vec!["echo unfinished"]);
+    }
+
+    #[test]
+    fn zsh_multi_line_continuation_leading_whitespace_trimmed() {
+        // Continuation lines indented for readability should not carry
+        // their leading whitespace into the reassembled command.
+        let content = ": 1700000000:0;echo first\\\n  indented_part\n";
+        assert_eq!(parse_zsh_history(content), vec!["echo first indented_part"]);
     }
 
     // ---------- parse_fish_history ----------
