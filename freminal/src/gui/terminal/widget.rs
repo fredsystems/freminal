@@ -1133,7 +1133,13 @@ impl FreminalTerminalWidget {
         // overlay is open so that egui can deliver events to those widgets.
         let context_menu_open = view_state.context_menu_pos.is_some();
         let search_open = view_state.search_state.is_open;
-        if !suppress_input && !context_menu_open && !search_open && is_active_pane {
+        let command_history_open = view_state.command_history.is_open;
+        if !suppress_input
+            && !context_menu_open
+            && !search_open
+            && !command_history_open
+            && is_active_pane
+        {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -1204,6 +1210,7 @@ impl FreminalTerminalWidget {
         if suppress_input
             || context_menu_open
             || view_state.search_state.is_open
+            || view_state.command_history.is_open
             || cache.scrollbar_dragging
         {
             cache.previous_key = None;
