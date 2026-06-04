@@ -287,54 +287,101 @@ fn decode_fish_cmd(s: &str) -> String {
 /// (unrecognised shell, missing file, permission denied, parse error) --
 /// failures are logged at `debug!`/`warn!` level but never surfaced to the
 /// user, because shell history is a best-effort convenience.
+///
+/// Emits a single `debug!` line per invocation summarising what was loaded
+/// (path, source of the path, file size, mtime age, parsed-vs-capped entry
+/// counts) so that misbehaving palettes (wrong file, stale file, drastic
+/// reassembly collapse) can be diagnosed with `RUST_LOG=debug` without
+/// inflating the default INFO log level on every pane spawn.
 #[must_use]
 pub fn load_for_program(program: &Path, get_env: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
     let kind = detect_shell_kind(program);
     if matches!(kind, ShellKind::Other) {
-        trace!("shell_history: not a recognised shell ({program:?}); skipping seed");
+        trace!("shell_history: program={program:?} detected=Other; skipping seed");
         return Vec::new();
     }
+    let histfile_env = get_env("HISTFILE").filter(|s| !s.is_empty());
+    let xdg_data_env = get_env("XDG_DATA_HOME").filter(|s| !s.is_empty());
     let Some(path) = resolve_history_path(kind, get_env) else {
-        debug!("shell_history: could not resolve history path for {kind:?}");
+        warn!(
+            "shell_history: could not resolve history path for {kind:?} \
+             (program={program:?}, $HOME unset?)"
+        );
         return Vec::new();
     };
-    let content = match std::fs::read(&path) {
-        Ok(bytes) => {
-            // Shell history files are not guaranteed to be valid UTF-8.
-            // zsh in particular stores command bytes >= 0x80 in a
-            // "metafied" encoding, and bash will faithfully record
-            // whatever bytes the user typed (Latin-1, Shift-JIS, paste
-            // residue, etc.).  Strict `read_to_string` rejects the
-            // entire file on a single stray byte, which produced the
-            // `stream did not contain valid UTF-8` warning at pane
-            // spawn time.  Lossy decoding preserves all valid UTF-8 and
-            // substitutes U+FFFD for invalid sequences -- acceptable
-            // for a best-effort palette seed.
-            String::from_utf8_lossy(&bytes).into_owned()
+    // Which input determined the chosen path?  Useful when the user
+    // expected `$HISTFILE` to be honoured but freminal was launched
+    // without it (set in .zshrc, not exported globally) and silently
+    // fell back to the default location.
+    let path_source = match kind {
+        ShellKind::Bash | ShellKind::Zsh => {
+            if histfile_env.is_some() {
+                "$HISTFILE"
+            } else {
+                "default $HOME"
+            }
         }
+        ShellKind::Fish => {
+            if xdg_data_env.is_some() {
+                "$XDG_DATA_HOME"
+            } else {
+                "default $HOME"
+            }
+        }
+        ShellKind::Other => "n/a",
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            trace!("shell_history: no history file at {path:?}; first-time shell?");
+            trace!(
+                "shell_history: {kind:?} no history file at {path:?} \
+                 (source={path_source}); first-time shell?"
+            );
             return Vec::new();
         }
         Err(e) => {
-            warn!("shell_history: failed to read {path:?}: {e}");
+            warn!("shell_history: failed to read {path:?} (source={path_source}): {e}");
             return Vec::new();
         }
     };
+    // mtime age in seconds; helps diagnose "history looks stale" reports
+    // (e.g. zsh without `INC_APPEND_HISTORY` only writes on shell exit, so
+    // a long-running zsh has a hours-old history file even mid-session).
+    let mtime_age = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or_else(|| "?".to_owned(), |d| format!("{}s", d.as_secs()));
+    // Shell history files are not guaranteed to be valid UTF-8.  zsh in
+    // particular stores command bytes >= 0x80 in a "metafied" encoding,
+    // and bash will faithfully record whatever bytes the user typed
+    // (Latin-1, Shift-JIS, paste residue, etc.).  Strict
+    // `read_to_string` rejects the entire file on a single stray byte,
+    // which produced the `stream did not contain valid UTF-8` warning
+    // at pane spawn time.  Lossy decoding preserves all valid UTF-8 and
+    // substitutes U+FFFD for invalid sequences -- acceptable for a
+    // best-effort palette seed.
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    let raw_line_count = content.lines().count();
     let mut entries = match kind {
         ShellKind::Bash => parse_bash_history(&content),
         ShellKind::Zsh => parse_zsh_history(&content),
         ShellKind::Fish => parse_fish_history(&content),
         ShellKind::Other => Vec::new(),
     };
+    let parsed_count = entries.len();
     // Keep only the last HISTORY_SEED_CAP entries.
     let len = entries.len();
     if len > HISTORY_SEED_CAP {
         entries.drain(..len - HISTORY_SEED_CAP);
     }
     debug!(
-        "shell_history: loaded {} entries from {path:?} for {kind:?}",
-        entries.len()
+        "shell_history: {kind:?} loaded {final_count} entries from {path:?} \
+         (source={path_source}, bytes={bytes_len}, raw_lines={raw_line_count}, \
+         parsed={parsed_count}, cap={cap}, mtime_age={mtime_age})",
+        final_count = entries.len(),
+        bytes_len = bytes.len(),
+        cap = HISTORY_SEED_CAP,
     );
     entries
 }
