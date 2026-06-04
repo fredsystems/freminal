@@ -285,25 +285,40 @@ fn main() {
     if cfg.shell_integration.set_term_program
         && let Some(dir) = config::shell_integration_dir()
     {
-        let result = shell_integration::sync_to_disk(&dir);
-        if result.has_errors() {
-            for (name, err) in &result.errors {
-                warn!(
-                    "Shell integration: failed to sync '{}' into {}: {}",
-                    name,
-                    dir.display(),
-                    err
+        match dir {
+            config::ShellIntegrationDir::UserWritable(ref path) => {
+                let result = shell_integration::sync_to_disk(path);
+                if result.has_errors() {
+                    for (name, err) in &result.errors {
+                        warn!(
+                            "Shell integration: failed to sync '{}' into {}: {}",
+                            name,
+                            path.display(),
+                            err
+                        );
+                    }
+                } else if !result.written.is_empty() {
+                    info!(
+                        "Shell integration: synced {} script(s) to {}",
+                        result.written.len(),
+                        path.display()
+                    );
+                }
+                // skipped files (already up to date) are not logged — that
+                // is the normal case on subsequent launches.
+            }
+            config::ShellIntegrationDir::PackagingProvided(ref path) => {
+                // Packager owns this directory; we never write to it.  The
+                // bundled scripts are whatever the package shipped, and
+                // keeping them in sync with the freminal binary is the
+                // packager's responsibility.
+                info!(
+                    "Shell integration: using packager-provided scripts at {} \
+                     (no on-disk sync performed)",
+                    path.display()
                 );
             }
-        } else if !result.written.is_empty() {
-            info!(
-                "Shell integration: synced {} script(s) to {}",
-                result.written.len(),
-                dir.display()
-            );
         }
-        // skipped files (already up to date) are not logged — that is
-        // the normal case on subsequent launches.
     }
 
     // Warn if both a positional command and --shell are specified.

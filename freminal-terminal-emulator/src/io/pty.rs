@@ -437,7 +437,7 @@ pub fn run_terminal(
             freminal_common::config::shell_integration_dir(),
         ) {
             if let Some(shell) = detect_shell(prog) {
-                inject_shell_integration_env(&mut cmd, shell, &resources)
+                inject_shell_integration_env(&mut cmd, shell, resources.path())
             } else {
                 &[]
             }
