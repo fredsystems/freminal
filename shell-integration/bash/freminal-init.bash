@@ -1,4 +1,4 @@
-# freminal-shell-integration v1
+# freminal-shell-integration v2
 # shellcheck shell=bash
 #
 # Freminal bash integration — loaded automatically when Freminal spawns bash.
@@ -73,6 +73,21 @@ if [ -n "${__FREMINAL_SHELL_INTEGRATION_LOADED:-}" ]; then
 	return 0 2>/dev/null || true
 fi
 __FREMINAL_SHELL_INTEGRATION_LOADED=1
+
+# ── OSC 1338 HISTFILE report (Task 72.15) ────────────────────────────────────
+# Report the shell-evaluated $HISTFILE so freminal can seed the Quick
+# Command History Palette with the file the shell will actually read,
+# rather than the parent-environment value (which may be unset or stale
+# if the user sets HISTFILE inside .bashrc as a shell variable rather
+# than exporting it).
+#
+# The path is sent verbatim — freminal trims trailing whitespace and
+# tolerates spaces in paths.  Empty $HISTFILE is suppressed: if it is
+# unset, the env-derived loader's default (~/.bash_history) is already
+# the right answer.
+if [ -n "${HISTFILE:-}" ]; then
+	printf '\033]1338;HISTFILE=%s\007' "${HISTFILE}"
+fi
 
 # Per-command counter used to give each command lifecycle a unique `fid`
 # (A→B→C→D all share one fid; the next command gets a fresh one).

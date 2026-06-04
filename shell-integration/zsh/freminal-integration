@@ -1,4 +1,4 @@
-# freminal-shell-integration v1
+# freminal-shell-integration v2
 #
 # Freminal zsh integration body — sourced by our `.zshenv` after the user's
 # own zsh startup files have run.
@@ -26,6 +26,36 @@ if [[ -n "${__FREMINAL_SHELL_INTEGRATION_LOADED:-}" ]]; then
 	return 0
 fi
 typeset -g __FREMINAL_SHELL_INTEGRATION_LOADED=1
+
+# ── OSC 1338 HISTFILE report (Task 72.15) ────────────────────────────────────
+# Report the shell-evaluated $HISTFILE so freminal can seed the Quick
+# Command History Palette with the file the shell will actually read,
+# rather than the parent-environment value (which may be unset or stale
+# if the user sets HISTFILE inside .zshrc as a shell variable rather
+# than exporting it — common in zsh setups that store history under
+# ~/.config/zsh/.zsh_history).
+#
+# This script is sourced from .zshenv, which runs BEFORE .zshrc — so
+# emitting at file-load time would miss any HISTFILE set in .zshrc.
+# Instead, register a one-shot precmd that fires on the first prompt
+# (after all rc files have been sourced) and then removes itself.
+__freminal_emit_histfile_once() {
+	emulate -L zsh
+	if [[ -n "${HISTFILE:-}" ]]; then
+		printf '\033]1338;HISTFILE=%s\007' "${HISTFILE}"
+	fi
+	# Self-remove so subsequent prompts pay no cost.
+	if (( ${+functions[add-zsh-hook]} )); then
+		add-zsh-hook -d precmd __freminal_emit_histfile_once
+	else
+		precmd_functions=("${(@)precmd_functions:#__freminal_emit_histfile_once}")
+	fi
+}
+if (( ${+functions[add-zsh-hook]} )); then
+	add-zsh-hook precmd __freminal_emit_histfile_once
+else
+	precmd_functions+=(__freminal_emit_histfile_once)
+fi
 
 # Per-command counter used to give each command lifecycle a unique `fid`
 # (A→B→C→D all share one fid; the next command gets a fresh one).

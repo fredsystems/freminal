@@ -1,4 +1,4 @@
-# freminal-shell-integration v1
+# freminal-shell-integration v2
 #
 # Freminal zsh `.zshenv` — loaded automatically when Freminal spawns zsh.
 #

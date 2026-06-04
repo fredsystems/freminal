@@ -1,4 +1,4 @@
-<!-- freminal-shell-integration v1 -->
+<!-- freminal-shell-integration v2 -->
 
 # Freminal Shell Integration
 
@@ -8,6 +8,14 @@ prompt-and-command lifecycle markers and [OSC 7](https://wezfurlong.org/wezterm/
 working-directory notifications. Each marker carries a `freminal=1;fid=<id>`
 payload that lets Freminal distinguish its own integration from foreign
 OSC 133 emitters (system zsh, Starship, oh-my-zsh, GNOME VTE, etc.).
+
+In addition, the scripts emit **OSC 1338 `HISTFILE=<path>`** once per
+session, after the user's rc files have run. This tells Freminal which
+shell-history file to seed the Quick Command History Palette
+(`Ctrl+Shift+M`) from when the parent-environment `$HISTFILE` is unset
+or stale (e.g. zsh users who set `HISTFILE` as a shell variable inside
+`.zshrc` rather than exporting it). Empty `$HISTFILE` is suppressed —
+Freminal falls back to the per-shell default in that case.
 
 The FTCS marker specification used by Freminal is documented in
 `freminal-common/src/buffer_states/ftcs.rs` in the repository.

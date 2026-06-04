@@ -1,4 +1,4 @@
-# freminal-shell-integration v1
+# freminal-shell-integration v2
 #
 # Freminal fish integration — installed under `vendor_conf.d/` and loaded
 # automatically by fish when Freminal prepends our resources directory to
@@ -73,4 +73,28 @@ function __freminal_fish_postexec --on-event fish_postexec
     printf '\033]133;D;%s;%s\007' $__freminal_exit $__freminal_fid_payload
     set -l __freminal_hostname (hostname 2>/dev/null; or echo localhost)
     printf '\033]7;file://%s%s\007' $__freminal_hostname $PWD
+end
+
+# ── OSC 1338 HISTFILE report (Task 72.15) ─────────────────────────────────────
+# Report fish's history file path on the FIRST prompt cycle so freminal can
+# seed the Quick Command History Palette with the file fish actually uses.
+#
+# vendor_conf.d files load BEFORE config.fish, so emitting at file-load
+# time would miss user overrides of $XDG_DATA_HOME or $fish_history.
+# Delaying until fish_prompt guarantees config.fish has run.  The handler
+# erases itself after firing so subsequent prompts pay no cost.
+#
+# Fish stores history at:
+#   ${XDG_DATA_HOME:-$HOME/.local/share}/fish/${fish_history:-fish}_history
+function __freminal_emit_histfile_once --on-event fish_prompt
+    functions -e __freminal_emit_histfile_once
+    set -l __freminal_session fish
+    if set -q fish_history; and test -n "$fish_history"
+        set __freminal_session $fish_history
+    end
+    set -l __freminal_base "$HOME/.local/share"
+    if set -q XDG_DATA_HOME; and test -n "$XDG_DATA_HOME"
+        set __freminal_base "$XDG_DATA_HOME"
+    end
+    printf '\033]1338;HISTFILE=%s/fish/%s_history\007' "$__freminal_base" "$__freminal_session"
 end
