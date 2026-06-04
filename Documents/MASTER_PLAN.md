@@ -19,7 +19,7 @@ and plan document maintenance rules.
 | v0.6.0  | Foundation                 | (retired — see DESIGN_DECISIONS.md)                                   | 62–67            | Complete      |
 | v0.7.0  | Recording & Layouts        | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69      | Complete      |
 | v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md`                                                 | 70–71            | Pending merge |
-| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | Stub          |
+| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | In progress   |
 | v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md`                                                 | 78–83, 96–97     | Stub          |
 | v0.11.0 | Platform Play              | `PLAN_VERSION_110.md`                                                 | 84–87            | Stub          |
 | v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md`                                                 | 88–93            | Stub          |
@@ -102,7 +102,7 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 | 67  | Window spawn truncation diagnostic       | See `DESIGN_DECISIONS.md`                     | Complete      | Task 64                |
 | 70  | Code Correctness & Hygiene Sweep         | `PLAN_VERSION_080.md` (Task 70)               | Complete      | None                   |
 | 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)               | Pending merge | None                   |
-| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Stub          | v0.8.0                 |
+| 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Pending merge | v0.8.0                 |
 | 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub          | Task 72                |
 | 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub          | v0.8.0, Task 58        |
 | 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub          | v0.8.0, Task 61        |
@@ -460,58 +460,59 @@ egui's `fonts_mut`), cell size is integer pixels, and the terminal area is drawn
 
 Update this section as tasks complete:
 
-| Task | Started    | Completed  | Notes                                                                    |
-| ---- | ---------- | ---------- | ------------------------------------------------------------------------ |
-| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                                         |
-| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                                          |
-| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                                         |
-| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4                                     |
-| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4                            |
-| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)                           |
-| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                                                 |
-| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                                                  |
-| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging                               |
-| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                                                    |
-| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4                            |
-| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4                            |
-| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4                            |
-| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection                              |
-| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17                                |
-| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17                                |
-| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17                                |
-| 18   |            |            |                                                                          |
-| 19   |            |            |                                                                          |
-| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage                             |
-| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                                      |
-| 22   | 2026-04-04 | 2026-04-04 | Phase B complete — 248 tests, 7 bugs fixed, compliance report written    |
-| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text                         |
-| 24   | 2026-04-05 | 2026-04-05 | All 7 subtasks complete on task-24/benchmark-improvements                |
-| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality                         |
-| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                                   |
-| 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit                           |
-| 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit                        |
-| 29   | 2026-04-06 | 2026-04-06 | All 12 subtasks complete on task-29/god-file-refactor                    |
-| 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit                    |
-| 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)                          |
-| 32   | 2026-04-06 | 2026-04-06 | All 9 subtasks complete on task-32/playback-feature-flag                 |
-| 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                                  |
-| 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                   |
-| 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                       |
-| 53   | 2026-04-15 | 2026-04-15 | All 7 subtasks complete on task-53/multiple-windows                      |
-| 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders      |
-| 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders      |
-| 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                      |
-| 62   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-62/freminal-windowing                      |
-| 63   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-63/single-window-migration                 |
-| 64   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-64/multi-window-parity                     |
-| 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete                |
-| 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                   |
-| 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                       |
-| 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window               |
-| 59   | 2026-04-19 | 2026-04-20 | All 12 subtasks complete on task-59/frec-v2-recording                    |
-| 61   | 2026-04-20 | 2026-04-20 | All 12 subtasks complete on task-61/saved-layouts                        |
-| 70   | 2026-04-21 | 2026-04-22 | All subtasks A–O complete; merged to main via PR #324 (`c537ae1`)        |
-| 71   | 2026-04-22 | 2026-05-17 | 21 subtasks + 6 post-MT bug fixes on task-71/ux-polish-sweep; PR pending |
+| Task | Started    | Completed  | Notes                                                                           |
+| ---- | ---------- | ---------- | ------------------------------------------------------------------------------- |
+| 1    | 2026-03-10 | 2026-03-10 | 5 commits on task-01/glyph-atlas                                                |
+| 2    | 2026-03-09 | 2026-03-09 | 8 commits on task-02/cli-config                                                 |
+| 3    | 2026-03-10 | 2026-03-10 | Menu bar + tabbed settings modal                                                |
+| 4    | 2026-03-15 | 2026-03-15 | All 8 subtasks on tasks/5-11-12-13-4                                            |
+| 5    | 2026-03-12 | 2026-03-12 | All 8 subtasks complete on tasks/5-11-12-13-4                                   |
+| 6    | 2026-03-16 | 2026-03-16 | All 13 subtasks complete; 71.6%→75.8% (+4.2pp)                                  |
+| 7    | 2026-03-09 | 2026-03-09 | All 30 subtasks complete                                                        |
+| 8    | 2026-03-09 | 2026-03-09 | All 7 subtasks complete                                                         |
+| 9    | 2026-03-11 | 2026-03-11 | 12 subtasks on task-09/tmux-compat-logging                                      |
+| 10   | 2026-03-11 | 2026-03-11 | All subtasks complete                                                           |
+| 11   | 2026-03-12 | 2026-03-12 | All 9 subtasks complete on tasks/5-11-12-13-4                                   |
+| 12   | 2026-03-12 | 2026-03-12 | All 4 subtasks complete on tasks/5-11-12-13-4                                   |
+| 13   | 2026-03-14 | 2026-03-14 | All 9 subtasks complete on tasks/5-11-12-13-4                                   |
+| 14   | 2026-03-15 | 2026-03-15 | Mode noise, URL hover, scrollback selection                                     |
+| 15   | 2026-03-16 | 2026-03-16 | All 6 subtasks complete on tasks/15-16-17                                       |
+| 16   | 2026-03-16 | 2026-03-16 | All 4 subtasks complete on tasks/15-16-17                                       |
+| 17   | 2026-03-16 | 2026-03-16 | All 3 subtasks complete on tasks/15-16-17                                       |
+| 18   |            |            |                                                                                 |
+| 19   |            |            |                                                                                 |
+| 20   | 2026-03-17 | 2026-03-17 | All 12 subtasks on task-20/dec-mode-coverage                                    |
+| 21   | 2026-03-31 | 2026-03-31 | All 6 subtasks on task-21/tab-stops                                             |
+| 22   | 2026-04-04 | 2026-04-04 | Phase B complete — 248 tests, 7 bugs fixed, compliance report written           |
+| 23   | 2026-04-01 | 2026-04-01 | All 7 subtasks complete on task-23/blinking-text                                |
+| 24   | 2026-04-05 | 2026-04-05 | All 7 subtasks complete on task-24/benchmark-improvements                       |
+| 25   | 2026-04-01 | 2026-04-01 | All 10 subtasks complete on task-25/code-quality                                |
+| 26   | 2026-04-01 | 2026-04-01 | All 6 subtasks on task-26/bool-to-enum                                          |
+| 27   | 2026-04-02 | 2026-04-02 | All 9 subtasks complete on task-27/fixme-audit                                  |
+| 28   | 2026-04-03 | 2026-04-03 | All 10 subtasks complete on task-28/comment-audit                               |
+| 29   | 2026-04-06 | 2026-04-06 | All 12 subtasks complete on task-29/god-file-refactor                           |
+| 30   | 2026-04-03 | 2026-04-03 | All 8 subtasks complete on task-30/clippy-allow-audit                           |
+| 31   | 2026-04-02 | 2026-04-02 | 13 dead items deleted, 15 demoted to pub(crate)                                 |
+| 32   | 2026-04-06 | 2026-04-06 | All 9 subtasks complete on task-32/playback-feature-flag                        |
+| 33   | 2026-04-01 | 2026-04-01 | All subtasks completed.                                                         |
+| 34   | 2026-04-02 | 2026-04-02 | All 12 subtasks complete on task-34/background-opacity                          |
+| 35   | 2026-04-05 | 2026-04-05 | All 10 subtasks on task-35/kitty-keyboard-protocol                              |
+| 53   | 2026-04-15 | 2026-04-15 | All 7 subtasks complete on task-53/multiple-windows                             |
+| 54   | 2026-04-11 | 2026-04-11 | All 6 subtasks complete on task-54-55/background-images-and-shaders             |
+| 55   | 2026-04-11 | 2026-04-11 | All 8 subtasks complete on task-54-55/background-images-and-shaders             |
+| 58   | 2026-04-09 | 2026-04-10 | All 14 subtasks complete on task-58/built-in-muxing                             |
+| 62   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-62/freminal-windowing                             |
+| 63   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-63/single-window-migration                        |
+| 64   | 2026-04-16 | 2026-04-16 | All subtasks complete on task-64/multi-window-parity                            |
+| 65   | 2026-04-16 | 2026-04-16 | Already implemented during Tasks 62-63; verified complete                       |
+| 66   | 2026-04-16 | 2026-04-16 | Removed eframe workspace dep, cleaned stale references                          |
+| 68   | 2026-04-19 | 2026-04-19 | macOS idle CPU fix + Windows split-pane resize fix                              |
+| 69   | 2026-04-17 | 2026-04-17 | Glyphs, settings gaps, search positioning, settings window                      |
+| 59   | 2026-04-19 | 2026-04-20 | All 12 subtasks complete on task-59/frec-v2-recording                           |
+| 61   | 2026-04-20 | 2026-04-20 | All 12 subtasks complete on task-61/saved-layouts                               |
+| 70   | 2026-04-21 | 2026-04-22 | All subtasks A–O complete; merged to main via PR #324 (`c537ae1`)               |
+| 71   | 2026-04-22 | 2026-05-17 | 21 subtasks + 6 post-MT bug fixes on task-71/ux-polish-sweep; PR pending        |
+| 72   | 2026-05-17 | 2026-06-04 | 16 subtasks (72.1-72.16) complete on task-72/osc-133-command-blocks; PR pending |
 
 ---
 

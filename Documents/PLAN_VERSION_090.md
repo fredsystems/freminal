@@ -18,17 +18,17 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 
 ## Task Summary
 
-| #   | Feature                                 | Scope        | Status  | Depends On      | Branch                           |
-| --- | --------------------------------------- | ------------ | ------- | --------------- | -------------------------------- |
-| 72  | OSC 133 Command Blocks                  | Large        | Pending | v0.8.0          | `task-72/osc-133-command-blocks` |
-| 73  | Command Gutters (exit-status indicator) | Medium       | Pending | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                | Medium       | Pending | v0.8.0, Task 58 | `task-74/broadcast-input`        |
-| 75  | Verify per-pane env round-trip          | Small        | Pending | v0.8.0          | `task-75/pane-env-roundtrip`     |
-| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending | v0.8.0, Task 72 | `task-76/notifications`          |
-| 77  | Smart Paste Guard                       | Small–Medium | Pending | v0.8.0          | `task-77/paste-guard`            |
-| 94  | Tab Title Precedence (prefix default)   | Small        | Pending | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
-| 95  | Persist Custom Tab Names in Layouts     | Small        | Pending | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Pending | Task 72         | `task-98/block-close-on-running` |
+| #   | Feature                                 | Scope        | Status        | Depends On      | Branch                           |
+| --- | --------------------------------------- | ------------ | ------------- | --------------- | -------------------------------- |
+| 72  | OSC 133 Command Blocks                  | Large        | Pending merge | v0.8.0          | `task-72/osc-133-command-blocks` |
+| 73  | Command Gutters (exit-status indicator) | Medium       | Pending       | Task 72         | `task-73/command-gutters`        |
+| 74  | Broadcast Input to Panes                | Medium       | Pending       | v0.8.0, Task 58 | `task-74/broadcast-input`        |
+| 75  | Verify per-pane env round-trip          | Small        | Pending       | v0.8.0          | `task-75/pane-env-roundtrip`     |
+| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending       | v0.8.0, Task 72 | `task-76/notifications`          |
+| 77  | Smart Paste Guard                       | Small–Medium | Pending       | v0.8.0          | `task-77/paste-guard`            |
+| 94  | Tab Title Precedence (prefix default)   | Small        | Pending       | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
+| 95  | Persist Custom Tab Names in Layouts     | Small        | Pending       | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
+| 98  | Block Close on Running Commands         | Small–Medium | Pending       | Task 72         | `task-98/block-close-on-running` |
 
 ### Execution order
 
@@ -2878,13 +2878,22 @@ Arc<OnceLock<Vec<String>>>` runs parallel to
      wiring (enum, default, dispatch, `config_example.toml`).
   3. Polish (animations, empty-state, exit-code icons) + final docs.
 
-**Completion notes (72.15):**
+**Completion notes (72.15):** ✅ Complete.
 
-- **72.15 commit 1** ✅ done (commit `8bdeb85`, 2026-06-04). Shell-
-  history data layer:
+The originally-scoped three-commit plan shipped as commits 1, 2, and
+the keybinding wiring of commit 3. Dogfooding then surfaced six
+real-world issues (none of which were in the original "polish" list),
+each fixed in a dedicated `fix:` commit. A seventh thread of work
+shipped the OSC 1338 HISTFILE auto-discovery protocol -- not in the
+original plan, but necessary to handle the common zsh-users-who-set-
+HISTFILE-as-a-shell-variable case that the env-only loader could not
+see. Final shape: 12 commits.
+
+- **72.15 commit 1** ✅ done (commit `8bdeb85`, 2026-06-04; docs in
+  `0039631`). Shell-history data layer:
   - New `freminal/src/gui/shell_history.rs` (658 lines, 39 unit tests):
     `ShellKind` enum (Bash, Zsh, Fish, Other), `detect_shell_kind` by
-    basename only (no symlink resolution — POSIX `sh` does not auto-
+    basename only (no symlink resolution -- POSIX `sh` does not auto-
     load bash history even if symlinked to bash), `resolve_history_path`
     honoring `HISTFILE` (bash, zsh) and `XDG_DATA_HOME` then
     `$HOME/.local/share` (fish) with empty env values falling through
@@ -2894,8 +2903,7 @@ Arc<OnceLock<Vec<String>>>` runs parallel to
     YAML-ish escape decoding of `\n \r \t \\`), `load_for_program`
     orchestrating detect → resolve → parse with `HISTORY_SEED_CAP = 1000`,
     `spawn_loader<S: BuildHasher + Send + 'static>` running on a named
-    `freminal-history-loader` thread writing into
-    `Arc<OnceLock<Vec<String>>>`.
+    `freminal-history-loader` thread writing into the per-pane slot.
   - `TabChannels.history_seed` slot in `gui/pty.rs`; `spawn_pty_tab`
     resolves shell (shell_override → args.shell → `$SHELL`, skipped if
     `args.command` is non-empty), snapshots `std::env::vars()`, calls
@@ -2904,18 +2912,92 @@ Arc<OnceLock<Vec<String>>>` runs parallel to
     construction sites (3 in `tab_spawning.rs`, 2 in `app_impl.rs`,
     1 in `panes/mod.rs` test helper, 1 in `tabs.rs` test helper)
     initialise it (production sites pull from `channels.history_seed`;
-    test helpers use a fresh `Arc::new(OnceLock::new())`).
-  - **Known limitation:** per-pane env snapshot is taken from the
-    parent freminal process, so runtime rc-file `HISTFILE` overrides
-    set after freminal launch are not visible to the loader.
-  - Verification: `cargo test --all` 103 suites green (39 new
-    shell_history tests pass), `cargo clippy --all-targets --all-
-features -- -D warnings` clean, `cargo machete` clean.
-- **72.15 commit 2** — pending. Palette UI in
-  `freminal/src/gui/command_history.rs`, `KeyAction::ShowCommandHistory`
-  with default `Ctrl+Shift+M`, 4-step keybinding wiring.
-- **72.15 commit 3** — pending. Polish + `config_example.toml` entry +
-  final doc cleanup.
+    test helpers use a fresh slot).
+  - **Originally-known limitation:** per-pane env snapshot is taken
+    from the parent freminal process, so runtime rc-file `HISTFILE`
+    overrides set after freminal launch are not visible to the
+    loader. Closed by the OSC 1338 work below.
+- **72.15 commit 2** ✅ done (commit `ca2efcb`, 2026-06-04). Palette
+  UI + key binding:
+  - New `freminal/src/gui/command_history.rs` (palette modal:
+    egui-based, top-of-pane positioning, fuzzy filter via case-
+    insensitive `to_ascii_lowercase().contains(...)`, no
+    `nucleo-matcher` dep added).
+  - Merges `pane.history_seed.load().entries` (seed) with
+    `pane.recent_commands` (live OSC 133 commands) at render time.
+    Seed-only entries render without timestamp/exit-icon as
+    specified in the data-model decision.
+  - Live entries cache extracted command text via
+    `pane.command_texts: HashMap<BlockId, String>` populated at
+    finish-time from the current snapshot.
+  - `KeyAction::ShowCommandHistory` with default `Ctrl+Shift+M`.
+    Full 4-step wiring: enum variant in `keybindings.rs`, default
+    binding in `BindingMap`, dispatch arm in `actions.rs`, doc
+    entry in `config_example.toml`.
+  - Enter on selection sends command text via keyboard input to
+    the current pane without a trailing `\n` -- user reviews and
+    presses Enter themselves.
+- **Post-MVP bug fixes** (surfaced during dogfooding, each its own
+  `fix:` commit):
+  - `8447400` -- shell history loader handles non-UTF-8 bytes via
+    `String::from_utf8_lossy`.
+  - `00cced3` -- release terminal focus while palette is open so
+    typed characters route to the filter input, not the PTY.
+  - `1741b3b` -- reassemble zsh multi-line history entries where
+    backslash continuations span multiple physical lines.
+  - `16d7a28` (chore) -- enrich shell-history loader diagnostic
+    logging: shell kind, resolved path, byte count, raw line
+    count, parsed entry count, mtime age.
+  - `9619c41` -- truncate palette entries to popup width via
+    `egui::Label::truncate()`; one giant history line (one-line
+    megabyte JSON) was extending the row's horizontal layout past
+    the popup max width and pushing other entries off-screen.
+- **OSC 1338 HISTFILE auto-discovery** (three commits, all 2026-
+  06-04). Extension beyond original scope, needed because the
+  parent-env loader could not see `$HISTFILE` set as a shell
+  variable inside `.zshrc` (common for zsh users storing history
+  under `~/.config/zsh/.zsh_history`). New shell-integration OSC
+  reports the shell-evaluated path; GUI reloads the seed when it
+  changes.
+  - `19f2eb8` -- parser + snapshot field. New
+    `AnsiOscType::ShellInfoHistFile(PathBuf)` variant,
+    `OscTarget::ShellInfo`, parser module
+    `osc_shell_info.rs`. `TerminalHandler.shell_histfile`
+    state and `TerminalSnapshot.shell_histfile` field. 15
+    new tests.
+  - `e41e9ef` -- emit OSC 1338 from bundled shell-integration
+    scripts. bash emits at end of `freminal-init.bash` (after
+    `~/.bashrc`); zsh emits via one-shot `precmd` hook (after
+    `~/.zshrc`); fish emits via one-shot `fish_prompt` handler
+    (after `config.fish`). Empty `$HISTFILE` suppressed so the
+    env-derived default takes over. `FREMINAL_SHELL_INTEGRATION_VERSION`
+    bumped from 1 to 2.
+  - `4adff19` -- wire OSC 1338 reload detector into command-
+    history palette. New `SharedSeededHistory =
+    Arc<ArcSwap<SeededHistory>>` (sequence-tagged: `SEED_SEQ_ENV
+= 0` env loader; `SEED_SEQ_OSC = 1` shell-reported loader)
+    replaces the previous `Arc<OnceLock<Vec<String>>>` so the
+    OSC-driven load always wins regardless of arrival order.
+    New `classify_osc_reload` pure detector + per-frame detector
+    block in `app_impl.rs`. `TabChannels.shell_program` threads
+    the resolved shell program for parser selection.
+    `Pane::from_channels` centralised constructor migrates five
+    ad-hoc Pane-struct-literal sites and eliminates a
+    `#[allow(clippy::too_many_lines)]` overflow risk in
+    `spawn_new_tab`.
+- **Verification at every commit:** `cargo test --all` green (~103
+  suites, growing through the task; final shell_history suite has
+  57 tests, command_history 25, osc_shell_info 10, shell-integration
+  version-sync test 6), `cargo clippy --all-targets --all-features
+-- -D warnings` clean, `cargo machete` clean, all 27 pre-commit
+  hooks pass at every commit.
+- **Polish items intentionally not pursued.** The original commit-3
+  plan named "animations, empty-state copy, real exit-code icons"
+  as polish. None surfaced as user-felt friction during the six
+  rounds of dogfooding; deferring to a future cosmetic pass if
+  ever requested. The actual polish that mattered (truncation,
+  focus release, non-UTF-8 robustness, zsh multi-line, diagnostic
+  logging, OSC 1338 HISTFILE auto-discovery) shipped instead.
 
 ### T4 — Bell on Command Completion (folded into Task 76.5)
 
@@ -3318,9 +3400,14 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      OSC 8 hyperlink action menu with the "Copy URL" right-click item;
      Ctrl+click + "Open URL" were already shipped as part of the
      earlier URL hover work).
-   - **72.15** — in progress. Commit 1 of 3 ✅ done
-     (`8bdeb85`, 2026-06-04, shell-history data layer). Commits 2
-     (palette UI + key binding) and 3 (polish + config) pending.
+   - **72.15** ✅ done (12 commits, 2026-06-04). Quick Command
+     History Palette: data layer (`8bdeb85`), palette UI + binding
+     (`ca2efcb`), six post-MVP bug fixes (`8447400`, `00cced3`,
+     `1741b3b`, `16d7a28`, `9619c41`), and OSC 1338 HISTFILE auto-
+     discovery extension (`19f2eb8`, `e41e9ef`, `4adff19`). Polish
+     items in the original commit-3 plan (animations, empty-state,
+     real exit-code icons) intentionally not pursued -- dogfooding
+     surfaced different polish needs which shipped instead.
 
    Pause after each subtask for user confirmation per the Multi-Step
    Task Protocol in `agents.md`. The 72.16 cleanup section accumulates
