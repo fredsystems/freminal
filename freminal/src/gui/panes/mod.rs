@@ -18,6 +18,7 @@
 //! the tree structure — they just own their `TerminalEmulator` and publish
 //! snapshots via `ArcSwap`.
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,7 +27,7 @@ use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use egui::Rect;
-use freminal_common::buffer_states::command_block::CommandBlock;
+use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
@@ -241,6 +242,22 @@ pub struct Pane {
     /// [`Self::recent_commands`].  See
     /// [`crate::gui::shell_history`] for the loader and the parsers.
     pub history_seed: Arc<std::sync::OnceLock<Vec<String>>>,
+
+    /// Per-pane cache of extracted command text, keyed by
+    /// [`CommandBlockId`].  Populated by the GUI when a finished
+    /// [`CommandBlock`] arrives and the command's rows are still inside
+    /// the snapshot's visible window, so the Quick Command History
+    /// Palette (Task 72.15) can present command text synchronously
+    /// without re-requesting it from the PTY thread.
+    ///
+    /// Entries are evicted in lock-step with [`Self::recent_commands`] --
+    /// when [`Self::push_recent_command`] drops the oldest block to
+    /// enforce [`RECENT_COMMANDS_CAP`], the corresponding text entry is
+    /// removed here as well.  Blocks whose text could not be extracted
+    /// at finish time (e.g. they had already scrolled out of the visible
+    /// window) are simply absent from this map; the palette degrades to
+    /// surfacing only seed entries + extractable live entries.
+    pub command_texts: HashMap<CommandBlockId, String>,
 }
 
 impl Pane {
@@ -248,13 +265,28 @@ impl Pane {
     /// enforcing the [`RECENT_COMMANDS_CAP`] bound.
     ///
     /// When the ring is at capacity, the oldest entry is dropped before the
-    /// new block is appended. Used by both the per-frame command-event drain
-    /// in the GUI (Task 72.9) and by unit tests.
+    /// new block is appended.  The oldest entry's text (if any) is also
+    /// evicted from [`Self::command_texts`] so the cache stays in step with
+    /// the ring buffer.  Used by both the per-frame command-event drain in
+    /// the GUI (Task 72.9) and by unit tests.
     pub fn push_recent_command(&mut self, block: CommandBlock) {
-        if self.recent_commands.len() >= RECENT_COMMANDS_CAP {
-            self.recent_commands.pop_front();
+        if self.recent_commands.len() >= RECENT_COMMANDS_CAP
+            && let Some(dropped) = self.recent_commands.pop_front()
+        {
+            self.command_texts.remove(&dropped.id);
         }
         self.recent_commands.push_back(block);
+    }
+
+    /// Record the extracted command text for a [`CommandBlockId`].
+    ///
+    /// Caller is responsible for extracting the text from the snapshot
+    /// (typically via [`crate::gui::command_history::extract_command_text`])
+    /// before calling this.  Storing an entry whose `id` is not in
+    /// [`Self::recent_commands`] is harmless but wasteful; the typical
+    /// pattern is to call this immediately after [`Self::push_recent_command`].
+    pub fn record_command_text(&mut self, id: CommandBlockId, text: String) {
+        self.command_texts.insert(id, text);
     }
 }
 
@@ -265,6 +297,7 @@ impl std::fmt::Debug for Pane {
             .field("title", &self.title)
             .field("bell_active", &self.bell_active)
             .field("history_seed_loaded", &self.history_seed.get().is_some())
+            .field("command_texts_len", &self.command_texts.len())
             .finish_non_exhaustive()
     }
 }
@@ -1446,6 +1479,7 @@ mod tests {
             command_event_rx,
             recent_commands: VecDeque::new(),
             history_seed: Arc::new(std::sync::OnceLock::new()),
+            command_texts: HashMap::new(),
         }
     }
 

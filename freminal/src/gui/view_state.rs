@@ -284,6 +284,48 @@ impl SearchState {
     }
 }
 
+/// GUI-local view state for the Quick Command History palette (Task 72.15).
+///
+/// All fields are private-to-GUI -- the PTY thread never reads them.  The
+/// palette is rendered as a modal overlay anchored inside the focused pane,
+/// drawing from the pane's `history_seed` (shell-history file, loaded at
+/// pane spawn time) and live `recent_commands` (OSC 133 captures).
+///
+/// User-facing preferences (`query`) are deliberately reset on close so the
+/// palette re-opens with an empty filter -- a different UX from `SearchState`
+/// which preserves the last query.  Command history is much larger than
+/// search results and a stale filter is far more likely to hide what the
+/// user wants the next time they open it.
+#[derive(Debug, Default)]
+pub struct CommandHistoryState {
+    /// Whether the palette overlay is currently visible.
+    pub is_open: bool,
+    /// The current filter query (UTF-8).  Matched case-insensitively as a
+    /// substring against the merged entry list.
+    pub query: String,
+    /// Index of the currently selected entry within the filtered list.
+    ///
+    /// Bounded to `0..filtered.len()` by the render loop; when the filtered
+    /// list is empty this value is ignored.
+    pub selected: usize,
+}
+
+impl CommandHistoryState {
+    /// Open the palette, clearing any prior query and selection.
+    pub fn open(&mut self) {
+        self.is_open = true;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    /// Close the palette and reset transient state.
+    pub fn close(&mut self) {
+        self.is_open = false;
+        self.query.clear();
+        self.selected = 0;
+    }
+}
+
 /// GUI-local view state for the terminal widget.
 ///
 /// Everything here belongs to the render thread only.  The PTY thread never
@@ -463,6 +505,14 @@ pub struct ViewState {
     ///
     /// All search interaction is GUI-local and never touches the PTY thread.
     pub search_state: SearchState,
+
+    // ── Quick Command History palette (Task 72.15) ──────────────────
+    /// Quick Command History palette state: open/closed, query, selection.
+    ///
+    /// All palette interaction is GUI-local. The palette draws from the
+    /// owning pane's `history_seed` (shell-history seed file) and
+    /// `recent_commands` (live OSC 133 captures) at render time.
+    pub command_history: CommandHistoryState,
 }
 
 impl Default for ViewState {
@@ -494,6 +544,7 @@ impl Default for ViewState {
             cursor_target_row: 0.0,
             cursor_last_frame: None,
             search_state: SearchState::default(),
+            command_history: CommandHistoryState::default(),
         }
     }
 }

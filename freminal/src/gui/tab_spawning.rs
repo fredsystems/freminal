@@ -102,6 +102,7 @@ impl FreminalGui {
                     command_event_rx: channels.command_event_rx,
                     history_seed: channels.history_seed,
                     recent_commands: std::collections::VecDeque::new(),
+                    command_texts: std::collections::HashMap::new(),
                 };
                 let tab = tabs::Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
@@ -260,6 +261,7 @@ impl FreminalGui {
                 command_event_rx: channels.command_event_rx,
                 history_seed: channels.history_seed,
                 recent_commands: std::collections::VecDeque::new(),
+                command_texts: std::collections::HashMap::new(),
             };
             match tab.pane_tree.split_with_id(target_id, direction, new_pane) {
                 Ok(id) => id,
@@ -400,6 +402,7 @@ impl FreminalGui {
             command_event_rx: channels.command_event_rx,
             history_seed: channels.history_seed,
             recent_commands: std::collections::VecDeque::new(),
+            command_texts: std::collections::HashMap::new(),
         })
     }
 }

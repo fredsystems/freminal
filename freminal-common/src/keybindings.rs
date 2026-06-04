@@ -785,6 +785,20 @@ pub enum KeyAction {
     /// writer thread. The default recording path is
     /// `~/.config/freminal/recordings/YYYY-MM-DD_HHMMSS.frec`.
     ToggleRecording,
+    /// Open the Quick Command History palette for the focused pane.
+    ///
+    /// The palette presents a fuzzy-searchable view over (a) the user's
+    /// shell history file (bash / zsh / fish), loaded once at pane spawn
+    /// time and capped at 1000 entries, and (b) the live OSC 133 command
+    /// blocks captured during the current session.  Selecting an entry
+    /// sends the command text to the pane as keyboard input (it does NOT
+    /// auto-execute — the user reviews and presses Enter themselves).
+    ///
+    /// Default binding: `Ctrl+Shift+M`.  Deliberately NOT `Ctrl+R`
+    /// (collides with the shell's reverse-i-search), NOT `Ctrl+Shift+R`
+    /// (taken by [`Self::ToggleRecording`]), NOT `Ctrl+Shift+P` (reserved
+    /// for the forthcoming command palette in Task 83).
+    ShowCommandHistory,
 
     // -- Pane management ---------------------------------------------------
     /// Split the focused pane vertically (left | right, vertical divider).
@@ -879,6 +893,7 @@ impl KeyAction {
             Self::CopyLastCommandOutput => "copy_last_command_output",
             Self::CopyCommandOutputAtCursor => "copy_command_output_at_cursor",
             Self::ToggleRecording => "toggle_recording",
+            Self::ShowCommandHistory => "show_command_history",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
             Self::ClosePane => "close_pane",
@@ -948,6 +963,7 @@ impl KeyAction {
             Self::CopyLastCommandOutput => "Copy Last Command Output",
             Self::CopyCommandOutputAtCursor => "Copy Command Output at Cursor",
             Self::ToggleRecording => "Toggle Recording",
+            Self::ShowCommandHistory => "Show Command History",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
             Self::ClosePane => "Close Pane",
@@ -1014,6 +1030,7 @@ impl KeyAction {
         Self::CopyLastCommandOutput,
         Self::CopyCommandOutputAtCursor,
         Self::ToggleRecording,
+        Self::ShowCommandHistory,
         Self::SplitVertical,
         Self::SplitHorizontal,
         Self::ClosePane,
@@ -1092,6 +1109,7 @@ impl FromStr for KeyAction {
             "copy_last_command_output" => Ok(Self::CopyLastCommandOutput),
             "copy_command_output_at_cursor" => Ok(Self::CopyCommandOutputAtCursor),
             "toggle_recording" => Ok(Self::ToggleRecording),
+            "show_command_history" => Ok(Self::ShowCommandHistory),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
             "close_pane" => Ok(Self::ClosePane),
@@ -1398,6 +1416,17 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::R, BindingModifiers::CTRL_SHIFT),
         KeyAction::ToggleRecording,
+    );
+
+    // Open the Quick Command History palette. Ctrl+Shift+M is free
+    // ("M" for "menu" / "command Memory") and avoids three previously
+    // considered conflicts:
+    //   - Ctrl+R       — the shell's reverse-i-search.
+    //   - Ctrl+Shift+R — already bound to ToggleRecording above.
+    //   - Ctrl+Shift+P — reserved for the Task 83 command palette.
+    map.bind(
+        KeyCombo::new(BindingKey::M, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ShowCommandHistory,
     );
 }
 
@@ -1799,7 +1828,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            58,
+            59,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2163,11 +2192,11 @@ mod tests {
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
         //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
         //        + ToggleRecording(1) + UnfoldAll(1)
-        //        + CopyLastCommandOutput(1) = 45
+        //        + CopyLastCommandOutput(1) + ShowCommandHistory(1) = 46
         assert_eq!(
             map.len(),
-            45,
-            "default binding map should have exactly 45 bindings"
+            46,
+            "default binding map should have exactly 46 bindings"
         );
     }
 

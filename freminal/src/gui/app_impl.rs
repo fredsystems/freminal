@@ -177,6 +177,7 @@ impl freminal_windowing::App for FreminalGui {
                         command_event_rx: channels.command_event_rx,
                         recent_commands: std::collections::VecDeque::new(),
                         history_seed: channels.history_seed,
+                        command_texts: std::collections::HashMap::new(),
                     };
                     let tab_id = super::tabs::TabId::first();
                     let tab = Tab::new(tab_id, pane);
@@ -615,6 +616,21 @@ impl freminal_windowing::App for FreminalGui {
             if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
                 for pane in panes {
                     while let Ok(event) = pane.command_event_rx.try_recv() {
+                        // Extract the command text from the current
+                        // snapshot before the rows scroll out of the
+                        // visible window. Used by the Quick Command
+                        // History Palette to replay live entries.  Cache
+                        // entries whose rows have already left the
+                        // visible window will be silently absent — the
+                        // seed half of the palette still works in that
+                        // case.
+                        let snap = pane.arc_swap.load();
+                        if let Some(text) =
+                            crate::gui::command_history::extract_command_text(&snap, &event.block)
+                        {
+                            pane.record_command_text(event.block.id, text);
+                        }
+                        drop(snap);
                         pane.push_recent_command(event.block);
                         tab_received_event = true;
                     }
@@ -1296,6 +1312,47 @@ impl freminal_windowing::App for FreminalGui {
                 let (left_clicked, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
 
+                // ── Command history palette overlay (Ctrl+Shift+M) ───
+                // Rendered here (not in `widget.show`) because the palette
+                // needs `Pane`-owned data — `recent_commands`,
+                // `history_seed`, and the `command_texts` cache — that the
+                // widget does not have access to.  The palette is an
+                // `egui::Area` overlay so its render order relative to the
+                // widget body does not matter; what matters is that
+                // `Pane` is in scope here.
+                if pane.view_state.command_history.is_open {
+                    use crate::gui::command_history::PaletteAction;
+                    let seed = pane.history_seed.get();
+                    let action = crate::gui::command_history::show_command_history_palette(
+                        ui,
+                        &mut pane.view_state.command_history,
+                        content_rect,
+                        pane_id,
+                        seed,
+                        &pane.recent_commands,
+                        &pane.command_texts,
+                    );
+                    match action {
+                        PaletteAction::None => {}
+                        PaletteAction::Close => {
+                            pane.view_state.command_history.close();
+                            crate::gui::command_history::log_close(pane_id);
+                        }
+                        PaletteAction::Submit(text) => {
+                            let len = text.len();
+                            let ok = crate::gui::command_history::send_command_text(
+                                &pane.input_tx,
+                                &text,
+                            );
+                            if !ok {
+                                crate::gui::command_history::log_submit_failure(pane_id, len);
+                            }
+                            pane.view_state.command_history.close();
+                            crate::gui::command_history::log_close(pane_id);
+                        }
+                    }
+                }
+
                 // Click-to-focus: if a non-active pane was left-clicked, transfer
                 // keyboard focus to it and send FocusChange events to both panes.
                 if left_clicked && !is_active {
@@ -1684,6 +1741,7 @@ impl FreminalGui {
             command_event_rx: channels.command_event_rx,
             recent_commands: std::collections::VecDeque::new(),
             history_seed: channels.history_seed,
+            command_texts: std::collections::HashMap::new(),
         };
 
         let tab = Tab::new(super::tabs::TabId::first(), pane);

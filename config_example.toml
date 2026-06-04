@@ -358,6 +358,11 @@ limit = 4000
 #     fold_all              = ""              (unbound — opt-in)
 #     unfold_all            = "Ctrl+Shift+U"  (unfold every folded command block in this pane)
 #
+#   Command history (Task 72.15):
+#     show_command_history = "Ctrl+Shift+M"  (open the Quick Command History Palette;
+#                                             selecting an entry inserts it on the prompt
+#                                             without sending Enter)
+#
 #   Pane management:
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)
 #     split_horizontal = "Ctrl+Shift+Minus"  (split focused pane top / bottom)

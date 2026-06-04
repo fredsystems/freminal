@@ -428,6 +428,18 @@ impl super::FreminalGui {
                     warn!("OpenSearch: active tab has no active pane");
                 }
             }
+            KeyAction::ShowCommandHistory => {
+                if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    let seed_loaded = pane.history_seed.get().is_some();
+                    let recent_len = pane.recent_commands.len();
+                    let texts_len = pane.command_texts.len();
+                    let pane_id = pane.id;
+                    pane.view_state.command_history.open();
+                    super::command_history::log_open(pane_id, seed_loaded, recent_len, texts_len);
+                } else {
+                    warn!("ShowCommandHistory: active tab has no active pane");
+                }
+            }
             KeyAction::SearchNext => {
                 let tab = win.tabs.active_tab_mut();
                 let Some(pane) = tab.active_pane_mut() else {
