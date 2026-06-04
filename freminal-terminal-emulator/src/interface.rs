@@ -616,6 +616,12 @@ impl TerminalEmulator {
             .current_working_directory()
             .map(String::from);
 
+        let shell_histfile = self
+            .internal
+            .handler
+            .shell_histfile()
+            .map(std::path::PathBuf::from);
+
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
         let prompt_rows = Arc::<[usize]>::from(self.internal.handler.buffer().prompt_rows());
@@ -677,6 +683,7 @@ impl TerminalEmulator {
             line_feed_mode: mode_fields.line_feed_mode,
             kitty_keyboard_flags: mode_fields.kitty_keyboard_flags,
             cwd,
+            shell_histfile,
             ftcs_state,
             last_exit_code,
             prompt_rows,
@@ -1265,6 +1272,28 @@ mod tests {
         emu.handle_incoming_data(b"hello world");
         let snap = emu.build_snapshot();
         assert!(!snap.has_urls);
+    }
+
+    // ── build_snapshot: shell_histfile (OSC 1338) ────────────────────────────
+
+    #[test]
+    fn build_snapshot_no_shell_histfile_by_default() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello world");
+        let snap = emu.build_snapshot();
+        assert!(snap.shell_histfile.is_none());
+    }
+
+    #[test]
+    fn build_snapshot_propagates_shell_histfile_from_osc_1338() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // OSC 1338 ; HISTFILE=/home/user/.zsh_history BEL
+        emu.handle_incoming_data(b"\x1b]1338;HISTFILE=/home/user/.zsh_history\x07");
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.shell_histfile.as_deref(),
+            Some(std::path::Path::new("/home/user/.zsh_history"))
+        );
     }
 
     // ── get_win_size ─────────────────────────────────────────────────────────

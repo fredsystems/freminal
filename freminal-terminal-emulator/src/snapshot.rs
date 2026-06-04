@@ -11,7 +11,7 @@
 //! thread loads the snapshot with a single atomic pointer load — no lock, no
 //! blocking.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 use freminal_common::{
@@ -252,6 +252,14 @@ pub struct TerminalSnapshot {
     /// new terminals in the same directory.
     pub cwd: Option<String>,
 
+    /// Shell history file path reported by the shell-integration scripts via
+    /// `OSC 1338 ; HISTFILE=<path> ST`, if any.
+    ///
+    /// The GUI uses this to seed the command-history palette with the
+    /// shell-evaluated `$HISTFILE` (which may differ from the parent-environment
+    /// value when shell configs override it).
+    pub shell_histfile: Option<PathBuf>,
+
     /// Current FTCS (OSC 133) shell integration state.
     ///
     /// Indicates whether the terminal is currently inside a prompt, command
@@ -367,6 +375,7 @@ impl TerminalSnapshot {
             kitty_keyboard_flags: 0,
             alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
+            shell_histfile: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
             prompt_rows: Arc::from([]),

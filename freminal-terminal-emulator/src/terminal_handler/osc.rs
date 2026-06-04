@@ -84,6 +84,10 @@ impl TerminalHandler {
                     tracing::debug!("OSC 7: CWD set to {:?}", self.current_working_directory);
                 }
             }
+            AnsiOscType::ShellInfoHistFile(path) => {
+                tracing::debug!("OSC 1338: HISTFILE set to {:?}", path);
+                self.shell_histfile = Some(path.clone());
+            }
             AnsiOscType::Ftcs(marker) => {
                 self.handle_osc_ftcs(marker);
             }
