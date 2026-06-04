@@ -1867,6 +1867,7 @@ impl FreminalTerminalWidget {
                         selection_is_block: view_state.selection.is_block,
                         match_highlights: &search_highlights,
                         command_block_hover_rows,
+                        term_width_cols: snap.term_width,
                         theme: snap.theme,
                         cursor_color_override: snap.cursor_color_override,
                     },

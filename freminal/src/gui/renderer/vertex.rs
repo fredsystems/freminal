@@ -201,6 +201,10 @@ pub struct BackgroundFrame<'a> {
     /// width between search highlights and selection so the underlying
     /// text remains readable.
     pub command_block_hover_rows: Option<(usize, usize)>,
+    /// Terminal width in columns, used to draw the hover-tint band the
+    /// full row width regardless of how short individual shaped lines
+    /// are.  Should match `TerminalSnapshot::term_width` at call time.
+    pub term_width_cols: usize,
     pub theme: &'a ThemePalette,
     pub cursor_color_override: Option<(u8, u8, u8)>,
 }
@@ -243,6 +247,7 @@ pub fn build_background_instances(
     let selection_is_block = frame.selection_is_block;
     let match_highlights = frame.match_highlights;
     let command_block_hover_rows = frame.command_block_hover_rows;
+    let term_width_cols = frame.term_width_cols;
     let theme = frame.theme;
     let cursor_color_override = frame.cursor_color_override;
     // Reuse existing heap allocations — clear but keep capacity.
@@ -379,8 +384,15 @@ pub fn build_background_instances(
     // remains crisply visible.  Uses the theme's selection color at
     // 25% alpha so the indicator is recognisable as "the same family"
     // as selection without looking like a real selection.
+    //
+    // Span is `term_width_cols * cell_width`, matching the snapshot's
+    // configured terminal width.  Deriving the span from the last
+    // shaped run on each row would visually truncate the tint at the
+    // last non-blank glyph -- typically a much narrower band than the
+    // full row, because trailing blank cells contribute no glyphs.
     if let Some((hover_start, hover_end)) = command_block_hover_rows
         && hover_start <= hover_end
+        && term_width_cols > 0
     {
         let cw = gl_f32_u32(cell_width);
         let ch = gl_f32_u32(cell_height);
@@ -392,18 +404,8 @@ pub fn build_background_instances(
                 break;
             }
             let row_scale = x_scale(shaped_lines[row].line_width);
-            // Use the full terminal width: ignore per-row column count
-            // so the tint visually marks the entire block regardless of
-            // how short individual lines are.
-            let term_cols = shaped_lines[row]
-                .runs
-                .last()
-                .map_or(0, |r| r.col_start + run_col_count(r));
-            if term_cols == 0 {
-                continue;
-            }
             let x0 = 0.0;
-            let x1 = gl_f32(term_cols) * cw * row_scale;
+            let x1 = gl_f32(term_width_cols) * cw * row_scale;
             let y0 = gl_f32(row) * ch;
             let y1 = y0 + ch;
             push_quad(deco, x0, y0, x1, y1, color);
@@ -1275,6 +1277,7 @@ mod tests {
                 selection_is_block: false,
                 match_highlights: &[],
                 command_block_hover_rows: None,
+                term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
                 cursor_color_override: None,
             },
@@ -2185,5 +2188,120 @@ mod tests {
         // Each double-width logical column produces 2 physical BG instances,
         // so the total instance count should be double.
         assert_eq!(bg_dw.len(), bg_normal.len() * 2);
+    }
+
+    #[test]
+    fn hover_tint_spans_full_term_width_not_shaped_run_extent() {
+        // Regression for PR #333 review comment 5: the hover-tint
+        // band used to derive its width from the last shaped run on
+        // each row, which silently truncated the tint at the last
+        // non-blank glyph.  After the fix, the band always spans
+        // `term_width_cols * cell_width`, regardless of how short the
+        // shaped content on the row is.
+        let cell_width_px: u32 = 8;
+        let cell_height_px: u32 = 16;
+        let cell_width_f32 = gl_f32_u32(cell_width_px);
+        // Five glyphs of content on an 80-column terminal.  Pre-fix,
+        // the tint would have spanned 5 * cell_width.  Post-fix it
+        // must span 80 * cell_width.
+        let line = make_line(
+            5,
+            cell_width_f32,
+            default_colors(),
+            FontDecorationFlags::empty(),
+        );
+        let mut instances = Vec::new();
+        let mut deco = Vec::new();
+        build_background_instances(
+            &BackgroundFrame {
+                shaped_lines: &[line],
+                cell_width: cell_width_px,
+                cell_height: cell_height_px,
+                ascent: 14.0,
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                show_cursor: false,
+                cursor_blink_on: false,
+                cursor_pixel_pos: (0.0, 0.0),
+                cursor_width_scale: 1.0,
+                cursor_visual_style: &CursorVisualStyle::BlockCursorSteady,
+                selection: None,
+                selection_is_block: false,
+                match_highlights: &[],
+                command_block_hover_rows: Some((0, 0)),
+                term_width_cols: 80,
+                theme: &themes::CATPPUCCIN_MOCHA,
+                cursor_color_override: None,
+            },
+            &mut instances,
+            &mut deco,
+        );
+
+        // The only deco quad produced (no cursor, no underlines, no
+        // selection, no search highlights) is the hover-tint quad.
+        // push_quad writes 6 vertices × 6 floats = 36 floats per quad.
+        assert_eq!(
+            deco.len(),
+            36,
+            "expected exactly one hover-tint quad in deco vec"
+        );
+        // Layout: vertex 0 = (x0, y0, r, g, b, a), vertex 1 = (x1, y0, ...).
+        let x0 = deco[0];
+        let x1 = deco[6];
+        let span = x1 - x0;
+        let expected_span = gl_f32(80usize) * cell_width_f32;
+        assert!(
+            (span - expected_span).abs() < f32::EPSILON,
+            "hover-tint span = {span}, expected {expected_span} \
+             (80 cols × {cell_width_f32} px/cell); shaped-line truncation regressed"
+        );
+    }
+
+    #[test]
+    fn hover_tint_skipped_when_term_width_cols_zero() {
+        // Defensive: a zero-width terminal (degenerate snapshot, e.g.
+        // before first resize) should not produce a hover tint even
+        // when hover rows are set.  The fix guards on term_width_cols
+        // > 0 so we don't push a zero-width quad.
+        let cell_width_px: u32 = 8;
+        let cell_height_px: u32 = 16;
+        let line = make_line(
+            5,
+            gl_f32_u32(cell_width_px),
+            default_colors(),
+            FontDecorationFlags::empty(),
+        );
+        let mut instances = Vec::new();
+        let mut deco = Vec::new();
+        build_background_instances(
+            &BackgroundFrame {
+                shaped_lines: &[line],
+                cell_width: cell_width_px,
+                cell_height: cell_height_px,
+                ascent: 14.0,
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                show_cursor: false,
+                cursor_blink_on: false,
+                cursor_pixel_pos: (0.0, 0.0),
+                cursor_width_scale: 1.0,
+                cursor_visual_style: &CursorVisualStyle::BlockCursorSteady,
+                selection: None,
+                selection_is_block: false,
+                match_highlights: &[],
+                command_block_hover_rows: Some((0, 0)),
+                term_width_cols: 0,
+                theme: &themes::CATPPUCCIN_MOCHA,
+                cursor_color_override: None,
+            },
+            &mut instances,
+            &mut deco,
+        );
+        assert!(
+            deco.is_empty(),
+            "expected no deco quads when term_width_cols == 0"
+        );
     }
 }
