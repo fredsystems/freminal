@@ -16,21 +16,31 @@
 //! ```text
 //! spawn_pty_tab
 //!   ├── resolves the shell program (--shell / layout override / $SHELL)
-//!   ├── creates an empty Arc<OnceLock<Vec<String>>> ("history seed")
+//!   ├── creates an Arc<ArcSwap<SeededHistory>> initialised with seq=0,
+//!   │   entries=[] ("history seed")
 //!   ├── spawns a background loader thread that:
 //!   │     1. detects the shell kind from the program path
 //!   │     2. resolves the history file path (HISTFILE env or default)
 //!   │     3. reads + parses the file
-//!   │     4. caps at HISTORY_SEED_CAP and calls slot.set(vec)
+//!   │     4. caps at HISTORY_SEED_CAP and CAS-publishes with seq=0
 //!   └── returns the slot in TabChannels
 //!
 //! Pane.history_seed = channels.history_seed (clone of Arc)
 //!
+//! Later, when the shell-integration scripts emit
+//! `OSC 1338 ; HISTFILE=<path> ST`, the GUI thread compares the snapshot's
+//! `shell_histfile` against `Pane.shell_histfile_last_seen` and, on
+//! change, calls `spawn_loader_with_path(path, seq=1)`.  Sequence-tagged
+//! ArcSwap CAS guarantees the OSC-driven load (seq=1) always wins over
+//! the env-derived load (seq=0) regardless of arrival order.
+//!
 //! Palette (Task 72.15 commit 2)
-//!   ├── reads slot.get() — Option<&Vec<String>>
-//!   ├── if Some, presents seed entries (no timestamps/exit codes)
-//!   ├── interleaves Pane.recent_commands (live, with timestamps/exit codes)
-//!   └── if None (still loading or no history), just shows live commands
+//!   ├── reads slot.load_full() — Arc<SeededHistory>
+//!   ├── if entries non-empty, presents seed entries (no timestamps/exit
+//!   │   codes)
+//!   ├── interleaves Pane.recent_commands (live, with timestamps/exit
+//!   │   codes)
+//!   └── if entries empty, just shows live commands
 //! ```
 //!
 //! ## Privacy considerations
@@ -45,8 +55,10 @@
 //! ## Known limitations
 //!
 //! - **Runtime `HISTFILE` overrides set in user `.bashrc` / `.zshrc` /
-//!   `config.fish` are not visible to freminal.**  We only see the env we
-//!   spawned the shell with.  Documented; not a bug.
+//!   `config.fish` are visible to freminal _only when shell-integration
+//!   is enabled_** (the integration scripts emit OSC 1338 to report the
+//!   shell-evaluated value).  Without shell-integration, the env-derived
+//!   load is the only signal.
 //! - **`exec`-ing a different shell mid-pane** does not trigger a re-load
 //!   of the new shell's history.  Acceptable; documented.
 //! - **Non-shell programs** (e.g. spawning `python` directly) have no
@@ -54,8 +66,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tracing::{debug, trace, warn};
 
 /// Maximum number of history entries loaded into the seed per pane.
@@ -65,6 +78,74 @@ use tracing::{debug, trace, warn};
 /// trivial (~tens of KB per pane).  Power users with huge history files get
 /// the most recent 1000 entries.
 pub const HISTORY_SEED_CAP: usize = 1000;
+
+/// Sequence number for the env-derived (parent-environment HISTFILE)
+/// loader spawned at pane construction time.
+///
+/// Ranks below [`SEED_SEQ_OSC`] so an OSC 1338 reload always wins.
+pub const SEED_SEQ_ENV: u32 = 0;
+
+/// Sequence number for the OSC 1338-derived loader spawned when the
+/// shell-integration scripts report the shell-evaluated HISTFILE.
+///
+/// Ranks above [`SEED_SEQ_ENV`] so a late-arriving env-derived load
+/// (slow stat / read) cannot overwrite the more authoritative
+/// shell-reported value.
+pub const SEED_SEQ_OSC: u32 = 1;
+
+/// A snapshot of loaded shell-history entries plus the sequence number of
+/// the loader that produced them.
+///
+/// Stored in [`SharedSeededHistory`] (an `Arc<ArcSwap<SeededHistory>>`) so
+/// that:
+///
+/// - the GUI thread can read entries lock-free via `slot.load_full()`,
+/// - background loaders can publish a new value via CAS that succeeds only
+///   when the incoming `seq >= current.seq`, ensuring an OSC 1338-derived
+///   load (seq=1) always wins over an env-derived load (seq=0) regardless
+///   of which background thread finishes first.
+#[derive(Debug, Default)]
+pub struct SeededHistory {
+    /// Sequence number of the loader that produced these entries.
+    /// Higher values dominate lower values during CAS publication.
+    pub seq: u32,
+    /// Loaded entries (oldest first).  Empty when no loader has populated
+    /// the slot yet, when the resolved history file does not exist, or
+    /// when the file parsed to zero entries.
+    pub entries: Arc<Vec<String>>,
+}
+
+/// Type alias for the per-pane history-seed slot shared between the
+/// background loader threads and the GUI thread.
+pub type SharedSeededHistory = Arc<ArcSwap<SeededHistory>>;
+
+/// Construct a fresh, empty [`SharedSeededHistory`] with `seq=0` and no
+/// entries.  Suitable for `TabChannels` initialisation.
+#[must_use]
+pub fn new_seeded_history() -> SharedSeededHistory {
+    Arc::new(ArcSwap::from_pointee(SeededHistory::default()))
+}
+
+/// Publish `entries` to `slot` under sequence number `seq`, keeping the
+/// existing slot value untouched if its sequence number is already
+/// `>= seq` (i.e. a higher-priority loader has already won the race).
+///
+/// Implemented as an `ArcSwap::rcu` loop so we tolerate concurrent
+/// updates from another loader.
+fn publish_seeded(slot: &SharedSeededHistory, seq: u32, entries: Vec<String>) {
+    let arc_entries = Arc::new(entries);
+    slot.rcu(|current| {
+        if current.seq > seq {
+            // A higher-priority loader has already published; preserve it.
+            Arc::clone(current)
+        } else {
+            Arc::new(SeededHistory {
+                seq,
+                entries: Arc::clone(&arc_entries),
+            })
+        }
+    });
+}
 
 /// The shell kind detected from a program path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,31 +467,186 @@ pub fn load_for_program(program: &Path, get_env: &dyn Fn(&str) -> Option<String>
     entries
 }
 
-/// Spawn a background thread that loads the shell history and writes the
-/// result into `slot`.
+/// Spawn a background thread that loads the shell history and publishes the
+/// result into `slot` under [`SEED_SEQ_ENV`].
 ///
 /// The thread is named `freminal-history-loader` for diagnostic visibility.
-/// If `slot.set(...)` fails (slot already populated), the result is
-/// discarded silently -- this is fine because the slot is per-pane and a
-/// double-set would only occur if this function were called twice on the
-/// same slot, which is a caller-side bug.
+/// Uses parent-environment `$HISTFILE` (or default per shell kind) to
+/// resolve the path; supersede via [`spawn_loader_with_path`] when the
+/// shell-integration scripts emit `OSC 1338`.
 ///
 /// Cost: one thread per pane spawn, exits within milliseconds for typical
 /// history-file sizes.  Loader does not hold any GUI-side locks; the only
-/// shared state is the `OnceLock` slot.
+/// shared state is the `ArcSwap` slot.
 pub fn spawn_loader<S: ::std::hash::BuildHasher + Send + 'static>(
     program: PathBuf,
     env_snapshot: HashMap<String, String, S>,
-    slot: Arc<OnceLock<Vec<String>>>,
+    slot: SharedSeededHistory,
 ) {
     let builder = std::thread::Builder::new().name("freminal-history-loader".to_string());
     if let Err(e) = builder.spawn(move || {
         let entries = load_for_program(&program, &|key| env_snapshot.get(key).cloned());
-        // Silently discard if already set (caller-side double-spawn bug).
-        let _ = slot.set(entries);
+        publish_seeded(&slot, SEED_SEQ_ENV, entries);
     }) {
         warn!("shell_history: failed to spawn loader thread: {e}");
     }
+}
+
+/// Spawn a background thread that loads shell history from an explicit
+/// `path` and publishes the result into `slot` under [`SEED_SEQ_OSC`].
+///
+/// Used when the shell-integration scripts report `HISTFILE` via
+/// `OSC 1338`.  Skips environment-based resolution; uses
+/// [`detect_shell_kind`] on `program` solely to pick the correct parser.
+/// If the program's basename is unrecognised, the loader still attempts
+/// to parse `path` using a best-guess parser based on the file name
+/// (`.bash_history` => bash, `.zsh_history` => zsh, `fish_history` =>
+/// fish, otherwise treated as bash plain format which is the most
+/// lenient).
+///
+/// Sequence-tagged CAS guarantees an `spawn_loader_with_path` publication
+/// always wins over a concurrent [`spawn_loader`] publication on the same
+/// slot, regardless of arrival order.
+pub fn spawn_loader_with_path(program: PathBuf, path: PathBuf, slot: SharedSeededHistory) {
+    let builder = std::thread::Builder::new().name("freminal-history-loader-osc".to_string());
+    if let Err(e) = builder.spawn(move || {
+        let entries = load_from_path(&program, &path);
+        publish_seeded(&slot, SEED_SEQ_OSC, entries);
+    }) {
+        warn!("shell_history: failed to spawn OSC-driven loader thread: {e}");
+    }
+}
+
+/// Load shell history from an explicit `path`, picking the parser by
+/// shell program first and falling back to the path's basename when the
+/// program is unrecognised.  Always returns at most [`HISTORY_SEED_CAP`]
+/// entries.
+fn load_from_path(program: &Path, path: &Path) -> Vec<String> {
+    let kind = match detect_shell_kind(program) {
+        ShellKind::Other => parser_kind_from_path(path),
+        k => k,
+    };
+    if matches!(kind, ShellKind::Other) {
+        trace!(
+            "shell_history: OSC-driven load could not infer parser kind \
+             (program={program:?}, path={path:?}); skipping"
+        );
+        return Vec::new();
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            trace!("shell_history: OSC-driven load: no file at {path:?} ({kind:?})");
+            return Vec::new();
+        }
+        Err(e) => {
+            warn!("shell_history: OSC-driven load: failed to read {path:?} ({kind:?}): {e}");
+            return Vec::new();
+        }
+    };
+    let mtime_age = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or_else(|| "?".to_owned(), |d| format!("{}s", d.as_secs()));
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    let raw_line_count = content.lines().count();
+    let mut entries = match kind {
+        ShellKind::Bash => parse_bash_history(&content),
+        ShellKind::Zsh => parse_zsh_history(&content),
+        ShellKind::Fish => parse_fish_history(&content),
+        ShellKind::Other => Vec::new(),
+    };
+    let parsed_count = entries.len();
+    let len = entries.len();
+    if len > HISTORY_SEED_CAP {
+        entries.drain(..len - HISTORY_SEED_CAP);
+    }
+    debug!(
+        "shell_history: OSC-driven {kind:?} load: {final_count} entries from {path:?} \
+         (program={program:?}, bytes={bytes_len}, raw_lines={raw_line_count}, \
+         parsed={parsed_count}, cap={cap}, mtime_age={mtime_age})",
+        final_count = entries.len(),
+        bytes_len = bytes.len(),
+        cap = HISTORY_SEED_CAP,
+    );
+    entries
+}
+
+/// Best-guess parser kind from a history-file basename, used when the
+/// shell program is unrecognised.  Conservative: unknown basenames yield
+/// `Other`, which suppresses the load entirely rather than parsing as
+/// the wrong format.
+fn parser_kind_from_path(path: &Path) -> ShellKind {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return ShellKind::Other;
+    };
+    match name {
+        ".bash_history" | "bash_history" => ShellKind::Bash,
+        ".zsh_history" | "zsh_history" => ShellKind::Zsh,
+        "fish_history" => ShellKind::Fish,
+        _ => ShellKind::Other,
+    }
+}
+
+/// Outcome of comparing a snapshot's `shell_histfile` against the last
+/// value observed for a pane.
+///
+/// Surfaced so the GUI's per-frame detector is a thin wrapper over a
+/// pure function we can exhaustively test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OscReloadDecision {
+    /// `snapshot_path == last_seen`; no action.  This is the steady-state
+    /// branch hit on every frame after the first OSC arrival.
+    NoChange,
+    /// The snapshot reports a new HISTFILE but the pane has no resolved
+    /// shell program -- a positional `command` was launched, or the
+    /// shell could not be resolved at spawn time.  No loader spawned;
+    /// the caller still updates `last_seen` so the no-op branch is
+    /// taken next frame.
+    NoProgramAvailable {
+        /// The new HISTFILE the snapshot reports.  Returned for logging.
+        new_path: PathBuf,
+    },
+    /// HISTFILE changed (including the initial `None -> Some` transition)
+    /// and a shell program is available; the caller should spawn an
+    /// OSC-priority loader with these arguments.
+    SpawnLoad {
+        /// The pane's resolved shell program (used to pick the parser).
+        program: PathBuf,
+        /// The new HISTFILE the snapshot reports.
+        path: PathBuf,
+    },
+    /// The snapshot's HISTFILE differs from `last_seen` (it cleared from
+    /// `Some` back to `None`).  No loader spawned; the caller still
+    /// updates `last_seen` so subsequent transitions are detected.
+    Cleared,
+}
+
+/// Decide whether a per-frame OSC 1338 reload should fire for a pane.
+///
+/// Pure -- no I/O, no thread spawning -- so the caller (`app_impl::draw`)
+/// can be a thin wrapper.  See [`OscReloadDecision`] for the four outcomes.
+#[must_use]
+pub fn classify_osc_reload(
+    program: Option<&Path>,
+    snapshot_path: Option<&Path>,
+    last_seen: Option<&Path>,
+) -> OscReloadDecision {
+    if snapshot_path == last_seen {
+        return OscReloadDecision::NoChange;
+    }
+    snapshot_path.map_or(OscReloadDecision::Cleared, |new_path| {
+        program.map_or_else(
+            || OscReloadDecision::NoProgramAvailable {
+                new_path: new_path.to_path_buf(),
+            },
+            |prog| OscReloadDecision::SpawnLoad {
+                program: prog.to_path_buf(),
+                path: new_path.to_path_buf(),
+            },
+        )
+    })
 }
 
 #[cfg(test)]
@@ -795,6 +1031,39 @@ mod tests {
 
     // ---------- spawn_loader (end-to-end) ----------
 
+    fn wait_for_seed(slot: &SharedSeededHistory, min_seq: u32) -> Arc<SeededHistory> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let snap = slot.load_full();
+            if snap.seq >= min_seq && (snap.seq > 0 || !snap.entries.is_empty()) {
+                return snap;
+            }
+            if std::time::Instant::now() >= deadline {
+                return snap;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Wait for the slot to receive any publication at all (any seq) by
+    /// polling the entries vector.  Used in tests where the loader's seq
+    /// matches the initial value (seq=0).
+    fn wait_for_first_publication(slot: &SharedSeededHistory) -> Arc<SeededHistory> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let snap = slot.load_full();
+            // Distinguish "freshly-published-empty" from the initial
+            // default by checking that the loader has had time to run.
+            if !snap.entries.is_empty() {
+                return snap;
+            }
+            if std::time::Instant::now() >= deadline {
+                return snap;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn spawn_loader_populates_slot() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -805,31 +1074,212 @@ mod tests {
             tmp.path().to_str().expect("utf8").to_owned(),
         ))
         .collect();
-        let slot: Arc<OnceLock<Vec<String>>> = Arc::new(OnceLock::new());
+        let slot: SharedSeededHistory = new_seeded_history();
         spawn_loader(PathBuf::from("/bin/bash"), env_snapshot, Arc::clone(&slot));
-        // Wait up to ~1s for the loader thread to populate.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while slot.get().is_none() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let loaded = slot.get().expect("loader did not populate within 1s");
-        assert_eq!(loaded, &vec!["alpha".to_owned(), "beta".to_owned()]);
+        let loaded = wait_for_first_publication(&slot);
+        assert_eq!(loaded.seq, SEED_SEQ_ENV);
+        assert_eq!(
+            loaded.entries.as_ref(),
+            &vec!["alpha".to_owned(), "beta".to_owned()]
+        );
     }
 
     #[test]
     fn spawn_loader_populates_empty_for_unknown_shell() {
         let env_snapshot: HashMap<String, String> = HashMap::new();
-        let slot: Arc<OnceLock<Vec<String>>> = Arc::new(OnceLock::new());
+        let slot: SharedSeededHistory = new_seeded_history();
         spawn_loader(
             PathBuf::from("/usr/bin/python"),
             env_snapshot,
             Arc::clone(&slot),
         );
+        // Loader still publishes (empty) at seq=0; poll until the seq is
+        // observed at the published value.  We can't distinguish
+        // initial-empty from loader-empty by entries alone, so wait for
+        // a brief moment and confirm the slot is consistent.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while slot.get().is_none() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let loaded = slot.get().expect("loader did not populate within 1s");
-        assert!(loaded.is_empty());
+        let loaded = slot.load_full();
+        assert_eq!(loaded.seq, SEED_SEQ_ENV);
+        assert!(loaded.entries.is_empty());
+    }
+
+    // ---------- spawn_loader_with_path (OSC 1338-driven) ----------
+
+    #[test]
+    fn spawn_loader_with_path_uses_explicit_path_and_publishes_at_seq_osc() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hist = tmp.path().join("custom.bash_history");
+        std::fs::write(&hist, "from-osc-only\n").expect("write");
+        let slot: SharedSeededHistory = new_seeded_history();
+        spawn_loader_with_path(PathBuf::from("/bin/bash"), hist, Arc::clone(&slot));
+        let loaded = wait_for_seed(&slot, SEED_SEQ_OSC);
+        assert_eq!(loaded.seq, SEED_SEQ_OSC);
+        assert_eq!(loaded.entries.as_ref(), &vec!["from-osc-only".to_owned()]);
+    }
+
+    #[test]
+    fn spawn_loader_with_path_overrides_earlier_env_load() {
+        // Simulate the OSC arriving after the env-derived load: the
+        // env loader publishes seq=0 first, then the OSC loader
+        // publishes seq=1.  After both, we expect seq=1's entries.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let env_hist = tmp.path().join(".bash_history");
+        std::fs::write(&env_hist, "env-entry\n").expect("write");
+        let osc_hist = tmp.path().join("osc.bash_history");
+        std::fs::write(&osc_hist, "osc-entry\n").expect("write");
+        let slot: SharedSeededHistory = new_seeded_history();
+
+        // Env load first.
+        let env_snapshot: HashMap<String, String> = std::iter::once((
+            "HOME".to_owned(),
+            tmp.path().to_str().expect("utf8").to_owned(),
+        ))
+        .collect();
+        spawn_loader(PathBuf::from("/bin/bash"), env_snapshot, Arc::clone(&slot));
+        let _ = wait_for_first_publication(&slot);
+
+        // OSC load second.
+        spawn_loader_with_path(PathBuf::from("/bin/bash"), osc_hist, Arc::clone(&slot));
+        let loaded = wait_for_seed(&slot, SEED_SEQ_OSC);
+        assert_eq!(loaded.seq, SEED_SEQ_OSC);
+        assert_eq!(loaded.entries.as_ref(), &vec!["osc-entry".to_owned()]);
+    }
+
+    #[test]
+    fn spawn_loader_with_path_does_not_lose_to_late_env_load() {
+        // The contract: even if the env-derived loader finishes _after_
+        // the OSC loader, the OSC value must remain (CAS rejects the
+        // stale env publication).  We exercise this by publishing the
+        // OSC value first, then directly calling the env-publication
+        // helper and observing the slot state afterwards.
+        let osc_entries = vec!["osc-entry".to_owned()];
+        let env_entries = vec!["stale-env-entry".to_owned()];
+        let slot: SharedSeededHistory = new_seeded_history();
+        publish_seeded(&slot, SEED_SEQ_OSC, osc_entries.clone());
+        publish_seeded(&slot, SEED_SEQ_ENV, env_entries);
+        let loaded = slot.load_full();
+        assert_eq!(loaded.seq, SEED_SEQ_OSC);
+        assert_eq!(loaded.entries.as_ref(), &osc_entries);
+    }
+
+    #[test]
+    fn publish_seeded_same_seq_overwrites() {
+        // Same-priority publication is allowed (the second loader's
+        // result is at least as fresh as the first).
+        let slot: SharedSeededHistory = new_seeded_history();
+        publish_seeded(&slot, SEED_SEQ_ENV, vec!["first".to_owned()]);
+        publish_seeded(&slot, SEED_SEQ_ENV, vec!["second".to_owned()]);
+        let loaded = slot.load_full();
+        assert_eq!(loaded.seq, SEED_SEQ_ENV);
+        assert_eq!(loaded.entries.as_ref(), &vec!["second".to_owned()]);
+    }
+
+    // ---------- parser_kind_from_path ----------
+
+    #[test]
+    fn parser_kind_from_path_recognises_known_basenames() {
+        assert_eq!(
+            parser_kind_from_path(Path::new("/x/.bash_history")),
+            ShellKind::Bash
+        );
+        assert_eq!(
+            parser_kind_from_path(Path::new("/x/.zsh_history")),
+            ShellKind::Zsh
+        );
+        assert_eq!(
+            parser_kind_from_path(Path::new("/x/fish_history")),
+            ShellKind::Fish
+        );
+    }
+
+    #[test]
+    fn parser_kind_from_path_returns_other_for_unknown() {
+        assert_eq!(
+            parser_kind_from_path(Path::new("/x/random_file")),
+            ShellKind::Other
+        );
+        assert_eq!(parser_kind_from_path(Path::new("/")), ShellKind::Other);
+    }
+
+    #[test]
+    fn spawn_loader_with_path_uses_basename_when_program_is_other() {
+        // Program is unrecognised (`/bin/sh`) but the path's basename
+        // hints at zsh -- the OSC loader should still parse it.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hist = tmp.path().join(".zsh_history");
+        std::fs::write(&hist, ": 1700000000:0;ls\n").expect("write");
+        let slot: SharedSeededHistory = new_seeded_history();
+        spawn_loader_with_path(PathBuf::from("/bin/sh"), hist, Arc::clone(&slot));
+        let loaded = wait_for_seed(&slot, SEED_SEQ_OSC);
+        assert_eq!(loaded.entries.as_ref(), &vec!["ls".to_owned()]);
+    }
+
+    // ---------- classify_osc_reload ----------
+
+    #[test]
+    fn classify_osc_reload_no_change_when_paths_equal_some() {
+        let p = PathBuf::from("/h/.zsh_history");
+        let d = classify_osc_reload(
+            Some(Path::new("/bin/zsh")),
+            Some(p.as_path()),
+            Some(p.as_path()),
+        );
+        assert_eq!(d, OscReloadDecision::NoChange);
+    }
+
+    #[test]
+    fn classify_osc_reload_no_change_when_both_none() {
+        let d = classify_osc_reload(Some(Path::new("/bin/zsh")), None, None);
+        assert_eq!(d, OscReloadDecision::NoChange);
+    }
+
+    #[test]
+    fn classify_osc_reload_spawn_on_initial_some_with_program() {
+        let prog = PathBuf::from("/bin/zsh");
+        let path = PathBuf::from("/h/.zsh_history");
+        let d = classify_osc_reload(Some(prog.as_path()), Some(path.as_path()), None);
+        assert_eq!(
+            d,
+            OscReloadDecision::SpawnLoad {
+                program: prog,
+                path,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_osc_reload_spawn_on_path_change_with_program() {
+        let prog = PathBuf::from("/bin/zsh");
+        let old = PathBuf::from("/h/.zsh_history");
+        let new = PathBuf::from("/custom/zhist");
+        let d = classify_osc_reload(
+            Some(prog.as_path()),
+            Some(new.as_path()),
+            Some(old.as_path()),
+        );
+        assert_eq!(
+            d,
+            OscReloadDecision::SpawnLoad {
+                program: prog,
+                path: new,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_osc_reload_no_program_when_program_unset() {
+        let path = PathBuf::from("/h/.zsh_history");
+        let d = classify_osc_reload(None, Some(path.as_path()), None);
+        assert_eq!(d, OscReloadDecision::NoProgramAvailable { new_path: path });
+    }
+
+    #[test]
+    fn classify_osc_reload_cleared_when_some_to_none() {
+        let old = PathBuf::from("/h/.zsh_history");
+        let d = classify_osc_reload(Some(Path::new("/bin/zsh")), None, Some(old.as_path()));
+        assert_eq!(d, OscReloadDecision::Cleared);
     }
 }

@@ -20,7 +20,7 @@ use super::panes;
 use super::renderer::WindowPostRenderer;
 use super::rendering;
 use super::tabs::{Tab, TabManager};
-use super::terminal::{FreminalTerminalWidget, new_render_state};
+use super::terminal::FreminalTerminalWidget;
 use super::view_state;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
@@ -156,29 +156,12 @@ impl freminal_windowing::App for FreminalGui {
                 },
             ) {
                 Ok(channels) => {
-                    let pane = panes::Pane {
-                        id: pane_id,
-                        arc_swap: channels.arc_swap,
-                        input_tx: channels.input_tx,
-                        pty_write_tx: channels.pty_write_tx,
-                        window_cmd_rx: channels.window_cmd_rx,
-                        clipboard_rx: channels.clipboard_rx,
-                        search_buffer_rx: channels.search_buffer_rx,
-                        pty_dead_rx: channels.pty_dead_rx,
-                        title: "Terminal".to_owned(),
-                        bell_active: false,
-                        pending_copy: false,
-                        title_stack: Vec::new(),
-                        view_state: view_state::ViewState::new(),
-                        echo_off: channels.echo_off,
-                        child_pid: channels.child_pid,
-                        render_state: new_render_state(Arc::clone(&window_post)),
-                        render_cache: super::terminal::PaneRenderCache::new(),
-                        command_event_rx: channels.command_event_rx,
-                        recent_commands: std::collections::VecDeque::new(),
-                        history_seed: channels.history_seed,
-                        command_texts: std::collections::HashMap::new(),
-                    };
+                    let pane = panes::Pane::from_channels(
+                        pane_id,
+                        channels,
+                        Arc::clone(&window_post),
+                        "Terminal".to_owned(),
+                    );
                     let tab_id = super::tabs::TabId::first();
                     let tab = Tab::new(tab_id, pane);
 
@@ -1262,6 +1245,57 @@ impl freminal_windowing::App for FreminalGui {
                     pane.view_state.scroll_offset = pane_snap.scroll_offset;
                 }
 
+                // OSC 1338 HISTFILE reload trigger (Task 72.15).  When the
+                // shell-integration scripts publish a new HISTFILE path
+                // through `OSC 1338 ; HISTFILE=<path> ST`, the snapshot's
+                // `shell_histfile` will diverge from the last value we
+                // observed for this pane.  On change, spawn an
+                // OSC-priority loader (`SEED_SEQ_OSC=1`) which CAS-wins
+                // over the env-derived load published earlier at spawn
+                // time.  The decision is factored into a pure function
+                // (`classify_osc_reload`) so the comparison logic is
+                // exhaustively unit-tested independently of egui.
+                {
+                    use crate::gui::shell_history::OscReloadDecision;
+                    let decision = crate::gui::shell_history::classify_osc_reload(
+                        pane.shell_program.as_deref(),
+                        pane_snap.shell_histfile.as_deref(),
+                        pane.shell_histfile_last_seen.as_deref(),
+                    );
+                    match decision {
+                        OscReloadDecision::NoChange => {}
+                        OscReloadDecision::SpawnLoad { program, path } => {
+                            tracing::debug!(
+                                "shell_history: pane {pane_id} OSC 1338 reload \
+                                 (program={program:?}, path={path:?})"
+                            );
+                            crate::gui::shell_history::spawn_loader_with_path(
+                                program,
+                                path,
+                                std::sync::Arc::clone(&pane.history_seed),
+                            );
+                            pane.shell_histfile_last_seen
+                                .clone_from(&pane_snap.shell_histfile);
+                        }
+                        OscReloadDecision::NoProgramAvailable { new_path } => {
+                            tracing::trace!(
+                                "shell_history: pane {pane_id} OSC 1338 \
+                                 received but no resolved shell program \
+                                 (new_path={new_path:?}); skipping reload"
+                            );
+                            pane.shell_histfile_last_seen
+                                .clone_from(&pane_snap.shell_histfile);
+                        }
+                        OscReloadDecision::Cleared => {
+                            tracing::trace!(
+                                "shell_history: pane {pane_id} OSC 1338 \
+                                 HISTFILE cleared; leaving existing seed in place"
+                            );
+                            pane.shell_histfile_last_seen = None;
+                        }
+                    }
+                }
+
                 let is_echo_off = self.config.security.password_indicator
                     && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
                 let is_active = pane_id == active_pane_id;
@@ -1322,7 +1356,14 @@ impl freminal_windowing::App for FreminalGui {
                 // `Pane` is in scope here.
                 if pane.view_state.command_history.is_open {
                     use crate::gui::command_history::PaletteAction;
-                    let seed = pane.history_seed.get();
+                    // Hold the Arc for the duration of the palette call
+                    // so the borrow into `entries` remains valid.
+                    let seed_arc = pane.history_seed.load_full();
+                    let seed: Option<&Vec<String>> = if seed_arc.entries.is_empty() {
+                        None
+                    } else {
+                        Some(seed_arc.entries.as_ref())
+                    };
                     let action = crate::gui::command_history::show_command_history_palette(
                         ui,
                         &mut pane.view_state.command_history,
@@ -1720,29 +1761,12 @@ impl FreminalGui {
             }
         };
 
-        let pane = panes::Pane {
-            id: pane_id,
-            arc_swap: channels.arc_swap,
-            input_tx: channels.input_tx,
-            pty_write_tx: channels.pty_write_tx,
-            window_cmd_rx: channels.window_cmd_rx,
-            clipboard_rx: channels.clipboard_rx,
-            search_buffer_rx: channels.search_buffer_rx,
-            pty_dead_rx: channels.pty_dead_rx,
-            title: "Terminal".to_owned(),
-            bell_active: false,
-            pending_copy: false,
-            title_stack: Vec::new(),
-            view_state: view_state::ViewState::new(),
-            echo_off: channels.echo_off,
-            child_pid: channels.child_pid,
-            render_state: new_render_state(Arc::clone(&window_post)),
-            render_cache: super::terminal::PaneRenderCache::new(),
-            command_event_rx: channels.command_event_rx,
-            recent_commands: std::collections::VecDeque::new(),
-            history_seed: channels.history_seed,
-            command_texts: std::collections::HashMap::new(),
-        };
+        let pane = panes::Pane::from_channels(
+            pane_id,
+            channels,
+            Arc::clone(&window_post),
+            "Terminal".to_owned(),
+        );
 
         let tab = Tab::new(super::tabs::TabId::first(), pane);
 

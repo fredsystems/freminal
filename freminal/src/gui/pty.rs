@@ -144,7 +144,13 @@ pub struct TabChannels {
     /// historical commands alongside the live `recent_commands` ring.
     /// Empty for non-shell programs and for shells freminal does not
     /// recognise.
-    pub history_seed: Arc<std::sync::OnceLock<Vec<String>>>,
+    pub history_seed: crate::gui::shell_history::SharedSeededHistory,
+
+    /// Resolved shell program (if any), used by the GUI to re-trigger the
+    /// shell-history loader when `OSC 1338 ; HISTFILE=<path>` arrives so
+    /// the right parser is selected.  `None` when a positional `command`
+    /// was specified or when no shell could be resolved.
+    pub shell_program: Option<std::path::PathBuf>,
 }
 
 /// Per-pane configuration forwarded to the PTY child process.
@@ -243,28 +249,36 @@ pub fn spawn_pty_tab(
     // writes the parsed history into `history_seed` once; the slot is
     // empty until then and the palette degrades gracefully to
     // "live commands only".
-    let history_seed: Arc<std::sync::OnceLock<Vec<String>>> = Arc::new(std::sync::OnceLock::new());
-    if args.command.is_empty() {
+    //
+    // The resolved shell program is also forwarded through `TabChannels`
+    // so the GUI thread can re-trigger the loader with an explicit
+    // `OSC 1338`-supplied HISTFILE path (and pick the right parser).
+    let history_seed: crate::gui::shell_history::SharedSeededHistory =
+        crate::gui::shell_history::new_seeded_history();
+    let shell_program: Option<std::path::PathBuf> = if args.command.is_empty() {
         let resolved_shell: Option<std::path::PathBuf> = tab_cfg
             .shell_override
             .map(std::path::PathBuf::from)
             .or_else(|| args.shell.as_deref().map(std::path::PathBuf::from))
             .or_else(|| std::env::var_os("SHELL").map(std::path::PathBuf::from));
-        if let Some(program) = resolved_shell {
+        if let Some(program) = resolved_shell.as_ref() {
             // Snapshot the parent process env once for the loader thread
             // so it sees the same HISTFILE / HOME / XDG_DATA_HOME freminal
             // was launched with.  Runtime rc-file overrides inside the
-            // spawned child shell are not visible -- documented in
-            // `shell_history` module docs.
+            // spawned child shell are reported via OSC 1338; see
+            // `app_impl::draw` for the reload trigger.
             let env_snapshot: std::collections::HashMap<String, String> =
                 std::env::vars().collect();
             crate::gui::shell_history::spawn_loader(
-                program,
+                program.clone(),
                 env_snapshot,
                 Arc::clone(&history_seed),
             );
         }
-    }
+        resolved_shell
+    } else {
+        None
+    };
 
     spawn_pty_consumer_thread(
         terminal,
@@ -294,6 +308,7 @@ pub fn spawn_pty_tab(
         child_pid,
         command_event_rx,
         history_seed,
+        shell_program,
     })
 }
 

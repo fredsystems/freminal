@@ -430,7 +430,7 @@ impl super::FreminalGui {
             }
             KeyAction::ShowCommandHistory => {
                 if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
-                    let seed_loaded = pane.history_seed.get().is_some();
+                    let seed_loaded = !pane.history_seed.load().entries.is_empty();
                     let recent_len = pane.recent_commands.len();
                     let texts_len = pane.command_texts.len();
                     let pane_id = pane.id;

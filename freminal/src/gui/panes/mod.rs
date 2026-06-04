@@ -233,15 +233,38 @@ pub struct Pane {
 
     /// Pre-loaded shell-history seed for the Quick Command History Palette
     /// (Task 72.15).  Populated asynchronously by
-    /// [`crate::gui::shell_history::spawn_loader`] at PTY spawn time;
-    /// empty until the loader thread completes and `None` (via the
-    /// surrounding `OnceLock`) means "not yet loaded or no history file".
+    /// [`crate::gui::shell_history::spawn_loader`] at PTY spawn time and
+    /// optionally re-published by
+    /// [`crate::gui::shell_history::spawn_loader_with_path`] when the
+    /// shell-integration scripts emit `OSC 1338`.
+    ///
+    /// Sequence-tagged `ArcSwap`: the OSC-driven load (`SEED_SEQ_OSC`)
+    /// always wins over the env-derived load (`SEED_SEQ_ENV`).  An empty
+    /// `entries` vec at `seq=0` means "not yet loaded or no history
+    /// file"; the palette degrades gracefully to live-commands-only.
     ///
     /// Read-only after spawn -- the palette merges these historical entries
     /// (no timestamps, no exit codes) with the live entries in
     /// [`Self::recent_commands`].  See
-    /// [`crate::gui::shell_history`] for the loader and the parsers.
-    pub history_seed: Arc<std::sync::OnceLock<Vec<String>>>,
+    /// [`crate::gui::shell_history`] for the loaders and the parsers.
+    pub history_seed: crate::gui::shell_history::SharedSeededHistory,
+
+    /// Resolved shell program for this pane (if any), captured at
+    /// PTY-spawn time and forwarded from
+    /// [`crate::gui::pty::TabChannels::shell_program`].  Used by the GUI
+    /// to pick the right parser when the shell-integration scripts emit
+    /// `OSC 1338 ; HISTFILE=<path> ST`.  `None` when a positional
+    /// `command` was specified or no shell could be resolved.
+    pub shell_program: Option<std::path::PathBuf>,
+
+    /// Last `shell_histfile` value observed in a snapshot for this pane.
+    /// The GUI compares each frame's `snapshot.shell_histfile` against
+    /// this; on change it spawns a new
+    /// [`crate::gui::shell_history::spawn_loader_with_path`] (sequence
+    /// `SEED_SEQ_OSC=1`) which CAS-supersedes the env-derived load.
+    /// Initialised to `None`; transitions monotonically toward the
+    /// authoritative shell-reported HISTFILE.
+    pub shell_histfile_last_seen: Option<std::path::PathBuf>,
 
     /// Per-pane cache of extracted command text, keyed by
     /// [`CommandBlockId`].  Populated by the GUI when a finished
@@ -261,6 +284,53 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Construct a `Pane` from the channels returned by
+    /// [`crate::gui::pty::spawn_pty_tab`] (or by the split-pane spawn
+    /// path) and the window's shared `WindowPostRenderer` handle.
+    ///
+    /// All GUI-owned state is initialised to its empty default: fresh
+    /// [`ViewState`], empty title stack, empty `recent_commands` ring,
+    /// empty `command_texts` cache, and `None` for
+    /// [`Self::shell_histfile_last_seen`].  The caller supplies the
+    /// initial `title` (typically `"Terminal"` or a layout-restored
+    /// title).
+    ///
+    /// Centralising this construction keeps the seven callsites in
+    /// `tab_spawning`, `app_impl`, and the layout-restore path in step
+    /// when new fields are added.
+    pub fn from_channels(
+        pane_id: PaneId,
+        channels: super::pty::TabChannels,
+        window_post: Arc<Mutex<crate::gui::renderer::WindowPostRenderer>>,
+        title: String,
+    ) -> Self {
+        Self {
+            id: pane_id,
+            arc_swap: channels.arc_swap,
+            input_tx: channels.input_tx,
+            pty_write_tx: channels.pty_write_tx,
+            window_cmd_rx: channels.window_cmd_rx,
+            clipboard_rx: channels.clipboard_rx,
+            search_buffer_rx: channels.search_buffer_rx,
+            pty_dead_rx: channels.pty_dead_rx,
+            title,
+            bell_active: false,
+            pending_copy: false,
+            title_stack: Vec::new(),
+            view_state: super::view_state::ViewState::new(),
+            echo_off: channels.echo_off,
+            child_pid: channels.child_pid,
+            render_state: super::terminal::new_render_state(window_post),
+            render_cache: PaneRenderCache::new(),
+            command_event_rx: channels.command_event_rx,
+            history_seed: channels.history_seed,
+            shell_program: channels.shell_program,
+            shell_histfile_last_seen: None,
+            recent_commands: VecDeque::new(),
+            command_texts: HashMap::new(),
+        }
+    }
+
     /// Push a finished `CommandBlock` onto [`Self::recent_commands`],
     /// enforcing the [`RECENT_COMMANDS_CAP`] bound.
     ///
@@ -296,7 +366,10 @@ impl std::fmt::Debug for Pane {
             .field("id", &self.id)
             .field("title", &self.title)
             .field("bell_active", &self.bell_active)
-            .field("history_seed_loaded", &self.history_seed.get().is_some())
+            .field(
+                "history_seed_loaded",
+                &!self.history_seed.load().entries.is_empty(),
+            )
             .field("command_texts_len", &self.command_texts.len())
             .finish_non_exhaustive()
     }
@@ -1478,7 +1551,9 @@ mod tests {
             render_cache: crate::gui::terminal::PaneRenderCache::new(),
             command_event_rx,
             recent_commands: VecDeque::new(),
-            history_seed: Arc::new(std::sync::OnceLock::new()),
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+            shell_histfile_last_seen: None,
             command_texts: HashMap::new(),
         }
     }
