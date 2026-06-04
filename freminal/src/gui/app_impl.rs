@@ -176,6 +176,7 @@ impl freminal_windowing::App for FreminalGui {
                         render_cache: super::terminal::PaneRenderCache::new(),
                         command_event_rx: channels.command_event_rx,
                         recent_commands: std::collections::VecDeque::new(),
+                        history_seed: channels.history_seed,
                     };
                     let tab_id = super::tabs::TabId::first();
                     let tab = Tab::new(tab_id, pane);
@@ -1682,6 +1683,7 @@ impl FreminalGui {
             render_cache: super::terminal::PaneRenderCache::new(),
             command_event_rx: channels.command_event_rx,
             recent_commands: std::collections::VecDeque::new(),
+            history_seed: channels.history_seed,
         };
 
         let tab = Tab::new(super::tabs::TabId::first(), pane);

@@ -133,6 +133,18 @@ pub struct TabChannels {
     /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
+
+    /// Per-pane shell-history seed populated asynchronously by
+    /// [`crate::gui::shell_history::spawn_loader`] at spawn time.
+    ///
+    /// `OnceLock` is empty until the loader thread reads and parses the
+    /// shell's history file; thereafter it holds at most
+    /// [`crate::gui::shell_history::HISTORY_SEED_CAP`] entries.  Consumed
+    /// by the Quick Command History Palette (Task 72.15) to surface
+    /// historical commands alongside the live `recent_commands` ring.
+    /// Empty for non-shell programs and for shells freminal does not
+    /// recognise.
+    pub history_seed: Arc<std::sync::OnceLock<Vec<String>>>,
 }
 
 /// Per-pane configuration forwarded to the PTY child process.
@@ -223,6 +235,37 @@ pub fn spawn_pty_tab(
 
     let repaint_handle_pty = Arc::clone(repaint_handle);
 
+    // Resolve the shell program (if any) and kick off the asynchronous
+    // shell-history loader for Task 72.15.  Mirrors the resolution logic
+    // in `freminal_terminal_emulator::io::pty::resolve_command`:
+    // explicit `--command` wins (no shell -> no history), else
+    // shell_override, else --shell, else `$SHELL`.  The loader thread
+    // writes the parsed history into `history_seed` once; the slot is
+    // empty until then and the palette degrades gracefully to
+    // "live commands only".
+    let history_seed: Arc<std::sync::OnceLock<Vec<String>>> = Arc::new(std::sync::OnceLock::new());
+    if args.command.is_empty() {
+        let resolved_shell: Option<std::path::PathBuf> = tab_cfg
+            .shell_override
+            .map(std::path::PathBuf::from)
+            .or_else(|| args.shell.as_deref().map(std::path::PathBuf::from))
+            .or_else(|| std::env::var_os("SHELL").map(std::path::PathBuf::from));
+        if let Some(program) = resolved_shell {
+            // Snapshot the parent process env once for the loader thread
+            // so it sees the same HISTFILE / HOME / XDG_DATA_HOME freminal
+            // was launched with.  Runtime rc-file overrides inside the
+            // spawned child shell are not visible -- documented in
+            // `shell_history` module docs.
+            let env_snapshot: std::collections::HashMap<String, String> =
+                std::env::vars().collect();
+            crate::gui::shell_history::spawn_loader(
+                program,
+                env_snapshot,
+                Arc::clone(&history_seed),
+            );
+        }
+    }
+
     spawn_pty_consumer_thread(
         terminal,
         pty_read_rx,
@@ -250,6 +293,7 @@ pub fn spawn_pty_tab(
         echo_off,
         child_pid,
         command_event_rx,
+        history_seed,
     })
 }
 

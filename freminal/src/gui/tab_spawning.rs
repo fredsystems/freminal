@@ -100,6 +100,7 @@ impl FreminalGui {
                     render_state: terminal::new_render_state(Arc::clone(&win.window_post)),
                     render_cache: terminal::PaneRenderCache::new(),
                     command_event_rx: channels.command_event_rx,
+                    history_seed: channels.history_seed,
                     recent_commands: std::collections::VecDeque::new(),
                 };
                 let tab = tabs::Tab::new(id, pane);
@@ -257,6 +258,7 @@ impl FreminalGui {
                 render_state: terminal::new_render_state(Arc::clone(&win.window_post)),
                 render_cache: terminal::PaneRenderCache::new(),
                 command_event_rx: channels.command_event_rx,
+                history_seed: channels.history_seed,
                 recent_commands: std::collections::VecDeque::new(),
             };
             match tab.pane_tree.split_with_id(target_id, direction, new_pane) {
@@ -396,6 +398,7 @@ impl FreminalGui {
             render_state: terminal::new_render_state(Arc::clone(window_post)),
             render_cache: terminal::PaneRenderCache::new(),
             command_event_rx: channels.command_event_rx,
+            history_seed: channels.history_seed,
             recent_commands: std::collections::VecDeque::new(),
         })
     }

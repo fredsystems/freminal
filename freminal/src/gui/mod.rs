@@ -29,6 +29,7 @@ pub mod renderer;
 pub mod search;
 pub mod settings;
 pub mod shaping;
+pub mod shell_history;
 pub mod tabs;
 pub mod terminal;
 pub mod view_state;

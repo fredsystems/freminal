@@ -229,6 +229,18 @@ pub struct Pane {
     /// formatting), Task 72.10 (fold/collapse UI), and a future command-palette
     /// task.
     pub recent_commands: VecDeque<CommandBlock>,
+
+    /// Pre-loaded shell-history seed for the Quick Command History Palette
+    /// (Task 72.15).  Populated asynchronously by
+    /// [`crate::gui::shell_history::spawn_loader`] at PTY spawn time;
+    /// empty until the loader thread completes and `None` (via the
+    /// surrounding `OnceLock`) means "not yet loaded or no history file".
+    ///
+    /// Read-only after spawn -- the palette merges these historical entries
+    /// (no timestamps, no exit codes) with the live entries in
+    /// [`Self::recent_commands`].  See
+    /// [`crate::gui::shell_history`] for the loader and the parsers.
+    pub history_seed: Arc<std::sync::OnceLock<Vec<String>>>,
 }
 
 impl Pane {
@@ -252,6 +264,7 @@ impl std::fmt::Debug for Pane {
             .field("id", &self.id)
             .field("title", &self.title)
             .field("bell_active", &self.bell_active)
+            .field("history_seed_loaded", &self.history_seed.get().is_some())
             .finish_non_exhaustive()
     }
 }
@@ -1432,6 +1445,7 @@ mod tests {
             render_cache: crate::gui::terminal::PaneRenderCache::new(),
             command_event_rx,
             recent_commands: VecDeque::new(),
+            history_seed: Arc::new(std::sync::OnceLock::new()),
         }
     }
 

@@ -429,6 +429,7 @@ mod tests {
             pty_dead_rx,
             command_event_rx,
             recent_commands: std::collections::VecDeque::new(),
+            history_seed: Arc::new(std::sync::OnceLock::new()),
             title: title.to_owned(),
             bell_active: false,
             pending_copy: false,
