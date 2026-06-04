@@ -2840,20 +2840,82 @@ Covered by 72.12. No separate task.
 
 ### T3 — Quick Command History Palette (lands in Task 72)
 
-**Scope:** ~2 days. New module `freminal/src/gui/command_history.rs`.
+**Scope:** ~2 days. New module `freminal/src/gui/command_history.rs`
+(palette UI) plus `freminal/src/gui/shell_history.rs` (shell-history
+seed loader).
 
-- A fuzzy-searchable palette over `pane.recent_commands` (from 72.9).
-- New `KeyAction::ShowCommandHistory`, default `Ctrl+R`.
+- A fuzzy-searchable palette over the union of:
+  - **Shell history seed** (bash / zsh / fish) loaded once per pane
+    spawn on a background thread, capped at 1000 entries.
+  - **Live recent commands** captured via OSC 133 in 72.9
+    (`pane.recent_commands`).
+- New `KeyAction::ShowCommandHistory`, default `Ctrl+Shift+M`. (Not
+  `Ctrl+R`: that collides with the shell's reverse-i-search and would
+  break a near-universal muscle-memory. Not `Ctrl+Shift+R`: taken by
+  `ToggleSessionRecording`. Not `Ctrl+Shift+P`: reserved for Task 83
+  Command Palette.)
 - Egui modal with:
   - Text input at top (fuzzy filter via `nucleo-matcher` or simple
     case-insensitive substring; whichever is already in the dep tree —
     check `Cargo.lock`).
   - List of recent commands with timestamp, exit code icon, command
-    preview.
+    preview. Seed-only entries show no exit code / timestamp.
   - Enter on a selection: send the command text as keyboard input to the
     current pane (does **not** auto-execute — user reviews and presses
     Enter themselves).
-- Land as **Task 72.15**.
+- **Data-model decision:** Option A — `Pane.history_seed:
+Arc<OnceLock<Vec<String>>>` runs parallel to
+  `recent_commands: VecDeque<CommandBlock>`; the palette merges them
+  at render time. Rejected: extending `CommandBlock` to carry a text
+  field (forces every consumer of `CommandBlock` to handle a
+  buffer-row-less variant; `CommandBlock` is a buffer-row pointer with
+  no `text` field today, and the palette is the only consumer that
+  wants text without rows).
+- Land as **Task 72.15**, three commits:
+  1. Shell-history data layer (parsers, path resolution, async loader,
+     `TabChannels.history_seed`, `Pane.history_seed`).
+  2. Palette UI + `KeyAction::ShowCommandHistory` + 4-step keybinding
+     wiring (enum, default, dispatch, `config_example.toml`).
+  3. Polish (animations, empty-state, exit-code icons) + final docs.
+
+**Completion notes (72.15):**
+
+- **72.15 commit 1** ✅ done (commit `8bdeb85`, 2026-06-04). Shell-
+  history data layer:
+  - New `freminal/src/gui/shell_history.rs` (658 lines, 39 unit tests):
+    `ShellKind` enum (Bash, Zsh, Fish, Other), `detect_shell_kind` by
+    basename only (no symlink resolution — POSIX `sh` does not auto-
+    load bash history even if symlinked to bash), `resolve_history_path`
+    honoring `HISTFILE` (bash, zsh) and `XDG_DATA_HOME` then
+    `$HOME/.local/share` (fish) with empty env values falling through
+    to defaults, format-specific parsers (`parse_bash_history` skips
+    `#<ts>` lines; `parse_zsh_history` handles `: <ts>:<dur>;<cmd>`
+    extended format; `parse_fish_history` with `decode_fish_cmd` for
+    YAML-ish escape decoding of `\n \r \t \\`), `load_for_program`
+    orchestrating detect → resolve → parse with `HISTORY_SEED_CAP = 1000`,
+    `spawn_loader<S: BuildHasher + Send + 'static>` running on a named
+    `freminal-history-loader` thread writing into
+    `Arc<OnceLock<Vec<String>>>`.
+  - `TabChannels.history_seed` slot in `gui/pty.rs`; `spawn_pty_tab`
+    resolves shell (shell_override → args.shell → `$SHELL`, skipped if
+    `args.command` is non-empty), snapshots `std::env::vars()`, calls
+    `spawn_loader`.
+  - `Pane.history_seed` field in `gui/panes/mod.rs`; all 8 Pane
+    construction sites (3 in `tab_spawning.rs`, 2 in `app_impl.rs`,
+    1 in `panes/mod.rs` test helper, 1 in `tabs.rs` test helper)
+    initialise it (production sites pull from `channels.history_seed`;
+    test helpers use a fresh `Arc::new(OnceLock::new())`).
+  - **Known limitation:** per-pane env snapshot is taken from the
+    parent freminal process, so runtime rc-file `HISTFILE` overrides
+    set after freminal launch are not visible to the loader.
+  - Verification: `cargo test --all` 103 suites green (39 new
+    shell_history tests pass), `cargo clippy --all-targets --all-
+features -- -D warnings` clean, `cargo machete` clean.
+- **72.15 commit 2** — pending. Palette UI in
+  `freminal/src/gui/command_history.rs`, `KeyAction::ShowCommandHistory`
+  with default `Ctrl+Shift+M`, 4-step keybinding wiring.
+- **72.15 commit 3** — pending. Polish + `config_example.toml` entry +
+  final doc cleanup.
 
 ### T4 — Bell on Command Completion (folded into Task 76.5)
 
@@ -2904,7 +2966,7 @@ FREC format change is required.
 | `UnfoldAll`                 | `Ctrl+Shift+U`      | 72.10 |
 | `CopyLastCommandOutput`     | `Ctrl+Shift+Y`      | 72.11 |
 | `CopyCommandOutputAtCursor` | (none, right-click) | 72.11 |
-| `ShowCommandHistory`        | `Ctrl+R`            | 72.15 |
+| `ShowCommandHistory`        | `Ctrl+Shift+M`      | 72.15 |
 | `ToggleBroadcastInput`      | `Ctrl+Shift+I`      | 74.2  |
 | `PasteUnsafe`               | `Ctrl+Shift+V`      | 77.5  |
 
@@ -3256,8 +3318,9 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
      OSC 8 hyperlink action menu with the "Copy URL" right-click item;
      Ctrl+click + "Open URL" were already shipped as part of the
      earlier URL hover work).
-   - **72.15** — remaining subtask per the rest of this plan
-     (Quick Command History Palette).
+   - **72.15** — in progress. Commit 1 of 3 ✅ done
+     (`8bdeb85`, 2026-06-04, shell-history data layer). Commits 2
+     (palette UI + key binding) and 3 (polish + config) pending.
 
    Pause after each subtask for user confirmation per the Multi-Step
    Task Protocol in `agents.md`. The 72.16 cleanup section accumulates
