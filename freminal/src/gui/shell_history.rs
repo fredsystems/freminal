@@ -252,8 +252,20 @@ pub fn load_for_program(program: &Path, get_env: &dyn Fn(&str) -> Option<String>
         debug!("shell_history: could not resolve history path for {kind:?}");
         return Vec::new();
     };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
+    let content = match std::fs::read(&path) {
+        Ok(bytes) => {
+            // Shell history files are not guaranteed to be valid UTF-8.
+            // zsh in particular stores command bytes >= 0x80 in a
+            // "metafied" encoding, and bash will faithfully record
+            // whatever bytes the user typed (Latin-1, Shift-JIS, paste
+            // residue, etc.).  Strict `read_to_string` rejects the
+            // entire file on a single stray byte, which produced the
+            // `stream did not contain valid UTF-8` warning at pane
+            // spawn time.  Lossy decoding preserves all valid UTF-8 and
+            // substitutes U+FFFD for invalid sequences -- acceptable
+            // for a best-effort palette seed.
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             trace!("shell_history: no history file at {path:?}; first-time shell?");
             return Vec::new();
@@ -613,6 +625,41 @@ mod tests {
     fn load_for_program_returns_empty_when_home_unset_for_bash() {
         let e = env(&[]);
         assert!(load_for_program(Path::new("/bin/bash"), &lookup(&e)).is_empty());
+    }
+
+    #[test]
+    fn load_for_program_zsh_history_with_invalid_utf8_bytes_is_lossy_not_dropped() {
+        // Regression for the warning observed at pane spawn:
+        //
+        //   shell_history: failed to read "~/.zsh_history":
+        //     stream did not contain valid UTF-8
+        //
+        // zsh stores metafied bytes for any byte >= 0x80 (and bash will
+        // faithfully record arbitrary bytes the user typed).  A strict
+        // `read_to_string` rejects the entire file on the first stray
+        // byte, dropping every valid entry above and below.  We now
+        // decode lossily so valid entries survive; the offending bytes
+        // become U+FFFD inside their own entry.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hist = tmp.path().join("zhist_with_bad_bytes");
+        // Three zsh-extended-format entries: valid, invalid byte, valid.
+        // 0xC3 0x28 is an invalid UTF-8 continuation sequence.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b": 1700000000:0;echo first\n");
+        bytes.extend_from_slice(b": 1700000001:0;echo ");
+        bytes.push(0xC3);
+        bytes.push(0x28);
+        bytes.extend_from_slice(b"middle\n");
+        bytes.extend_from_slice(b": 1700000002:0;echo last\n");
+        std::fs::write(&hist, &bytes).expect("write");
+        let e = env(&[("HISTFILE", hist.to_str().expect("utf8"))]);
+        let v = load_for_program(Path::new("/usr/bin/zsh"), &lookup(&e));
+        // First and last entries must survive verbatim; middle entry
+        // exists in some U+FFFD-substituted form (we don't assert its
+        // exact text -- the point is the file no longer drops to []).
+        assert_eq!(v.first().map(String::as_str), Some("echo first"));
+        assert_eq!(v.last().map(String::as_str), Some("echo last"));
+        assert_eq!(v.len(), 3, "all three entries should load, got {v:?}");
     }
 
     // ---------- spawn_loader (end-to-end) ----------
