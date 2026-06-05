@@ -1,7 +1,9 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-04-21 — Audited against source; removed OSC 12 and ESC Z (both fully implemented)
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52)
+Last updated: 2026-06-03 — Task 72.13: OSC 133 command-block storage and navigation
+complete; only the gutter UI (v0.9.0 Task 73) remains. Added XTGETTCAP capability-
+recognition polish entry (Task 72.16.e demoted the unknown-capability log to debug).
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only
@@ -27,7 +29,8 @@ protocol is complete (Task 35). The remaining gaps are:
 - **OSC gaps:** OSC 66 (recognized but no effect), OSC 777 (Konsole notification)
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
 - **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
-- **UI work:** OSC 133 command-block navigation (markers are parsed; UI is Task 72)
+- **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
+  storage, navigation, fold/copy/hover/duration all complete under Task 72)
 
 Legend:
 
@@ -49,11 +52,11 @@ These features are tracked at the state-machine level but the renderer does not 
 
 ## OSC Gaps
 
-| Sequence   | Importance | Type | Planned        | Notes                                                                                                          |
-| ---------- | ---------- | ---- | -------------- | -------------------------------------------------------------------------------------------------------------- |
-| OSC 66     | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement |
-| OSC 777    | ⬜         | ⬜   | v0.9.0 Task 76 | Konsole system notification — scheduled under Notification System task                                         |
-| OSC 133 UI | 🟨         | 🚧   | v0.9.0 Task 72 | Markers A/B/C/D all parsed and stored; gutter/jump-to-prompt UI is the outstanding work                        |
+| Sequence   | Importance | Type | Planned        | Notes                                                                                                                              |
+| ---------- | ---------- | ---- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| OSC 66     | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement                     |
+| OSC 777    | ⬜         | ⬜   | v0.9.0 Task 76 | Konsole system notification — scheduled under Notification System task                                                             |
+| OSC 133 UI | 🟨         | 🚧   | v0.9.0 Task 73 | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73 |
 
 ---
 
@@ -135,16 +138,17 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 1 — Renderer integration
 
-| Item                          | Rationale                                                               | Planned        |
-| ----------------------------- | ----------------------------------------------------------------------- | -------------- |
-| DECSCNM cell-level fg/bg swap | Panel-fill inversion lands today; true per-cell inversion still missing | —              |
-| OSC 133 command-block UI      | Markers parsed; gutter + jump-to-prompt is the outstanding work         | v0.9.0 Task 72 |
+| Item                          | Rationale                                                                  | Planned        |
+| ----------------------------- | -------------------------------------------------------------------------- | -------------- |
+| DECSCNM cell-level fg/bg swap | Panel-fill inversion lands today; true per-cell inversion still missing    | —              |
+| OSC 133 command-block UI      | Storage + navigation done under Task 72; only the gutter rendering remains | v0.9.0 Task 73 |
 
 ### Priority 2 — Polish
 
-| Item    | Rationale                   | Planned        |
-| ------- | --------------------------- | -------------- |
-| OSC 777 | Konsole notification compat | v0.9.0 Task 76 |
+| Item                           | Rationale                                                                                                                                                                    | Planned        |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| OSC 777                        | Konsole notification compat                                                                                                                                                  | v0.9.0 Task 76 |
+| XTGETTCAP capability expansion | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —              |
 
 ### Priority 3 — Low priority / optional
 

@@ -2,8 +2,10 @@
 
 ## Last updated
 
-Last updated: 2026-04-21 — Audited against source; corrected OSC 12/112 (fully implemented) and ESC Z DECID (fully implemented)
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52)
+Last updated: 2026-06-03 — Task 72.13: cross-checked OSC 133 coverage against the
+shipped Task 72 surface (storage, navigation, fold, copy, hover, duration) and
+confirmed full support. No new entries; the existing OSC 133 row is already accurate.
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72)
 
 ## Overview
 
@@ -185,7 +187,7 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | OSC 110                  | Reset foreground color        | ✅     | Clears dynamic fg override; query returns theme default                                                  |
 | OSC 111                  | Reset background color        | ✅     | Clears dynamic bg override; query returns theme default                                                  |
 | OSC 112                  | Reset cursor color            | ✅     | Clears `cursor_color_override`                                                                           |
-| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed and stored in `FtcsState`; command-block UI planned for Task 72 (v0.9.0)         |
+| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed; freminal=1 extension required (see FTCS section below)                          |
 | OSC 777                  | System notification (Konsole) | ⬜     | Not implemented; Task 76 (v0.9.0)                                                                        |
 | OSC 1337                 | iTerm2 inline images          | ✅     | Full `File=`, `MultipartFile=`/`FilePart=`/`FileEnd` handling; decoded and placed                        |
 
@@ -258,12 +260,21 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 
 ## FTCS — FinalTerm Control Sequences (OSC 133)
 
-| Sequence  | Name                  | Status | Notes                                            |
-| --------- | --------------------- | ------ | ------------------------------------------------ |
-| OSC 133 A | Prompt Start          | ✅     | Parsed and stored in `FtcsState`                 |
-| OSC 133 B | Prompt End            | ✅     | Parsed and stored in `FtcsState`                 |
-| OSC 133 C | Pre-execution (input) | ✅     | Parsed and stored in `FtcsState`                 |
-| OSC 133 D | Command Finished      | ✅     | Parsed with exit code stored in `last_exit_code` |
+| Sequence  | Name                  | Status | Notes                                                                                           |
+| --------- | --------------------- | ------ | ----------------------------------------------------------------------------------------------- |
+| OSC 133 A | Prompt Start          | ✅     | Parsed with `freminal=1; fid=<id>`; stored in `FtcsState` and `CommandBlock`                    |
+| OSC 133 B | Prompt End            | ✅     | Parsed with `freminal=1; fid=<id>`; fid used to locate matching block                           |
+| OSC 133 C | Pre-execution (input) | ✅     | Parsed with `freminal=1; fid=<id>`; fid used to locate matching block                           |
+| OSC 133 D | Command Finished      | ✅     | Parsed with `freminal=1; fid=<id>`; exit code and fid used to close the matching `CommandBlock` |
+| OSC 133 P | Prompt Property       | ✅     | Accepted from any emitter (no `freminal=1` required); informational only                        |
+
+**Freminal `freminal=1; fid=<id>` extension:** Freminal extends OSC 133 A/B/C/D with
+`freminal=1; fid=<id>` parameters. Markers without `freminal=1` are silently dropped by the
+parser to avoid duplicate command blocks when other shell integrations (WezTerm, Starship,
+iTerm2, Kitty) are simultaneously active. The `fid` parameter is a per-command correlation ID
+that allows `A` and `D` pairs to be matched explicitly rather than by position.
+`P` (`PromptProperty`) does not require `freminal=1`. See `Documents/DESIGN_DECISIONS.md`
+"Shell Integration Architecture" for the full rationale.
 
 UI for command-block navigation (gutters, jump-to-prompt, fold) is planned for
 **Task 72** in v0.9.0 and is not yet implemented.
@@ -288,7 +299,7 @@ UI for command-block navigation (gutters, jump-to-prompt, fold) is planned for
 | OSC 7 (CWD)                     | ✅              | ✅                 | CWD parsed and stored                                                                                                   |
 | OSC 8 (Hyperlink)               | ✅              | ✅                 | Fully implemented                                                                                                       |
 | OSC 52 (Clipboard)              | ✅              | ✅                 | Clipboard copy/query via base64                                                                                         |
-| OSC 133 (FTCS)                  | ✅              | 🚧                 | All four markers parsed and stored; UI in Task 72 (v0.9.0)                                                              |
+| OSC 133 (FTCS)                  | ✅              | 🚧                 | All markers parsed with `freminal=1; fid=<id>` extension; foreign markers dropped; UI in Task 72 (v0.9.0)               |
 | Mouse Tracking                  | ✅              | ✅                 | Modes wired; GUI reads and forwards events                                                                              |
 | Bracketed Paste                 | ✅              | ✅                 | Mode wired; GUI wraps paste events                                                                                      |
 | DSR/DA Queries                  | ✅              | ✅                 | DA1/DA2/DSR all work correctly                                                                                          |

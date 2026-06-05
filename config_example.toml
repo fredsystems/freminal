@@ -228,6 +228,42 @@ limit = 4000
 # password_indicator = true
 
 ## ##############################################################################
+# SHELL INTEGRATION (OSC 133)
+## ##############################################################################
+[shell_integration]
+# When true, Freminal sets TERM_PROGRAM=freminal and TERM_PROGRAM_VERSION
+# in the PTY environment so shell scripts can detect Freminal, AND injects
+# the env needed to auto-load Freminal's bundled bash/zsh/fish integration
+# scripts at PTY spawn time.  The scripts emit OSC 133 prompt/command markers
+# so the terminal can render command blocks, gutters, and notifications.
+# No manual sourcing is required.
+# Default: true.
+# set_term_program = true
+
+## ##############################################################################
+# COMMAND BLOCKS (OSC 133 visualization)
+## ##############################################################################
+[command_blocks]
+# Master switch for command-block visualization.
+# When false, OSC 133 markers are still parsed but no gutters, duration
+# overlays, or fold/collapse affordances appear in the UI.
+# Default: true.
+# enabled = true
+
+# Display the duration of long-running commands next to the gutter
+# (e.g. "3s", "2m15s", "1h5m").  Sub-second commands always show as
+# "1s"; durations are truncated to whole seconds — fractional and
+# millisecond labels are never emitted.
+# Default: true.
+# show_duration = true
+
+# Minimum command duration in seconds before a duration label is rendered.
+# Below this threshold the label is suppressed to avoid flicker on fast
+# commands.
+# Default: 2.0.
+# duration_threshold_secs = 2.0
+
+## ##############################################################################
 # STARTUP & LAYOUTS
 ## ##############################################################################
 
@@ -318,6 +354,16 @@ limit = 4000
 #     scroll_line_up   = "Shift+Up"
 #     scroll_line_down = "Shift+Down"
 #     clear_scrollback = "Ctrl+Shift+Backspace"  (erase scrollback; leaves visible display)
+#
+#   Command-block folding (OSC 133):
+#     fold_previous_command = ""              (unbound — no default to avoid conflicting with open_search)
+#     fold_all              = ""              (unbound — opt-in)
+#     unfold_all            = "Ctrl+Shift+U"  (unfold every folded command block in this pane)
+#
+#   Command history (Task 72.15):
+#     show_command_history = "Ctrl+Shift+M"  (open the Quick Command History Palette;
+#                                             selecting an entry inserts it on the prompt
+#                                             without sending Enter)
 #
 #   Pane management:
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)

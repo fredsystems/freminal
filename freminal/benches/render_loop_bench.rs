@@ -471,6 +471,8 @@ fn bench_bg_instances(c: &mut Criterion) {
                             selection: None,
                             selection_is_block: false,
                             match_highlights: &[],
+                            command_block_hover_rows: None,
+                            term_width_cols: 0,
                             theme: &CATPPUCCIN_MOCHA,
                             cursor_color_override: None,
                         },
@@ -533,6 +535,66 @@ fn bench_fg_instances(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_shape_placeholder_line — fold-placeholder shaping
+// ---------------------------------------------------------------
+//
+// Measures the cost of shaping a single fold-placeholder row, which is
+// invoked once per folded command block on the full-rebuild path. Folded
+// workspaces with many command blocks (Task 72.10) call this for each
+// collapsed range; the per-line cost must stay well below the per-row
+// cost of `shape_visible` for it to remain free.
+fn bench_shape_placeholder_line(c: &mut Criterion) {
+    use freminal::gui::shaping::shape_placeholder_line;
+    use freminal_common::colors::TerminalColor;
+
+    let mut group = c.benchmark_group("shape_placeholder_line");
+    // One element per call — each invocation shapes one row.
+    group.throughput(Throughput::Elements(1));
+
+    // Typical case: width 80, 7 lines hidden.
+    group.bench_function("typical_w80", |b| {
+        b.iter_batched(
+            || FontManager::new(&Config::default(), 1.0).unwrap(),
+            |mut fm| {
+                #[allow(clippy::cast_precision_loss)]
+                let cell_w = fm.cell_width() as f32;
+                let text = "▶ 7 lines hidden — click to unfold".to_string();
+                std::hint::black_box(shape_placeholder_line(
+                    &text,
+                    TerminalColor::BrightBlack,
+                    &mut fm,
+                    cell_w,
+                    false,
+                ));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // Wide terminal — still one row, same text.
+    group.bench_function("wide_w200", |b| {
+        b.iter_batched(
+            || FontManager::new(&Config::default(), 1.0).unwrap(),
+            |mut fm| {
+                #[allow(clippy::cast_precision_loss)]
+                let cell_w = fm.cell_width() as f32;
+                let text = "▶ 1234 lines hidden — click to unfold".to_string();
+                std::hint::black_box(shape_placeholder_line(
+                    &text,
+                    TerminalColor::BrightBlack,
+                    &mut fm,
+                    cell_w,
+                    false,
+                ));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -547,6 +609,7 @@ criterion_group!(
         bench_shaping_ligatures,
         bench_bg_instances,
         bench_fg_instances,
+        bench_shape_placeholder_line,
 );
 
 criterion_main!(benches);

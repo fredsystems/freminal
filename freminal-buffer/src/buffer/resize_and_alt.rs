@@ -10,6 +10,8 @@
 //! scrollback row limit, and switching between the primary and alternate
 //! screen buffers.
 
+use std::collections::VecDeque;
+
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
     cursor::CursorState,
@@ -207,6 +209,7 @@ impl Buffer {
             image_store: saved.image_store,
             image_cell_count: saved.image_cell_count,
             prompt_rows: Vec::new(),
+            command_blocks: VecDeque::new(),
         };
 
         let new_offset = tmp.set_size(new_width, new_height, saved.scroll_offset);

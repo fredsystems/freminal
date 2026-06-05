@@ -18,6 +18,8 @@
 //! the tree structure — they just own their `TerminalEmulator` and publish
 //! snapshots via `ArcSwap`.
 
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -25,14 +27,25 @@ use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use egui::Rect;
+use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
+use super::pty::CommandFinishedEvent;
 use super::terminal::PaneRenderCache;
 use super::terminal::RenderState;
 use super::view_state::ViewState;
+
+/// Maximum number of completed command blocks retained per pane.
+///
+/// `Pane::recent_commands` is a bounded ring buffer; once it reaches this cap,
+/// the oldest entry is dropped each time a new finished-command event arrives.
+/// The cap exists so a long-running shell cannot grow GUI memory without
+/// bound, and matches the per-pane history quota called out in
+/// `Documents/PLAN_VERSION_090.md` Task 72.9.
+pub const RECENT_COMMANDS_CAP: usize = 64;
 
 // ── PaneId ───────────────────────────────────────────────────────────
 
@@ -200,6 +213,151 @@ pub struct Pane {
     /// Tracks the previous frame's cursor, theme, selection, and content pointers
     /// to detect what changed and enable fast-path (cursor-only) updates.
     pub(crate) render_cache: PaneRenderCache,
+
+    /// Receiver for [`CommandFinishedEvent`]s emitted by this pane's PTY
+    /// consumer thread (Task 72.9).
+    ///
+    /// Drained once per frame by the GUI; new events are pushed onto
+    /// [`Self::recent_commands`] and, when the owning tab is not active,
+    /// flip the tab's pending-event indicator.
+    pub command_event_rx: Receiver<CommandFinishedEvent>,
+
+    /// Bounded ring buffer of recently finished commands for this pane.
+    ///
+    /// Capped at [`RECENT_COMMANDS_CAP`]; the oldest entry is dropped when the
+    /// cap is reached. Populated by draining
+    /// [`Self::command_event_rx`] each frame. Consumed by Task 76 (notification
+    /// formatting), Task 72.10 (fold/collapse UI), and a future command-palette
+    /// task.
+    pub recent_commands: VecDeque<CommandBlock>,
+
+    /// Pre-loaded shell-history seed for the Quick Command History Palette
+    /// (Task 72.15).  Populated asynchronously by
+    /// [`crate::gui::shell_history::spawn_loader`] at PTY spawn time and
+    /// optionally re-published by
+    /// [`crate::gui::shell_history::spawn_loader_with_path`] when the
+    /// shell-integration scripts emit `OSC 1338`.
+    ///
+    /// Sequence-tagged `ArcSwap`: the OSC-driven load (`SEED_SEQ_OSC`)
+    /// always wins over the env-derived load (`SEED_SEQ_ENV`).  An empty
+    /// `entries` vec at `seq=0` means "not yet loaded or no history
+    /// file"; the palette degrades gracefully to live-commands-only.
+    ///
+    /// Read-only after spawn -- the palette merges these historical entries
+    /// (no timestamps, no exit codes) with the live entries in
+    /// [`Self::recent_commands`].  See
+    /// [`crate::gui::shell_history`] for the loaders and the parsers.
+    pub history_seed: crate::gui::shell_history::SharedSeededHistory,
+
+    /// Resolved shell program for this pane (if any), captured at
+    /// PTY-spawn time and forwarded from
+    /// [`crate::gui::pty::TabChannels::shell_program`].  Used by the GUI
+    /// to pick the right parser when the shell-integration scripts emit
+    /// `OSC 1338 ; HISTFILE=<path> ST`.  `None` when a positional
+    /// `command` was specified or no shell could be resolved.
+    pub shell_program: Option<std::path::PathBuf>,
+
+    /// Last `shell_histfile` value observed in a snapshot for this pane.
+    /// The GUI compares each frame's `snapshot.shell_histfile` against
+    /// this; on change it spawns a new
+    /// [`crate::gui::shell_history::spawn_loader_with_path`] (sequence
+    /// `SEED_SEQ_OSC=1`) which CAS-supersedes the env-derived load.
+    /// Initialised to `None`; transitions monotonically toward the
+    /// authoritative shell-reported HISTFILE.
+    pub shell_histfile_last_seen: Option<std::path::PathBuf>,
+
+    /// Per-pane cache of extracted command text, keyed by
+    /// [`CommandBlockId`].  Populated by the GUI when a finished
+    /// [`CommandBlock`] arrives and the command's rows are still inside
+    /// the snapshot's visible window, so the Quick Command History
+    /// Palette (Task 72.15) can present command text synchronously
+    /// without re-requesting it from the PTY thread.
+    ///
+    /// Entries are evicted in lock-step with [`Self::recent_commands`] --
+    /// when [`Self::push_recent_command`] drops the oldest block to
+    /// enforce [`RECENT_COMMANDS_CAP`], the corresponding text entry is
+    /// removed here as well.  Blocks whose text could not be extracted
+    /// at finish time (e.g. they had already scrolled out of the visible
+    /// window) are simply absent from this map; the palette degrades to
+    /// surfacing only seed entries + extractable live entries.
+    pub command_texts: HashMap<CommandBlockId, String>,
+}
+
+impl Pane {
+    /// Construct a `Pane` from the channels returned by
+    /// [`crate::gui::pty::spawn_pty_tab`] (or by the split-pane spawn
+    /// path) and the window's shared `WindowPostRenderer` handle.
+    ///
+    /// All GUI-owned state is initialised to its empty default: fresh
+    /// [`ViewState`], empty title stack, empty `recent_commands` ring,
+    /// empty `command_texts` cache, and `None` for
+    /// [`Self::shell_histfile_last_seen`].  The caller supplies the
+    /// initial `title` (typically `"Terminal"` or a layout-restored
+    /// title).
+    ///
+    /// Centralising this construction keeps the seven callsites in
+    /// `tab_spawning`, `app_impl`, and the layout-restore path in step
+    /// when new fields are added.
+    pub fn from_channels(
+        pane_id: PaneId,
+        channels: super::pty::TabChannels,
+        window_post: Arc<Mutex<crate::gui::renderer::WindowPostRenderer>>,
+        title: String,
+    ) -> Self {
+        Self {
+            id: pane_id,
+            arc_swap: channels.arc_swap,
+            input_tx: channels.input_tx,
+            pty_write_tx: channels.pty_write_tx,
+            window_cmd_rx: channels.window_cmd_rx,
+            clipboard_rx: channels.clipboard_rx,
+            search_buffer_rx: channels.search_buffer_rx,
+            pty_dead_rx: channels.pty_dead_rx,
+            title,
+            bell_active: false,
+            pending_copy: false,
+            title_stack: Vec::new(),
+            view_state: super::view_state::ViewState::new(),
+            echo_off: channels.echo_off,
+            child_pid: channels.child_pid,
+            render_state: super::terminal::new_render_state(window_post),
+            render_cache: PaneRenderCache::new(),
+            command_event_rx: channels.command_event_rx,
+            history_seed: channels.history_seed,
+            shell_program: channels.shell_program,
+            shell_histfile_last_seen: None,
+            recent_commands: VecDeque::new(),
+            command_texts: HashMap::new(),
+        }
+    }
+
+    /// Push a finished `CommandBlock` onto [`Self::recent_commands`],
+    /// enforcing the [`RECENT_COMMANDS_CAP`] bound.
+    ///
+    /// When the ring is at capacity, the oldest entry is dropped before the
+    /// new block is appended.  The oldest entry's text (if any) is also
+    /// evicted from [`Self::command_texts`] so the cache stays in step with
+    /// the ring buffer.  Used by both the per-frame command-event drain in
+    /// the GUI (Task 72.9) and by unit tests.
+    pub fn push_recent_command(&mut self, block: CommandBlock) {
+        if self.recent_commands.len() >= RECENT_COMMANDS_CAP
+            && let Some(dropped) = self.recent_commands.pop_front()
+        {
+            self.command_texts.remove(&dropped.id);
+        }
+        self.recent_commands.push_back(block);
+    }
+
+    /// Record the extracted command text for a [`CommandBlockId`].
+    ///
+    /// Caller is responsible for extracting the text from the snapshot
+    /// (typically via [`crate::gui::command_history::extract_command_text`])
+    /// before calling this.  Storing an entry whose `id` is not in
+    /// [`Self::recent_commands`] is harmless but wasteful; the typical
+    /// pattern is to call this immediately after [`Self::push_recent_command`].
+    pub fn record_command_text(&mut self, id: CommandBlockId, text: String) {
+        self.command_texts.insert(id, text);
+    }
 }
 
 impl std::fmt::Debug for Pane {
@@ -208,6 +366,11 @@ impl std::fmt::Debug for Pane {
             .field("id", &self.id)
             .field("title", &self.title)
             .field("bell_active", &self.bell_active)
+            .field(
+                "history_seed_loaded",
+                &!self.history_seed.load().entries.is_empty(),
+            )
+            .field("command_texts_len", &self.command_texts.len())
             .finish_non_exhaustive()
     }
 }
@@ -1364,6 +1527,7 @@ mod tests {
         let (_search_buffer_tx, search_buffer_rx) =
             crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 
         Pane {
             id,
@@ -1385,6 +1549,12 @@ mod tests {
                 crate::gui::renderer::WindowPostRenderer::new(),
             ))),
             render_cache: crate::gui::terminal::PaneRenderCache::new(),
+            command_event_rx,
+            recent_commands: VecDeque::new(),
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+            shell_histfile_last_seen: None,
+            command_texts: HashMap::new(),
         }
     }
 
@@ -1420,6 +1590,59 @@ mod tests {
         pane1.view_state.scroll_offset = 42;
         assert_eq!(pane1.view_state.scroll_offset, 42);
         assert_eq!(pane2.view_state.scroll_offset, 0);
+    }
+
+    // ── recent_commands ring buffer (Task 72.9) ──────────────────────
+
+    #[test]
+    fn push_recent_command_below_cap_appends_in_order() {
+        let mut pane = dummy_pane(PaneId(0), "p");
+        for _ in 0..5 {
+            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        }
+        assert_eq!(pane.recent_commands.len(), 5);
+    }
+
+    #[test]
+    fn push_recent_command_enforces_cap_dropping_oldest() {
+        let mut pane = dummy_pane(PaneId(0), "p");
+        // Push CAP + 10 blocks; the first 10 must be evicted.
+        let total = RECENT_COMMANDS_CAP + 10;
+        let mut ids = Vec::with_capacity(total);
+        for _ in 0..total {
+            let block = CommandBlock::new_running(0, None, String::new());
+            ids.push(block.id);
+            pane.push_recent_command(block);
+        }
+
+        assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
+
+        // The remaining blocks must be the last RECENT_COMMANDS_CAP pushed,
+        // in insertion order.
+        let expected_first = ids[total - RECENT_COMMANDS_CAP];
+        let expected_last = ids[total - 1];
+        assert_eq!(
+            pane.recent_commands.front().unwrap().id,
+            expected_first,
+            "oldest retained entry should be ids[total - CAP]"
+        );
+        assert_eq!(
+            pane.recent_commands.back().unwrap().id,
+            expected_last,
+            "newest entry should be the last pushed"
+        );
+    }
+
+    #[test]
+    fn push_recent_command_at_exact_cap_does_not_evict() {
+        let mut pane = dummy_pane(PaneId(0), "p");
+        for _ in 0..RECENT_COMMANDS_CAP {
+            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        }
+        assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
+        // The next push must evict exactly one entry.
+        pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
     }
 
     // ── PaneTree: single pane ────────────────────────────────────────

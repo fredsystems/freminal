@@ -14,7 +14,7 @@ use freminal_windowing::{RepaintProxy, WindowId};
 use tracing::{error, warn};
 
 use super::window::PerWindowState;
-use super::{FreminalGui, panes, pty, renderer, tabs, terminal, view_state};
+use super::{FreminalGui, panes, pty, renderer, tabs};
 
 impl FreminalGui {
     /// Spawn a new PTY-backed tab and add it to the tab manager.
@@ -76,29 +76,17 @@ impl FreminalGui {
                 extra_env: None,
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                set_term_program: self.config.shell_integration.set_term_program,
             },
         ) {
             Ok(channels) => {
                 let id = win.tabs.next_tab_id();
-                let pane = panes::Pane {
-                    id: pane_id,
-                    arc_swap: channels.arc_swap,
-                    input_tx: channels.input_tx,
-                    pty_write_tx: channels.pty_write_tx,
-                    window_cmd_rx: channels.window_cmd_rx,
-                    clipboard_rx: channels.clipboard_rx,
-                    search_buffer_rx: channels.search_buffer_rx,
-                    pty_dead_rx: channels.pty_dead_rx,
-                    title: "Terminal".to_owned(),
-                    bell_active: false,
-                    pending_copy: false,
-                    title_stack: Vec::new(),
-                    view_state: view_state::ViewState::new(),
-                    echo_off: channels.echo_off,
-                    child_pid: channels.child_pid,
-                    render_state: terminal::new_render_state(Arc::clone(&win.window_post)),
-                    render_cache: terminal::PaneRenderCache::new(),
-                };
+                let pane = panes::Pane::from_channels(
+                    pane_id,
+                    channels,
+                    Arc::clone(&win.window_post),
+                    "Terminal".to_owned(),
+                );
                 let tab = tabs::Tab::new(id, pane);
                 // Inform the new tab of the current theme mode so DECRPM
                 // ?2031 queries return the correct locked/dynamic status.
@@ -215,6 +203,7 @@ impl FreminalGui {
                 extra_env: None,
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
+                set_term_program: self.config.shell_integration.set_term_program,
             },
         ) {
             Ok(ch) => ch,
@@ -234,25 +223,12 @@ impl FreminalGui {
         // Insert the new pane into the tree.
         let new_pane_id = {
             let tab = win.tabs.active_tab_mut();
-            let new_pane = panes::Pane {
-                id: new_pane_id,
-                arc_swap: channels.arc_swap,
-                input_tx: channels.input_tx,
-                pty_write_tx: channels.pty_write_tx,
-                window_cmd_rx: channels.window_cmd_rx,
-                clipboard_rx: channels.clipboard_rx,
-                search_buffer_rx: channels.search_buffer_rx,
-                pty_dead_rx: channels.pty_dead_rx,
-                title: "Terminal".to_owned(),
-                bell_active: false,
-                pending_copy: false,
-                title_stack: Vec::new(),
-                view_state: view_state::ViewState::new(),
-                echo_off: channels.echo_off,
-                child_pid: channels.child_pid,
-                render_state: terminal::new_render_state(Arc::clone(&win.window_post)),
-                render_cache: terminal::PaneRenderCache::new(),
-            };
+            let new_pane = panes::Pane::from_channels(
+                new_pane_id,
+                channels,
+                Arc::clone(&win.window_post),
+                "Terminal".to_owned(),
+            );
             match tab.pane_tree.split_with_id(target_id, direction, new_pane) {
                 Ok(id) => id,
                 Err(e) => {
@@ -357,6 +333,7 @@ impl FreminalGui {
                 extra_env,
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                set_term_program: self.config.shell_integration.set_term_program,
             },
         ) {
             Ok(ch) => ch,
@@ -370,24 +347,11 @@ impl FreminalGui {
             }
         };
 
-        Some(panes::Pane {
-            id: pane_id,
-            arc_swap: channels.arc_swap,
-            input_tx: channels.input_tx,
-            pty_write_tx: channels.pty_write_tx,
-            window_cmd_rx: channels.window_cmd_rx,
-            clipboard_rx: channels.clipboard_rx,
-            search_buffer_rx: channels.search_buffer_rx,
-            pty_dead_rx: channels.pty_dead_rx,
-            title: leaf.title.clone().unwrap_or_else(|| "Terminal".to_owned()),
-            bell_active: false,
-            pending_copy: false,
-            title_stack: Vec::new(),
-            view_state: view_state::ViewState::new(),
-            echo_off: channels.echo_off,
-            child_pid: channels.child_pid,
-            render_state: terminal::new_render_state(Arc::clone(window_post)),
-            render_cache: terminal::PaneRenderCache::new(),
-        })
+        Some(panes::Pane::from_channels(
+            pane_id,
+            channels,
+            Arc::clone(window_post),
+            leaf.title.clone().unwrap_or_else(|| "Terminal".to_owned()),
+        ))
     }
 }

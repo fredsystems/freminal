@@ -57,6 +57,7 @@ use tracing_subscriber::{
 };
 
 pub mod gui;
+mod shell_integration;
 use anyhow::Result;
 use freminal_common::{args::Args, config, config::load_config};
 use freminal_terminal_emulator::recording::{
@@ -269,6 +270,56 @@ fn main() {
         info!("Log directory: {}", dir.display());
     }
     debug!("Loaded config: {:#?}", cfg);
+
+    // ── 2.5. Sync shell-integration scripts to disk on every launch ─────
+    // The scripts are loaded automatically by Freminal-spawned shells via
+    // shell-specific injection (see freminal-terminal-emulator/src/io/pty.rs).
+    // We sync on every launch so the on-disk copies always match the
+    // bundled versions — user edits are intentionally not preserved.
+    // Files whose bytes already match are skipped (no mtime bump).
+    //
+    // Non-fatal: failures are logged via `warn!` but do not abort startup.
+    // Gated on `set_term_program` since that flag controls the whole
+    // shell-integration feature (TERM_PROGRAM announcement + script
+    // injection are coupled).
+    if cfg.shell_integration.set_term_program
+        && let Some(dir) = config::shell_integration_dir()
+    {
+        match dir {
+            config::ShellIntegrationDir::UserWritable(ref path) => {
+                let result = shell_integration::sync_to_disk(path);
+                if result.has_errors() {
+                    for (name, err) in &result.errors {
+                        warn!(
+                            "Shell integration: failed to sync '{}' into {}: {}",
+                            name,
+                            path.display(),
+                            err
+                        );
+                    }
+                } else if !result.written.is_empty() {
+                    info!(
+                        "Shell integration: synced {} script(s) to {}",
+                        result.written.len(),
+                        path.display()
+                    );
+                }
+                // skipped files (already up to date) are not logged — that
+                // is the normal case on subsequent launches.
+            }
+            config::ShellIntegrationDir::PackagingProvided(ref path) => {
+                // Packager owns this directory; we never write to it.  The
+                // bundled scripts are whatever the package shipped, and
+                // keeping them in sync with the freminal binary is the
+                // packager's responsibility.
+                info!(
+                    "Shell integration: using packager-provided scripts at {} \
+                     (no on-disk sync performed)",
+                    path.display()
+                );
+            }
+        }
+    }
 
     // Warn if both a positional command and --shell are specified.
     // The positional command takes precedence (handled in TerminalEmulator::new).

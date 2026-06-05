@@ -19,6 +19,7 @@ use window::PerWindowState;
 
 pub mod atlas;
 pub mod colors;
+pub mod folding;
 pub mod font_manager;
 pub mod fonts;
 pub mod mouse;
@@ -28,12 +29,15 @@ pub mod renderer;
 pub mod search;
 pub mod settings;
 pub mod shaping;
+pub mod shell_history;
 pub mod tabs;
 pub mod terminal;
 pub mod view_state;
 
 mod actions;
 mod app_impl;
+mod command_blocks;
+mod command_history;
 mod hot_reload;
 mod layout_ops;
 mod menu;

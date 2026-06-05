@@ -739,6 +739,44 @@ pub enum KeyAction {
     /// drops the off-screen history. Useful for cleaning up a session's
     /// accumulated history without clearing the current prompt context.
     ClearScrollback,
+    /// Toggle the folded/collapsed state of the OSC 133 command block
+    /// containing the cursor.
+    ///
+    /// Only applies to completed blocks (those with a recorded end row).
+    /// Running commands cannot be folded. Folding hides every row from the
+    /// command's start row through its end row inclusive; the prompt line
+    /// itself remains visible. Clicking the placeholder row produced by a
+    /// folded block unfolds it.
+    ///
+    /// Unbound by default to avoid conflicting with `OpenSearch`
+    /// (`Ctrl+Shift+F`). Users who want a fold shortcut should add a binding
+    /// in `[keybindings]`.
+    FoldPreviousCommand,
+    /// Fold every completed OSC 133 command block in the current pane.
+    ///
+    /// Running blocks are skipped. Unbound by default.
+    FoldAll,
+    /// Unfold every folded OSC 133 command block in the current pane.
+    UnfoldAll,
+    /// Copy the output of the most recently completed OSC 133 command
+    /// block to the clipboard.
+    ///
+    /// "Output" is the row range `[output_start_row, end_row]` — i.e.
+    /// the text the command produced after the C marker fired, up to and
+    /// including the row where D was received. Running blocks (no
+    /// `end_row`) and blocks missing `output_start_row` are skipped.
+    ///
+    /// Default binding: `Ctrl+Shift+Y`. When `command_blocks.enabled`
+    /// is `false` the action is a no-op.
+    CopyLastCommandOutput,
+    /// Copy the output of the OSC 133 command block containing the
+    /// right-clicked or cursor row.
+    ///
+    /// Unbound by default; surfaced primarily via the right-click
+    /// context menu entry "Copy Command Output". Users who want a
+    /// keybinding for it should add one in `[keybindings]`. When
+    /// `command_blocks.enabled` is `false` the action is a no-op.
+    CopyCommandOutputAtCursor,
     /// Start or stop recording the current session to a `.frec` file.
     ///
     /// Toggle-on captures the current topology (all windows, tabs, pane
@@ -747,6 +785,20 @@ pub enum KeyAction {
     /// writer thread. The default recording path is
     /// `~/.config/freminal/recordings/YYYY-MM-DD_HHMMSS.frec`.
     ToggleRecording,
+    /// Open the Quick Command History palette for the focused pane.
+    ///
+    /// The palette presents a fuzzy-searchable view over (a) the user's
+    /// shell history file (bash / zsh / fish), loaded once at pane spawn
+    /// time and capped at 1000 entries, and (b) the live OSC 133 command
+    /// blocks captured during the current session.  Selecting an entry
+    /// sends the command text to the pane as keyboard input (it does NOT
+    /// auto-execute — the user reviews and presses Enter themselves).
+    ///
+    /// Default binding: `Ctrl+Shift+M`.  Deliberately NOT `Ctrl+R`
+    /// (collides with the shell's reverse-i-search), NOT `Ctrl+Shift+R`
+    /// (taken by [`Self::ToggleRecording`]), NOT `Ctrl+Shift+P` (reserved
+    /// for the forthcoming command palette in Task 83).
+    ShowCommandHistory,
 
     // -- Pane management ---------------------------------------------------
     /// Split the focused pane vertically (left | right, vertical divider).
@@ -835,7 +887,13 @@ impl KeyAction {
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
             Self::ClearScrollback => "clear_scrollback",
+            Self::FoldPreviousCommand => "fold_previous_command",
+            Self::FoldAll => "fold_all",
+            Self::UnfoldAll => "unfold_all",
+            Self::CopyLastCommandOutput => "copy_last_command_output",
+            Self::CopyCommandOutputAtCursor => "copy_command_output_at_cursor",
             Self::ToggleRecording => "toggle_recording",
+            Self::ShowCommandHistory => "show_command_history",
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
             Self::ClosePane => "close_pane",
@@ -899,7 +957,13 @@ impl KeyAction {
             Self::ScrollLineUp => "Scroll Line Up",
             Self::ScrollLineDown => "Scroll Line Down",
             Self::ClearScrollback => "Clear Scrollback",
+            Self::FoldPreviousCommand => "Fold Previous Command",
+            Self::FoldAll => "Fold All Commands",
+            Self::UnfoldAll => "Unfold All Commands",
+            Self::CopyLastCommandOutput => "Copy Last Command Output",
+            Self::CopyCommandOutputAtCursor => "Copy Command Output at Cursor",
             Self::ToggleRecording => "Toggle Recording",
+            Self::ShowCommandHistory => "Show Command History",
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
             Self::ClosePane => "Close Pane",
@@ -960,7 +1024,13 @@ impl KeyAction {
         Self::ScrollLineUp,
         Self::ScrollLineDown,
         Self::ClearScrollback,
+        Self::FoldPreviousCommand,
+        Self::FoldAll,
+        Self::UnfoldAll,
+        Self::CopyLastCommandOutput,
+        Self::CopyCommandOutputAtCursor,
         Self::ToggleRecording,
+        Self::ShowCommandHistory,
         Self::SplitVertical,
         Self::SplitHorizontal,
         Self::ClosePane,
@@ -1033,7 +1103,13 @@ impl FromStr for KeyAction {
             "scroll_line_up" => Ok(Self::ScrollLineUp),
             "scroll_line_down" => Ok(Self::ScrollLineDown),
             "clear_scrollback" => Ok(Self::ClearScrollback),
+            "fold_previous_command" => Ok(Self::FoldPreviousCommand),
+            "fold_all" => Ok(Self::FoldAll),
+            "unfold_all" => Ok(Self::UnfoldAll),
+            "copy_last_command_output" => Ok(Self::CopyLastCommandOutput),
+            "copy_command_output_at_cursor" => Ok(Self::CopyCommandOutputAtCursor),
             "toggle_recording" => Ok(Self::ToggleRecording),
+            "show_command_history" => Ok(Self::ShowCommandHistory),
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
             "close_pane" => Ok(Self::ClosePane),
@@ -1238,6 +1314,14 @@ fn register_misc_bindings(map: &mut BindingMap) {
         KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT),
         KeyAction::Paste,
     );
+    // Copy the last completed command's output (OSC 133 D-bounded region).
+    // Ctrl+Shift+Y is free on all platforms — bash readline binds Ctrl+Y to
+    // yank but only without Shift. Mnemonic: "Y is for Yank a command's
+    // output to the clipboard".
+    map.bind(
+        KeyCombo::new(BindingKey::Y, BindingModifiers::CTRL_SHIFT),
+        KeyAction::CopyLastCommandOutput,
+    );
 
     // -- Font zoom --
     // Ctrl+= is the primary zoom-in binding (= is next to - on US keyboards).
@@ -1315,6 +1399,16 @@ fn register_misc_bindings(map: &mut BindingMap) {
         KeyAction::ClearScrollback,
     );
 
+    // Unfold every folded OSC 133 command block in the current pane.
+    // `FoldPreviousCommand` and `FoldAll` are intentionally unbound by default
+    // — `Ctrl+Shift+F` is already bound to `OpenSearch` and there is no
+    // obvious free combo for a one-shot "fold the block at the cursor"
+    // action. Users who want one should add a binding in `[keybindings]`.
+    map.bind(
+        KeyCombo::new(BindingKey::U, BindingModifiers::CTRL_SHIFT),
+        KeyAction::UnfoldAll,
+    );
+
     // Toggle session recording on/off. Ctrl+Shift+R is free on all
     // platforms (bash readline Ctrl+R reverse-search uses only Ctrl, no
     // Shift) and is a mnemonic match for "Record". Users can rebind via
@@ -1322,6 +1416,17 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::R, BindingModifiers::CTRL_SHIFT),
         KeyAction::ToggleRecording,
+    );
+
+    // Open the Quick Command History palette. Ctrl+Shift+M is free
+    // ("M" for "menu" / "command Memory") and avoids three previously
+    // considered conflicts:
+    //   - Ctrl+R       — the shell's reverse-i-search.
+    //   - Ctrl+Shift+R — already bound to ToggleRecording above.
+    //   - Ctrl+Shift+P — reserved for the Task 83 command palette.
+    map.bind(
+        KeyCombo::new(BindingKey::M, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ShowCommandHistory,
     );
 }
 
@@ -1723,7 +1828,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            53,
+            59,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2086,11 +2191,12 @@ mod tests {
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
         //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
-        //        + ToggleRecording(1) = 43
+        //        + ToggleRecording(1) + UnfoldAll(1)
+        //        + CopyLastCommandOutput(1) + ShowCommandHistory(1) = 46
         assert_eq!(
             map.len(),
-            43,
-            "default binding map should have exactly 43 bindings"
+            46,
+            "default binding map should have exactly 46 bindings"
         );
     }
 
@@ -2107,6 +2213,9 @@ mod tests {
             KeyAction::SearchNext,
             KeyAction::SearchPrev,
             KeyAction::ToggleMenuBar,
+            KeyAction::FoldPreviousCommand,
+            KeyAction::FoldAll,
+            KeyAction::CopyCommandOutputAtCursor,
         ];
         for action in unbound {
             assert!(

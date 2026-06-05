@@ -234,6 +234,10 @@ impl FreminalGui {
     ///
     /// Unlike the inline modal path (which operates on a single `win`), this
     /// applies changes across ALL terminal windows in `self.windows`.
+    // Long match arm with one branch per SettingsAction variant; each
+    // branch carries the broadcast logic for that action class.  Splitting
+    // would scatter related per-variant handlers across opaque helpers.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_settings_action(
         &mut self,
         action: &SettingsAction,

@@ -78,6 +78,14 @@ pub struct Tab {
     /// so that shell-driven titles remain authoritative once the user stops
     /// pinning a custom name.
     pub custom_name: Option<String>,
+
+    /// Set when an unfocused tab has received a [`CommandFinishedEvent`]
+    /// (Task 72.9). The tab bar will surface this as a visual indicator
+    /// (badge / dot) in Task 72.10.
+    ///
+    /// Cleared by [`TabManager::switch_to`], [`TabManager::next_tab`], and
+    /// [`TabManager::prev_tab`] when the tab becomes active again.
+    pub has_pending_event: bool,
 }
 
 impl Tab {
@@ -91,6 +99,7 @@ impl Tab {
             active_pane: pane_id,
             zoomed_pane: None,
             custom_name: None,
+            has_pending_event: false,
         }
     }
 
@@ -285,7 +294,7 @@ impl TabManager {
     /// # Errors
     ///
     /// Returns `TabError::IndexOutOfBounds` if `index >= tab_count()`.
-    pub const fn switch_to(&mut self, index: usize) -> Result<(), TabError> {
+    pub fn switch_to(&mut self, index: usize) -> Result<(), TabError> {
         if index >= self.tabs.len() {
             return Err(TabError::IndexOutOfBounds {
                 index,
@@ -293,21 +302,26 @@ impl TabManager {
             });
         }
         self.active = index;
+        // Clear the pending-event badge when a tab is focused. The user has
+        // observed the event by switching to the tab.
+        self.tabs[self.active].has_pending_event = false;
         Ok(())
     }
 
     /// Switch to the next tab (wrapping around to the first).
-    pub const fn next_tab(&mut self) {
+    pub fn next_tab(&mut self) {
         self.active = (self.active + 1) % self.tabs.len();
+        self.tabs[self.active].has_pending_event = false;
     }
 
     /// Switch to the previous tab (wrapping around to the last).
-    pub const fn prev_tab(&mut self) {
+    pub fn prev_tab(&mut self) {
         if self.active == 0 {
             self.active = self.tabs.len() - 1;
         } else {
             self.active -= 1;
         }
+        self.tabs[self.active].has_pending_event = false;
     }
 
     /// Move a tab from `from` to `to` in display order.
@@ -402,6 +416,7 @@ mod tests {
         let (_search_buffer_tx, search_buffer_rx) =
             crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 
         let pane = Pane {
             id: PaneId::first(),
@@ -412,6 +427,12 @@ mod tests {
             clipboard_rx,
             search_buffer_rx,
             pty_dead_rx,
+            command_event_rx,
+            recent_commands: std::collections::VecDeque::new(),
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+            shell_histfile_last_seen: None,
+            command_texts: std::collections::HashMap::new(),
             title: title.to_owned(),
             bell_active: false,
             pending_copy: false,

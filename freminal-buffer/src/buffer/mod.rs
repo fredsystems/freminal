@@ -6,6 +6,7 @@
 use conv2::ValueFrom;
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
+    command_block::CommandBlock,
     cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
@@ -182,6 +183,18 @@ pub struct Buffer {
     /// Maintained atomically with row drains: when rows are removed from the
     /// front, all indices are shifted down and entries that fell off are dropped.
     pub(in crate::buffer) prompt_rows: Vec<usize>,
+
+    /// OSC 133 command blocks, stored oldest-first.
+    ///
+    /// Each block covers one shell command's full lifecycle: prompt start (`A`),
+    /// command input start (`B`), output start (`C`), and command finished (`D`).
+    /// Capped at `scrollback_limit` entries; when the cap is reached the oldest
+    /// block is evicted before inserting a new one.
+    ///
+    /// Row indices inside each block are buffer-relative (same coordinate space
+    /// as `prompt_rows`).  They are adjusted atomically with row drains via
+    /// [`Buffer::adjust_prompt_rows`].
+    pub(in crate::buffer) command_blocks: std::collections::VecDeque<CommandBlock>,
 }
 
 /// Snapshot of the primary buffer state saved when entering the alternate screen.

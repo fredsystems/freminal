@@ -6,8 +6,10 @@
 //! The `FreminalTerminalWidget` egui widget and GPU render state.
 
 use crate::gui::{
+    folding::{RenderedRow, RowMap, compute_fold_ranges},
     fonts::{FontConfig, setup_font_files},
     mouse::PreviousMouseState,
+    shaping::ShapedLine,
     view_state::{CellCoord, ViewState},
 };
 
@@ -18,7 +20,9 @@ use freminal_common::{
     send_or_log,
     themes::ThemePalette,
 };
-use freminal_terminal_emulator::{InlineImage, io::InputEvent, snapshot::TerminalSnapshot};
+use freminal_terminal_emulator::{
+    InlineImage, LineWidth, io::InputEvent, snapshot::TerminalSnapshot,
+};
 
 use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
 
@@ -46,6 +50,67 @@ use glow::HasContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::error;
+
+// ─── Fold-placeholder helpers (Task 72.10b-3) ────────────────────────────
+
+/// Format the placeholder text shown on a collapsed fold-row.
+///
+/// Examples (assuming `width_cols` is generous):
+///
+/// - `format_placeholder_text(1, 80)` → `"▶ 1 line hidden — click to unfold"`
+/// - `format_placeholder_text(7, 80)` → `"▶ 7 lines hidden — click to unfold"`
+///
+/// When `width_cols` cannot fit the full string, the result is truncated
+/// to `width_cols.saturating_sub(1)` characters and an ellipsis (`…`) is
+/// appended.  When `width_cols` is too small to fit even the minimal
+/// `"▶ N lines…"` form, the helper falls back to `"▶…"` (or `""` if the
+/// width is zero).
+#[must_use]
+pub fn format_placeholder_text(hidden_rows: usize, width_cols: usize) -> String {
+    let suffix = if hidden_rows == 1 { "line" } else { "lines" };
+    let full = format!("▶ {hidden_rows} {suffix} hidden — click to unfold");
+
+    if width_cols == 0 {
+        return String::new();
+    }
+
+    // Count *characters* (not bytes) to compare against terminal columns.
+    // This is a rough match: wide chars actually take 2 cols, but the
+    // placeholder string is overwhelmingly ASCII so the over-approximation
+    // is acceptable for truncation purposes.
+    if full.chars().count() <= width_cols {
+        return full;
+    }
+
+    if width_cols < 2 {
+        return "▶".to_string();
+    }
+
+    // Take `width_cols - 1` chars, then append the ellipsis.
+    let kept: String = full.chars().take(width_cols.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Hit-test a pointer position against a list of fold-placeholder rects.
+///
+/// Returns the `CommandBlockId` of the first rect that contains `pos`, or
+/// `None` if the pointer is not over any placeholder.  Rects are checked
+/// in insertion order; placeholder rows do not overlap by construction
+/// (each occupies one rendered row), so order does not matter for
+/// correctness — but it is well-defined for testability.
+#[must_use]
+pub fn hit_test_placeholder(
+    rects: &[(
+        Rect,
+        freminal_common::buffer_states::command_block::CommandBlockId,
+    )],
+    pos: Pos2,
+) -> Option<freminal_common::buffer_states::command_block::CommandBlockId> {
+    rects
+        .iter()
+        .find(|(rect, _)| rect.contains(pos))
+        .map(|(_, id)| *id)
+}
 
 ///
 /// The scrollbar is shown when the user is actively scrolled back
@@ -244,7 +309,18 @@ enum ContextMenuAction {
     Paste,
     SelectAll,
     OpenUrl(String),
+    /// Copy the URL string to the clipboard. Distinct from `Copy` (which
+    /// copies the current selection) and from `OpenUrl` (which launches the
+    /// browser). Surfaced only when the right-click cell is inside an
+    /// OSC 8 hyperlink.
+    CopyUrl(String),
     NewTerminal,
+    /// Copy the output range `[start_row, end_row]` of the command block
+    /// the right-click occurred inside, full-width per row.
+    CopyCommandOutput {
+        start_row: usize,
+        end_row: usize,
+    },
 }
 
 /// Render the right-click context menu when `view_state.context_menu_pos`
@@ -349,6 +425,18 @@ fn render_context_menu_area(
         )
     });
 
+    // Look up whether the right-clicked cell sits inside a completed
+    // OSC 133 command block.  Returns `(start_row, end_row)` of the
+    // block's output region if the click was inside a block with a
+    // captured C marker and a recorded D marker.
+    let command_output_range = view_state.context_menu_cell.and_then(|cell| {
+        let block = super::input::find_block_containing_row(snap, cell.row)?;
+        match (block.output_start_row, block.end_row) {
+            (Some(start), Some(end)) if start <= end => Some((start, end)),
+            _ => None,
+        }
+    });
+
     egui::Area::new(area_id)
         .order(egui::Order::Foreground)
         .fixed_pos(menu_pos)
@@ -392,6 +480,23 @@ fn render_context_menu_area(
                     let label = format!("Open {}", truncate_url(url, 40));
                     if ui.button(label).clicked() {
                         *action = Some(ContextMenuAction::OpenUrl(url.clone()));
+                        *close = true;
+                    }
+                    if ui.button("Copy URL").clicked() {
+                        *action = Some(ContextMenuAction::CopyUrl(url.clone()));
+                        *close = true;
+                    }
+                }
+
+                // "Copy Command Output" — only shown when the clicked
+                // cell is inside a completed OSC 133 command block
+                // (`OutputStart` and `CommandFinished` markers both
+                // recorded).  Running and incomplete blocks suppress
+                // the entry entirely.
+                if let Some((start_row, end_row)) = command_output_range {
+                    ui.separator();
+                    if ui.button("Copy Command Output").clicked() {
+                        *action = Some(ContextMenuAction::CopyCommandOutput { start_row, end_row });
                         *close = true;
                     }
                 }
@@ -499,8 +604,32 @@ fn dispatch_context_menu_action(
                 error!("Failed to spawn URL-open thread: {e}");
             }
         }
+        ContextMenuAction::CopyUrl(url) => {
+            ui.ctx().copy_text(url);
+        }
         ContextMenuAction::NewTerminal => {
             deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
+        }
+        ContextMenuAction::CopyCommandOutput { start_row, end_row } => {
+            // Full-width per-row extraction.  `extract_text` clamps per
+            // row to the actual cell count, so passing
+            // `term_width - 1` as `end_col` gives us "to end of row"
+            // without spurious trailing whitespace.
+            let end_col = snap.term_width.saturating_sub(1);
+            if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
+                start_row,
+                start_col: 0,
+                end_row,
+                end_col,
+                is_block: false,
+            }) {
+                error!("Context menu Copy Command Output: failed to send ExtractSelection: {e}");
+            } else if let Ok(text) =
+                clipboard_rx.recv_timeout(std::time::Duration::from_millis(100))
+                && !text.is_empty()
+            {
+                ui.ctx().copy_text(text);
+            }
         }
     }
 }
@@ -710,6 +839,25 @@ pub struct PaneRenderCache {
     /// Terminal height (rows) from the last full vertex rebuild.  See
     /// `previous_term_width` for rationale.
     pub(super) previous_term_height: usize,
+    /// Hash of the sorted fold-range list from the last full vertex rebuild.
+    ///
+    /// When the user folds or unfolds a command block, the rendered row
+    /// layout shifts (folded ranges collapse to a single placeholder row).
+    /// The cached vertex buffers still encode the *previous* layout, so we
+    /// must force a full rebuild when this epoch changes.
+    pub(super) previous_fold_epoch: u64,
+    /// Per-frame list of fold-placeholder click targets in window/logical
+    /// pixel coordinates, paired with the `CommandBlockId` to unfold when
+    /// the user clicks them.
+    ///
+    /// Rebuilt every frame inside the render path (cheap — at most one
+    /// entry per folded block) and consumed by [`super::input::write_input_to_terminal`]
+    /// to convert clicks on placeholder rows into `view_state.unfold()`
+    /// calls.  Empty when no folds are active.
+    pub(super) placeholder_hit_rects: Vec<(
+        Rect,
+        freminal_common::buffer_states::command_block::CommandBlockId,
+    )>,
 }
 
 impl PaneRenderCache {
@@ -740,6 +888,8 @@ impl PaneRenderCache {
             scrollbar_dragging: false,
             previous_term_width: 0,
             previous_term_height: 0,
+            previous_fold_epoch: 0,
+            placeholder_hit_rects: Vec::new(),
         }
     }
 
@@ -937,6 +1087,7 @@ impl FreminalTerminalWidget {
         bg_opacity: f32,
         bg_image_opacity: f32,
         bg_image_mode: freminal_common::config::BackgroundImageMode,
+        command_blocks_config: &freminal_common::config::CommandBlocksConfig,
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
@@ -982,7 +1133,13 @@ impl FreminalTerminalWidget {
         // overlay is open so that egui can deliver events to those widgets.
         let context_menu_open = view_state.context_menu_pos.is_some();
         let search_open = view_state.search_state.is_open;
-        if !suppress_input && !context_menu_open && !search_open && is_active_pane {
+        let command_history_open = view_state.command_history.is_open;
+        if !suppress_input
+            && !context_menu_open
+            && !search_open
+            && !command_history_open
+            && is_active_pane
+        {
             let terminal_id = ui.id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
@@ -1053,6 +1210,7 @@ impl FreminalTerminalWidget {
         if suppress_input
             || context_menu_open
             || view_state.search_state.is_open
+            || view_state.command_history.is_open
             || cache.scrollbar_dragging
         {
             cache.previous_key = None;
@@ -1085,6 +1243,7 @@ impl FreminalTerminalWidget {
                     binding_map,
                     is_active_pane,
                     recording_ctx,
+                    &cache.placeholder_hit_rects,
                 )
             });
             left_mouse_button_pressed = left_mouse_button_pressed_inner;
@@ -1214,7 +1373,45 @@ impl FreminalTerminalWidget {
         // - a password prompt is active (echo-off lock icon replaces it), or
         // - this pane is not the active/focused pane (tmux-style: only the
         //   focused pane shows a cursor).
-        let effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
+        let mut effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
+
+        // ── Command-block folding (Task 72.10b) ─────────────────────────────
+        //
+        // Compute the per-frame fold-range list from the snapshot's
+        // `command_blocks` and the GUI-local `folded_blocks` set, then build
+        // a `RowMap` that translates between snapshot-row space (what the
+        // PTY/buffer produced) and rendered-row space (what we actually paint,
+        // with folded ranges collapsed to single placeholder rows).
+        //
+        // For 72.10b-2, a folded range collapses to a *blank* row at its
+        // placeholder slot — the placeholder visual (line count, triangle
+        // glyph) and click-to-unfold land in 72.10b-3.
+        // `compute_fold_ranges` produces ranges in **buffer-absolute** row
+        // space (because `CommandBlock` row fields are buffer-absolute).
+        // `RowMap` works in **snapshot-row** space `[0, term_height)`.
+        // Translate before constructing the map; otherwise ranges with
+        // `start_row >= term_height` are silently dropped and the fold
+        // becomes a visual no-op.
+        let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
+        let fold_ranges = crate::gui::folding::translate_ranges_to_snapshot(
+            &raw_fold_ranges,
+            visible_window_start(snap),
+        );
+        let row_map = RowMap::new(snap.term_height, &fold_ranges);
+        // Per-frame epoch: a stable hash of the sorted, non-overlapping ranges
+        // list.  When the user folds or unfolds a block this changes, and we
+        // use it below to invalidate the vertex cache (the rendered row layout
+        // has shifted).
+        let fold_epoch: u64 = {
+            use std::hash::{Hash, Hasher};
+            let mut h = rustc_hash::FxHasher::default();
+            for r in &fold_ranges {
+                r.command_block_id.hash(&mut h);
+                r.start_row.hash(&mut h);
+                r.end_row.hash(&mut h);
+            }
+            h.finish()
+        };
 
         if !snap.skip_draw {
             // Detect content changes via `Arc::ptr_eq` — this is immune to the
@@ -1236,9 +1433,15 @@ impl FreminalTerminalWidget {
             // right edge.  Force a full rebuild on resize.
             let dims_changed = snap.term_width != cache.previous_term_width
                 || snap.term_height != cache.previous_term_height;
+            // Force a rebuild when the fold-range set changes (user folded or
+            // unfolded a command block): the rendered row layout shifts, so
+            // the cached background/foreground vertex buffers are stale even
+            // if `visible_chars` is byte-identical.
+            let folds_changed = fold_epoch != cache.previous_fold_epoch;
             let content_changed = snap.content_changed
                 || theme_changed
                 || dims_changed
+                || folds_changed
                 || cache
                     .last_rendered_visible
                     .as_ref()
@@ -1325,8 +1528,24 @@ impl FreminalTerminalWidget {
             // Update the animated cursor position.  When trail is enabled, the
             // visual position glides from the previous location to the new one.
             // When disabled, it snaps instantly.
+            //
+            // The animation target is in **rendered-row** space — when a fold
+            // collapses rows above the cursor, the cursor's rendered row index
+            // is less than `snap.cursor_pos.y`.  If the cursor's snapshot row
+            // is *inside* a folded range (which shouldn't happen normally
+            // because the prompt is never folded, but is defensible against
+            // races) we suppress the cursor for this frame.
+            let cursor_rendered_row = row_map.snapshot_to_rendered(snap.cursor_pos.y);
+            let cursor_visible = cursor_rendered_row.is_some();
+            // If the cursor's snapshot row is hidden behind a fold, suppress
+            // it for this frame.  AND-ing here means the cursor-only fast
+            // path and the full rebuild path agree on visibility.
+            effective_show_cursor = effective_show_cursor && cursor_visible;
             let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
-            let target_row = snap.cursor_pos.y.approx_as::<f32>().unwrap_or(0.0);
+            let target_row = cursor_rendered_row
+                .unwrap_or(snap.cursor_pos.y)
+                .approx_as::<f32>()
+                .unwrap_or(0.0);
             let cursor_animating = view_state.update_cursor_animation(
                 target_col,
                 target_row,
@@ -1447,12 +1666,177 @@ impl FreminalTerminalWidget {
                     &snap.visible_line_widths,
                 );
 
+                // ── Apply folding to shaped_lines ─────────────────────────
+                //
+                // The renderer iterates `shaped_lines` by enumerated index
+                // and treats that index as the screen row.  When folds are
+                // active, the rendered row layout differs from the snapshot
+                // row layout: each folded range collapses to a single
+                // *placeholder* row.  Build a new Vec sized to
+                // `rendered_row_count`, mapping each rendered row index back
+                // to its snapshot row (or to a blank placeholder).
+                //
+                // 72.10b-3: each placeholder row carries a shaped line of
+                // `"▶ {N} lines hidden — click to unfold"` rendered in a
+                // dim foreground colour (BrightBlack from the active
+                // palette).  Per-placeholder hit rects are recorded into
+                // `cache.placeholder_hit_rects` so the input handler can
+                // turn primary clicks on those rows into `view_state.unfold()`.
+                cache.placeholder_hit_rects.clear();
+                let rendered_shaped_lines: Vec<Arc<ShapedLine>> = if fold_ranges.is_empty() {
+                    shaped_lines
+                } else {
+                    let empty_placeholder = Arc::new(ShapedLine {
+                        runs: Vec::new(),
+                        line_width: LineWidth::Normal,
+                    });
+                    let dim_fg = freminal_common::colors::TerminalColor::BrightBlack;
+                    let row_count = row_map.rendered_row_count().min(snap.term_height);
+                    let mut out: Vec<Arc<ShapedLine>> = Vec::with_capacity(row_count);
+                    for rendered in 0..row_count {
+                        match row_map.rendered_to_snapshot(rendered) {
+                            Some(RenderedRow::Snapshot(snap_row)) => {
+                                out.push(
+                                    shaped_lines
+                                        .get(snap_row)
+                                        .cloned()
+                                        .unwrap_or_else(|| Arc::clone(&empty_placeholder)),
+                                );
+                            }
+                            Some(RenderedRow::Placeholder(range)) => {
+                                let text = format_placeholder_text(
+                                    range.block_total_rows,
+                                    snap.term_width,
+                                );
+                                let shaped = crate::gui::shaping::shape_placeholder_line(
+                                    &text,
+                                    dim_fg,
+                                    &mut self.font_manager,
+                                    cell_w_f,
+                                    self.ligatures,
+                                );
+                                out.push(Arc::new(shaped));
+
+                                // Record the placeholder's hit rect in
+                                // logical pixel coordinates so the input
+                                // handler (which sees pointer positions in
+                                // window coordinates) can hit-test against
+                                // it directly.
+                                let rendered_f = rendered.approx_as::<f32>().unwrap_or(0.0);
+                                let row_top =
+                                    rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                                let rect = Rect::from_min_size(
+                                    egui::pos2(terminal_rect.min.x, row_top),
+                                    egui::vec2(terminal_rect.width(), logical_cell_h),
+                                );
+                                cache
+                                    .placeholder_hit_rects
+                                    .push((rect, range.command_block_id));
+                            }
+                            None => {
+                                out.push(Arc::clone(&empty_placeholder));
+                            }
+                        }
+                    }
+                    out
+                };
+
                 // Build search match highlights from the current search state.
                 // Only matches within the visible window are included, with
                 // rows converted from buffer-absolute to screen-relative.
                 let win_start = visible_window_start(snap);
-                let search_highlights: Vec<MatchHighlight> =
+                let search_highlights_snap: Vec<MatchHighlight> =
                     matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
+                // Translate from snapshot-row space to rendered-row space and
+                // drop highlights inside folded ranges (they're not visible).
+                let search_highlights: Vec<MatchHighlight> = if fold_ranges.is_empty() {
+                    search_highlights_snap
+                } else {
+                    search_highlights_snap
+                        .into_iter()
+                        .filter_map(|h| {
+                            row_map
+                                .snapshot_to_rendered(h.row)
+                                .map(|rendered| MatchHighlight { row: rendered, ..h })
+                        })
+                        .collect()
+                };
+
+                // Translate the screen selection's row indices from snapshot
+                // to rendered space.  If either endpoint sits inside a folded
+                // range, drop the selection for this frame (it will reappear
+                // when the user unfolds the block).
+                let screen_selection_rendered = if fold_ranges.is_empty() {
+                    screen_selection
+                } else {
+                    screen_selection.and_then(|(sc, sr, ec, er)| {
+                        let sr_r = row_map.snapshot_to_rendered(sr)?;
+                        let er_r = row_map.snapshot_to_rendered(er)?;
+                        Some((sc, sr_r, ec, er_r))
+                    })
+                };
+
+                // ── Command-block hover-row range (current frame) ──
+                //
+                // Determine which OSC 133 block (if any) the mouse is
+                // hovering over and compute its rendered-row span.  The
+                // result is passed into `BackgroundFrame` so the tint
+                // is drawn alongside selection / search highlights in
+                // the same vertex batch.  Disabled when the feature is
+                // off, when no blocks exist, or when the mouse is not
+                // inside the terminal area.
+                let command_block_hover_rows: Option<(usize, usize)> = if command_blocks_config
+                    .enabled
+                    && !snap.command_blocks.is_empty()
+                    && let Some(mouse_position) = view_state.mouse_position
+                    && terminal_rect.contains(mouse_position)
+                {
+                    let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
+                        mouse_position,
+                        (logical_cell_w, logical_cell_h),
+                        terminal_rect.min,
+                    );
+                    // Translate to a snapshot (buffer-absolute) row via the
+                    // fold-aware row map; placeholder / out-of-range rows
+                    // never hover-tint a block.
+                    let snap_screen_row = match row_map.rendered_to_snapshot(rendered_row) {
+                        Some(RenderedRow::Snapshot(r)) => Some(r),
+                        Some(RenderedRow::Placeholder(_)) | None => None,
+                    };
+                    snap_screen_row.and_then(|screen_row| {
+                        let buffer_row = win_start + screen_row;
+                        // Find the block containing this absolute row.
+                        // Skips running blocks (no end_row) and blocks
+                        // missing `command_start_row`.
+                        let block = snap.command_blocks.iter().find(|b| {
+                            match (b.command_start_row, b.end_row) {
+                                (Some(s), Some(e)) => buffer_row >= s && buffer_row <= e,
+                                _ => false,
+                            }
+                        })?;
+                        let start = block.command_start_row?;
+                        let end = block.end_row?;
+                        // Clip the block's [start, end] to the visible
+                        // window, then convert each endpoint into
+                        // rendered-row space.  Endpoints inside a fold
+                        // are snapped to the placeholder's surviving
+                        // row via the row-map lookup; if the entire
+                        // block sits inside a fold the result is None.
+                        let win_end = win_start + snap.term_height;
+                        if end < win_start || start >= win_end {
+                            return None;
+                        }
+                        let s_screen = start.saturating_sub(win_start);
+                        let e_screen = end
+                            .saturating_sub(win_start)
+                            .min(snap.term_height.saturating_sub(1));
+                        let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
+                        let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
+                        Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
+                    })
+                } else {
+                    None
+                };
 
                 // Acquire the lock early so all vertex builders can write
                 // directly into the persistent `RenderState` Vecs, reusing
@@ -1467,7 +1851,7 @@ impl FreminalTerminalWidget {
 
                 build_background_instances(
                     &BackgroundFrame {
-                        shaped_lines: &shaped_lines,
+                        shaped_lines: &rendered_shaped_lines,
                         cell_width: cell_w,
                         cell_height: cell_h,
                         ascent: self.font_manager.ascent(),
@@ -1479,9 +1863,11 @@ impl FreminalTerminalWidget {
                         cursor_pixel_pos,
                         cursor_width_scale: cursor_x_scale,
                         cursor_visual_style: &snap.cursor_visual_style,
-                        selection: screen_selection,
+                        selection: screen_selection_rendered,
                         selection_is_block: view_state.selection.is_block,
                         match_highlights: &search_highlights,
+                        command_block_hover_rows,
+                        term_width_cols: snap.term_width,
                         theme: snap.theme,
                         cursor_color_override: snap.cursor_color_override,
                     },
@@ -1499,13 +1885,13 @@ impl FreminalTerminalWidget {
                 };
 
                 let fg_opts = FgRenderOptions {
-                    selection: screen_selection,
+                    selection: screen_selection_rendered,
                     selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
                 };
                 build_foreground_instances(
-                    &shaped_lines,
+                    &rendered_shaped_lines,
                     &mut rs_ref.atlas,
                     &self.font_manager,
                     cell_h,
@@ -1545,6 +1931,7 @@ impl FreminalTerminalWidget {
                 cache.previous_search_current_match = search_current_match;
                 cache.previous_term_width = snap.term_width;
                 cache.previous_term_height = snap.term_height;
+                cache.previous_fold_epoch = fold_epoch;
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
@@ -1748,6 +2135,61 @@ impl FreminalTerminalWidget {
             );
         }
 
+        // ── Command-block duration overlay ───────────────────────────
+        // For each finished command block whose duration meets the
+        // configured threshold, paint a compact right-aligned label on
+        // the block's first visible rendered row.  Running blocks have
+        // no `finished_at` and are skipped.  Blocks entirely outside
+        // the visible window or hidden inside a fold are also skipped
+        // (the row-map lookup yields `None`).
+        if command_blocks_config.enabled
+            && command_blocks_config.show_duration
+            && !snap.command_blocks.is_empty()
+        {
+            let threshold =
+                Duration::from_secs_f32(command_blocks_config.duration_threshold_secs.max(0.0));
+            let win_start = visible_window_start(snap);
+            let win_end = win_start + snap.term_height;
+            let (fg_r, fg_g, fg_b) = snap.theme.foreground;
+            // Muted: ~60% alpha so the label reads without overpowering
+            // the underlying cell content.
+            let label_color = egui::Color32::from_rgba_unmultiplied(fg_r, fg_g, fg_b, 153);
+            let font_id = egui::FontId::monospace(logical_cell_h * 0.75);
+            for block in snap.command_blocks.iter() {
+                let Some(finished_at) = block.finished_at else {
+                    continue;
+                };
+                let Ok(elapsed) = finished_at.duration_since(block.started_at) else {
+                    continue;
+                };
+                if elapsed < threshold {
+                    continue;
+                }
+                // Anchor on `command_start_row` when available, else
+                // fall back to `prompt_start_row` (very early blocks
+                // that finished before any output line).
+                let anchor_buffer_row = block.command_start_row.unwrap_or(block.prompt_start_row);
+                if anchor_buffer_row < win_start || anchor_buffer_row >= win_end {
+                    continue;
+                }
+                let screen_row = anchor_buffer_row - win_start;
+                let Some(rendered_row) = row_map.snapshot_to_rendered(screen_row) else {
+                    continue;
+                };
+                let rendered_f = rendered_row.approx_as::<f32>().unwrap_or(0.0);
+                let y = rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                let pos = egui::pos2(terminal_rect.max.x - 4.0, y);
+                let label = crate::gui::command_blocks::format_command_duration(elapsed);
+                ui.painter().text(
+                    pos,
+                    egui::Align2::RIGHT_TOP,
+                    label,
+                    font_id.clone(),
+                    label_color,
+                );
+            }
+        }
+
         // ── Search overlay ───────────────────────────────────────────
         // Run search refresh when query changed (outside the !snap.skip_draw block
         // to ensure it fires even on identical content frames).
@@ -1805,18 +2247,34 @@ impl FreminalTerminalWidget {
                 cache.hover_snap_ptr = snap_ptr;
 
                 if cell_changed || content_changed_under_mouse {
-                    // Recompute the hovered URL: convert the mouse's
-                    // display-column position to a flat index into
-                    // `visible_chars`, using the O(1) row-offset table.
-                    let flat_idx =
-                        flat_index_for_cell(&snap.visible_chars, row, col, &snap.row_offsets);
+                    // Translate the mouse's rendered row to a snapshot row
+                    // (folding-aware).  When the mouse hovers over a fold
+                    // placeholder row, there is no underlying text to match
+                    // against a URL — clear the cache.  When `row` is past
+                    // the bottom of the rendered viewport, `rendered_to_snapshot`
+                    // returns None and we likewise clear.
+                    let snap_row = match row_map.rendered_to_snapshot(row) {
+                        Some(RenderedRow::Snapshot(r)) => Some(r),
+                        Some(RenderedRow::Placeholder(_)) | None => None,
+                    };
+                    cache.cached_hovered_url = snap_row.and_then(|snap_row| {
+                        // Recompute the hovered URL: convert the mouse's
+                        // display-column position to a flat index into
+                        // `visible_chars`, using the O(1) row-offset table.
+                        let flat_idx = flat_index_for_cell(
+                            &snap.visible_chars,
+                            snap_row,
+                            col,
+                            &snap.row_offsets,
+                        );
 
-                    cache.cached_hovered_url = flat_idx.and_then(|idx| {
-                        snap.url_tag_indices
-                            .iter()
-                            .filter_map(|&ti| snap.visible_tags.get(ti))
-                            .find(|tag| tag.start <= idx && idx < tag.end)
-                            .and_then(|tag| tag.url.clone())
+                        flat_idx.and_then(|idx| {
+                            snap.url_tag_indices
+                                .iter()
+                                .filter_map(|&ti| snap.visible_tags.get(ti))
+                                .find(|tag| tag.start <= idx && idx < tag.end)
+                                .and_then(|tag| tag.url.clone())
+                        })
                     });
                 }
 
@@ -1894,6 +2352,20 @@ impl FreminalTerminalWidget {
             let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
             ui.ctx().output_mut(|output| {
                 output.cursor_icon = base_icon;
+            });
+        }
+
+        // Fold placeholder hover: override the cursor icon to a pointing
+        // hand whenever the mouse is over a placeholder row, regardless
+        // of URL or OSC 22 shape state. Runs every frame because egui
+        // resets `output.cursor_icon` to Default at the start of each
+        // frame, so the override must be reapplied.
+        if !cache.placeholder_hit_rects.is_empty()
+            && let Some(mouse_position) = view_state.mouse_position
+            && hit_test_placeholder(&cache.placeholder_hit_rects, mouse_position).is_some()
+        {
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = CursorIcon::PointingHand;
             });
         }
 
@@ -2314,5 +2786,89 @@ mod shell_escape_tests {
     fn empty_path() {
         let result = shell_escape_path(Path::new(""));
         assert_eq!(result, "''");
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::{format_placeholder_text, hit_test_placeholder};
+    use egui::{Pos2, Rect, pos2, vec2};
+    use freminal_common::buffer_states::command_block::CommandBlockId;
+
+    #[test]
+    fn format_singular() {
+        assert_eq!(
+            format_placeholder_text(1, 80),
+            "▶ 1 line hidden — click to unfold"
+        );
+    }
+
+    #[test]
+    fn format_plural() {
+        assert_eq!(
+            format_placeholder_text(7, 80),
+            "▶ 7 lines hidden — click to unfold"
+        );
+    }
+
+    #[test]
+    fn format_zero_is_plural() {
+        assert_eq!(
+            format_placeholder_text(0, 80),
+            "▶ 0 lines hidden — click to unfold"
+        );
+    }
+
+    #[test]
+    fn format_truncates_when_narrow() {
+        let result = format_placeholder_text(123, 10);
+        // 10 chars total, last is the ellipsis
+        assert_eq!(result.chars().count(), 10);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn format_falls_back_when_very_narrow() {
+        assert_eq!(format_placeholder_text(5, 1), "▶");
+    }
+
+    #[test]
+    fn format_empty_when_zero_width() {
+        assert_eq!(format_placeholder_text(5, 0), "");
+    }
+
+    #[test]
+    fn hit_test_inside() {
+        let id = CommandBlockId(42);
+        let rects = vec![(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0)), id)];
+        assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 10.0)), Some(id));
+    }
+
+    #[test]
+    fn hit_test_outside() {
+        let id = CommandBlockId(42);
+        let rects = vec![(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0)), id)];
+        assert_eq!(hit_test_placeholder(&rects, pos2(200.0, 200.0)), None);
+    }
+
+    #[test]
+    fn hit_test_empty_list() {
+        assert_eq!(hit_test_placeholder(&[], Pos2::new(10.0, 10.0)), None);
+    }
+
+    #[test]
+    fn hit_test_multiple_rects_returns_first_containing() {
+        let id_a = CommandBlockId(1);
+        let id_b = CommandBlockId(2);
+        let rects = vec![
+            (Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0)), id_a),
+            (
+                Rect::from_min_size(pos2(0.0, 40.0), vec2(100.0, 20.0)),
+                id_b,
+            ),
+        ];
+        assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 50.0)), Some(id_b));
+        assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 10.0)), Some(id_a));
     }
 }

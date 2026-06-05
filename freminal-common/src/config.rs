@@ -34,6 +34,8 @@ pub struct Config {
     pub tabs: TabsConfig,
     pub bell: BellConfig,
     pub security: SecurityConfig,
+    pub shell_integration: ShellIntegrationConfig,
+    pub command_blocks: CommandBlocksConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -73,6 +75,8 @@ impl Default for Config {
             tabs: TabsConfig::default(),
             bell: BellConfig::default(),
             security: SecurityConfig::default(),
+            shell_integration: ShellIntegrationConfig::default(),
+            command_blocks: CommandBlocksConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
@@ -477,6 +481,94 @@ impl Default for SecurityConfig {
 }
 
 // ------------------------------------------------------------------------------------------------
+//  Shell Integration
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for OSC 133 (FinalTerm/FTCS) shell integration.
+///
+/// Freminal sets `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION=<crate version>`
+/// in the PTY environment so shell scripts can detect us.  When enabled,
+/// freminal also injects the necessary env at PTY spawn time so the bundled
+/// bash/zsh/fish integration scripts auto-load — no manual sourcing required.
+/// The scripts emit OSC 133 A/B/C/D markers so the terminal can render
+/// command blocks, gutters (Task 73), and notifications (Task 76).
+///
+/// ```toml
+/// [shell_integration]
+/// set_term_program = true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellIntegrationConfig {
+    /// When `true`, freminal sets `TERM_PROGRAM=freminal` and
+    /// `TERM_PROGRAM_VERSION` in the PTY environment, and injects the env
+    /// needed for spawn-time auto-loading of the bundled shell-integration
+    /// scripts.
+    ///
+    /// Default: `true`.  Disable only if you have an external workflow that
+    /// conflicts with either the inherited `TERM_PROGRAM` or with our shell
+    /// hooks.
+    pub set_term_program: bool,
+}
+
+impl Default for ShellIntegrationConfig {
+    fn default() -> Self {
+        Self {
+            set_term_program: true,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Command Blocks
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for OSC 133 command-block visualization.
+///
+/// Command blocks group each shell command's prompt, input, and output into
+/// a selectable unit.  This config controls whether blocks are populated in
+/// the snapshot and surfaced to the GUI, and whether the per-command
+/// duration overlay is shown.
+///
+/// ```toml
+/// [command_blocks]
+/// enabled = true
+/// show_duration = true
+/// duration_threshold_secs = 2.0
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandBlocksConfig {
+    /// Master switch.  When `false`, OSC 133 markers are still parsed
+    /// (because `FtcsState` matters for other features) but `command_blocks`
+    /// is left empty in snapshots and the GUI shows no command-aware
+    /// affordances.  Default: `true`.
+    pub enabled: bool,
+
+    /// Display the duration of long-running commands next to the gutter
+    /// (e.g. `"3s"`, `"2m15s"`, `"1h5m"`).  Sub-second commands always
+    /// show as `"1s"`; durations are truncated to whole seconds —
+    /// fractional and millisecond labels are never emitted.  Default:
+    /// `true`.
+    pub show_duration: bool,
+
+    /// Minimum command duration (in seconds) before a duration label is
+    /// rendered.  Below this threshold the label is suppressed to avoid
+    /// flicker on fast commands.  Default: `2.0`.
+    pub duration_threshold_secs: f32,
+}
+
+impl Default for CommandBlocksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_duration: true,
+            duration_threshold_secs: 2.0,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 //  Startup / Layout
 // ------------------------------------------------------------------------------------------------
 
@@ -647,6 +739,135 @@ pub fn layout_library_dir() -> Option<PathBuf> {
         let p = base.config_dir().join("freminal").join("layouts");
         create_dir_if_missing(&p);
         return Some(p);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Resolved shell-integration script directory, tagged with whether
+/// Freminal owns the directory or whether it was provided read-only by
+/// the packager.
+///
+/// Callers that want to copy the bundled scripts onto disk (i.e.
+/// [`shell_integration::sync_to_disk`]) must only do so on the
+/// [`UserWritable`](Self::UserWritable) variant — writing into a
+/// packaging-provided path (e.g. `/usr/share/freminal/shell-integration/`)
+/// would either fail or, worse, succeed and silently mutate files owned
+/// by the system package manager.
+///
+/// Both variants borrow their path uniformly via [`Self::path`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellIntegrationDir {
+    /// Per-user data directory.  Freminal owns it and may freely
+    /// extract / overwrite the bundled scripts on every launch.
+    UserWritable(PathBuf),
+
+    /// Packaging-provided directory — resolved either from
+    /// `$FREMINAL_RESOURCES_DIR` (treated as the resources root, with
+    /// `shell-integration/` appended) or from a hit under
+    /// `$XDG_DATA_DIRS` (e.g. `/usr/share/freminal/shell-integration/`).
+    /// Freminal must not write to this directory; the packager is
+    /// responsible for keeping the scripts in sync.
+    PackagingProvided(PathBuf),
+}
+
+impl ShellIntegrationDir {
+    /// Borrow the underlying directory path regardless of variant.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::UserWritable(p) | Self::PackagingProvided(p) => p.as_path(),
+        }
+    }
+}
+
+/// Directory where Freminal looks up shell-integration scripts.
+///
+/// Resolution order:
+///
+/// 1. `$FREMINAL_RESOURCES_DIR` if set — used by packaging / Nix setups.
+///    The env var names the resources *root*; `shell-integration/` is
+///    appended automatically so the variable matches its name.  Returned
+///    as [`ShellIntegrationDir::PackagingProvided`]; never created.
+/// 2. Any directory in `$XDG_DATA_DIRS` that already contains a
+///    `freminal/shell-integration/` subtree — supports system-wide
+///    installs (e.g. `/usr/share`, `/usr/local/share`).  The first match
+///    wins.  Returned as [`ShellIntegrationDir::PackagingProvided`].
+/// 3. Platform-default per-user data directory:
+///    - Linux/BSD:  `~/.config/freminal/shell-integration/`
+///    - macOS:      `~/Library/Application Support/Freminal/shell-integration/`
+///    - Windows:    `%APPDATA%\Freminal\shell-integration\`
+///
+///    Created on first call (via `create_dir_if_missing`) and returned
+///    as [`ShellIntegrationDir::UserWritable`] so callers can extract
+///    the bundled scripts into it.
+///
+/// Returns `None` only if base directories cannot be determined AND
+/// none of the override paths above resolved.
+#[must_use]
+pub fn shell_integration_dir() -> Option<ShellIntegrationDir> {
+    // 1. Explicit override via $FREMINAL_RESOURCES_DIR.
+    //    The env var names the resources root, so we always append
+    //    `shell-integration/`.  The packager owns this tree; we never
+    //    create it or write into it.
+    if let Ok(custom) = std::env::var("FREMINAL_RESOURCES_DIR")
+        && !custom.is_empty()
+    {
+        let p = PathBuf::from(custom).join("shell-integration");
+        return Some(ShellIntegrationDir::PackagingProvided(p));
+    }
+
+    // 2. System-wide install via $XDG_DATA_DIRS.  We only return a hit
+    //    if the directory already exists — otherwise an unrelated XDG
+    //    entry would shadow the per-user default.  These paths
+    //    (typically `/usr/share/...`) are owned by the packager.
+    if let Ok(xdg_data_dirs) = std::env::var("XDG_DATA_DIRS")
+        && !xdg_data_dirs.is_empty()
+    {
+        for entry in xdg_data_dirs.split(':') {
+            if entry.is_empty() {
+                continue;
+            }
+            let candidate = PathBuf::from(entry)
+                .join("freminal")
+                .join("shell-integration");
+            if candidate.is_dir() {
+                return Some(ShellIntegrationDir::PackagingProvided(candidate));
+            }
+        }
+    }
+
+    // 3. Platform-default per-user data directory.  Freminal owns this
+    //    location and re-extracts the bundled scripts on every launch.
+    let base = BaseDirs::new()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let p = base.data_dir().join("Freminal").join("shell-integration");
+        create_dir_if_missing(&p);
+        return Some(ShellIntegrationDir::UserWritable(p));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let p = base.data_dir().join("Freminal").join("shell-integration");
+        create_dir_if_missing(&p);
+        return Some(ShellIntegrationDir::UserWritable(p));
+    }
+
+    // Linux / BSD
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        let p = base.config_dir().join("freminal").join("shell-integration");
+        create_dir_if_missing(&p);
+        return Some(ShellIntegrationDir::UserWritable(p));
     }
 
     #[allow(unreachable_code)]
@@ -1276,6 +1497,23 @@ size = 14.0
     fn full_config_default_has_ligatures_true() {
         let cfg = Config::default();
         assert!(cfg.font.ligatures);
+    }
+
+    #[test]
+    fn shell_integration_and_command_blocks_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.shell_integration.set_term_program = false;
+        cfg.command_blocks.enabled = false;
+        cfg.command_blocks.show_duration = false;
+        cfg.command_blocks.duration_threshold_secs = 5.5;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise default config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert!(!parsed.shell_integration.set_term_program);
+        assert!(!parsed.command_blocks.enabled);
+        assert!(!parsed.command_blocks.show_duration);
+        assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2525,8 +2763,8 @@ path = "/tmp/my.frag"
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let prev = std::env::var_os(key);
-            // SAFETY: test code — parallel mutation of this env var is not
-            // expected within the same test binary.
+            // SAFETY: test code — concurrent mutation of this env var
+            // across tests is serialized via `ENV_LOCK`.
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -2546,6 +2784,16 @@ path = "/tmp/my.frag"
         }
     }
 
+    /// Serializes tests that mutate process-wide env vars consulted by
+    /// [`shell_integration_dir`] (`FREMINAL_RESOURCES_DIR`,
+    /// `XDG_DATA_DIRS`).  Without this lock, two such tests running on
+    /// concurrent harness threads would observe each other's mutations
+    /// and flake non-deterministically.  `PoisonError` is intentionally
+    /// ignored: a panicking test poisons the lock but the underlying
+    /// guards still restore the env vars on unwind, so subsequent tests
+    /// can safely proceed.
+    static SHELL_INTEGRATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn load_config_via_freminal_config_env_var() {
         // Exercises lines 774-779: FREMINAL_CONFIG env var path.
@@ -2561,5 +2809,164 @@ path = "/tmp/my.frag"
 
         let loaded = result.expect("load_config with FREMINAL_CONFIG should succeed");
         assert!((loaded.font.size - 18.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn shell_integration_dir_is_some_on_supported_platforms() {
+        // Serialize against the other env-var-touching tests below so
+        // none of us observes a sibling test's transient mutations.
+        let _lock = SHELL_INTEGRATION_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Clear both packaging-related overrides so the resolver is
+        // guaranteed to fall through to the per-user data dir (variant 3).
+        // The empty-string guards still restore whatever the CI host had
+        // set before the test ran.
+        let _g_res = EnvVarGuard::set("FREMINAL_RESOURCES_DIR", "");
+        let _g_xdg = EnvVarGuard::set("XDG_DATA_DIRS", "");
+
+        let dir = shell_integration_dir();
+        // On all CI-reachable platforms (Linux, macOS, Windows) a home
+        // directory is always available, so `None` here would indicate a
+        // broken environment rather than incorrect code.
+        assert!(
+            dir.is_some(),
+            "shell_integration_dir() returned None; \
+             check that a home directory is available in the test environment"
+        );
+        let dir = dir.unwrap();
+        let path = match dir {
+            ShellIntegrationDir::UserWritable(ref p) => p.clone(),
+            ShellIntegrationDir::PackagingProvided(ref p) => {
+                panic!(
+                    "expected UserWritable when packaging env vars are cleared, \
+                     got PackagingProvided({})",
+                    p.display()
+                );
+            }
+        };
+        let mut components: Vec<_> = path.components().collect();
+
+        // Last component must be "shell-integration".
+        let last = components
+            .pop()
+            .expect("path must have at least 2 components");
+        let last_str = last.as_os_str().to_string_lossy();
+        assert_eq!(
+            last_str, "shell-integration",
+            "last path component should be 'shell-integration', got '{last_str}'"
+        );
+
+        // Second-to-last must be "freminal" (Linux/BSD) or "Freminal" (macOS/Windows).
+        let second_last = components
+            .pop()
+            .expect("path must have at least 2 components");
+        let second_last_str = second_last.as_os_str().to_string_lossy();
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        assert_eq!(
+            second_last_str, "freminal",
+            "second-to-last path component should be 'freminal' on Linux/BSD, \
+             got '{second_last_str}'"
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            second_last_str, "Freminal",
+            "second-to-last path component should be 'Freminal' on macOS/Windows, \
+             got '{second_last_str}'"
+        );
+    }
+
+    #[test]
+    fn shell_integration_dir_with_freminal_resources_dir_env_returns_packaging_provided() {
+        // Regression for the Copilot PR-333 review finding that
+        // `FREMINAL_RESOURCES_DIR` should be the resources *root* (so
+        // `shell-integration/` is appended) and that the resulting
+        // directory must be tagged as packaging-provided so the binary
+        // never calls `sync_to_disk` against it.
+        let _lock = SHELL_INTEGRATION_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _g_res = EnvVarGuard::set(
+            "FREMINAL_RESOURCES_DIR",
+            tmp.path().to_str().expect("tempdir path is utf-8"),
+        );
+        let _g_xdg = EnvVarGuard::set("XDG_DATA_DIRS", "");
+
+        let resolved = shell_integration_dir().expect("expected Some when override is set");
+        let expected = tmp.path().join("shell-integration");
+        match resolved {
+            ShellIntegrationDir::PackagingProvided(ref p) => {
+                assert_eq!(
+                    p, &expected,
+                    "FREMINAL_RESOURCES_DIR should be treated as the resources root \
+                     with 'shell-integration/' appended"
+                );
+            }
+            ShellIntegrationDir::UserWritable(ref p) => {
+                panic!(
+                    "FREMINAL_RESOURCES_DIR should resolve to PackagingProvided, \
+                     got UserWritable({})",
+                    p.display()
+                );
+            }
+        }
+
+        // The packaging path must NOT be auto-created.  The packager owns
+        // the layout; mkdir-ing into it would be writing to a directory
+        // we don't own.
+        assert!(
+            !expected.exists(),
+            "FREMINAL_RESOURCES_DIR override must not auto-create the \
+             shell-integration subdir (it exists at {})",
+            expected.display()
+        );
+    }
+
+    #[test]
+    fn shell_integration_dir_with_xdg_data_dirs_hit_returns_packaging_provided() {
+        // Regression for the Copilot PR-333 review finding that an
+        // XDG_DATA_DIRS hit (typically a system path like
+        // `/usr/share/freminal/shell-integration/`) must be tagged
+        // packaging-provided so the binary never tries to `sync_to_disk`
+        // into a system-owned directory.
+        let _lock = SHELL_INTEGRATION_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let expected = tmp.path().join("freminal").join("shell-integration");
+        std::fs::create_dir_all(&expected).expect("create xdg hit directory");
+
+        let _g_res = EnvVarGuard::set("FREMINAL_RESOURCES_DIR", "");
+        let _g_xdg = EnvVarGuard::set(
+            "XDG_DATA_DIRS",
+            tmp.path().to_str().expect("tempdir path is utf-8"),
+        );
+
+        let resolved = shell_integration_dir().expect("expected Some when XDG hit exists");
+        match resolved {
+            ShellIntegrationDir::PackagingProvided(ref p) => {
+                assert_eq!(
+                    p, &expected,
+                    "XDG_DATA_DIRS hit should resolve to the discovered candidate path"
+                );
+            }
+            ShellIntegrationDir::UserWritable(ref p) => {
+                panic!(
+                    "XDG_DATA_DIRS hit should resolve to PackagingProvided, \
+                     got UserWritable({})",
+                    p.display()
+                );
+            }
+        }
     }
 }

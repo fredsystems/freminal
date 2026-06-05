@@ -11,11 +11,12 @@
 //! thread loads the snapshot with a single atomic pointer load — no lock, no
 //! blocking.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 use freminal_common::{
     buffer_states::{
+        command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
         ftcs::FtcsState,
@@ -220,6 +221,7 @@ pub struct TerminalSnapshot {
     /// Backarrow key mode (`DECBKM` / `?67`).
     ///
     /// Controls whether the Backspace key sends BS (0x08) or DEL (0x7F).
+    /// Default is DEL (reset), matching xterm and modern terminals.
     pub backarrow_sends_bs: Decbkm,
 
     /// Line Feed / New Line mode (`LNM` / mode 20).
@@ -250,6 +252,14 @@ pub struct TerminalSnapshot {
     /// new terminals in the same directory.
     pub cwd: Option<String>,
 
+    /// Shell history file path reported by the shell-integration scripts via
+    /// `OSC 1338 ; HISTFILE=<path> ST`, if any.
+    ///
+    /// The GUI uses this to seed the command-history palette with the
+    /// shell-evaluated `$HISTFILE` (which may differ from the parent-environment
+    /// value when shell configs override it).
+    pub shell_histfile: Option<PathBuf>,
+
     /// Current FTCS (OSC 133) shell integration state.
     ///
     /// Indicates whether the terminal is currently inside a prompt, command
@@ -267,6 +277,18 @@ pub struct TerminalSnapshot {
     /// Ordering is not guaranteed; consumers must not assume this list is
     /// sorted by row index.
     pub prompt_rows: Arc<[usize]>,
+
+    /// OSC 133 command blocks captured by the buffer.
+    ///
+    /// Each block records one shell command's full lifecycle — prompt start
+    /// (`A`), command input start (`B`), output start (`C`), command finished
+    /// (`D`) — along with optional exit code, captured CWD, and start/finish
+    /// timestamps.  Surfaced through the snapshot so the GUI can render
+    /// command gutters (Task 73), copy-output actions (Task 72.11), and fold
+    /// state (Task 72.10).
+    ///
+    /// Ordering: oldest-first.  Capped at the buffer's `scrollback_limit`.
+    pub command_blocks: Arc<[CommandBlock]>,
 
     /// The active color theme palette.
     ///
@@ -348,14 +370,16 @@ impl TerminalSnapshot {
             skip_draw: false,
             modify_other_keys: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
-            backarrow_sends_bs: Decbkm::BackarrowSendsBs,
+            backarrow_sends_bs: Decbkm::BackarrowSendsDel,
             line_feed_mode: Lnm::LineFeed,
             kitty_keyboard_flags: 0,
             alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
+            shell_histfile: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
             prompt_rows: Arc::from([]),
+            command_blocks: Arc::from(Vec::<CommandBlock>::new()),
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),

@@ -22,6 +22,7 @@ pub enum SettingsTab {
     Logging,
     Ui,
     Tabs,
+    ShellIntegration,
     Bell,
     Security,
     Keybindings,
@@ -30,7 +31,7 @@ pub enum SettingsTab {
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -39,6 +40,7 @@ impl SettingsTab {
         Self::Logging,
         Self::Ui,
         Self::Tabs,
+        Self::ShellIntegration,
         Self::Bell,
         Self::Security,
         Self::Keybindings,
@@ -55,6 +57,7 @@ impl SettingsTab {
             Self::Logging => "Logging",
             Self::Ui => "UI",
             Self::Tabs => "Tabs",
+            Self::ShellIntegration => "Shell Integration",
             Self::Bell => "Bell",
             Self::Security => "Security",
             Self::Keybindings => "Keybindings",
@@ -537,6 +540,10 @@ impl SettingsModal {
         action
     }
 
+    // The main inline-modal entry point. Dominated by sequential preview /
+    // revert / dirty-state checks; splitting would scatter the apply-flow
+    // logic across opaque helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn show(&mut self, ctx: &egui::Context, os_dark_mode: bool) -> SettingsAction {
         self.os_dark_mode = os_dark_mode;
         if !self.is_open {
@@ -712,6 +719,7 @@ impl SettingsModal {
             SettingsTab::Logging => self.show_logging_tab(ui),
             SettingsTab::Ui => self.show_ui_tab(ui),
             SettingsTab::Tabs => self.show_tabs_tab(ui),
+            SettingsTab::ShellIntegration => self.show_shell_integration_tab(ui),
             SettingsTab::Bell => self.show_bell_tab(ui),
             SettingsTab::Security => self.show_security_tab(ui),
             SettingsTab::Keybindings => self.show_keybindings_tab(ui),
@@ -1192,6 +1200,93 @@ impl SettingsModal {
                     "Bottom",
                 );
             });
+    }
+
+    // Renders both the Shell Integration section and the Command Blocks
+    // section in one tab (per 72.5's bundling decision). The two sections
+    // share enough thematic context that splitting them obscures intent.
+    #[allow(clippy::too_many_lines)]
+    fn show_shell_integration_tab(&mut self, ui: &mut Ui) {
+        // ── Shell Integration section ────────────────────────────────────────
+        ui.heading("Shell Integration");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "OSC 133 (FinalTerm/FTCS) shell integration lets Freminal detect \
+             where each shell command starts, ends, and what its exit code was. \
+             This powers command-block navigation, exit-status gutters, and \
+             desktop notifications.",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.draft.shell_integration.set_term_program,
+            "Set TERM_PROGRAM=freminal",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Sets TERM_PROGRAM and TERM_PROGRAM_VERSION in the PTY environment \
+             so shell scripts can detect Freminal.  Also enables spawn-time \
+             auto-loading of the bundled shell-integration scripts for bash, \
+             zsh, and fish — no manual sourcing required.",
+        );
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // ── Command Blocks section ───────────────────────────────────────────
+        ui.heading("Command Blocks");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Visual treatment of OSC 133 command blocks. Requires the \
+             \"Set TERM_PROGRAM=freminal\" option above to be enabled so \
+             that the bundled shell-integration scripts auto-load on \
+             shell spawn.",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.draft.command_blocks.enabled,
+            "Enable command block tracking",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When disabled, OSC 133 markers are still parsed but no command \
+             blocks are surfaced to the GUI.",
+        );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.draft.command_blocks.show_duration,
+            "Show command duration",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Display the duration of long-running commands next to the gutter.",
+        );
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Duration threshold:");
+            ui.add(
+                egui::DragValue::new(&mut self.draft.command_blocks.duration_threshold_secs)
+                    .speed(0.1)
+                    .range(0.0_f32..=60.0_f32)
+                    .suffix(" s"),
+            );
+        });
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Minimum command duration before the duration label is shown.",
+        );
     }
 
     fn show_bell_tab(&mut self, ui: &mut Ui) {
@@ -1980,6 +2075,7 @@ mod tests {
         assert_eq!(SettingsTab::Logging.label(), "Logging");
         assert_eq!(SettingsTab::Ui.label(), "UI");
         assert_eq!(SettingsTab::Tabs.label(), "Tabs");
+        assert_eq!(SettingsTab::ShellIntegration.label(), "Shell Integration");
         assert_eq!(SettingsTab::Bell.label(), "Bell");
         assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
@@ -2025,7 +2121,7 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 12);
+        assert_eq!(SettingsTab::ALL.len(), 13);
     }
 
     #[test]

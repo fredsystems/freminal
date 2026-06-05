@@ -511,6 +511,118 @@ fn shape_runs(
         .collect()
 }
 
+/// Shape a single line of synthetic text in a uniform color.
+///
+/// Used by the widget layer to build fold-placeholder rows (Task 72.10b-3):
+/// rows that are not present in the snapshot buffer but need to render real
+/// glyphs through the same shaping pipeline as buffer text so atlas
+/// rasterisation, font fallback, and ligature features behave identically.
+///
+/// `text` is treated as a single contiguous run with the given foreground
+/// color, normal weight, and no decorations.  Per-character cell widths are
+/// computed via `char::width_cjk` semantics (ASCII = 1, wide = 2).  Face
+/// resolution falls back to the primary face for any character whose
+/// natural face cannot be determined — sufficient for the ASCII +
+/// triangle (`▶`) + ellipsis (`…`) glyphs used by the placeholder UI.
+///
+/// Returns a fully-shaped [`ShapedLine`] with one [`ShapedRun`] per
+/// face-segmented sub-span, mirroring what `shape_visible` would produce
+/// for the same text in the buffer.
+#[must_use]
+pub fn shape_placeholder_line(
+    text: &str,
+    fg: freminal_common::colors::TerminalColor,
+    font_manager: &mut FontManager,
+    cell_width: f32,
+    ligatures: bool,
+) -> ShapedLine {
+    use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
+
+    if text.is_empty() {
+        return ShapedLine {
+            runs: Vec::new(),
+            line_width: LineWidth::Normal,
+        };
+    }
+
+    let colors = StateColors {
+        color: fg,
+        background_color: freminal_common::colors::TerminalColor::DefaultBackground,
+        underline_color: freminal_common::colors::TerminalColor::DefaultUnderlineColor,
+        reverse_video: ReverseVideo::Off,
+    };
+
+    // Segment the text into runs by font-face boundary so glyph fallback
+    // works for non-ASCII placeholder glyphs (▶, …).  All other format
+    // attributes are uniform across the line.
+    let style = GlyphStyle::from_format(&FontWeight::Normal, FontDecorationFlags::empty());
+    let chars: Vec<char> = text.chars().collect();
+    let char_widths: Vec<usize> = chars
+        .iter()
+        .map(|c| {
+            use unicode_width::UnicodeWidthChar;
+            UnicodeWidthChar::width(*c).unwrap_or(1).max(1)
+        })
+        .collect();
+
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut run_text = String::new();
+    let mut run_char_widths: Vec<usize> = Vec::new();
+    let mut run_col_start: usize = 0;
+    let mut run_col_count: usize = 0;
+    let mut current_face = {
+        let (face, _) = font_manager.resolve_glyph(chars[0], style);
+        face
+    };
+
+    for (i, &ch) in chars.iter().enumerate() {
+        let (face, _) = font_manager.resolve_glyph(ch, style);
+        if face != current_face && !run_text.is_empty() {
+            runs.push(TextRun {
+                col_start: run_col_start,
+                col_count: run_col_count,
+                face_id: current_face,
+                style,
+                font_weight: FontWeight::Normal,
+                font_decorations: FontDecorationFlags::empty(),
+                colors,
+                url: None,
+                text: std::mem::take(&mut run_text),
+                char_widths: std::mem::take(&mut run_char_widths),
+                blink: BlinkState::None,
+            });
+            run_col_start += run_col_count;
+            run_col_count = 0;
+            current_face = face;
+        }
+        run_text.push(ch);
+        run_char_widths.push(char_widths[i]);
+        run_col_count += char_widths[i];
+    }
+
+    if !run_text.is_empty() {
+        runs.push(TextRun {
+            col_start: run_col_start,
+            col_count: run_col_count,
+            face_id: current_face,
+            style,
+            font_weight: FontWeight::Normal,
+            font_decorations: FontDecorationFlags::empty(),
+            colors,
+            url: None,
+            text: run_text,
+            char_widths: run_char_widths,
+            blink: BlinkState::None,
+        });
+    }
+
+    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
+    ShapedLine {
+        runs: shaped_runs,
+        line_width: LineWidth::Normal,
+    }
+}
+
 /// Shape a single `TextRun` via `rustybuzz`.
 fn shape_single_run(
     run: &TextRun,

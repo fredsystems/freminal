@@ -785,3 +785,236 @@ decisions below capture _why_ the format is shaped this way.
    | Active PTY output     | Proportional to output |       |         |
 
    Any platform exceeding 1% CPU at steady idle is a correctness bug.
+
+---
+
+## Shell Integration Architecture (Task 72.8b / 72.8c)
+
+### Why Ghostty-style spawn-time injection (not PTY-side scripting, not on-system install)
+
+freminal provides command-aware features (gutters, navigation, notifications,
+command-block fold/collapse) by parsing OSC 133 (FTCS) prompt/command
+markers emitted by the user's shell. To do this reliably, freminal needs
+those markers to actually be emitted — which means the shell must source
+some integration script before drawing its first prompt.
+
+Three options were considered:
+
+1. **User manually sources a script in their rc file.** Standard practice for
+   bash/zsh users. Rejected because:
+   - Users must take action; if they don't, command-aware features silently
+     don't work.
+   - Re-launching freminal from inside another terminal (or freminal-in-
+     freminal) doesn't help — the user's rc was loaded once at session
+     start; the injection happens at that moment, not at PTY spawn.
+
+2. **PTY-side injection: write the script bytes to the master side of the
+   PTY after the shell starts.** Investigated empirically (validation in
+   `/tmp/nix-shell.noQLDq/opencode/freminal-shell-injection/` on
+   2026-05-18). **Rejected because it is fundamentally visible** to the
+   user. Both bash and zsh echo all stdin via their line editor; heredoc
+   blocks render their body verbatim before evaluation. Bracketed-paste
+   wrapping makes it worse (reverse-video flash of the pasted code).
+   There is no way to inject through the PTY's input side that doesn't
+   show on screen.
+
+3. **Ghostty-style spawn-time env injection.** freminal sets shell-specific
+   env vars (`ENV` for bash, `ZDOTDIR` for zsh, `XDG_DATA_DIRS` for fish
+   and nushell) on the child process before spawn. The shell's standard
+   startup-file discovery finds our scripts and sources them silently
+   alongside the user's normal rc files. **This is the architecture
+   adopted in 72.8b.**
+
+The empirical confirmation that Ghostty does exactly this and that the
+result is invisible to the user came from reading their source
+documentation ([Ghostty Shell Integration](https://ghostty.org/docs/features/shell-integration)
+and `src/shell-integration/README.md`, retrieved 2026-05-18). iTerm2 3.5+
+has the same feature ("Load shell integration automatically"); WezTerm
+distributes `wezterm.sh` via `/etc/profile.d/` on packaged installs and
+relies on users sourcing it manually otherwise — a less ambitious model
+than Ghostty's.
+
+### The `freminal=1; fid=<id>` marker convention
+
+When sourced inside a freminal session, our shell scripts emit OSC 133
+markers tagged with two parameters that no other emitter uses:
+
+- `freminal=1` — sentinel saying "this marker was emitted by freminal's
+  integration." Presence is the gate that distinguishes our markers from
+  Starship's, WezTerm's, iTerm2's, etc.
+- `fid=<id>` — a freminal-specific block ID (matching A and D pairs).
+  Format is shell-side opaque (currently `<pid>-<counter>`). Required for
+  correlation when multiple emitters interleave A and D markers within
+  the same prompt cycle.
+
+Example:
+
+```text
+OSC 133 ; A ; freminal=1 ; fid=12345-1 ST
+OSC 133 ; B ; freminal=1 ; fid=12345-1 ST
+OSC 133 ; C ; freminal=1 ; fid=12345-1 ST
+OSC 133 ; D ; 0 ; freminal=1 ; fid=12345-1 ST
+```
+
+The parser (`parse_ftcs_params` in `freminal-common/src/buffer_states/ftcs.rs`)
+requires `freminal=1` for A/B/C/D markers. Markers without it return `None`
+and never reach the buffer. WezTerm/Starship/iTerm2 emissions are silently
+dropped at the parser layer. The shell-side emitters continue to run (we
+do not attempt to disable them), but their output is microseconds-per-
+prompt of harmless noise. P (prompt property) does not require the
+`freminal=1` gate because it is informational-only and has no effect on
+buffer state.
+
+`Buffer::start_command_block(cwd, fid)` and `finish_command_block(exit_code, fid)`
+take the `fid` and use it for explicit A/D correlation, falling back to
+the previous "most-recent-open" heuristic only when `fid` is `None`
+(which our scripts never emit, but defensively preserves behaviour for
+historical FTCS markers in FREC recordings).
+
+### Why freminal owns the on-disk script files
+
+The scripts live on disk at runtime (see "File layout" below). They are
+shipped as `include_bytes!()` constants in the binary so the install does
+not depend on packaging shipping the scripts as separate files.
+
+**freminal owns the on-disk files. User edits are not preserved.** On
+every launch, `sync_to_disk` (in `freminal/src/shell_integration.rs`)
+compares the on-disk content of each script against the embedded bytes
+and overwrites any file that differs.
+
+Rationale: the scripts are tightly coupled to freminal's parser. A
+user-modified script may emit markers in an incompatible format,
+producing parser errors that the user cannot easily debug. Treating the
+scripts as a managed resource (like a vendored binary) keeps the
+parser/script contract closed and testable. Users who genuinely need to
+customise the integration are expected to fork freminal and modify the
+embedded scripts.
+
+The Settings Modal does NOT expose a manual sync trigger or path-copy
+button. The auto-sync runs on every launch silently. This was a
+deliberate UI simplification: removing the buttons removed the
+`SettingsAction::ReinstallShellScripts` and `CopyShellIntegrationPath`
+variants and the corresponding `pending_shell_action` field on
+`SettingsModal`.
+
+### Version-marker hygiene (developer-facing, not runtime-load-bearing)
+
+Each shipped script starts with a `# freminal-shell-integration v<N>`
+comment (or `<!-- ... -->` for README.md). A single Rust constant
+`FREMINAL_SHELL_INTEGRATION_VERSION: u32` lives in `shell_integration.rs`.
+A `cargo test` invariant asserts the constant matches the marker in every
+shipped script. Forgetting to bump the constant after editing a script
+fails CI.
+
+The runtime install path (`sync_to_disk`) does NOT read the version
+marker. It compares bytes directly. The version is purely a development-
+discipline marker — it gives us a stable, greppable identifier for
+support diagnostics ("what version of the integration is this user
+running?") and ensures the team cannot ship asymmetric script/parser
+changes.
+
+### File layout on disk
+
+```text
+$FREMINAL_RESOURCES_DIR/shell-integration/    (or user fallback)
+├── bash/
+│   └── freminal-init.bash       — sourced via $ENV in POSIX bash mode
+├── zsh/
+│   ├── .zshenv                  — read by zsh when $ZDOTDIR points here
+│   └── freminal-integration     — sourced from .zshenv after user's rc
+├── fish/
+│   └── vendor_conf.d/
+│       └── freminal.fish        — auto-loaded via $XDG_DATA_DIRS
+└── README.md
+```
+
+The bash, zsh, and fish entries use the shell-specific subdirectory
+structures required by each shell's standard startup-file discovery:
+
+- **bash**'s `$ENV` env var (set when `--posix` is active) points to a
+  single file. Our `freminal-init.bash` first runs `set +o posix` to
+  return to bash mode, then sources `~/.bashrc` (or `~/.bash_profile`
+  for login shells), then installs our hooks.
+- **zsh** treats `$ZDOTDIR` as a directory and looks for `.zshenv`,
+  `.zshrc`, etc. inside it. Our `.zshenv` does the Ghostty-derived dance:
+  restore the user's original `$ZDOTDIR` from `$__FREMINAL_ZSH_ZDOTDIR`
+  (a sentinel env var we set before spawn), source the user's real
+  `.zshenv`, then source our `freminal-integration` script. The
+  `+X` parameter expansion is used to distinguish "user had `$ZDOTDIR`
+  set even if empty" from "user did not have `$ZDOTDIR` set at all".
+- **fish** auto-loads files matching `<XDG_DATA_DIR>/fish/vendor_conf.d/*.fish`
+  on startup. We prepend our resources dir to `$XDG_DATA_DIRS`, and fish
+  finds `freminal.fish` via standard discovery. No `$ZDOTDIR`-style
+  backup-restore needed because fish's `XDG_DATA_DIRS` discovery
+  composes naturally with the user's existing paths.
+
+### Search order for the resources dir
+
+At runtime, `freminal_common::config::shell_integration_dir()` returns
+the first existing directory among:
+
+1. `$FREMINAL_RESOURCES_DIR/shell-integration/` (packaging override —
+   intended for distros that ship our scripts in a system location like
+   `/usr/share/freminal/shell-integration/`).
+2. Entries in `$XDG_DATA_DIRS` containing `freminal/shell-integration/`
+   (alternate system-wide install path on Linux).
+3. `~/.config/freminal/shell-integration/` (user-local fallback,
+   populated by `sync_to_disk` on launch).
+
+The fallback location is the only one freminal itself writes to.
+Packaging overrides (1, 2) are read-only and managed by the packager;
+freminal's `sync_to_disk` does not write to them. If `$FREMINAL_RESOURCES_DIR`
+points at a directory that lacks `shell-integration/`, freminal falls
+through to the user-local fallback and treats the packaging override
+as missing.
+
+### Fail-graceful semantics
+
+The whole shell-integration pipeline is best-effort. Any failure mode
+results in "no command-aware features for this session" with no error
+surface beyond a `tracing::warn!` log line. Failure paths:
+
+- Resources dir cannot be resolved (e.g. `BaseDirs::new()` returns None) —
+  PTY spawns normally without env injection. Other terminal features
+  unaffected.
+- `sync_to_disk` cannot write (read-only filesystem, missing parent dir,
+  permission denied) — PTY spawns normally without env injection. Toast
+  is NOT surfaced (this happens at startup before the toast system
+  exists); only logged.
+- Shell binary is unknown (not bash/zsh/fish/nushell) — no env injection.
+  Shell starts as usual, no integration.
+- User runs an explicit `command` instead of a shell (e.g. `freminal vim`)
+  — no env injection. The command runs as itself; command-aware features
+  are obviously not relevant.
+- Scripts are present but malformed (should never happen at runtime
+  because the byte content is compiled in; would happen only if a
+  packaging override has corrupted scripts) — the shell itself surfaces
+  a syntax error to stderr; our parser sees no markers; user sees a
+  brief error message in their shell. Recovery is to remove the
+  packaging override.
+
+### Why we do NOT attempt to detect and disable other FTCS emitters
+
+The shell user's environment may include WezTerm's `wezterm.sh`,
+Starship's `starship init`, iTerm2's `iterm2_shell_integration.zsh`,
+Kitty's integration, etc. — any of these distributed by packaging or
+sourced manually by the user. They emit OSC 133 markers that lack our
+`freminal=1` parameter.
+
+Earlier designs considered detecting these (via env vars like
+`$WEZTERM_PANE`, `$ITERM_SHELL_INTEGRATION_INSTALLED`) and disabling
+them. This was rejected because:
+
+- Detection signals are unreliable. A NixOS environment where WezTerm's
+  shell integration is sourced via home-manager has no `$WEZTERM_PANE`
+  (no live WezTerm parent process) but the integration runs anyway.
+- Disabling other emitters means modifying the user's shell environment
+  in ways that affect their experience outside freminal (e.g. unsetting
+  Starship's OSC 133 emission would also affect non-freminal terminals
+  they later launch).
+- Parser-side filtering on `freminal=1` is correct and complete: other
+  emitters' markers are silently dropped without touching the user's
+  shell configuration.
+
+The cost is microseconds-per-prompt of dropped marker traffic, which is
+not measurable in practice.

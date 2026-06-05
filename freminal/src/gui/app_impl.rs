@@ -20,7 +20,7 @@ use super::panes;
 use super::renderer::WindowPostRenderer;
 use super::rendering;
 use super::tabs::{Tab, TabManager};
-use super::terminal::{FreminalTerminalWidget, new_render_state};
+use super::terminal::FreminalTerminalWidget;
 use super::view_state;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
@@ -152,28 +152,16 @@ impl freminal_windowing::App for FreminalGui {
                     extra_env: None,
                     recording_swap: self.recording_swap.clone(),
                     recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                    set_term_program: self.config.shell_integration.set_term_program,
                 },
             ) {
                 Ok(channels) => {
-                    let pane = panes::Pane {
-                        id: pane_id,
-                        arc_swap: channels.arc_swap,
-                        input_tx: channels.input_tx,
-                        pty_write_tx: channels.pty_write_tx,
-                        window_cmd_rx: channels.window_cmd_rx,
-                        clipboard_rx: channels.clipboard_rx,
-                        search_buffer_rx: channels.search_buffer_rx,
-                        pty_dead_rx: channels.pty_dead_rx,
-                        title: "Terminal".to_owned(),
-                        bell_active: false,
-                        pending_copy: false,
-                        title_stack: Vec::new(),
-                        view_state: view_state::ViewState::new(),
-                        echo_off: channels.echo_off,
-                        child_pid: channels.child_pid,
-                        render_state: new_render_state(Arc::clone(&window_post)),
-                        render_cache: super::terminal::PaneRenderCache::new(),
-                    };
+                    let pane = panes::Pane::from_channels(
+                        pane_id,
+                        channels,
+                        Arc::clone(&window_post),
+                        "Terminal".to_owned(),
+                    );
                     let tab_id = super::tabs::TabId::first();
                     let tab = Tab::new(tab_id, pane);
 
@@ -594,6 +582,45 @@ impl freminal_windowing::App for FreminalGui {
                         );
                     }
                 }
+            }
+        }
+
+        // ── Drain CommandFinishedEvent from each pane (Task 72.9) ─────────────
+        // The PTY consumer thread forwards completed CommandBlocks here via a
+        // dedicated channel. Append each block to the owning pane's
+        // recent_commands ring (cap RECENT_COMMANDS_CAP) and set the tab's
+        // has_pending_event flag if the event arrived on a non-active tab.
+        //
+        // TODO(Task 76): dispatch CommandFinishedEvent to the notification
+        // subsystem here (OSC 9 / OSC 777) before the badge is set.
+        let active_tab_idx = win.tabs.active_index();
+        for (tab_idx, tab) in win.tabs.iter_mut().enumerate() {
+            let mut tab_received_event = false;
+            if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+                for pane in panes {
+                    while let Ok(event) = pane.command_event_rx.try_recv() {
+                        // Extract the command text from the current
+                        // snapshot before the rows scroll out of the
+                        // visible window. Used by the Quick Command
+                        // History Palette to replay live entries.  Cache
+                        // entries whose rows have already left the
+                        // visible window will be silently absent — the
+                        // seed half of the palette still works in that
+                        // case.
+                        let snap = pane.arc_swap.load();
+                        if let Some(text) =
+                            crate::gui::command_history::extract_command_text(&snap, &event.block)
+                        {
+                            pane.record_command_text(event.block.id, text);
+                        }
+                        drop(snap);
+                        pane.push_recent_command(event.block);
+                        tab_received_event = true;
+                    }
+                }
+            }
+            if tab_received_event && tab_idx != active_tab_idx {
+                tab.has_pending_event = true;
             }
         }
 
@@ -1218,6 +1245,57 @@ impl freminal_windowing::App for FreminalGui {
                     pane.view_state.scroll_offset = pane_snap.scroll_offset;
                 }
 
+                // OSC 1338 HISTFILE reload trigger (Task 72.15).  When the
+                // shell-integration scripts publish a new HISTFILE path
+                // through `OSC 1338 ; HISTFILE=<path> ST`, the snapshot's
+                // `shell_histfile` will diverge from the last value we
+                // observed for this pane.  On change, spawn an
+                // OSC-priority loader (`SEED_SEQ_OSC=1`) which CAS-wins
+                // over the env-derived load published earlier at spawn
+                // time.  The decision is factored into a pure function
+                // (`classify_osc_reload`) so the comparison logic is
+                // exhaustively unit-tested independently of egui.
+                {
+                    use crate::gui::shell_history::OscReloadDecision;
+                    let decision = crate::gui::shell_history::classify_osc_reload(
+                        pane.shell_program.as_deref(),
+                        pane_snap.shell_histfile.as_deref(),
+                        pane.shell_histfile_last_seen.as_deref(),
+                    );
+                    match decision {
+                        OscReloadDecision::NoChange => {}
+                        OscReloadDecision::SpawnLoad { program, path } => {
+                            tracing::debug!(
+                                "shell_history: pane {pane_id} OSC 1338 reload \
+                                 (program={program:?}, path={path:?})"
+                            );
+                            crate::gui::shell_history::spawn_loader_with_path(
+                                program,
+                                path,
+                                std::sync::Arc::clone(&pane.history_seed),
+                            );
+                            pane.shell_histfile_last_seen
+                                .clone_from(&pane_snap.shell_histfile);
+                        }
+                        OscReloadDecision::NoProgramAvailable { new_path } => {
+                            tracing::trace!(
+                                "shell_history: pane {pane_id} OSC 1338 \
+                                 received but no resolved shell program \
+                                 (new_path={new_path:?}); skipping reload"
+                            );
+                            pane.shell_histfile_last_seen
+                                .clone_from(&pane_snap.shell_histfile);
+                        }
+                        OscReloadDecision::Cleared => {
+                            tracing::trace!(
+                                "shell_history: pane {pane_id} OSC 1338 \
+                                 HISTFILE cleared; leaving existing seed in place"
+                            );
+                            pane.shell_histfile_last_seen = None;
+                        }
+                    }
+                }
+
                 let is_echo_off = self.config.security.password_indicator
                     && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
                 let is_active = pane_id == active_pane_id;
@@ -1256,6 +1334,7 @@ impl freminal_windowing::App for FreminalGui {
                             bg_opacity,
                             self.config.ui.background_image_opacity,
                             self.config.ui.background_image_mode,
+                            &self.config.command_blocks,
                             &self.binding_map,
                             is_echo_off,
                             is_active,
@@ -1266,6 +1345,54 @@ impl freminal_windowing::App for FreminalGui {
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
+
+                // ── Command history palette overlay (Ctrl+Shift+M) ───
+                // Rendered here (not in `widget.show`) because the palette
+                // needs `Pane`-owned data — `recent_commands`,
+                // `history_seed`, and the `command_texts` cache — that the
+                // widget does not have access to.  The palette is an
+                // `egui::Area` overlay so its render order relative to the
+                // widget body does not matter; what matters is that
+                // `Pane` is in scope here.
+                if pane.view_state.command_history.is_open {
+                    use crate::gui::command_history::PaletteAction;
+                    // Hold the Arc for the duration of the palette call
+                    // so the borrow into `entries` remains valid.
+                    let seed_arc = pane.history_seed.load_full();
+                    let seed: Option<&Vec<String>> = if seed_arc.entries.is_empty() {
+                        None
+                    } else {
+                        Some(seed_arc.entries.as_ref())
+                    };
+                    let action = crate::gui::command_history::show_command_history_palette(
+                        ui,
+                        &mut pane.view_state.command_history,
+                        content_rect,
+                        pane_id,
+                        seed,
+                        &pane.recent_commands,
+                        &pane.command_texts,
+                    );
+                    match action {
+                        PaletteAction::None => {}
+                        PaletteAction::Close => {
+                            pane.view_state.command_history.close();
+                            crate::gui::command_history::log_close(pane_id);
+                        }
+                        PaletteAction::Submit(text) => {
+                            let len = text.len();
+                            let ok = crate::gui::command_history::send_command_text(
+                                &pane.input_tx,
+                                &text,
+                            );
+                            if !ok {
+                                crate::gui::command_history::log_submit_failure(pane_id, len);
+                            }
+                            pane.view_state.command_history.close();
+                            crate::gui::command_history::log_close(pane_id);
+                        }
+                    }
+                }
 
                 // Click-to-focus: if a non-active pane was left-clicked, transfer
                 // keyboard focus to it and send FocusChange events to both panes.
@@ -1617,6 +1744,7 @@ impl FreminalGui {
                 extra_env: None,
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
+                set_term_program: self.config.shell_integration.set_term_program,
             },
         ) {
             Ok(channels) => channels,
@@ -1633,25 +1761,12 @@ impl FreminalGui {
             }
         };
 
-        let pane = panes::Pane {
-            id: pane_id,
-            arc_swap: channels.arc_swap,
-            input_tx: channels.input_tx,
-            pty_write_tx: channels.pty_write_tx,
-            window_cmd_rx: channels.window_cmd_rx,
-            clipboard_rx: channels.clipboard_rx,
-            search_buffer_rx: channels.search_buffer_rx,
-            pty_dead_rx: channels.pty_dead_rx,
-            title: "Terminal".to_owned(),
-            bell_active: false,
-            pending_copy: false,
-            title_stack: Vec::new(),
-            view_state: view_state::ViewState::new(),
-            echo_off: channels.echo_off,
-            child_pid: channels.child_pid,
-            render_state: new_render_state(Arc::clone(&window_post)),
-            render_cache: super::terminal::PaneRenderCache::new(),
-        };
+        let pane = panes::Pane::from_channels(
+            pane_id,
+            channels,
+            Arc::clone(&window_post),
+            "Terminal".to_owned(),
+        );
 
         let tab = Tab::new(super::tabs::TabId::first(), pane);
 

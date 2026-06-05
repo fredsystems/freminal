@@ -9,6 +9,7 @@ use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
+        command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
         ftcs::FtcsState,
@@ -56,6 +57,7 @@ use freminal_common::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use freminal_buffer::buffer::Buffer;
 use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
@@ -149,12 +151,25 @@ pub struct TerminalHandler {
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
+    /// Finished OSC 133 command blocks queued for the GUI to drain via
+    /// [`Self::drain_command_events`].
+    ///
+    /// Populated by [`Self::handle_osc_ftcs`] when an `OSC 133 D` marker
+    /// arrives.  The GUI consumes these (in subtask 72.9) and routes them to
+    /// the corresponding pane's `recent_commands` and to the notification
+    /// system (Task 76).
+    pending_command_events: Vec<CommandBlock>,
     /// Last graphic character written (for REP — CSI b).
     last_graphic_char: Option<TChar>,
     /// Current working directory reported by the shell via OSC 7.
     ///
     /// Stores the decoded path component from `file://hostname/path`.
     current_working_directory: Option<String>,
+    /// Shell history file path reported by the shell-integration scripts via
+    /// `OSC 1338 ; HISTFILE=<path> ST`. Used to refresh the command-history
+    /// palette seed with the actual shell-evaluated `$HISTFILE` (which may
+    /// differ from the parent-environment value when configs override it).
+    shell_histfile: Option<PathBuf>,
     /// Current FTCS (OSC 133) shell integration state.
     ftcs_state: FtcsState,
     /// Exit code from the most recent `OSC 133 ; D [; exitcode]` marker.
@@ -342,8 +357,10 @@ impl TerminalHandler {
             saved_character_replace: None,
             write_tx: None,
             window_commands: Vec::new(),
+            pending_command_events: Vec::new(),
             last_graphic_char: None,
             current_working_directory: None,
+            shell_histfile: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
             palette: ColorPalette::default(),
@@ -449,8 +466,10 @@ impl TerminalHandler {
         self.character_replace = DecSpecialGraphics::default();
         self.saved_character_replace = None;
         self.window_commands.clear();
+        self.pending_command_events.clear();
         self.last_graphic_char = None;
         self.current_working_directory = None;
+        self.shell_histfile = None;
         self.ftcs_state = FtcsState::default();
         self.last_exit_code = None;
         self.palette.reset_all();
@@ -748,6 +767,13 @@ impl TerminalHandler {
         self.current_working_directory.as_deref()
     }
 
+    /// Return the shell history file path reported by the shell-integration
+    /// scripts via OSC 1338, if any.
+    #[must_use]
+    pub fn shell_histfile(&self) -> Option<&Path> {
+        self.shell_histfile.as_deref()
+    }
+
     /// Return the current FTCS (OSC 133) shell integration state.
     #[must_use]
     pub const fn ftcs_state(&self) -> FtcsState {
@@ -758,6 +784,15 @@ impl TerminalHandler {
     #[must_use]
     pub const fn last_exit_code(&self) -> Option<i32> {
         self.last_exit_code
+    }
+
+    /// Drain and return all pending command-finished events.
+    ///
+    /// Called by the PTY loop after each batch of incoming data is processed.
+    /// Returns events oldest-first; the queue is emptied by this call.
+    #[must_use]
+    pub fn drain_command_events(&mut self) -> Vec<CommandBlock> {
+        std::mem::take(&mut self.pending_command_events)
     }
 
     /// Return the current xterm `modifyOtherKeys` level (0, 1, or 2).
@@ -3134,16 +3169,25 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         assert_eq!(handler.ftcs_state(), FtcsState::None);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InPrompt);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandStart {
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InCommand);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::OutputStart {
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::InOutput);
 
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(Some(0))));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: Some(0),
+            fid: "sm1".to_owned(),
+        }));
         assert_eq!(handler.ftcs_state(), FtcsState::None);
         assert_eq!(handler.last_exit_code(), Some(0));
     }
@@ -3153,7 +3197,13 @@ mod tests {
         use freminal_common::buffer_states::ftcs::FtcsMarker;
 
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished(None)));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::CommandFinished {
+            exit_code: None,
+            fid: "test".to_owned(),
+        }));
         assert_eq!(handler.last_exit_code(), None);
     }
 
@@ -3162,7 +3212,9 @@ mod tests {
         use freminal_common::buffer_states::ftcs::{FtcsMarker, FtcsState, PromptKind};
 
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart));
+        handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        }));
         handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptProperty(
             PromptKind::Initial,
         )));
@@ -3636,6 +3688,49 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::RemoteHost("not-a-valid-uri".to_string()));
         assert!(handler.current_working_directory().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 1338 shell info / HISTFILE
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_shell_info_histfile_stores_path() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(handler.shell_histfile().is_none());
+        handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
+            "/home/user/.zsh_history",
+        )));
+        assert_eq!(
+            handler.shell_histfile(),
+            Some(Path::new("/home/user/.zsh_history"))
+        );
+    }
+
+    #[test]
+    fn osc_shell_info_histfile_overwrites_previous_value() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
+            "/home/user/.bash_history",
+        )));
+        handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
+            "/home/user/.config/zsh/.zsh_history",
+        )));
+        assert_eq!(
+            handler.shell_histfile(),
+            Some(Path::new("/home/user/.config/zsh/.zsh_history"))
+        );
+    }
+
+    #[test]
+    fn reset_clears_shell_histfile() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
+            "/home/user/.zsh_history",
+        )));
+        assert!(handler.shell_histfile().is_some());
+        handler.full_reset();
+        assert!(handler.shell_histfile().is_none());
     }
 
     // ------------------------------------------------------------------

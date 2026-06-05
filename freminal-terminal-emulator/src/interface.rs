@@ -58,6 +58,7 @@ use crate::state::{TerminalSections, internal::TerminalState};
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
+use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
@@ -238,6 +239,9 @@ impl TerminalEmulator {
     ///
     /// # Errors
     ///
+    // 72.6: 8th parameter is the shell-integration TERM_PROGRAM flag,
+    // derived from the GUI's config and forwarded straight to PtySpawnConfig.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         args: &Args,
         scrollback_limit: Option<usize>,
@@ -246,6 +250,7 @@ impl TerminalEmulator {
         extra_env: Option<&std::collections::HashMap<String, String>>,
         shell_override: Option<&str>,
         pane_id: u32,
+        set_term_program: bool,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
         let (write_tx, read_rx) = unbounded();
         let (pty_tx, pty_rx) = unbounded();
@@ -279,6 +284,7 @@ impl TerminalEmulator {
                 shell,
                 cwd,
                 extra_env,
+                set_term_program,
             },
             &initial_size,
             pane_id,
@@ -524,6 +530,7 @@ impl TerminalEmulator {
     /// from the previous snapshot.  Cursor-only moves do not set it because
     /// cursor position is carried separately in the snapshot struct.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Struct literal dominates line count; logic is linear and clear
     pub fn build_snapshot(&mut self) -> TerminalSnapshot {
         // ── Cheap immutable reads (no &mut borrow of handler needed) ────────
         let (term_width, term_height) = self.internal.handler.win_size();
@@ -609,9 +616,24 @@ impl TerminalEmulator {
             .current_working_directory()
             .map(String::from);
 
+        let shell_histfile = self
+            .internal
+            .handler
+            .shell_histfile()
+            .map(std::path::PathBuf::from);
+
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
         let prompt_rows = Arc::<[usize]>::from(self.internal.handler.buffer().prompt_rows());
+        let command_blocks: Arc<[CommandBlock]> = self
+            .internal
+            .handler
+            .buffer()
+            .command_blocks()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         let theme = self.internal.handler.theme();
 
         // ── Inline image data ────────────────────────────────────────────────
@@ -661,9 +683,11 @@ impl TerminalEmulator {
             line_feed_mode: mode_fields.line_feed_mode,
             kitty_keyboard_flags: mode_fields.kitty_keyboard_flags,
             cwd,
+            shell_histfile,
             ftcs_state,
             last_exit_code,
             prompt_rows,
+            command_blocks,
             theme,
             images,
             visible_image_placements,
@@ -1250,6 +1274,28 @@ mod tests {
         assert!(!snap.has_urls);
     }
 
+    // ── build_snapshot: shell_histfile (OSC 1338) ────────────────────────────
+
+    #[test]
+    fn build_snapshot_no_shell_histfile_by_default() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello world");
+        let snap = emu.build_snapshot();
+        assert!(snap.shell_histfile.is_none());
+    }
+
+    #[test]
+    fn build_snapshot_propagates_shell_histfile_from_osc_1338() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // OSC 1338 ; HISTFILE=/home/user/.zsh_history BEL
+        emu.handle_incoming_data(b"\x1b]1338;HISTFILE=/home/user/.zsh_history\x07");
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.shell_histfile.as_deref(),
+            Some(std::path::Path::new("/home/user/.zsh_history"))
+        );
+    }
+
     // ── get_win_size ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1277,6 +1323,139 @@ mod tests {
             snap.max_scroll_offset <= 10,
             "scrollback limit=10, but max_scroll_offset={}",
             snap.max_scroll_offset
+        );
+    }
+
+    // ── command_blocks in TerminalSnapshot (Task 72.4) ───────────────────────
+
+    #[test]
+    fn default_snapshot_has_empty_command_blocks() {
+        let snap = TerminalSnapshot::empty();
+        assert!(snap.command_blocks.is_empty());
+    }
+
+    #[test]
+    fn build_snapshot_empty_command_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.command_blocks.is_empty(),
+            "fresh emulator should have no command blocks"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_populated_command_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Drive one full A → B → C → D;0 cycle via the byte-stream path.
+        // All markers carry freminal=1 and fid=t1 for correlation.
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;B;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;C;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0;freminal=1;fid=t1\x07");
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.command_blocks.len(),
+            1,
+            "expected 1 command block after A→B→C→D cycle"
+        );
+        assert!(
+            snap.command_blocks[0].end_row.is_some(),
+            "end_row should be set after D marker"
+        );
+        assert_eq!(
+            snap.command_blocks[0].exit_code,
+            Some(0),
+            "exit_code must be Some(0) — OscValue token must not be dropped"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_command_blocks_ordering() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Drive 3 full A → B → C → D cycles with distinct fids per cycle so
+        // that fid-based correlation and block ordering are verified together.
+        for code in [0u8, 1, 2] {
+            let fid = format!("cycle-{code}");
+            let seq_a = format!("\x1b]133;A;freminal=1;fid={fid}\x07");
+            let seq_b = format!("\x1b]133;B;freminal=1;fid={fid}\x07");
+            let seq_c = format!("\x1b]133;C;freminal=1;fid={fid}\x07");
+            let seq_d = format!("\x1b]133;D;{code};freminal=1;fid={fid}\x07");
+            emu.handle_incoming_data(seq_a.as_bytes());
+            emu.handle_incoming_data(seq_b.as_bytes());
+            emu.handle_incoming_data(seq_c.as_bytes());
+            emu.handle_incoming_data(seq_d.as_bytes());
+        }
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.command_blocks.len(),
+            3,
+            "expected 3 command blocks after 3 A→B→C→D cycles"
+        );
+        assert!(
+            snap.command_blocks[0].id < snap.command_blocks[1].id,
+            "command block IDs must be strictly increasing (oldest first)"
+        );
+        assert!(
+            snap.command_blocks[1].id < snap.command_blocks[2].id,
+            "command block IDs must be strictly increasing (oldest first)"
+        );
+        assert_eq!(
+            snap.command_blocks[0].exit_code,
+            Some(0),
+            "first block exit_code must be Some(0)"
+        );
+        assert_eq!(
+            snap.command_blocks[1].exit_code,
+            Some(1),
+            "second block exit_code must be Some(1)"
+        );
+        assert_eq!(
+            snap.command_blocks[2].exit_code,
+            Some(2),
+            "third block exit_code must be Some(2)"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_command_block_preserves_exit_code_127() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // OSC 133 D;127 must round-trip the exit code through the byte-stream
+        // OSC parser (regression guard for the bug fixed in 72.16.a).
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;127;freminal=1;fid=t1\x07");
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.command_blocks.len(), 1);
+        assert_eq!(snap.command_blocks[0].exit_code, Some(127));
+        assert_eq!(
+            snap.command_blocks[0].status(),
+            freminal_common::buffer_states::command_block::CommandStatus::Failure(127),
+        );
+    }
+
+    #[test]
+    fn foreign_osc_133_markers_produce_no_command_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // WezTerm-style: A;cl=m;aid=12345, D;0;aid=12345 — no freminal=1
+        emu.handle_incoming_data(b"\x1b]133;A;cl=m;aid=12345\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0;aid=12345\x07");
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.command_blocks.is_empty(),
+            "foreign FTCS markers (no freminal=1) must not produce command blocks"
+        );
+    }
+
+    #[test]
+    fn plain_osc_133_markers_without_freminal_tag_produce_no_blocks() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Plain markers (e.g. older freminal recordings, hand-written test fixtures)
+        emu.handle_incoming_data(b"\x1b]133;A\x07");
+        emu.handle_incoming_data(b"\x1b]133;D;0\x07");
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.command_blocks.is_empty(),
+            "plain FTCS markers without freminal=1 must not produce command blocks"
         );
     }
 }

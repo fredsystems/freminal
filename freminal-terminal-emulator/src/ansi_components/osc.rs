@@ -16,6 +16,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use super::osc_clipboard::handle_osc_clipboard;
 use super::osc_iterm2::handle_osc_iterm2;
 use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
+use super::osc_shell_info::handle_osc_shell_info;
 
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) enum AnsiOscParserState {
@@ -242,23 +243,32 @@ fn dispatch_osc_target(
             )));
         }
         OscTarget::Ftcs => {
-            // Extract the string tokens after "133" and pass
-            // them to the FTCS parser.  E.g. for
-            // `OSC 133 ; D ; 0 ST` → params_strs = ["D", "0"]
-            let ftcs_strs: Vec<&str> = params
+            // Serialize each token to its display form so numeric exit codes
+            // (e.g. "0", "127" — tokenised as `AnsiOscToken::OscValue`) survive
+            // the filter alongside string tokens like "D" or "P".  Owned
+            // `String`s are required because `OscValue` numerics are formatted
+            // at runtime; refs collected into `ftcs_str_refs` for the call.
+            let ftcs_strs: Vec<String> = params
                 .iter()
                 .skip(1) // skip the "133" token
                 .filter_map(|t| match t {
-                    Some(AnsiOscToken::String(s)) => Some(s.as_str()),
-                    _ => None,
+                    Some(AnsiOscToken::String(s)) => Some(s.clone()),
+                    Some(AnsiOscToken::OscValue(n)) => Some(n.to_string()),
+                    None => None,
                 })
                 .collect();
+            let ftcs_str_refs: Vec<&str> = ftcs_strs.iter().map(String::as_str).collect();
 
-            if let Some(marker) = parse_ftcs_params(&ftcs_strs) {
+            if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
                 output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
             } else {
-                tracing::warn!(
-                    "OSC 133: unrecognised FTCS params: recent='{}'",
+                // Foreign FTCS markers (e.g. Apple Terminal's `/etc/bashrc`
+                // emitting `133;A;cl=m;aid=$$` before our PS1 wraps) are
+                // intentionally dropped to avoid duplicate command blocks.
+                // Logged at debug to aid diagnosis without flooding the
+                // log on systems where a foreign integration is active.
+                tracing::debug!(
+                    "OSC 133: ignored foreign or unrecognised FTCS params: recent='{}'",
                     seq_trace.as_str()
                 );
             }
@@ -296,6 +306,9 @@ fn dispatch_osc_target(
         }
         OscTarget::ITerm2 => {
             handle_osc_iterm2(raw_params, seq_trace, output);
+        }
+        OscTarget::ShellInfo => {
+            handle_osc_shell_info(raw_params, seq_trace, output);
         }
         // OSC 22 — set the pointer (mouse cursor) shape.
         OscTarget::PointerShape => {
@@ -667,8 +680,8 @@ mod tests {
     // ── Lines 245-259: OSC 133 (FTCS) ───────────────────────────────────────
     #[test]
     fn osc133_ftcs_prompt_start() {
-        // OSC 133 ; A BEL — FTCS prompt start
-        let output = feed_osc(b"133;A\x07");
+        // OSC 133 ; A ; freminal=1 ; fid=t1 BEL — FTCS prompt start (freminal format)
+        let output = feed_osc(b"133;A;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -678,8 +691,8 @@ mod tests {
 
     #[test]
     fn osc133_ftcs_command_start() {
-        // OSC 133 ; B BEL — FTCS command start
-        let output = feed_osc(b"133;B\x07");
+        // OSC 133 ; B ; freminal=1 ; fid=t1 BEL — FTCS command start (freminal format)
+        let output = feed_osc(b"133;B;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -689,8 +702,8 @@ mod tests {
 
     #[test]
     fn osc133_ftcs_command_output_start() {
-        // OSC 133 ; C BEL — FTCS command output start
-        let output = feed_osc(b"133;C\x07");
+        // OSC 133 ; C ; freminal=1 ; fid=t1 BEL — FTCS output start (freminal format)
+        let output = feed_osc(b"133;C;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -700,13 +713,33 @@ mod tests {
 
     #[test]
     fn osc133_ftcs_command_done_with_exit_code() {
-        // OSC 133 ; D ; 0 BEL — FTCS command done with exit code 0
-        let output = feed_osc(b"133;D;0\x07");
+        // OSC 133 ; D ; 0 ; freminal=1 ; fid=t1 BEL — FTCS done (freminal format)
+        let output = feed_osc(b"133;D;0;freminal=1;fid=t1\x07");
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
             TerminalOutput::OscResponse(AnsiOscType::Ftcs(_))
         ));
+    }
+
+    #[test]
+    fn osc133_ftcs_plain_marker_silently_consumed() {
+        // OSC 133 ; A BEL — plain marker without freminal=1 is silently dropped
+        let output = feed_osc(b"133;A\x07");
+        assert!(
+            output.is_empty(),
+            "plain marker without freminal=1 must produce no output"
+        );
+    }
+
+    #[test]
+    fn osc133_ftcs_foreign_marker_silently_consumed() {
+        // OSC 133 ; A ; aid=12345 BEL — WezTerm-style marker is silently dropped
+        let output = feed_osc(b"133;A;aid=12345\x07");
+        assert!(
+            output.is_empty(),
+            "foreign marker without freminal=1 must produce no output"
+        );
     }
 
     #[test]

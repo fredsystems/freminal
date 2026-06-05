@@ -73,6 +73,19 @@ pub const fn search_current_bg_f() -> [f32; 4] {
     [1.0, 0.549_019_63, 0.0, 0.85]
 }
 
+/// Background tint for the OSC 133 command block currently under the
+/// mouse cursor, as `[f32; 4]`.
+///
+/// Derived from the theme's selection color at reduced alpha (≈25%) so
+/// the hover indicator is visually distinct from a real selection while
+/// still using a color the user has implicitly approved. The lower
+/// alpha also keeps the underlying text readable.
+#[must_use]
+pub const fn command_block_hover_bg_f(theme: &ThemePalette) -> [f32; 4] {
+    let [r, g, b, _] = rgb_to_f32(theme.selection_bg);
+    [r, g, b, 0.25]
+}
+
 // ---------------------------------------------------------------------------
 //  Color conversion functions
 // ---------------------------------------------------------------------------

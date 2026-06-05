@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::buffer_states::{ftcs::FtcsMarker, pointer_shape::PointerShape, url::Url};
@@ -168,6 +169,20 @@ pub enum OscTarget {
     ColorSchemeNotification,
     Unknown,
     ITerm2,
+    /// OSC 1338 — Freminal-private shell-information sub-protocol.
+    ///
+    /// Emitted by the bundled shell-integration scripts (bash / zsh / fish)
+    /// at session start to convey out-of-band metadata that freminal cannot
+    /// reliably observe from the parent process environment.  The first
+    /// (and currently only) sub-command is `HISTFILE=<path>`, which lets
+    /// the command-history palette read the *correct* history file when
+    /// `$HISTFILE` was set as a non-exported shell variable in `.zshrc` /
+    /// `.bashrc` and therefore invisible to freminal at PTY spawn time.
+    ///
+    /// OSC 1338 is adjacent to iTerm2's OSC 1337 (signalling private use)
+    /// and unassigned in any public registry.  Sub-commands follow
+    /// `key=value` semantics with raw (un-encoded) values.
+    ShellInfo,
 }
 
 // A list of command we may need to handle. I'm sure there is more.
@@ -223,6 +238,7 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
             AnsiOscToken::OscValue(133) => Self::Ftcs,
             AnsiOscToken::OscValue(1337) => Self::ITerm2,
+            AnsiOscToken::OscValue(1338) => Self::ShellInfo,
             AnsiOscToken::OscValue(110) => Self::ResetForeground,
             AnsiOscToken::OscValue(111) => Self::ResetBackground,
             _ => Self::Unknown,
@@ -319,6 +335,13 @@ pub enum AnsiOscType {
     ///
     /// An empty name or `"default"` resets to the OS default.
     SetPointerShape(PointerShape),
+    /// OSC 1338 `HISTFILE=<path>` — freminal-private shell-information
+    /// sub-command reporting the live shell's history-file path.
+    ///
+    /// Carried in the snapshot so the GUI can replace the env-derived
+    /// command-history seed with the authoritative path the shell itself
+    /// reports.  See [`OscTarget::ShellInfo`].
+    ShellInfoHistFile(PathBuf),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -370,6 +393,7 @@ impl std::fmt::Display for AnsiOscType {
             Self::ResetForegroundColor => write!(f, "ResetForegroundColor"),
             Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
             Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
+            Self::ShellInfoHistFile(path) => write!(f, "ShellInfoHistFile({})", path.display()),
         }
     }
 }
@@ -716,6 +740,14 @@ mod tests {
         assert_eq!(AnsiOscType::ITerm2Unknown.to_string(), "ITerm2Unknown");
     }
 
+    #[test]
+    fn display_ansi_osc_shell_info_histfile() {
+        let s =
+            AnsiOscType::ShellInfoHistFile(PathBuf::from("/home/user/.zsh_history")).to_string();
+        assert!(s.contains("ShellInfoHistFile"), "got: {s}");
+        assert!(s.contains("/home/user/.zsh_history"), "got: {s}");
+    }
+
     // ------------------------------------------------------------------
     // AnsiOscType Display: remaining uncovered variants
     // ------------------------------------------------------------------
@@ -735,7 +767,10 @@ mod tests {
     #[test]
     fn display_ansi_osc_ftcs() {
         use crate::buffer_states::ftcs::FtcsMarker;
-        let s = AnsiOscType::Ftcs(FtcsMarker::PromptStart).to_string();
+        let s = AnsiOscType::Ftcs(FtcsMarker::PromptStart {
+            fid: "test".to_owned(),
+        })
+        .to_string();
         assert!(s.contains("Ftcs"), "got: {s}");
     }
 
@@ -971,6 +1006,14 @@ mod tests {
         assert_eq!(
             OscTarget::from(&AnsiOscToken::OscValue(1337)),
             OscTarget::ITerm2
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_shell_info() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(1338)),
+            OscTarget::ShellInfo
         );
     }
 

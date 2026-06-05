@@ -370,11 +370,19 @@ impl super::FreminalGui {
             KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
                 trace!("Cannot close tab: {e}");
             }
-            // `CloseTab` with no error is a no-op here; `ClearScrollback` is
-            // fully handled synchronously in `dispatch_binding_action` (resets
-            // view scroll offset and sends `InputEvent::ClearScrollback` to
-            // the PTY thread) so it needs no deferred-action work.
-            KeyAction::CloseTab | KeyAction::ClearScrollback => {}
+            // `CloseTab` with no error is a no-op here; `ClearScrollback`
+            // and the fold actions are fully handled synchronously in
+            // `dispatch_binding_action` (the former resets view scroll
+            // offset and sends `InputEvent::ClearScrollback`; the latter
+            // mutate `ViewState::folded_blocks` directly) so they need no
+            // deferred-action work.
+            KeyAction::CloseTab
+            | KeyAction::ClearScrollback
+            | KeyAction::FoldPreviousCommand
+            | KeyAction::FoldAll
+            | KeyAction::UnfoldAll
+            | KeyAction::CopyLastCommandOutput
+            | KeyAction::CopyCommandOutputAtCursor => {}
             KeyAction::NextTab => {
                 win.tabs.next_tab();
                 if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
@@ -418,6 +426,18 @@ impl super::FreminalGui {
                     pane.view_state.search_state.is_open = true;
                 } else {
                     warn!("OpenSearch: active tab has no active pane");
+                }
+            }
+            KeyAction::ShowCommandHistory => {
+                if let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() {
+                    let seed_loaded = !pane.history_seed.load().entries.is_empty();
+                    let recent_len = pane.recent_commands.len();
+                    let texts_len = pane.command_texts.len();
+                    let pane_id = pane.id;
+                    pane.view_state.command_history.open();
+                    super::command_history::log_open(pane_id, seed_loaded, recent_len, texts_len);
+                } else {
+                    warn!("ShowCommandHistory: active tab has no active pane");
                 }
             }
             KeyAction::SearchNext => {
