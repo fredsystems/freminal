@@ -2037,7 +2037,7 @@ warnings`, `cargo machete`, `cargo fmt --check` all clean.
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
 warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
-#### 73.5 — Move hover trigger from buffer to gutter
+#### 73.5 — Move hover trigger from buffer to gutter ✅
 
 **Scope:** `freminal/src/gui/mouse.rs`, `freminal/src/gui/renderer/`
 (whichever module currently owns the 72.12 hover overlay), and the view-
@@ -2071,6 +2071,34 @@ block-related.
 **Verification:** Update or replace the 72.12 hover unit tests. New
 integration test: hovering output cells does not set
 `hovered_block_id`; hovering gutter rows belonging to a block does.
+
+**Completion notes (2026-06-08):**
+
+- **Minimal change thanks to 73.3.** 73.3 had already added the gutter as a
+  hover trigger _alongside_ the 72.12 cell trigger inside
+  `compute_command_block_hover_rows`. 73.5 simply deletes the cell-hover
+  branch (`else if terminal_rect.contains(...)`), leaving the gutter strip
+  as the sole surface. The tint rendering (25%-alpha row range across the
+  cell grid) is unchanged — only the trigger surface moved.
+- **Disabled states.** Hover returns `None` when the feature is off, the
+  alternate screen is active, there are no blocks, OR the gutter is off
+  (`gutter_inset <= 0.0`, which is the case for `gutter = "off"`). The
+  unused `logical_cell_w` parameter was dropped.
+- **No view-state field.** There is no stored `hovered_block_id`; hover is
+  recomputed per frame as a local (`command_block_hover_rows`), gated by
+  the `hover_changed` cache term from 73.3. The plan's "does not set
+  `hovered_block_id`" is expressed as "returns `None`".
+- **Mouse-reporting safety** is inherited: the gutter is outside
+  `terminal_rect`, so DEC mouse modes never see gutter hover.
+- **Tests:** new `gutter_hover_trigger_tests` module —
+  `hovering_gutter_row_tints_the_block` (gutter -> `Some(range)`),
+  `hovering_output_cell_does_not_tint` (the regression: cell -> `None`),
+  `gutter_off_disables_hover`, and `no_pointer_no_tint`. Built on
+  `TerminalSnapshot::empty()` + `ViewState::new()` + a no-fold `RowMap`, so
+  no GUI/GL context is needed. No prior 72.12 hover unit test existed to
+  retire (the cell trigger was inline render-path code).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
 #### 73.6 — Move command-duration label into the gutter
 

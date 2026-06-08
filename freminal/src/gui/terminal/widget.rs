@@ -164,15 +164,17 @@ fn gutter_block_id_at_pos(
     }
 }
 
-/// Compute the rendered-row span (inclusive) of the command block the pointer
-/// is currently hovering, for the hover-tint overlay.
+/// Compute the rendered-row span (inclusive) of the command block whose
+/// gutter the pointer is currently hovering, for the hover-tint overlay.
 ///
-/// Two trigger surfaces feed this: hovering a cell inside the terminal area
-/// (72.12) and hovering the command-block gutter strip (73.3).  Returns `None`
-/// when the feature is off, the alternate screen is active, there are no
-/// blocks, the pointer is elsewhere, or the hovered block is entirely inside a
-/// fold.  The result must be recomputed before the vertex-rebuild decision so a
-/// hover-only change can invalidate the cached background instances.
+/// The **gutter strip is the sole hover trigger** (73.5): hovering a cell in
+/// the terminal output area does nothing block-related, so the tint no longer
+/// fires during text selection, mouse-tracking apps, or passive cursor motion.
+/// Returns `None` when the feature is off, the gutter is disabled
+/// (`gutter_inset == 0`), the alternate screen is active, there are no blocks,
+/// the pointer is not over the gutter, or the hovered block is entirely inside
+/// a fold.  The result must be recomputed before the vertex-rebuild decision so
+/// a hover-only change can invalidate the cached background instances.
 #[allow(clippy::too_many_arguments)]
 fn compute_command_block_hover_rows(
     snap: &TerminalSnapshot,
@@ -183,7 +185,6 @@ fn compute_command_block_hover_rows(
     pane_rect: Rect,
     terminal_rect: Rect,
     gutter_inset: f32,
-    logical_cell_w: f32,
     logical_cell_h: f32,
 ) -> Option<(usize, usize)> {
     if !crate::gui::command_blocks::command_block_overlays_visible(
@@ -193,46 +194,33 @@ fn compute_command_block_hover_rows(
     ) {
         return None;
     }
-    if logical_cell_h <= 0.0 {
+    // No gutter (feature off / `gutter = "off"`) means no hover trigger.
+    if gutter_inset <= 0.0 || logical_cell_h <= 0.0 {
         return None;
     }
 
-    // Resolve the hovered buffer row from whichever surface the pointer is
-    // over: the gutter (left of the terminal rect) or a terminal cell.
+    // The gutter strip is the only hover surface: the pointer must be in the
+    // reserved inset, left of the terminal rect.
     let mouse_position = view_state.mouse_position?;
-    let hovered_buffer_row: Option<usize> = if gutter_inset > 0.0
-        && mouse_position.x >= pane_rect.min.x
-        && mouse_position.x < terminal_rect.min.x
-        && mouse_position.y >= terminal_rect.min.y
-        && mouse_position.y < terminal_rect.max.y
+    if mouse_position.x < pane_rect.min.x
+        || mouse_position.x >= terminal_rect.min.x
+        || mouse_position.y < terminal_rect.min.y
+        || mouse_position.y >= terminal_rect.max.y
     {
-        // Gutter hover: map y → rendered row → buffer row (live rows only; a
-        // placeholder resolves to the folded block via its first row).
-        let rendered_row = ((mouse_position.y - terminal_rect.min.y) / logical_cell_h)
-            .floor()
-            .approx_as::<usize>()
-            .ok()?;
-        match row_map.rendered_to_snapshot(rendered_row) {
-            Some(RenderedRow::Snapshot(r)) => Some(win_start + r),
-            Some(RenderedRow::Placeholder(range)) => Some(win_start + range.start_row),
-            None => None,
-        }
-    } else if terminal_rect.contains(mouse_position) {
-        // Terminal-cell hover.
-        let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
-            mouse_position,
-            (logical_cell_w, logical_cell_h),
-            terminal_rect.min,
-        );
-        match row_map.rendered_to_snapshot(rendered_row) {
-            Some(RenderedRow::Snapshot(r)) => Some(win_start + r),
-            Some(RenderedRow::Placeholder(_)) | None => None,
-        }
-    } else {
-        None
-    };
+        return None;
+    }
 
-    let buffer_row = hovered_buffer_row?;
+    // Map y → rendered row → buffer row (live rows only; a placeholder
+    // resolves to the folded block via its first row).
+    let rendered_row = ((mouse_position.y - terminal_rect.min.y) / logical_cell_h)
+        .floor()
+        .approx_as::<usize>()
+        .ok()?;
+    let buffer_row = match row_map.rendered_to_snapshot(rendered_row) {
+        Some(RenderedRow::Snapshot(r)) => win_start + r,
+        Some(RenderedRow::Placeholder(range)) => win_start + range.start_row,
+        None => return None,
+    };
     // Find the block containing this absolute row.  A running block (no
     // `end_row`) extends to the last visible row so its gutter is hoverable.
     let running_extent = win_start + snap.term_height.saturating_sub(1);
@@ -1782,7 +1770,6 @@ impl FreminalTerminalWidget {
                 pane_rect,
                 terminal_rect,
                 gutter_inset,
-                logical_cell_w,
                 logical_cell_h,
             );
             let hover_changed =
@@ -3021,6 +3008,153 @@ mod subtask_1_7_tests {
         assert_eq!(super::truncate_url(url, 5), "abcde");
         // One over — truncates.
         assert_eq!(super::truncate_url(url, 4), "abcd…");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod gutter_hover_trigger_tests {
+    //! 73.5: the gutter strip is the sole hover trigger; hovering output
+    //! cells does not tint a command block.
+    use super::*;
+    use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::config::{CommandBlocksConfig, GutterPosition};
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+    use std::time::SystemTime;
+
+    /// A snapshot with a single finished block spanning screen rows 1..=3,
+    /// `term_height` rows tall, scrolled to the live bottom (so
+    /// `win_start == 0`).
+    fn snapshot_with_block(term_height: usize) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.term_width = 80;
+        snap.term_height = term_height;
+        snap.total_rows = term_height; // win_start = total - height - 0 = 0
+        snap.scroll_offset = 0;
+        let block = CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "t".to_owned(),
+            prompt_start_row: 1,
+            command_start_row: Some(1),
+            output_start_row: Some(2),
+            end_row: Some(3),
+            exit_code: Some(0),
+            cwd: None,
+            started_at: SystemTime::UNIX_EPOCH,
+            executed_at: Some(SystemTime::UNIX_EPOCH),
+            finished_at: Some(SystemTime::UNIX_EPOCH),
+        };
+        snap.command_blocks = std::sync::Arc::from(vec![block]);
+        snap
+    }
+
+    /// Geometry: 10px logical cells, gutter inset 8px, pane top-left at (0,0).
+    /// Terminal rect therefore starts at x=8.  Row 2 spans y in [20,30).
+    fn geometry() -> (Rect, Rect, f32, f32) {
+        let cell_h = 10.0_f32;
+        let inset = 8.0_f32;
+        let pane_rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(808.0, 500.0));
+        let terminal_rect = Rect::from_min_max(egui::pos2(inset, 0.0), egui::pos2(808.0, 500.0));
+        (pane_rect, terminal_rect, inset, cell_h)
+    }
+
+    #[test]
+    fn hovering_gutter_row_tints_the_block() {
+        let snap = snapshot_with_block(24);
+        let (pane_rect, terminal_rect, inset, cell_h) = geometry();
+        let row_map = RowMap::new(snap.term_height, &[]);
+        let cfg = CommandBlocksConfig::default();
+        let mut vs = ViewState::new();
+        // Pointer in the gutter (x=4, inside [0,8)), at row 2 (y=25 -> row 2).
+        vs.mouse_position = Some(egui::pos2(4.0, 25.0));
+
+        let rows = compute_command_block_hover_rows(
+            &snap,
+            &vs,
+            &cfg,
+            &row_map,
+            0,
+            pane_rect,
+            terminal_rect,
+            inset,
+            cell_h,
+        );
+        // Block spans command_start_row..=end_row = rows 1..=3.
+        assert_eq!(rows, Some((1, 3)), "gutter hover must tint the block");
+    }
+
+    #[test]
+    fn hovering_output_cell_does_not_tint() {
+        let snap = snapshot_with_block(24);
+        let (pane_rect, terminal_rect, inset, cell_h) = geometry();
+        let row_map = RowMap::new(snap.term_height, &[]);
+        let cfg = CommandBlocksConfig::default();
+        let mut vs = ViewState::new();
+        // Pointer over a terminal cell well inside the block's rows (x=100,
+        // which is >= terminal_rect.min.x=8), row 2.
+        vs.mouse_position = Some(egui::pos2(100.0, 25.0));
+
+        let rows = compute_command_block_hover_rows(
+            &snap,
+            &vs,
+            &cfg,
+            &row_map,
+            0,
+            pane_rect,
+            terminal_rect,
+            inset,
+            cell_h,
+        );
+        assert_eq!(rows, None, "hovering output cells must not tint a block");
+    }
+
+    #[test]
+    fn gutter_off_disables_hover() {
+        let snap = snapshot_with_block(24);
+        let (pane_rect, terminal_rect, _inset, cell_h) = geometry();
+        let row_map = RowMap::new(snap.term_height, &[]);
+        let cfg = CommandBlocksConfig {
+            gutter: GutterPosition::Off,
+            ..CommandBlocksConfig::default()
+        };
+        let mut vs = ViewState::new();
+        vs.mouse_position = Some(egui::pos2(4.0, 25.0));
+
+        // gutter_inset == 0 when the gutter is off.
+        let rows = compute_command_block_hover_rows(
+            &snap,
+            &vs,
+            &cfg,
+            &row_map,
+            0,
+            pane_rect,
+            terminal_rect,
+            0.0,
+            cell_h,
+        );
+        assert_eq!(rows, None, "gutter = off disables the hover trigger");
+    }
+
+    #[test]
+    fn no_pointer_no_tint() {
+        let snap = snapshot_with_block(24);
+        let (pane_rect, terminal_rect, inset, cell_h) = geometry();
+        let row_map = RowMap::new(snap.term_height, &[]);
+        let cfg = CommandBlocksConfig::default();
+        let vs = ViewState::new(); // mouse_position == None
+
+        let rows = compute_command_block_hover_rows(
+            &snap,
+            &vs,
+            &cfg,
+            &row_map,
+            0,
+            pane_rect,
+            terminal_rect,
+            inset,
+            cell_h,
+        );
+        assert_eq!(rows, None);
     }
 }
 
