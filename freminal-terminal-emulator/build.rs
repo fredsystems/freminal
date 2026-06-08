@@ -7,16 +7,16 @@
 extern crate vergen;
 use std::path::PathBuf;
 use std::process::Command;
-use vergen::{BuildBuilder, CargoBuilder, Emitter, RustcBuilder, SysinfoBuilder};
+use vergen::{Build, Cargo, Emitter, Rustc, Sysinfo};
 
 // https://github.com/sagiegurari/cargo-make
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Building....");
     println!("cargo:rerun-if-changed=build.rs");
-    let build = BuildBuilder::all_build()?;
-    let cargo = CargoBuilder::all_cargo()?;
-    let rustc = RustcBuilder::all_rustc()?;
-    let si = SysinfoBuilder::all_sysinfo()?;
+    let build = Build::all_build();
+    let cargo = Cargo::all_cargo();
+    let rustc = Rustc::all_rustc();
+    let si = Sysinfo::all_sysinfo();
 
     Emitter::default()
         .add_instructions(&build)?
