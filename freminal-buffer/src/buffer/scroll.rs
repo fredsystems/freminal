@@ -34,8 +34,19 @@ impl Buffer {
     /// per-row line-width data through to the renderer.
     #[must_use]
     pub fn visible_line_widths(&self, scroll_offset: usize) -> Vec<crate::row::LineWidth> {
-        let start = self.visible_window_start(scroll_offset);
-        let end = (start + self.height).min(self.rows.len());
+        self.visible_line_widths_extended(scroll_offset, 0)
+    }
+
+    /// Like [`Self::visible_line_widths`] but extends the window upward by
+    /// `extra_rows` (see [`Self::visible_window_bounds`]). The returned vector
+    /// has one entry per row in the extended window, top-to-bottom.
+    #[must_use]
+    pub fn visible_line_widths_extended(
+        &self,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> Vec<crate::row::LineWidth> {
+        let (start, end) = self.visible_window_bounds(scroll_offset, extra_rows);
         self.rows[start..end].iter().map(|r| r.line_width).collect()
     }
 
@@ -128,6 +139,31 @@ impl Buffer {
         total.saturating_sub(h + offset)
     }
 
+    /// Compute the `[start, end)` row-index bounds of the flatten window for a
+    /// given `scroll_offset`, optionally extended **upward** by `extra_rows`.
+    ///
+    /// The window always ends at `visible_window_start(scroll_offset) +
+    /// height` (clamped to the buffer length); `extra_rows` pulls the *start*
+    /// earlier into scrollback so the window contains extra rows **above** the
+    /// normal visible window. This is what the GUI uses when command-block
+    /// folds collapse rows in the visible window: the renderer needs extra
+    /// real rows above the fold so that, after collapsing, a full screen of
+    /// rendered rows can still be painted with the live bottom pinned.
+    ///
+    /// `extra_rows` is clamped so the start never underflows past row 0.
+    /// When `extra_rows == 0` this is exactly the normal visible window.
+    #[must_use]
+    pub(in crate::buffer) fn visible_window_bounds(
+        &self,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> (usize, usize) {
+        let base_start = self.visible_window_start(scroll_offset);
+        let end = (base_start + self.height).min(self.rows.len());
+        let start = base_start.saturating_sub(extra_rows);
+        (start, end)
+    }
+
     /// Return `true` if any row in the visible window is dirty (needs re-flattening).
     ///
     /// The PTY thread calls this with `scroll_offset = 0`.  A `false` result means
@@ -136,11 +172,17 @@ impl Buffer {
     /// `visible_chars` / `visible_tags` vectors.
     #[must_use]
     pub fn any_visible_dirty(&self, scroll_offset: usize) -> bool {
+        self.any_visible_dirty_extended(scroll_offset, 0)
+    }
+
+    /// Like [`Self::any_visible_dirty`] but checks the window extended upward
+    /// by `extra_rows` (see [`Self::visible_window_bounds`]).
+    #[must_use]
+    pub fn any_visible_dirty_extended(&self, scroll_offset: usize, extra_rows: usize) -> bool {
         if self.rows.is_empty() || self.height == 0 {
             return false;
         }
-        let vis_start = self.visible_window_start(scroll_offset);
-        let vis_end = (vis_start + self.height).min(self.rows.len());
+        let (vis_start, vis_end) = self.visible_window_bounds(scroll_offset, extra_rows);
         self.rows[vis_start..vis_end].iter().any(|r| r.dirty)
     }
 
@@ -157,11 +199,23 @@ impl Buffer {
     /// of `visible_chars` so the caller can index them in parallel.
     #[must_use]
     pub fn visible_image_placements(&self, scroll_offset: usize) -> Vec<Option<ImagePlacement>> {
+        self.visible_image_placements_extended(scroll_offset, 0)
+    }
+
+    /// Like [`Self::visible_image_placements`] but extends the window upward by
+    /// `extra_rows` (see [`Self::visible_window_bounds`]). The returned vector
+    /// has `window_rows * width` entries in row-major order, matching the
+    /// extended `visible_chars` layout.
+    #[must_use]
+    pub fn visible_image_placements_extended(
+        &self,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> Vec<Option<ImagePlacement>> {
         if self.rows.is_empty() || self.height == 0 || self.width == 0 {
             return Vec::new();
         }
-        let vis_start = self.visible_window_start(scroll_offset);
-        let vis_end = (vis_start + self.height).min(self.rows.len());
+        let (vis_start, vis_end) = self.visible_window_bounds(scroll_offset, extra_rows);
         let mut out = Vec::with_capacity((vis_end - vis_start) * self.width);
         for row in &self.rows[vis_start..vis_end] {
             let cells = row.cells();

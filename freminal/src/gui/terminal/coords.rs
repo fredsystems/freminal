@@ -23,9 +23,24 @@ use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 /// buffer is at `total_rows - term_height`, and scrolling *back* subtracts
 /// from that position.
 pub(super) const fn visible_window_start(snap: &TerminalSnapshot) -> usize {
+    visible_window_start_for(snap, snap.scroll_offset)
+}
+
+/// Compute the buffer-absolute index of the first visible row for an arbitrary
+/// `scroll_offset` (not necessarily the snapshot's current one).
+///
+/// Used when computing the window start for a *prospective* scroll offset
+/// (e.g. while handling a scroll input that has not yet been reflected in a
+/// snapshot). `extra_rows` from command-block folding is intentionally NOT
+/// included here: this returns the start of the *normal* visible window, which
+/// is the reference point fold math is expressed against.
+pub(super) const fn visible_window_start_for(
+    snap: &TerminalSnapshot,
+    scroll_offset: usize,
+) -> usize {
     snap.total_rows
         .saturating_sub(snap.term_height)
-        .saturating_sub(snap.scroll_offset)
+        .saturating_sub(scroll_offset)
 }
 
 /// Convert a screen-relative `(row, col)` — where `col` is a **display

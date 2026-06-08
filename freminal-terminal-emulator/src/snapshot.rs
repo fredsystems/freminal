@@ -77,6 +77,21 @@ pub struct TerminalSnapshot {
     /// size.  When `max_scroll_offset == 0` there is no scrollback history.
     pub max_scroll_offset: usize,
 
+    /// Number of extra rows flattened **above** the normal visible window for
+    /// command-block fold support.
+    ///
+    /// `visible_chars` / `visible_tags` / `row_offsets` / `visible_line_widths`
+    /// / `visible_image_placements` describe `term_height + window_extra_rows`
+    /// rows. The first `window_extra_rows` rows sit above the normal visible
+    /// window (i.e. the buffer-absolute window start is
+    /// `total_rows - term_height - scroll_offset - window_extra_rows`).
+    ///
+    /// `0` in the common case (no folds in view). The GUI uses these extra
+    /// rows to fill the screen after collapsing folded blocks, keeping the
+    /// live bottom pinned. It never affects `scroll_offset`, `show_cursor`, or
+    /// `scroll_changed` — only the top of the flatten window moves.
+    pub window_extra_rows: usize,
+
     /// Height of the visible window in rows.
     pub height: usize,
 
@@ -346,6 +361,7 @@ impl TerminalSnapshot {
             visible_tags: Arc::new(Vec::new()),
             scroll_offset: 0,
             max_scroll_offset: 0,
+            window_extra_rows: 0,
             height: 0,
             cursor_pos: CursorPos { x: 0, y: 0 },
             show_cursor: false,

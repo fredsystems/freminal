@@ -33,8 +33,122 @@ use freminal_terminal_emulator::{
 };
 use std::borrow::Cow;
 
-use super::coords::{encode_egui_mouse_pos_as_usize, visible_window_start};
+use super::coords::{
+    encode_egui_mouse_pos_as_usize, visible_window_start, visible_window_start_for,
+};
 use super::widget::hit_test_placeholder;
+use crate::gui::folding::{compute_extra_rows, compute_fold_ranges};
+
+/// Build an [`InputEvent::ScrollOffset`] for a target raw scroll offset,
+/// computing the fold-aware `extra_rows` the renderer needs at that offset.
+///
+/// `extra_rows` is the number of rows that must be flattened above the normal
+/// visible window so the screen stays full after collapsing every fold that
+/// overlaps the window (see [`compute_extra_rows`]). When no fold is in view
+/// it is `0` and this is equivalent to the old `ScrollOffset(offset)`.
+pub fn scroll_event(
+    snap: &TerminalSnapshot,
+    folded_blocks: &std::collections::HashSet<CommandBlockId>,
+    offset: usize,
+) -> InputEvent {
+    let extra_rows = if folded_blocks.is_empty() {
+        0
+    } else {
+        let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+        let win_start = visible_window_start_for(snap, offset);
+        compute_extra_rows(&ranges, win_start, snap.term_height)
+    };
+    InputEvent::ScrollOffset { offset, extra_rows }
+}
+
+/// Map an on-screen row (0 = top of the painted terminal area) to a
+/// buffer-absolute row, accounting for command-block folds and the
+/// bottom-anchored extra-row window.
+///
+/// Mirrors the renderer's `FoldLayout`: screen → rendered → snapshot →
+/// buffer. When the screen row lands on a fold placeholder, the folded block's
+/// first row is returned (so a click/selection on the placeholder anchors at
+/// the block). When no fold is in view this is exactly
+/// `visible_window_start(snap) + screen_row`.
+pub(super) fn screen_row_to_buffer_row(
+    snap: &TerminalSnapshot,
+    folded_blocks: &std::collections::HashSet<CommandBlockId>,
+    screen_row: usize,
+) -> usize {
+    if folded_blocks.is_empty() && snap.window_extra_rows == 0 {
+        return visible_window_start(snap) + screen_row;
+    }
+    let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+    let flat_window_start = visible_window_start(snap).saturating_sub(snap.window_extra_rows);
+    let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
+    let translated = crate::gui::folding::translate_ranges_to_snapshot(&ranges, flat_window_start);
+    let row_map = crate::gui::folding::RowMap::new(snap_rows, &translated);
+    let render_skip = row_map
+        .rendered_row_count()
+        .saturating_sub(snap.term_height);
+    let rendered = screen_row.saturating_add(render_skip);
+    match row_map.rendered_to_snapshot(rendered) {
+        Some(crate::gui::folding::RenderedRow::Snapshot(snap_row)) => flat_window_start + snap_row,
+        Some(crate::gui::folding::RenderedRow::Placeholder(range)) => {
+            flat_window_start + range.start_row
+        }
+        // Below the last rendered row → clamp to the live bottom.
+        None => visible_window_start(snap) + snap.term_height.saturating_sub(1),
+    }
+}
+
+/// Compute a new raw scroll offset for a scroll request expressed in
+/// **rendered rows** (visible lines), skipping over rows hidden inside
+/// collapsed folds so each step moves the view by exactly one visible line.
+///
+/// Delegates to [`crate::gui::folding::apply_rendered_scroll`]. When no fold is
+/// in view this is exactly `current ± steps` (clamped), matching the unfolded
+/// behaviour.
+pub(super) fn scrolled_offset(
+    snap: &TerminalSnapshot,
+    folded_blocks: &std::collections::HashSet<CommandBlockId>,
+    current: usize,
+    dir: crate::gui::folding::ScrollDir,
+    steps: usize,
+) -> usize {
+    if folded_blocks.is_empty() {
+        return match dir {
+            crate::gui::folding::ScrollDir::Up => {
+                current.saturating_add(steps).min(snap.max_scroll_offset)
+            }
+            crate::gui::folding::ScrollDir::Down => current.saturating_sub(steps),
+        };
+    }
+    let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+    crate::gui::folding::apply_rendered_scroll(
+        &ranges,
+        snap.total_rows,
+        snap.term_height,
+        snap.max_scroll_offset,
+        current,
+        dir,
+        steps,
+    )
+}
+
+/// Re-send the current scroll window to the PTY so the snapshot's
+/// `window_extra_rows` is recomputed after a fold/unfold action.
+///
+/// Folding does not change `view_state.scroll_offset`, but it does change how
+/// many extra rows the renderer needs above the window. Without this resend
+/// the new extra-row count would not take effect until the user's next scroll
+/// event. Sends at the *current* offset.
+pub(super) fn resend_scroll_window(
+    snap: &TerminalSnapshot,
+    view_state: &ViewState,
+    input_tx: &Sender<InputEvent>,
+) {
+    send_or_log!(
+        input_tx,
+        scroll_event(snap, &view_state.folded_blocks, view_state.scroll_offset),
+        "Failed to send scroll window to PTY consumer"
+    );
+}
 
 /// Convert egui [`Modifiers`] to the terminal-emulator's [`KeyModifiers`].
 ///
@@ -371,26 +485,35 @@ pub(super) fn dispatch_binding_action(
             }
         }
         KeyAction::ScrollPageUp => {
-            let new_offset = view_state
-                .scroll_offset
-                .saturating_add(snap.term_height)
-                .min(snap.max_scroll_offset);
+            let new_offset = scrolled_offset(
+                snap,
+                &view_state.folded_blocks,
+                view_state.scroll_offset,
+                crate::gui::folding::ScrollDir::Up,
+                snap.term_height,
+            );
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
                 send_or_log!(
                     input_tx,
-                    InputEvent::ScrollOffset(new_offset),
+                    scroll_event(snap, &view_state.folded_blocks, new_offset),
                     "Failed to send scroll offset to PTY consumer"
                 );
             }
         }
         KeyAction::ScrollPageDown => {
-            let new_offset = view_state.scroll_offset.saturating_sub(snap.term_height);
+            let new_offset = scrolled_offset(
+                snap,
+                &view_state.folded_blocks,
+                view_state.scroll_offset,
+                crate::gui::folding::ScrollDir::Down,
+                snap.term_height,
+            );
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
                 send_or_log!(
                     input_tx,
-                    InputEvent::ScrollOffset(new_offset),
+                    scroll_event(snap, &view_state.folded_blocks, new_offset),
                     "Failed to send scroll offset to PTY consumer"
                 );
             }
@@ -401,7 +524,7 @@ pub(super) fn dispatch_binding_action(
                 view_state.scroll_offset = new_offset;
                 send_or_log!(
                     input_tx,
-                    InputEvent::ScrollOffset(new_offset),
+                    scroll_event(snap, &view_state.folded_blocks, new_offset),
                     "Failed to send scroll offset to PTY consumer"
                 );
             }
@@ -410,31 +533,40 @@ pub(super) fn dispatch_binding_action(
             view_state.scroll_offset = 0;
             send_or_log!(
                 input_tx,
-                InputEvent::ScrollOffset(0),
+                scroll_event(snap, &view_state.folded_blocks, 0),
                 "Failed to send scroll offset to PTY consumer"
             );
         }
         KeyAction::ScrollLineUp => {
-            let new_offset = view_state
-                .scroll_offset
-                .saturating_add(1)
-                .min(snap.max_scroll_offset);
+            let new_offset = scrolled_offset(
+                snap,
+                &view_state.folded_blocks,
+                view_state.scroll_offset,
+                crate::gui::folding::ScrollDir::Up,
+                1,
+            );
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
                 send_or_log!(
                     input_tx,
-                    InputEvent::ScrollOffset(new_offset),
+                    scroll_event(snap, &view_state.folded_blocks, new_offset),
                     "Failed to send scroll offset to PTY consumer"
                 );
             }
         }
         KeyAction::ScrollLineDown => {
-            let new_offset = view_state.scroll_offset.saturating_sub(1);
+            let new_offset = scrolled_offset(
+                snap,
+                &view_state.folded_blocks,
+                view_state.scroll_offset,
+                crate::gui::folding::ScrollDir::Down,
+                1,
+            );
             if new_offset != view_state.scroll_offset {
                 view_state.scroll_offset = new_offset;
                 send_or_log!(
                     input_tx,
-                    InputEvent::ScrollOffset(new_offset),
+                    scroll_event(snap, &view_state.folded_blocks, new_offset),
                     "Failed to send scroll offset to PTY consumer"
                 );
             }
@@ -455,13 +587,16 @@ pub(super) fn dispatch_binding_action(
         KeyAction::FoldPreviousCommand => {
             if let Some(id) = find_fold_target(snap) {
                 view_state.toggle_fold(id);
+                resend_scroll_window(snap, view_state, input_tx);
             }
         }
         KeyAction::FoldAll => {
             view_state.fold_all(snap.command_blocks.iter());
+            resend_scroll_window(snap, view_state, input_tx);
         }
         KeyAction::UnfoldAll => {
             view_state.unfold_all();
+            resend_scroll_window(snap, view_state, input_tx);
         }
         KeyAction::CopyLastCommandOutput => {
             if let Some(block) = find_last_copyable_block(snap)
@@ -740,20 +875,26 @@ pub(super) fn handle_scroll_fallback(
         const SCROLL_MULTIPLIER: usize = 3;
         let n = abs_lines.approx_as::<usize>().unwrap_or(0).max(1) * SCROLL_MULTIPLIER;
 
-        let new_offset = if lines > 0.0 {
-            // Scroll up (into history) — increase offset.
-            // The PTY thread will clamp to max_scroll_offset().
-            view_state.scroll_offset.saturating_add(n)
+        // Scroll by rendered (visible) rows so a tick over a collapsed fold
+        // moves one visible line, not one hidden buffer row.
+        let dir = if lines > 0.0 {
+            crate::gui::folding::ScrollDir::Up
         } else {
-            // Scroll down (toward live bottom) — decrease offset.
-            view_state.scroll_offset.saturating_sub(n)
+            crate::gui::folding::ScrollDir::Down
         };
+        let new_offset = scrolled_offset(
+            snap,
+            &view_state.folded_blocks,
+            view_state.scroll_offset,
+            dir,
+            n,
+        );
 
         if new_offset != view_state.scroll_offset {
             view_state.scroll_offset = new_offset;
             send_or_log!(
                 input_tx,
-                InputEvent::ScrollOffset(new_offset),
+                scroll_event(snap, &view_state.folded_blocks, new_offset),
                 "Failed to send scroll offset to PTY consumer"
             );
         }
@@ -770,13 +911,18 @@ fn release_end_col(
     view_state: &ViewState,
     snap: &TerminalSnapshot,
     x: usize,
-    y: usize,
     abs_row: usize,
 ) -> usize {
+    // Snapshot-row index for `visible_chars` lookups, derived from the
+    // buffer-absolute `abs_row` so it accounts for the extra-row fold window.
+    // `y` (the raw screen row) is NOT a valid `visible_chars` index when folds
+    // shift the window.
+    let snap_y =
+        abs_row.saturating_sub(visible_window_start(snap).saturating_sub(snap.window_extra_rows));
     if view_state.click_count >= 3 {
         let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
         let (line_start, line_end) =
-            crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+            crate::gui::view_state::line_boundaries(&snap.visible_chars, snap_y);
         if abs_row >= anchor_row {
             line_end
         } else {
@@ -786,7 +932,7 @@ fn release_end_col(
         let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
         let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
         let (word_start, word_end) =
-            crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
+            crate::gui::view_state::word_boundaries(&snap.visible_chars, snap_y, x);
         if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col) {
             word_end
         } else {
@@ -1437,12 +1583,17 @@ pub(super) fn write_input_to_terminal(
                     // Mouse tracking is off — update text selection if a drag
                     // is in progress.
                     if view_state.selection.is_selecting {
-                        let abs_row = visible_window_start(snap) + y;
+                        let abs_row = screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
                         let end_col = if view_state.click_count >= 3 {
                             // Triple-click drag — snap end to line boundaries.
                             let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
-                            let (line_start, line_end) =
-                                crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+                            let snap_y = abs_row.saturating_sub(
+                                visible_window_start(snap).saturating_sub(snap.window_extra_rows),
+                            );
+                            let (line_start, line_end) = crate::gui::view_state::line_boundaries(
+                                &snap.visible_chars,
+                                snap_y,
+                            );
                             if abs_row >= anchor_row {
                                 line_end
                             } else {
@@ -1554,6 +1705,7 @@ pub(super) fn write_input_to_terminal(
                     && let Some(block_id) = hit_test_placeholder(placeholder_rects, *pos)
                 {
                     view_state.unfold(block_id);
+                    resend_scroll_window(snap, view_state, input_tx);
                     continue;
                 }
 
@@ -1565,7 +1717,7 @@ pub(super) fn write_input_to_terminal(
                     if *button == PointerButton::Secondary && *pressed {
                         // Record the right-clicked cell so the widget layer
                         // can open the context menu and detect URLs.
-                        let abs_row = visible_window_start(snap) + y;
+                        let abs_row = screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
                         view_state.context_menu_cell = Some(CellCoord {
                             col: x,
                             row: abs_row,
@@ -1588,7 +1740,14 @@ pub(super) fn write_input_to_terminal(
                             // Start a new selection at this cell.
                             // Use buffer-absolute row so the selection
                             // survives scroll offset changes.
-                            let abs_row = visible_window_start(snap) + y;
+                            let abs_row =
+                                screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
+                            // Snapshot-row index for `visible_chars` lookups
+                            // (word/line boundaries), accounting for the
+                            // extra-row fold window.
+                            let snap_y = abs_row.saturating_sub(
+                                visible_window_start(snap).saturating_sub(snap.window_extra_rows),
+                            );
                             let coord = CellCoord {
                                 col: x,
                                 row: abs_row,
@@ -1598,8 +1757,10 @@ pub(super) fn write_input_to_terminal(
 
                             if click_count >= 3 {
                                 // Triple-click — select the entire visual line.
-                                let (start_col, end_col) =
-                                    crate::gui::view_state::line_boundaries(&snap.visible_chars, y);
+                                let (start_col, end_col) = crate::gui::view_state::line_boundaries(
+                                    &snap.visible_chars,
+                                    snap_y,
+                                );
                                 view_state.selection.anchor = Some(CellCoord {
                                     col: start_col,
                                     row: abs_row,
@@ -1612,7 +1773,7 @@ pub(super) fn write_input_to_terminal(
                                 // Double-click — select the word under the cursor.
                                 let (start_col, end_col) = crate::gui::view_state::word_boundaries(
                                     &snap.visible_chars,
-                                    y,
+                                    snap_y,
                                     x,
                                 );
                                 view_state.selection.anchor = Some(CellCoord {
@@ -1636,8 +1797,9 @@ pub(super) fn write_input_to_terminal(
                             // Respect click_count so double/triple-click
                             // selections are not collapsed to the raw
                             // mouse position on release.
-                            let abs_row = visible_window_start(snap) + y;
-                            let end_col = release_end_col(view_state, snap, x, y, abs_row);
+                            let abs_row =
+                                screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
+                            let end_col = release_end_col(view_state, snap, x, abs_row);
                             let end_coord = CellCoord {
                                 col: end_col,
                                 row: abs_row,
@@ -2086,5 +2248,138 @@ mod fold_target_tests {
         partial.command_start_row = None;
         let snap = snap_with(vec![partial], 0);
         assert!(find_block_containing_row(&snap, 7).is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scroll_window_tests {
+    //! Tests for the fold-aware scroll helpers [`scroll_event`] and
+    //! [`screen_row_to_buffer_row`].
+
+    use super::*;
+    use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    fn completed(id: u64, prompt: usize, end: usize) -> CommandBlock {
+        CommandBlock {
+            id: CommandBlockId(id),
+            fid: format!("test-{id}"),
+            prompt_start_row: prompt,
+            command_start_row: Some(prompt),
+            output_start_row: Some(prompt + 1),
+            end_row: Some(end),
+            exit_code: Some(0),
+            cwd: None,
+            started_at: SystemTime::UNIX_EPOCH,
+            executed_at: Some(SystemTime::UNIX_EPOCH),
+            finished_at: Some(SystemTime::UNIX_EPOCH),
+        }
+    }
+
+    /// Snapshot with `total_rows` buffer rows, `term_height` visible rows, the
+    /// given scroll offset, and the supplied command blocks.
+    fn snap_geo(
+        total_rows: usize,
+        term_height: usize,
+        scroll_offset: usize,
+        blocks: Vec<CommandBlock>,
+    ) -> TerminalSnapshot {
+        let mut s = TerminalSnapshot::empty();
+        s.total_rows = total_rows;
+        s.term_height = term_height;
+        s.scroll_offset = scroll_offset;
+        s.command_blocks = Arc::from(blocks);
+        s
+    }
+
+    fn folded(ids: &[u64]) -> HashSet<CommandBlockId> {
+        ids.iter().copied().map(CommandBlockId).collect()
+    }
+
+    #[test]
+    fn scroll_event_no_folds_has_zero_extra() {
+        // total 100, height 24, at live bottom. No folds → extra 0.
+        let snap = snap_geo(100, 24, 0, vec![]);
+        match scroll_event(&snap, &HashSet::new(), 0) {
+            InputEvent::ScrollOffset { offset, extra_rows } => {
+                assert_eq!(offset, 0);
+                assert_eq!(extra_rows, 0);
+            }
+            other => panic!("expected ScrollOffset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scroll_event_fold_in_window_requests_extra() {
+        // total 100, height 24, live bottom → window [76, 100).
+        // Block 80..=89: the prompt/command line (row 80) stays visible and
+        // only the OUTPUT rows 81..=89 (9 rows) are folded; collapsing them to
+        // one placeholder frees 8 rows of screen.
+        let snap = snap_geo(100, 24, 0, vec![completed(1, 80, 89)]);
+        match scroll_event(&snap, &folded(&[1]), 0) {
+            InputEvent::ScrollOffset { offset, extra_rows } => {
+                assert_eq!(offset, 0);
+                assert_eq!(extra_rows, 8, "9 folded output rows free 8 rows of screen");
+            }
+            other => panic!("expected ScrollOffset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scroll_event_unfolded_block_no_extra() {
+        // The block exists but is not in the folded set → no extra rows.
+        let snap = snap_geo(100, 24, 0, vec![completed(1, 80, 89)]);
+        match scroll_event(&snap, &HashSet::new(), 0) {
+            InputEvent::ScrollOffset { extra_rows, .. } => assert_eq!(extra_rows, 0),
+            other => panic!("expected ScrollOffset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scroll_event_uses_target_offset_window() {
+        // At a scrolled-back offset the window moves; the fold must be
+        // evaluated against the *target* window, not the snapshot's current
+        // one. Offset 20 → window [56, 80). Block 80..=89 is below the window
+        // (its end is at the live bottom edge) — only its overlap counts.
+        let snap = snap_geo(100, 24, 0, vec![completed(1, 60, 69)]);
+        // Target offset 20 → window [56, 80). Block 60..=69: output rows
+        // 61..=69 (9 rows) folded → frees 8.
+        match scroll_event(&snap, &folded(&[1]), 20) {
+            InputEvent::ScrollOffset { offset, extra_rows } => {
+                assert_eq!(offset, 20);
+                assert_eq!(extra_rows, 8);
+            }
+            other => panic!("expected ScrollOffset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn screen_row_to_buffer_no_folds_is_window_start_plus_row() {
+        // No folds → screen row maps directly: win_start (76) + screen.
+        let snap = snap_geo(100, 24, 0, vec![]);
+        assert_eq!(screen_row_to_buffer_row(&snap, &HashSet::new(), 0), 76);
+        assert_eq!(screen_row_to_buffer_row(&snap, &HashSet::new(), 5), 81);
+    }
+
+    #[test]
+    fn screen_row_to_buffer_with_fold_skips_collapsed_rows() {
+        // Window [76, 100); fold block 80..=89 (output 81..=89 folded, 9 rows)
+        // collapses to a placeholder. Screen rows above the fold map 1:1;
+        // rows below the placeholder jump past the hidden rows.
+        let snap = snap_geo(100, 24, 0, vec![completed(1, 80, 89)]);
+        let f = folded(&[1]);
+        // Row 0 is buffer row 76 (well above the fold which starts at output
+        // row 81).
+        assert_eq!(screen_row_to_buffer_row(&snap, &f, 0), 76);
+        // A row well past the placeholder must map beyond the folded span
+        // (>= 90), proving the hidden rows are skipped.
+        let late = screen_row_to_buffer_row(&snap, &f, 20);
+        assert!(
+            late >= 90,
+            "rows after the fold placeholder must skip the hidden span, got {late}"
+        );
     }
 }

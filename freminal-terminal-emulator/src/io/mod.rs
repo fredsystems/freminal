@@ -34,12 +34,19 @@ pub enum InputEvent {
     Resize(usize, usize, usize, usize),
     /// Window focus gained (`true`) or lost (`false`).
     FocusChange(bool),
-    /// Desired scroll offset (rows from the bottom, 0 = live view).
+    /// Desired scroll window: scroll offset (rows from the bottom, 0 = live
+    /// view) plus extra rows to flatten above the visible window.
     ///
-    /// Sent by the GUI when the user scrolls up/down on the primary screen.
-    /// The PTY thread stores this and uses it when building the next snapshot
-    /// so `visible_as_tchars_and_tags(offset)` renders the correct window.
-    ScrollOffset(usize),
+    /// Sent by the GUI when the user scrolls up/down on the primary screen, or
+    /// when command-block folds in the visible window change. The PTY thread
+    /// stores both and uses them when building the next snapshot so the
+    /// flattened window covers `term_height + extra_rows` rows (the extra rows
+    /// sit above the normal visible window).
+    ///
+    /// `extra_rows` is `0` in the common case (no folds in view). It only
+    /// moves the top of the flatten window; the live bottom, `show_cursor`,
+    /// and scroll position are unaffected.
+    ScrollOffset { offset: usize, extra_rows: usize },
     /// The user selected a new color theme in the Settings Modal.
     ///
     /// The PTY thread updates `handler.set_theme()` so subsequent snapshots

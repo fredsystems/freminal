@@ -180,6 +180,160 @@ pub fn compute_fold_ranges<S: BuildHasher>(
     deduped
 }
 
+/// Compute how many extra rows to flatten **above** the visible window.
+///
+/// After collapsing every fold that overlaps the window, the extra rows let a
+/// full screen of rendered rows still be painted with the live bottom pinned.
+///
+/// `ranges` are the **buffer-absolute** fold ranges (as produced by
+/// [`compute_fold_ranges`]). `visible_window_start` is the buffer-absolute
+/// index of the topmost normally-visible row, and `term_height` the visible
+/// window height in rows.
+///
+/// For each fold overlapping the window `[visible_window_start,
+/// visible_window_start + term_height)`, collapsing it frees `overlap_len - 1`
+/// rows of screen space (the fold's visible rows become a single placeholder).
+/// The renderer must pull in that many real rows from above the window to keep
+/// the screen full. The total is the sum across all overlapping folds, capped
+/// by the rows actually available above the window (`visible_window_start`).
+///
+/// Returns `0` when no fold overlaps the window. The result is a stable
+/// function of `visible_window_start` (it does not depend on the extra-row
+/// count itself), so feeding it back through the scroll request does not
+/// oscillate.
+#[must_use]
+pub fn compute_extra_rows(
+    ranges: &[FoldRange],
+    visible_window_start: usize,
+    term_height: usize,
+) -> usize {
+    if term_height == 0 {
+        return 0;
+    }
+    let win_end = visible_window_start.saturating_add(term_height); // exclusive
+    let mut freed: usize = 0;
+    for r in ranges {
+        // Overlap of [start_row, end_row] (inclusive) with
+        // [visible_window_start, win_end) (half-open).
+        let ov_start = r.start_row.max(visible_window_start);
+        let ov_end_incl = r.end_row.min(win_end.saturating_sub(1));
+        if ov_start > ov_end_incl {
+            continue; // no overlap with the visible window
+        }
+        let overlap_len = ov_end_incl - ov_start + 1;
+        // Collapsing an overlapping fold frees `overlap_len - 1` rows.
+        freed = freed.saturating_add(overlap_len.saturating_sub(1));
+    }
+    // Cannot pull in more rows than exist above the window.
+    freed.min(visible_window_start)
+}
+
+/// Direction of a scroll step in [`apply_rendered_scroll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDir {
+    /// Scroll up, into history (increases the raw scroll offset).
+    Up,
+    /// Scroll down, toward the live bottom (decreases the raw scroll offset).
+    Down,
+}
+
+/// Convert a rendered-row scroll request into a new raw `scroll_offset`.
+///
+/// Steps are measured in **rendered rows** (visible lines); rows hidden inside
+/// collapsed folds are skipped so each step moves the view by exactly one
+/// visible line.
+///
+/// Without this, the raw scroll offset steps one buffer row at a time; while
+/// traversing a collapsed fold's hidden rows the visible content does not move
+/// (the rows are not painted), so scrolling feels stuck and the live bottom
+/// fails to track the input. With it, one rendered step that lands on a
+/// collapsed fold consumes the whole hidden span in a single move.
+///
+/// Parameters:
+/// - `ranges`: buffer-absolute fold ranges (from [`compute_fold_ranges`]).
+/// - `total_rows`, `term_height`: buffer / window geometry.
+/// - `max_scroll_offset`: clamp bound (raw rows of scrollback).
+/// - `raw_offset`: the current raw scroll offset.
+/// - `dir`, `steps`: scroll direction and the number of *rendered* rows.
+///
+/// Returns the new raw `scroll_offset`, clamped to `[0, max_scroll_offset]`.
+/// When `ranges` is empty this is exactly `raw_offset ± steps` (1:1 with the
+/// unfolded behaviour).
+#[must_use]
+pub fn apply_rendered_scroll(
+    ranges: &[FoldRange],
+    total_rows: usize,
+    term_height: usize,
+    max_scroll_offset: usize,
+    raw_offset: usize,
+    dir: ScrollDir,
+    steps: usize,
+) -> usize {
+    if ranges.is_empty() || term_height == 0 {
+        // No folds: rendered rows == raw rows.
+        return match dir {
+            ScrollDir::Up => raw_offset.saturating_add(steps).min(max_scroll_offset),
+            ScrollDir::Down => raw_offset.saturating_sub(steps),
+        };
+    }
+
+    // The first normally-visible buffer row at a given raw offset.
+    let top_of =
+        |raw: usize| -> usize { total_rows.saturating_sub(term_height).saturating_sub(raw) };
+    // Is buffer row `row` strictly inside a collapsed fold (i.e. hidden, not
+    // the placeholder anchor)? The placeholder occupies the fold's first row.
+    let hidden_in_fold = |row: usize| -> Option<&FoldRange> {
+        ranges
+            .iter()
+            .find(|r| row > r.start_row && row <= r.end_row)
+    };
+
+    let mut raw = raw_offset;
+    match dir {
+        ScrollDir::Up => {
+            for _ in 0..steps {
+                if raw >= max_scroll_offset {
+                    break;
+                }
+                let top = top_of(raw);
+                if top == 0 {
+                    break;
+                }
+                let revealed = top - 1; // buffer row revealed by one raw step up
+                // If the revealed row is hidden inside a fold, jump up to the
+                // fold's first (placeholder) row so the single placeholder is
+                // what appears, consuming the whole hidden span in one step.
+                // Otherwise reveal exactly one more row (raw + 1).
+                let next_raw = hidden_in_fold(revealed)
+                    .map_or(raw + 1, |fold| raw + (revealed - fold.start_row) + 1);
+                raw = next_raw.min(max_scroll_offset);
+            }
+        }
+        ScrollDir::Down => {
+            for _ in 0..steps {
+                if raw == 0 {
+                    break;
+                }
+                let top = top_of(raw);
+                // Scrolling down hides the current top row. If the row that
+                // would become the new top (`top + 1` after one raw step) is
+                // hidden inside a fold, jump down past the whole hidden span so
+                // one rendered row disappears, not a hidden one.
+                let new_top = top + 1;
+                // If the row that would become the new top is hidden inside a
+                // fold, jump down past the whole hidden span so one rendered
+                // row disappears, not a hidden one. Otherwise hide one row.
+                let next_raw = hidden_in_fold(new_top).map_or(raw - 1, |fold| {
+                    let target_top = fold.end_row + 1;
+                    raw.saturating_sub(target_top - top)
+                });
+                raw = next_raw;
+            }
+        }
+    }
+    raw.min(max_scroll_offset)
+}
+
 /// Translate a slice of [`FoldRange`] values from **buffer-absolute** row
 /// space into **snapshot-row** space (the row space [`RowMap`] consumes).
 ///
@@ -873,6 +1027,134 @@ mod tests {
         let r = fold(1, 4, 4);
         assert_eq!(r.len(), 1);
         assert!(r.contains(4));
+    }
+
+    // ── compute_extra_rows ──────────────────────────────────────────────
+
+    #[test]
+    fn extra_rows_zero_when_no_folds() {
+        assert_eq!(compute_extra_rows(&[], 100, 24), 0);
+    }
+
+    #[test]
+    fn extra_rows_zero_when_term_height_zero() {
+        let ranges = [fold(1, 100, 110)];
+        assert_eq!(compute_extra_rows(&ranges, 100, 0), 0);
+    }
+
+    #[test]
+    fn extra_rows_fold_fully_in_window() {
+        // Window [100, 124). Fold buffer rows 105..=110 (6 rows) is fully
+        // inside; collapsing frees 6 - 1 = 5 rows.
+        let ranges = [fold(1, 105, 110)];
+        assert_eq!(compute_extra_rows(&ranges, 100, 24), 5);
+    }
+
+    #[test]
+    fn extra_rows_fold_entirely_in_scrollback_above() {
+        // Window [100, 124). Fold 80..=90 is wholly above the window → no
+        // freed space.
+        let ranges = [fold(1, 80, 90)];
+        assert_eq!(compute_extra_rows(&ranges, 100, 24), 0);
+    }
+
+    #[test]
+    fn extra_rows_fold_straddles_top_of_window() {
+        // Window [100, 124). Fold 95..=110 overlaps rows 100..=110 (11 rows
+        // visible) → frees 11 - 1 = 10.
+        let ranges = [fold(1, 95, 110)];
+        assert_eq!(compute_extra_rows(&ranges, 100, 24), 10);
+    }
+
+    #[test]
+    fn extra_rows_capped_by_available_scrollback() {
+        // Window starts at row 3, so only 3 rows exist above it. A fold that
+        // would free 10 rows is capped at 3.
+        let ranges = [fold(1, 3, 20)];
+        assert_eq!(compute_extra_rows(&ranges, 3, 24), 3);
+    }
+
+    #[test]
+    fn extra_rows_sums_multiple_folds() {
+        // Window [100, 130). Fold A 102..=105 (4 rows → frees 3), fold B
+        // 110..=120 (11 rows → frees 10). Total freed 13, capped by 100.
+        let ranges = [fold(1, 102, 105), fold(2, 110, 120)];
+        assert_eq!(compute_extra_rows(&ranges, 100, 30), 13);
+    }
+
+    #[test]
+    fn extra_rows_single_row_fold_frees_nothing() {
+        // A 1-row fold collapses to a 1-row placeholder: no net space freed.
+        let ranges = [fold(1, 105, 105)];
+        assert_eq!(compute_extra_rows(&ranges, 100, 24), 0);
+    }
+
+    // ── apply_rendered_scroll ───────────────────────────────────────────
+
+    #[test]
+    fn rendered_scroll_no_folds_is_one_to_one_up() {
+        // total 100, height 24, max 76. Up 3 from offset 0 → 3.
+        let n = apply_rendered_scroll(&[], 100, 24, 76, 0, ScrollDir::Up, 3);
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn rendered_scroll_no_folds_is_one_to_one_down() {
+        let n = apply_rendered_scroll(&[], 100, 24, 76, 10, ScrollDir::Down, 3);
+        assert_eq!(n, 7);
+    }
+
+    #[test]
+    fn rendered_scroll_clamps_up_at_max() {
+        let n = apply_rendered_scroll(&[], 100, 24, 76, 75, ScrollDir::Up, 10);
+        assert_eq!(n, 76);
+    }
+
+    #[test]
+    fn rendered_scroll_clamps_down_at_zero() {
+        let n = apply_rendered_scroll(&[], 100, 24, 76, 2, ScrollDir::Down, 10);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn rendered_scroll_up_skips_collapsed_fold_in_one_step() {
+        // total 100, height 24, max 76. Window top at offset 0 is row 76.
+        // A fold collapses buffer rows 70..=79 (start 70, end 79). The fold's
+        // first row (70) is the placeholder; rows 71..=79 are hidden.
+        //
+        // At a raw offset that places the top just below the fold's hidden
+        // span, scrolling up one rendered row must skip the entire hidden span
+        // in a single move and land the placeholder row at the top.
+        let ranges = [fold(1, 70, 79)];
+        // Offset 6 → top = 100 - 24 - 6 = 70 (the placeholder row already at
+        // top). One step up reveals row 69 (not folded) → raw 7.
+        let n = apply_rendered_scroll(&ranges, 100, 24, 76, 6, ScrollDir::Up, 1);
+        assert_eq!(n, 7, "row above the fold is normal → +1 raw");
+
+        // Offset 0 → top = 76, inside the fold's hidden span (71..=79).
+        // Revealed row would be 75 (hidden). One rendered step up must jump to
+        // the placeholder row 70: raw such that top == 70 → raw = 6.
+        let n2 = apply_rendered_scroll(&ranges, 100, 24, 76, 0, ScrollDir::Up, 1);
+        assert_eq!(
+            n2, 6,
+            "one rendered step from inside a fold jumps to the placeholder"
+        );
+    }
+
+    #[test]
+    fn rendered_scroll_down_skips_collapsed_fold() {
+        // Mirror of the up case. Fold 70..=79. From offset 7 (top = 69),
+        // scrolling down one rendered row: new top would be 70 (placeholder) —
+        // not hidden, so raw - 1 = 6.
+        let ranges = [fold(1, 70, 79)];
+        let n = apply_rendered_scroll(&ranges, 100, 24, 76, 7, ScrollDir::Down, 1);
+        assert_eq!(n, 6);
+
+        // From offset 6 (top = 70, the placeholder). Scrolling down, the new
+        // top (71) is hidden inside the fold → jump past the whole span so the
+        // new top is row 80 (after fold end): raw 6 - (80 - 70) saturates to 0.
+        let n2 = apply_rendered_scroll(&ranges, 100, 24, 76, 6, ScrollDir::Down, 1);
+        assert_eq!(n2, 0, "down past a fold skips the hidden span");
     }
 
     // ── translate_ranges_to_snapshot ────────────────────────────────────

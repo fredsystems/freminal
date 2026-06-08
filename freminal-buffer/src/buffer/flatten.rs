@@ -120,8 +120,27 @@ impl Buffer {
         &mut self,
         scroll_offset: usize,
     ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
-        let visible_start = self.visible_window_start(scroll_offset);
-        let visible_end = (visible_start + self.height).min(self.rows.len());
+        self.visible_as_tchars_and_tags_extended(scroll_offset, 0)
+    }
+
+    /// Like [`Self::visible_as_tchars_and_tags`] but extends the flatten window
+    /// upward by `extra_rows` (see
+    /// [`Buffer::visible_window_bounds`](super::Buffer::visible_window_bounds)).
+    ///
+    /// The GUI passes a non-zero `extra_rows` when command-block folds collapse
+    /// rows in the visible window: the extra rows above the normal window
+    /// provide real content to fill the screen once the folds are collapsed,
+    /// so the live bottom stays pinned instead of leaving a blank gap.
+    ///
+    /// When `extra_rows == 0` this is identical to
+    /// [`Self::visible_as_tchars_and_tags`].
+    #[must_use]
+    pub fn visible_as_tchars_and_tags_extended(
+        &mut self,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
+        let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, extra_rows);
         let auto_detect = self.auto_detect_urls;
         Self::rows_as_tchars_and_tags_cached(
             &mut self.rows[visible_start..visible_end],
@@ -711,4 +730,101 @@ fn splice_auto_urls(tags: &[FormatTag], ranges: &[AutoUrlRange]) -> Vec<FormatTa
     }
 
     current
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod extended_window_tests {
+    use crate::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.chars().map(TChar::from).collect()
+    }
+
+    /// Build a 4-wide, 3-tall buffer containing 6 rows of distinct content
+    /// ("r0".."r5"), so rows 0..=2 are scrollback and rows 3..=5 are the live
+    /// visible window.
+    fn buffer_with_scrollback() -> Buffer {
+        let mut buf = Buffer::new(4, 3);
+        for i in 0..6 {
+            buf.insert_text(&t(&format!("r{i}")));
+            if i < 5 {
+                buf.handle_lf();
+                buf.handle_cr();
+            }
+        }
+        assert_eq!(buf.rows().len(), 6, "expected 6 total rows");
+        buf
+    }
+
+    #[test]
+    fn bounds_no_extra_is_normal_window() {
+        let buf = buffer_with_scrollback();
+        // height = 3, total = 6, scroll 0 → normal window [3, 6).
+        let (start, end) = buf.visible_window_bounds(0, 0);
+        assert_eq!((start, end), (3, 6));
+    }
+
+    #[test]
+    fn bounds_extra_extends_window_upward() {
+        let buf = buffer_with_scrollback();
+        // Pull in 2 extra rows above the window: [1, 6).
+        let (start, end) = buf.visible_window_bounds(0, 2);
+        assert_eq!((start, end), (1, 6));
+    }
+
+    #[test]
+    fn bounds_extra_clamped_at_row_zero() {
+        let buf = buffer_with_scrollback();
+        // Request more extra rows than exist above the window: clamps to 0.
+        let (start, end) = buf.visible_window_bounds(0, 99);
+        assert_eq!((start, end), (0, 6));
+    }
+
+    #[test]
+    fn bounds_extra_with_scroll_offset() {
+        let buf = buffer_with_scrollback();
+        // Scrolled back 1 row → normal window [2, 5); plus 1 extra → [1, 5).
+        let (start, end) = buf.visible_window_bounds(1, 1);
+        assert_eq!((start, end), (1, 5));
+    }
+
+    #[test]
+    fn extended_flatten_has_more_rows() {
+        let mut buf = buffer_with_scrollback();
+        let (_c0, _t0, ro0, _u0) = buf.visible_as_tchars_and_tags_extended(0, 0);
+        let (_c2, _t2, ro2, _u2) = buf.visible_as_tchars_and_tags_extended(0, 2);
+        assert_eq!(ro0.len(), 3, "normal window has term_height rows");
+        assert_eq!(ro2.len(), 5, "extended window has term_height + extra rows");
+    }
+
+    #[test]
+    fn extended_flatten_starts_earlier() {
+        let mut buf = buffer_with_scrollback();
+        // The extended window's first row should be buffer row 1 ("r1").
+        let (chars, _tags, row_offsets, _url) = buf.visible_as_tchars_and_tags_extended(0, 2);
+        // First row's first char is 'r'.
+        assert_eq!(chars[row_offsets[0]], TChar::from('r'));
+        // Second char of first row is '1' (buffer row 1).
+        assert_eq!(chars[row_offsets[0] + 1], TChar::from('1'));
+    }
+
+    #[test]
+    fn extended_line_widths_match_extended_window() {
+        let buf = buffer_with_scrollback();
+        assert_eq!(buf.visible_line_widths_extended(0, 0).len(), 3);
+        assert_eq!(buf.visible_line_widths_extended(0, 2).len(), 5);
+    }
+
+    #[test]
+    fn extended_dirty_check_covers_extra_rows() {
+        let mut buf = buffer_with_scrollback();
+        // Flatten the extended window to clear dirty flags across all 5 rows.
+        let _ = buf.visible_as_tchars_and_tags_extended(0, 2);
+        assert!(
+            !buf.any_visible_dirty_extended(0, 2),
+            "freshly flattened extended window must be clean"
+        );
+    }
 }

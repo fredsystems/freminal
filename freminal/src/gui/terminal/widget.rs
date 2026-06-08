@@ -114,6 +114,70 @@ pub fn hit_test_placeholder(
         .map(|(_, id)| *id)
 }
 
+/// Fold-aware window layout for one frame.
+///
+/// Centralises the coordinate math shared by the renderer and every overlay
+/// that maps between buffer rows, snapshot rows, rendered rows, and on-screen
+/// rows. Computed once from a snapshot plus the GUI-local folded-block set so
+/// the renderer, gutter, duration labels, hover, and hit-tests all agree.
+///
+/// Coordinate spaces:
+/// - **buffer row**: absolute index into the scrollback buffer.
+/// - **snapshot row** `[0, snap_rows)`: index into `visible_chars` etc. The
+///   window covers `term_height + window_extra_rows` rows starting at
+///   `flat_window_start`.
+/// - **rendered row** `[0, rendered_row_count)`: snapshot rows with folded
+///   ranges collapsed to placeholders.
+/// - **screen row** `[0, term_height)`: rendered rows with the top
+///   `render_skip` rows scrolled off (bottom-anchored so the live bottom is
+///   pinned).
+struct FoldLayout {
+    /// Buffer-absolute index of the first snapshot row.
+    flat_window_start: usize,
+    /// Snapshot → rendered row mapping with folds collapsed.
+    row_map: RowMap,
+    /// Rendered rows scrolled off the top so the bottom `term_height` rendered
+    /// rows fill the screen.
+    render_skip: usize,
+}
+
+impl FoldLayout {
+    /// Build the layout for `snap` given the folded-block set.
+    fn new(
+        snap: &TerminalSnapshot,
+        folded_blocks: &std::collections::HashSet<
+            freminal_common::buffer_states::command_block::CommandBlockId,
+        >,
+    ) -> Self {
+        let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+        let flat_window_start =
+            super::coords::visible_window_start(snap).saturating_sub(snap.window_extra_rows);
+        let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
+        let fold_ranges =
+            crate::gui::folding::translate_ranges_to_snapshot(&raw_fold_ranges, flat_window_start);
+        let row_map = RowMap::new(snap_rows, &fold_ranges);
+        let render_skip = row_map
+            .rendered_row_count()
+            .saturating_sub(snap.term_height);
+        Self {
+            flat_window_start,
+            row_map,
+            render_skip,
+        }
+    }
+
+    /// Map a rendered row to an on-screen row, or `None` if it is scrolled off
+    /// the top of the screen (above the bottom-anchored window).
+    const fn rendered_to_screen(&self, rendered_row: usize) -> Option<usize> {
+        rendered_row.checked_sub(self.render_skip)
+    }
+
+    /// Map an on-screen row to its rendered row.
+    const fn screen_to_rendered(&self, screen_row: usize) -> usize {
+        screen_row.saturating_add(self.render_skip)
+    }
+}
+
 /// Resolve a pointer position in the command-block gutter to the
 /// `CommandBlockId` of the block whose rendered row range the pointer is
 /// over, accounting for folds.
@@ -133,24 +197,24 @@ fn gutter_block_id_at_pos(
     if logical_cell_h <= 0.0 {
         return None;
     }
-    // Rendered row under the pointer (relative to the terminal area top).
-    let rendered_row = ((pos.y - terminal_rect.min.y) / logical_cell_h)
+    // Screen row under the pointer (relative to the terminal area top), then
+    // its rendered row in the bottom-anchored layout.
+    let screen_row = ((pos.y - terminal_rect.min.y) / logical_cell_h)
         .floor()
         .approx_as::<usize>()
         .ok()?;
 
-    // Build the same fold-aware row map the renderer uses this frame.
-    let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
-    let win_start = super::coords::visible_window_start(snap);
-    let fold_ranges =
-        crate::gui::folding::translate_ranges_to_snapshot(&raw_fold_ranges, win_start);
-    let row_map = RowMap::new(snap.term_height, &fold_ranges);
+    // Build the same fold-aware layout the renderer uses this frame.
+    let layout = FoldLayout::new(snap, &view_state.folded_blocks);
+    let rendered_row = layout.screen_to_rendered(screen_row);
+    // Running blocks extend to the live bottom row (last normally-visible row).
+    let running_extent =
+        super::coords::visible_window_start(snap) + snap.term_height.saturating_sub(1);
 
-    match row_map.rendered_to_snapshot(rendered_row) {
+    match layout.row_map.rendered_to_snapshot(rendered_row) {
         // A live snapshot row → containment hit-test against the blocks.
-        Some(RenderedRow::Snapshot(screen_row)) => {
-            let buffer_row = win_start + screen_row;
-            let running_extent = win_start + snap.term_height.saturating_sub(1);
+        Some(RenderedRow::Snapshot(snap_row)) => {
+            let buffer_row = layout.flat_window_start + snap_row;
             crate::gui::command_blocks::gutter_block_for_row(
                 &snap.command_blocks,
                 buffer_row,
@@ -180,8 +244,7 @@ fn compute_command_block_hover_rows(
     snap: &TerminalSnapshot,
     view_state: &ViewState,
     command_blocks_config: &freminal_common::config::CommandBlocksConfig,
-    row_map: &RowMap,
-    win_start: usize,
+    layout: &FoldLayout,
     pane_rect: Rect,
     terminal_rect: Rect,
     gutter_inset: f32,
@@ -210,20 +273,25 @@ fn compute_command_block_hover_rows(
         return None;
     }
 
-    // Map y → rendered row → buffer row (live rows only; a placeholder
-    // resolves to the folded block via its first row).
-    let rendered_row = ((mouse_position.y - terminal_rect.min.y) / logical_cell_h)
+    let win_start = layout.flat_window_start;
+    let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
+
+    // Map y → screen row → rendered row → buffer row (live rows only; a
+    // placeholder resolves to the folded block via its first row).
+    let screen_row = ((mouse_position.y - terminal_rect.min.y) / logical_cell_h)
         .floor()
         .approx_as::<usize>()
         .ok()?;
-    let buffer_row = match row_map.rendered_to_snapshot(rendered_row) {
+    let rendered_row = layout.screen_to_rendered(screen_row);
+    let buffer_row = match layout.row_map.rendered_to_snapshot(rendered_row) {
         Some(RenderedRow::Snapshot(r)) => win_start + r,
         Some(RenderedRow::Placeholder(range)) => win_start + range.start_row,
         None => return None,
     };
     // Find the block containing this absolute row.  A running block (no
-    // `end_row`) extends to the last visible row so its gutter is hoverable.
-    let running_extent = win_start + snap.term_height.saturating_sub(1);
+    // `end_row`) extends to the live bottom so its gutter is hoverable.
+    let running_extent =
+        super::coords::visible_window_start(snap) + snap.term_height.saturating_sub(1);
     let block = crate::gui::command_blocks::gutter_block_for_row(
         &snap.command_blocks,
         buffer_row,
@@ -231,19 +299,20 @@ fn compute_command_block_hover_rows(
     )?;
     let start = block.command_start_row?;
     let end = block.end_row.unwrap_or(running_extent);
-    // Clip [start, end] to the visible window, then convert each endpoint into
-    // rendered-row space.  If the entire block sits inside a fold, None.
-    let win_end = win_start + snap.term_height;
+    // Clip [start, end] to the flattened window, then convert each endpoint
+    // into screen-row space.  If the entire block sits inside a fold or is
+    // scrolled off the top, None.
+    let win_end = win_start + snap_rows;
     if end < win_start || start >= win_end {
         return None;
     }
-    let s_screen = start.saturating_sub(win_start);
-    let e_screen = end
+    let s_snap = start.saturating_sub(win_start);
+    let e_snap = end
         .saturating_sub(win_start)
-        .min(snap.term_height.saturating_sub(1));
-    let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
-    let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
-    Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
+        .min(snap_rows.saturating_sub(1));
+    let s_screen = layout.rendered_to_screen(layout.row_map.snapshot_to_rendered(s_snap)?)?;
+    let e_screen = layout.rendered_to_screen(layout.row_map.snapshot_to_rendered(e_snap)?)?;
+    Some((s_screen.min(e_screen), s_screen.max(e_screen)))
 }
 
 ///
@@ -1457,6 +1526,7 @@ impl FreminalTerminalWidget {
                     && crate::gui::command_blocks::block_is_foldable(block)
                 {
                     view_state.toggle_fold(block_id);
+                    super::input::resend_scroll_window(snap, view_state, input_tx);
                 }
             }
         }
@@ -1657,24 +1727,32 @@ impl FreminalTerminalWidget {
         // Translate before constructing the map; otherwise ranges with
         // `start_row >= term_height` are silently dropped and the fold
         // becomes a visual no-op.
-        let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
-        let fold_ranges = crate::gui::folding::translate_ranges_to_snapshot(
-            &raw_fold_ranges,
-            visible_window_start(snap),
-        );
-        let row_map = RowMap::new(snap.term_height, &fold_ranges);
+        // Fold-aware window layout for this frame: with command-block folds in
+        // view the PTY flattens `window_extra_rows` extra rows ABOVE the normal
+        // visible window so the screen can be filled after collapsing folds
+        // (see `TerminalSnapshot::window_extra_rows`).  `FoldLayout` centralises
+        // the buffer/snapshot/rendered/screen row mapping; the renderer paints
+        // the bottom `term_height` rendered rows so the live bottom is pinned.
+        // When no fold is in view (`window_extra_rows == 0`) `render_skip == 0`
+        // and rendering is identical to the unfolded path.
+        let layout = FoldLayout::new(snap, &view_state.folded_blocks);
+        let flat_window_start = layout.flat_window_start;
+        let render_skip = layout.render_skip;
+        let row_map = &layout.row_map;
         // Per-frame epoch: a stable hash of the sorted, non-overlapping ranges
-        // list.  When the user folds or unfolds a block this changes, and we
-        // use it below to invalidate the vertex cache (the rendered row layout
-        // has shifted).
+        // list (plus the bottom-anchor skip).  When the user folds or unfolds a
+        // block — or scrolls such that the visible fold span changes — this
+        // changes, and we use it below to invalidate the vertex cache (the
+        // rendered row layout has shifted).
         let fold_epoch: u64 = {
             use std::hash::{Hash, Hasher};
             let mut h = rustc_hash::FxHasher::default();
-            for r in &fold_ranges {
+            for r in row_map.ranges() {
                 r.command_block_id.hash(&mut h);
                 r.start_row.hash(&mut h);
                 r.end_row.hash(&mut h);
             }
+            render_skip.hash(&mut h);
             h.finish()
         };
 
@@ -1751,9 +1829,13 @@ impl FreminalTerminalWidget {
             let search_changed = search_match_count != cache.previous_search_match_count
                 || search_current_match != cache.previous_search_current_match;
 
-            // Convert buffer-absolute selection coordinates to screen-relative
-            // for the renderer (which iterates `shaped_lines` by screen row).
-            let win_start = visible_window_start(snap);
+            // Convert buffer-absolute selection coordinates to snapshot-row
+            // space for the renderer.  `win_start` is the flattened window top
+            // (it includes the fold extra rows); the snapshot covers `snap_rows`
+            // rows.  Selection rows are later mapped snapshot → rendered →
+            // screen alongside the shaped lines.
+            let win_start = flat_window_start;
+            let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
 
             // Compute the command-block hover-row range NOW (before the
             // vertex-rebuild decision) so a hover-only change — which does not
@@ -1765,8 +1847,7 @@ impl FreminalTerminalWidget {
                 snap,
                 view_state,
                 command_blocks_config,
-                &row_map,
-                win_start,
+                &layout,
                 pane_rect,
                 terminal_rect,
                 gutter_inset,
@@ -1776,10 +1857,10 @@ impl FreminalTerminalWidget {
                 command_block_hover_rows_early != cache.previous_command_block_hover_rows;
 
             let screen_selection = current_selection.and_then(|(s, e)| {
-                // Clamp the selection to the visible window.  If both start
-                // and end are outside the visible range, there is nothing to
+                // Clamp the selection to the flattened window.  If both start
+                // and end are outside the window, there is nothing to
                 // highlight on screen.
-                let win_end = win_start + snap.term_height;
+                let win_end = win_start + snap_rows;
                 if e.row < win_start || s.row >= win_end {
                     return None; // entirely outside visible window
                 }
@@ -1787,7 +1868,7 @@ impl FreminalTerminalWidget {
                 let e_row = e
                     .row
                     .saturating_sub(win_start)
-                    .min(snap.term_height.saturating_sub(1));
+                    .min(snap_rows.saturating_sub(1));
 
                 let is_block = view_state.selection.is_block;
 
@@ -1821,14 +1902,22 @@ impl FreminalTerminalWidget {
             // is *inside* a folded range (which shouldn't happen normally
             // because the prompt is never folded, but is defensible against
             // races) we suppress the cursor for this frame.
-            let cursor_rendered_row = row_map.snapshot_to_rendered(snap.cursor_pos.y);
-            let cursor_visible = cursor_rendered_row.is_some();
-            // If the cursor's snapshot row is hidden behind a fold, suppress
-            // it for this frame.  AND-ing here means the cursor-only fast
-            // path and the full rebuild path agree on visibility.
+            // The cursor row is reported relative to the *normal* visible
+            // window top; shift it into snapshot-row space (the flattened
+            // window has `window_extra_rows` extra rows above it), map through
+            // the fold collapse, then to the bottom-anchored screen row.
+            let cursor_snap_row = snap.cursor_pos.y.saturating_add(snap.window_extra_rows);
+            let cursor_screen_row = row_map
+                .snapshot_to_rendered(cursor_snap_row)
+                .and_then(|rendered| layout.rendered_to_screen(rendered));
+            let cursor_visible = cursor_screen_row.is_some();
+            // If the cursor's snapshot row is hidden behind a fold (or scrolled
+            // off the top), suppress it for this frame.  AND-ing here means the
+            // cursor-only fast path and the full rebuild path agree on
+            // visibility.
             effective_show_cursor = effective_show_cursor && cursor_visible;
             let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
-            let target_row = cursor_rendered_row
+            let target_row = cursor_screen_row
                 .unwrap_or(snap.cursor_pos.y)
                 .approx_as::<f32>()
                 .unwrap_or(0.0);
@@ -1848,7 +1937,7 @@ impl FreminalTerminalWidget {
             // so it aligns with the magnified glyphs.
             let cursor_row_lw = snap
                 .visible_line_widths
-                .get(snap.cursor_pos.y)
+                .get(cursor_snap_row)
                 .copied()
                 .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
             let cursor_x_scale = if cursor_row_lw.is_double_width() {
@@ -1971,7 +2060,11 @@ impl FreminalTerminalWidget {
                 // `cache.placeholder_hit_rects` so the input handler can
                 // turn primary clicks on those rows into `view_state.unfold()`.
                 cache.placeholder_hit_rects.clear();
-                let rendered_shaped_lines: Vec<Arc<ShapedLine>> = if fold_ranges.is_empty() {
+                let rendered_shaped_lines: Vec<Arc<ShapedLine>> = if row_map.ranges().is_empty()
+                    && render_skip == 0
+                    && snap.window_extra_rows == 0
+                {
+                    // No folds and no extra rows: snapshot rows == screen rows.
                     shaped_lines
                 } else {
                     let empty_placeholder = Arc::new(ShapedLine {
@@ -1979,9 +2072,12 @@ impl FreminalTerminalWidget {
                         line_width: LineWidth::Normal,
                     });
                     let dim_fg = freminal_common::colors::TerminalColor::BrightBlack;
-                    let row_count = row_map.rendered_row_count().min(snap.term_height);
-                    let mut out: Vec<Arc<ShapedLine>> = Vec::with_capacity(row_count);
-                    for rendered in 0..row_count {
+                    // Paint exactly the bottom `term_height` rendered rows
+                    // (screen rows). `render_skip` rendered rows are scrolled
+                    // off the top so the live bottom stays pinned.
+                    let mut out: Vec<Arc<ShapedLine>> = Vec::with_capacity(snap.term_height);
+                    for screen in 0..snap.term_height {
+                        let rendered = layout.screen_to_rendered(screen);
                         match row_map.rendered_to_snapshot(rendered) {
                             Some(RenderedRow::Snapshot(snap_row)) => {
                                 out.push(
@@ -2006,13 +2102,12 @@ impl FreminalTerminalWidget {
                                 out.push(Arc::new(shaped));
 
                                 // Record the placeholder's hit rect in
-                                // logical pixel coordinates so the input
-                                // handler (which sees pointer positions in
-                                // window coordinates) can hit-test against
-                                // it directly.
-                                let rendered_f = rendered.approx_as::<f32>().unwrap_or(0.0);
-                                let row_top =
-                                    rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                                // logical pixel coordinates (screen row) so the
+                                // input handler (which sees pointer positions in
+                                // window coordinates) can hit-test against it
+                                // directly.
+                                let screen_f = screen.approx_as::<f32>().unwrap_or(0.0);
+                                let row_top = screen_f.mul_add(logical_cell_h, terminal_rect.min.y);
                                 let rect = Rect::from_min_size(
                                     egui::pos2(terminal_rect.min.x, row_top),
                                     egui::vec2(terminal_rect.width(), logical_cell_h),
@@ -2030,37 +2125,40 @@ impl FreminalTerminalWidget {
                 };
 
                 // Build search match highlights from the current search state.
-                // Only matches within the visible window are included, with
-                // rows converted from buffer-absolute to screen-relative.
-                let win_start = visible_window_start(snap);
+                // Only matches within the flattened window are included, with
+                // rows converted from buffer-absolute to snapshot-relative.
+                let win_start = flat_window_start;
+                let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
                 let search_highlights_snap: Vec<MatchHighlight> =
-                    matches_to_highlights(&view_state.search_state, win_start, snap.term_height);
-                // Translate from snapshot-row space to rendered-row space and
-                // drop highlights inside folded ranges (they're not visible).
-                let search_highlights: Vec<MatchHighlight> = if fold_ranges.is_empty() {
-                    search_highlights_snap
-                } else {
-                    search_highlights_snap
-                        .into_iter()
-                        .filter_map(|h| {
-                            row_map
-                                .snapshot_to_rendered(h.row)
-                                .map(|rendered| MatchHighlight { row: rendered, ..h })
-                        })
-                        .collect()
-                };
+                    matches_to_highlights(&view_state.search_state, win_start, snap_rows);
+                // Translate from snapshot-row space to screen-row space and
+                // drop highlights inside folded ranges or scrolled off the top.
+                let search_highlights: Vec<MatchHighlight> =
+                    if row_map.ranges().is_empty() && render_skip == 0 {
+                        search_highlights_snap
+                    } else {
+                        search_highlights_snap
+                            .into_iter()
+                            .filter_map(|h| {
+                                let rendered = row_map.snapshot_to_rendered(h.row)?;
+                                let screen = layout.rendered_to_screen(rendered)?;
+                                Some(MatchHighlight { row: screen, ..h })
+                            })
+                            .collect()
+                    };
 
-                // Translate the screen selection's row indices from snapshot
-                // to rendered space.  If either endpoint sits inside a folded
-                // range, drop the selection for this frame (it will reappear
-                // when the user unfolds the block).
-                let screen_selection_rendered = if fold_ranges.is_empty() {
+                // Translate the selection's row indices from snapshot to
+                // bottom-anchored screen space.  If either endpoint sits inside
+                // a folded range or is scrolled off the top, drop the selection
+                // for this frame (it will reappear when the user unfolds /
+                // scrolls back).
+                let screen_selection_rendered = if row_map.ranges().is_empty() && render_skip == 0 {
                     screen_selection
                 } else {
                     screen_selection.and_then(|(sc, sr, ec, er)| {
-                        let sr_r = row_map.snapshot_to_rendered(sr)?;
-                        let er_r = row_map.snapshot_to_rendered(er)?;
-                        Some((sc, sr_r, ec, er_r))
+                        let sr_s = layout.rendered_to_screen(row_map.snapshot_to_rendered(sr)?)?;
+                        let er_s = layout.rendered_to_screen(row_map.snapshot_to_rendered(er)?)?;
+                        Some((sc, sr_s, ec, er_s))
                     })
                 };
 
@@ -2357,7 +2455,11 @@ impl FreminalTerminalWidget {
             &mut cache.scrollbar_dragging,
         ) {
             view_state.scroll_offset = new_offset;
-            let _ = input_tx.try_send(InputEvent::ScrollOffset(new_offset));
+            let _ = input_tx.try_send(super::input::scroll_event(
+                snap,
+                &view_state.folded_blocks,
+                new_offset,
+            ));
         }
 
         // ── Visual bell flash overlay ────────────────────────────────
@@ -2401,19 +2503,21 @@ impl FreminalTerminalWidget {
             && !snap.is_alternate_screen
             && !snap.command_blocks.is_empty()
         {
-            let win_start = visible_window_start(snap);
-            // Running blocks extend to the last visible buffer row.
-            let running_extent = win_start + snap.term_height.saturating_sub(1);
-            let rendered_rows = row_map.rendered_row_count();
-            for rendered_row in 0..rendered_rows {
+            let win_start = flat_window_start;
+            // Running blocks extend to the live bottom row.
+            let running_extent = visible_window_start(snap) + snap.term_height.saturating_sub(1);
+            // Iterate on-screen rows (bottom-anchored); map each back through
+            // rendered → snapshot → buffer.
+            for screen_row_idx in 0..snap.term_height {
+                let rendered_row = layout.screen_to_rendered(screen_row_idx);
                 // Resolve each rendered row to a status color.  Snapshot
                 // rows map back to a buffer row and use row containment;
                 // fold placeholders are colored (desaturated) by the
                 // folded block's own status, looked up by id.
                 let resolved: Option<(CommandStatus, bool)> =
                     match row_map.rendered_to_snapshot(rendered_row) {
-                        Some(RenderedRow::Snapshot(screen_row)) => {
-                            let buffer_row = win_start + screen_row;
+                        Some(RenderedRow::Snapshot(snap_row)) => {
+                            let buffer_row = win_start + snap_row;
                             crate::gui::command_blocks::gutter_status_for_row(
                                 &snap.command_blocks,
                                 buffer_row,
@@ -2439,8 +2543,8 @@ impl FreminalTerminalWidget {
                 } else {
                     egui::Color32::from_rgb(cr, cg, cb)
                 };
-                let rendered_f = rendered_row.approx_as::<f32>().unwrap_or(0.0);
-                let y0 = rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                let screen_f = screen_row_idx.approx_as::<f32>().unwrap_or(0.0);
+                let y0 = screen_f.mul_add(logical_cell_h, terminal_rect.min.y);
                 let row_rect = egui::Rect::from_min_max(
                     egui::pos2(gutter_rect.min.x, y0),
                     egui::pos2(gutter_rect.max.x, y0 + logical_cell_h),
@@ -2472,9 +2576,9 @@ impl FreminalTerminalWidget {
         {
             let threshold =
                 Duration::from_secs_f32(command_blocks_config.duration_threshold_secs.max(0.0));
-            let win_start = visible_window_start(snap);
-            let win_end = win_start + snap.term_height;
-            let running_extent = win_start + snap.term_height.saturating_sub(1);
+            let win_start = flat_window_start;
+            let win_end = win_start + snap.term_height.saturating_add(snap.window_extra_rows);
+            let running_extent = visible_window_start(snap) + snap.term_height.saturating_sub(1);
             let (fg_r, fg_g, fg_b) = snap.theme.foreground;
             // Muted: ~60% alpha so the label reads without overpowering
             // the underlying cell content.
@@ -2509,12 +2613,15 @@ impl FreminalTerminalWidget {
                 else {
                     continue; // block entirely outside the viewport
                 };
-                let screen_row = last_visible_buffer_row.saturating_sub(win_start);
-                let Some(rendered_row) = row_map.snapshot_to_rendered(screen_row) else {
-                    continue; // last row hidden inside a fold
+                let snap_row = last_visible_buffer_row.saturating_sub(win_start);
+                let Some(screen_row) = row_map
+                    .snapshot_to_rendered(snap_row)
+                    .and_then(|rendered| layout.rendered_to_screen(rendered))
+                else {
+                    continue; // last row hidden inside a fold or scrolled off
                 };
-                let rendered_f = rendered_row.approx_as::<f32>().unwrap_or(0.0);
-                let y = rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                let screen_f = screen_row.approx_as::<f32>().unwrap_or(0.0);
+                let y = screen_f.mul_add(logical_cell_h, terminal_rect.min.y);
                 let pos = egui::pos2(label_x, y);
                 let label = crate::gui::command_blocks::format_command_duration(elapsed);
                 ui.painter().text(
@@ -2590,10 +2697,11 @@ impl FreminalTerminalWidget {
                     // against a URL — clear the cache.  When `row` is past
                     // the bottom of the rendered viewport, `rendered_to_snapshot`
                     // returns None and we likewise clear.
-                    let snap_row = match row_map.rendered_to_snapshot(row) {
-                        Some(RenderedRow::Snapshot(r)) => Some(r),
-                        Some(RenderedRow::Placeholder(_)) | None => None,
-                    };
+                    let snap_row =
+                        match row_map.rendered_to_snapshot(layout.screen_to_rendered(row)) {
+                            Some(RenderedRow::Snapshot(r)) => Some(r),
+                            Some(RenderedRow::Placeholder(_)) | None => None,
+                        };
                     cache.cached_hovered_url = snap_row.and_then(|snap_row| {
                         // Recompute the hovered URL: convert the mouse's
                         // display-column position to a flat index into
@@ -3078,18 +3186,17 @@ mod gutter_hover_trigger_tests {
     fn hovering_gutter_row_tints_the_block() {
         let snap = snapshot_with_block(24);
         let (pane_rect, terminal_rect, inset, cell_h) = geometry();
-        let row_map = RowMap::new(snap.term_height, &[]);
         let cfg = CommandBlocksConfig::default();
         let mut vs = ViewState::new();
         // Pointer in the gutter (x=4, inside [0,8)), at row 2 (y=25 -> row 2).
         vs.mouse_position = Some(egui::pos2(4.0, 25.0));
+        let layout = FoldLayout::new(&snap, &vs.folded_blocks);
 
         let rows = compute_command_block_hover_rows(
             &snap,
             &vs,
             &cfg,
-            &row_map,
-            0,
+            &layout,
             pane_rect,
             terminal_rect,
             inset,
@@ -3103,19 +3210,18 @@ mod gutter_hover_trigger_tests {
     fn hovering_output_cell_does_not_tint() {
         let snap = snapshot_with_block(24);
         let (pane_rect, terminal_rect, inset, cell_h) = geometry();
-        let row_map = RowMap::new(snap.term_height, &[]);
         let cfg = CommandBlocksConfig::default();
         let mut vs = ViewState::new();
         // Pointer over a terminal cell well inside the block's rows (x=100,
         // which is >= terminal_rect.min.x=8), row 2.
         vs.mouse_position = Some(egui::pos2(100.0, 25.0));
+        let layout = FoldLayout::new(&snap, &vs.folded_blocks);
 
         let rows = compute_command_block_hover_rows(
             &snap,
             &vs,
             &cfg,
-            &row_map,
-            0,
+            &layout,
             pane_rect,
             terminal_rect,
             inset,
@@ -3128,21 +3234,20 @@ mod gutter_hover_trigger_tests {
     fn gutter_off_disables_hover() {
         let snap = snapshot_with_block(24);
         let (pane_rect, terminal_rect, _inset, cell_h) = geometry();
-        let row_map = RowMap::new(snap.term_height, &[]);
         let cfg = CommandBlocksConfig {
             gutter: GutterPosition::Off,
             ..CommandBlocksConfig::default()
         };
         let mut vs = ViewState::new();
         vs.mouse_position = Some(egui::pos2(4.0, 25.0));
+        let layout = FoldLayout::new(&snap, &vs.folded_blocks);
 
         // gutter_inset == 0 when the gutter is off.
         let rows = compute_command_block_hover_rows(
             &snap,
             &vs,
             &cfg,
-            &row_map,
-            0,
+            &layout,
             pane_rect,
             terminal_rect,
             0.0,
@@ -3155,16 +3260,15 @@ mod gutter_hover_trigger_tests {
     fn no_pointer_no_tint() {
         let snap = snapshot_with_block(24);
         let (pane_rect, terminal_rect, inset, cell_h) = geometry();
-        let row_map = RowMap::new(snap.term_height, &[]);
         let cfg = CommandBlocksConfig::default();
         let vs = ViewState::new(); // mouse_position == None
+        let layout = FoldLayout::new(&snap, &vs.folded_blocks);
 
         let rows = compute_command_block_hover_rows(
             &snap,
             &vs,
             &cfg,
-            &row_map,
-            0,
+            &layout,
             pane_rect,
             terminal_rect,
             inset,
