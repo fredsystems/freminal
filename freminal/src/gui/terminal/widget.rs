@@ -1783,60 +1783,64 @@ impl FreminalTerminalWidget {
                 // result is passed into `BackgroundFrame` so the tint
                 // is drawn alongside selection / search highlights in
                 // the same vertex batch.  Disabled when the feature is
-                // off, when no blocks exist, or when the mouse is not
-                // inside the terminal area.
-                let command_block_hover_rows: Option<(usize, usize)> = if command_blocks_config
-                    .enabled
-                    && !snap.command_blocks.is_empty()
-                    && let Some(mouse_position) = view_state.mouse_position
-                    && terminal_rect.contains(mouse_position)
-                {
-                    let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
-                        mouse_position,
-                        (logical_cell_w, logical_cell_h),
-                        terminal_rect.min,
-                    );
-                    // Translate to a snapshot (buffer-absolute) row via the
-                    // fold-aware row map; placeholder / out-of-range rows
-                    // never hover-tint a block.
-                    let snap_screen_row = match row_map.rendered_to_snapshot(rendered_row) {
-                        Some(RenderedRow::Snapshot(r)) => Some(r),
-                        Some(RenderedRow::Placeholder(_)) | None => None,
-                    };
-                    snap_screen_row.and_then(|screen_row| {
-                        let buffer_row = win_start + screen_row;
-                        // Find the block containing this absolute row.
-                        // Skips running blocks (no end_row) and blocks
-                        // missing `command_start_row`.
-                        let block = snap.command_blocks.iter().find(|b| {
-                            match (b.command_start_row, b.end_row) {
-                                (Some(s), Some(e)) => buffer_row >= s && buffer_row <= e,
-                                _ => false,
+                // off, when the alternate screen is active (command
+                // blocks describe primary-screen rows and must not tint
+                // a full-screen TUI), when no blocks exist, or when the
+                // mouse is not inside the terminal area.
+                let command_block_hover_rows: Option<(usize, usize)> =
+                    if crate::gui::command_blocks::command_block_overlays_visible(
+                        command_blocks_config.enabled,
+                        snap.is_alternate_screen,
+                        !snap.command_blocks.is_empty(),
+                    ) && let Some(mouse_position) = view_state.mouse_position
+                        && terminal_rect.contains(mouse_position)
+                    {
+                        let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
+                            mouse_position,
+                            (logical_cell_w, logical_cell_h),
+                            terminal_rect.min,
+                        );
+                        // Translate to a snapshot (buffer-absolute) row via the
+                        // fold-aware row map; placeholder / out-of-range rows
+                        // never hover-tint a block.
+                        let snap_screen_row = match row_map.rendered_to_snapshot(rendered_row) {
+                            Some(RenderedRow::Snapshot(r)) => Some(r),
+                            Some(RenderedRow::Placeholder(_)) | None => None,
+                        };
+                        snap_screen_row.and_then(|screen_row| {
+                            let buffer_row = win_start + screen_row;
+                            // Find the block containing this absolute row.
+                            // Skips running blocks (no end_row) and blocks
+                            // missing `command_start_row`.
+                            let block = snap.command_blocks.iter().find(|b| {
+                                match (b.command_start_row, b.end_row) {
+                                    (Some(s), Some(e)) => buffer_row >= s && buffer_row <= e,
+                                    _ => false,
+                                }
+                            })?;
+                            let start = block.command_start_row?;
+                            let end = block.end_row?;
+                            // Clip the block's [start, end] to the visible
+                            // window, then convert each endpoint into
+                            // rendered-row space.  Endpoints inside a fold
+                            // are snapped to the placeholder's surviving
+                            // row via the row-map lookup; if the entire
+                            // block sits inside a fold the result is None.
+                            let win_end = win_start + snap.term_height;
+                            if end < win_start || start >= win_end {
+                                return None;
                             }
-                        })?;
-                        let start = block.command_start_row?;
-                        let end = block.end_row?;
-                        // Clip the block's [start, end] to the visible
-                        // window, then convert each endpoint into
-                        // rendered-row space.  Endpoints inside a fold
-                        // are snapped to the placeholder's surviving
-                        // row via the row-map lookup; if the entire
-                        // block sits inside a fold the result is None.
-                        let win_end = win_start + snap.term_height;
-                        if end < win_start || start >= win_end {
-                            return None;
-                        }
-                        let s_screen = start.saturating_sub(win_start);
-                        let e_screen = end
-                            .saturating_sub(win_start)
-                            .min(snap.term_height.saturating_sub(1));
-                        let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
-                        let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
-                        Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
-                    })
-                } else {
-                    None
-                };
+                            let s_screen = start.saturating_sub(win_start);
+                            let e_screen = end
+                                .saturating_sub(win_start)
+                                .min(snap.term_height.saturating_sub(1));
+                            let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
+                            let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
+                            Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
+                        })
+                    } else {
+                        None
+                    };
 
                 // Acquire the lock early so all vertex builders can write
                 // directly into the persistent `RenderState` Vecs, reusing
@@ -2141,10 +2145,16 @@ impl FreminalTerminalWidget {
         // the block's first visible rendered row.  Running blocks have
         // no `finished_at` and are skipped.  Blocks entirely outside
         // the visible window or hidden inside a fold are also skipped
-        // (the row-map lookup yields `None`).
-        if command_blocks_config.enabled
-            && command_blocks_config.show_duration
-            && !snap.command_blocks.is_empty()
+        // (the row-map lookup yields `None`).  Suppressed entirely on
+        // the alternate screen: the stored blocks describe primary-
+        // screen rows, so their durations must not be painted over a
+        // full-screen TUI.
+        if command_blocks_config.show_duration
+            && crate::gui::command_blocks::command_block_overlays_visible(
+                command_blocks_config.enabled,
+                snap.is_alternate_screen,
+                !snap.command_blocks.is_empty(),
+            )
         {
             let threshold =
                 Duration::from_secs_f32(command_blocks_config.duration_threshold_secs.max(0.0));

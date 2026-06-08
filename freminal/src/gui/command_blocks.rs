@@ -9,11 +9,36 @@
 //! - [`format_command_duration`] — compact human-readable duration
 //!   formatter used by the duration-label overlay drawn at the end of a
 //!   finished block's first row.
+//! - [`command_block_overlays_visible`] — gate deciding whether any
+//!   command-block visual affordance (hover tint, duration label) may be
+//!   drawn for the current frame.
 //!
 //! Kept as a standalone module so the formatter can be unit-tested
 //! without an egui or GPU context.
 
 use std::time::Duration;
+
+/// Decide whether command-block visual overlays (hover-row tint and the
+/// duration label) may be drawn this frame.
+///
+/// Overlays are suppressed when:
+///
+/// - the command-block feature is disabled (`enabled == false`), or
+/// - the alternate screen is active — the stored [`CommandBlock`]s
+///   describe primary-screen buffer rows, so painting hover tints or
+///   duration labels over a full-screen TUI (vim, htop, less, …) would
+///   highlight unrelated rows, or
+/// - there are no command blocks to draw.
+///
+/// [`CommandBlock`]: freminal_common::buffer_states::command_block::CommandBlock
+#[must_use]
+pub const fn command_block_overlays_visible(
+    feature_enabled: bool,
+    is_alternate_screen: bool,
+    has_blocks: bool,
+) -> bool {
+    feature_enabled && !is_alternate_screen && has_blocks
+}
 
 /// Format a finished command's wall-clock duration as a compact label
 /// such as `"3s"`, `"2m15s"`, or `"1h3m"`.
@@ -128,6 +153,45 @@ mod tests {
     fn boundary_at_one_hour_no_extra_minutes() {
         // 3600s exactly should render as "1h" not "1h0m".
         assert_eq!(format_command_duration(Duration::from_hours(1)), "1h");
+    }
+
+    #[test]
+    fn overlays_visible_only_when_enabled_present_and_primary_screen() {
+        // All preconditions met → visible.
+        assert!(command_block_overlays_visible(true, false, true));
+    }
+
+    #[test]
+    fn overlays_hidden_when_feature_disabled() {
+        assert!(!command_block_overlays_visible(false, false, true));
+    }
+
+    #[test]
+    fn overlays_hidden_on_alternate_screen() {
+        // The regression this gate fixes: a full-screen TUI on the
+        // alternate screen must not show stale primary-screen command
+        // affordances, even though blocks are present and the feature
+        // is on.
+        assert!(!command_block_overlays_visible(true, true, true));
+    }
+
+    #[test]
+    fn overlays_hidden_when_no_blocks() {
+        assert!(!command_block_overlays_visible(true, false, false));
+    }
+
+    #[test]
+    fn alternate_screen_dominates_every_other_precondition() {
+        // No matter how the other two flags are set, the alternate
+        // screen always suppresses overlays.
+        for enabled in [false, true] {
+            for has_blocks in [false, true] {
+                assert!(
+                    !command_block_overlays_visible(enabled, true, has_blocks),
+                    "alt-screen should suppress overlays (enabled={enabled}, has_blocks={has_blocks})"
+                );
+            }
+        }
     }
 
     #[test]
